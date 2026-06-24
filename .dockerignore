@@ -1,0 +1,11 @@
+# Keep the build context small and reproducible.
+.git
+data/
+**/__pycache__/
+*.pyc
+.venv/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
+*.sqlite
+raglex design docs/

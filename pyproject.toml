@@ -1,0 +1,60 @@
+[project]
+name = "raglex"
+version = "0.1.0"
+description = "Multi-jurisdiction legal corpus harvester + analysis system (RagLex)"
+authors = [
+    { name = "Michael Veale", email = "michaelrveale@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "socksio>=1.0.0",
+]
+
+[project.optional-dependencies]
+# The production spine is PostgreSQL (pgvector/FTS/partitioning land in later
+# build steps, §7). The catalogue repository is portable; the SQLite backend is
+# the zero-dependency local/dev/test default, psycopg is the Postgres backend.
+postgres = ["psycopg[binary]>=3.2"]
+# The §8 ops/research web API.
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+    "mcp>=1.2",
+]
+# Manual PDF/HTML import (§5c extraction). pypdf is the pluggable default; heavier
+# engines (Docling/Marker/OCR, §5c) drop in behind the same interface.
+import = ["pypdf>=4"]
+scrape = [
+    "beautifulsoup4>=4.15.0",
+    # Anti-bot / JS scraping engines (§5a). Scrapling brings StealthyFetcher
+    # (Camoufox) and the PlayWright fetcher; after install run `scrapling install`
+    # (Camoufox) and/or `playwright install chromium`.
+    "scrapling>=0.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "fastapi>=0.110",
+    "httpx>=0.27",
+    "pypdf>=4",
+    "python-multipart>=0.0.9",
+    "mcp>=1.2",
+    "psycopg[binary]>=3.2",
+    "beautifulsoup4>=4.15.0",
+]
+
+[project.scripts]
+raglex = "raglex.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]

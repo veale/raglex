@@ -1,0 +1,2204 @@
+"""Service facade — one place that does everything, used by BOTH the web API and
+the MCP server so they never drift (the user's requirement: "an MCP endpoint
+which can do all the things the API can do").
+
+Every method opens the catalogue + stores, does the work, returns plain JSON-able
+dicts, and closes. That keeps it safe to call from FastAPI's thread pool and from
+the MCP server alike. The agent workflow the design imagines — "augment each
+section of a law with secondary material found via other tools" — is exactly:
+``list_documents`` to iterate sections, then ``import_url`` / ``import_bytes`` /
+``add_note`` + ``link`` to attach what you find, in several posting modes.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import re
+from contextlib import contextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
+from typing import Iterator
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _progress(cb, **fields) -> None:
+    """Report coarse progress to an optional callback (used by the background-job
+    runner so the UI can poll "fetching 5/30"). Never lets a callback error break
+    the operation."""
+    if cb is None:
+        return
+    try:
+        cb(**fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+from .config import Config
+from .core.models import DocType, RelationshipType
+from .embeddings import EmbedStage
+from .imports import (
+    add_note,
+    attach_asset,
+    import_file,
+    import_url,
+    link_documents,
+    tag_document,
+)
+from .imports.zotero import ZoteroImporter
+from .ops import check_alerts, corpus_stats, pipeline_queues, resolution_worklist, source_dashboard
+from .resolve import Resolver
+from .retrieval import SearchEngine, expand
+from .settings import SettingsStore
+from .storage import Catalogue, RawStore, TextStore
+
+
+def _doc_type(value: str | None, default: DocType) -> DocType:
+    if not value:
+        return default
+    try:
+        return DocType(value)
+    except ValueError:
+        return default
+
+
+def _sniff_format(raw: bytes) -> str | None:
+    """Infer the structural format of stored raw bytes (for re-parsing) — a zip or
+    Formex ``<ACT>`` → Formex; Akoma Ntoso; a BWB ``<toestand>`` → BWB."""
+    head = raw[:4096]
+    if raw[:2] == b"PK":
+        return "formex-legislation"  # CELLAR Formex zip
+    low = head.lower()
+    if b"akomantoso" in low:
+        return "akoma-ntoso"
+    if b"<act" in low or b"formex" in low or b"enacting.terms" in low:
+        return "formex-legislation"
+    if b"toestand" in low or b"<wetgeving" in low:
+        return "bwb"
+    return None
+
+
+def _act_level(candidate: str | None) -> str | None:
+    """Collapse a section/part-level legislation id to its Act so only the high-level
+    instrument is ever listed/harvested (the section becomes a pinpoint, not a
+    separate document): ``ukpga/2000/36/section/14`` → ``ukpga/2000/36``."""
+    if not candidate:
+        return candidate
+    from .citations.snowball import UK_LEG_TYPES
+
+    parts = candidate.split("/")
+    if parts[0].lower() not in UK_LEG_TYPES:
+        return candidate
+    # A pre-1963 Act is cited by regnal year — type/monarch/session/number (4 segments,
+    # e.g. ukpga/Eliz2/9-10/18) — so its Act level is FOUR parts, not three. Truncating to
+    # three drops the chapter and yields an ambiguous whole-session id. Detect regnal by a
+    # non-numeric second segment.
+    act_len = 4 if (len(parts) > 1 and not parts[1].isdigit()) else 3
+    if len(parts) > act_len:
+        return "/".join(parts[:act_len])
+    return candidate
+
+
+def _neutral_citation_from_slug(stable_id: str) -> str | None:
+    """A UK Find Case Law slug → its neutral citation, for searching out citing cases.
+    ``uksc/2021/12`` → ``[2021] UKSC 12``; ``ewca/civ/2015/454`` → ``[2015] EWCA Civ 454``;
+    ``ukut/aac/2012/440`` → ``[2012] UKUT 440 (AAC)``. None for non-case slugs (legislation)."""
+    from .citations.snowball import UK_LEG_TYPES
+
+    parts = stable_id.split("/")
+    if not parts or parts[0].lower() in UK_LEG_TYPES or not parts[0].isalpha():
+        return None  # legislation or opaque id — not a neutral-citation case
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        court, year, num = parts
+        return f"[{year}] {court.upper()} {num}"
+    if len(parts) == 4 and parts[2].isdigit() and parts[3].isdigit():
+        court, div, year, num = parts
+        cu = court.upper()
+        # the division is written inline for EWCA ("EWCA Civ 1") but parenthetically for
+        # tribunals and the High Court ("UKUT 440 (AAC)", "EWHC 22 (Admin)").
+        if cu == "EWCA":
+            return f"[{year}] {cu} {div.title()} {num}"
+        # High Court divisions are title-case (Admin, Comm); tribunal chambers are
+        # upper-case initialisms (AAC, GRC, IAC).
+        divtxt = div.title() if cu == "EWHC" else div.upper()
+        return f"[{year}] {cu} {num} ({divtxt})"
+    return None
+
+
+def _is_junk_ref(ref: str) -> bool:
+    """A reference string with no citation value (stray ``#`` anchors, js/mailto
+    links) — kept out of the manual-resolution worklist."""
+    if not ref or len(ref) < 3:
+        return True
+    low = ref.lower()
+    return ref.startswith("#") or low.startswith(("javascript:", "mailto:", "tel:"))
+
+
+class _SingleStubAdapter:
+    """Wrap a real adapter to fetch exactly one known item: ``discover`` yields a
+    single constructed stub, ``fetch`` delegates to the base adapter. Used for
+    targeted resolution of a hanging reference whose adapter discovers by crawling
+    (e.g. uk-caselaw) rather than by id."""
+
+    def __init__(self, base, stub) -> None:
+        self._base = base
+        self._stub = stub
+        self.source = base.source
+        self.min_interval = getattr(base, "min_interval", 0.0)
+
+    def discover(self, since, *, max_pages=None):
+        yield self._stub
+
+    def fetch(self, stub):
+        return self._base.fetch(stub)
+
+
+def _targeted_uk_legislation(candidate: str):
+    from .adapters.registry import get_adapter
+
+    return get_adapter("uk-legislation", ids=candidate)
+
+
+def _targeted_eu_legislation(candidate: str):
+    from .adapters.registry import get_adapter
+
+    return get_adapter("eu-legislation", celex=candidate)
+
+
+def _targeted_uk_caselaw(candidate: str):
+    from .adapters.registry import get_adapter
+    from .core.models import Stub
+
+    base = get_adapter("uk-caselaw")
+    base_url = "https://caselaw.nationalarchives.gov.uk"
+    stub = Stub(stable_id=candidate, landing_url=f"{base_url}/{candidate}",
+                raw_url=f"{base_url}/{candidate}/data.xml")
+    return _SingleStubAdapter(base, stub)
+
+
+def _targeted_eu_cellar(candidate: str):
+    """A CJEU case by CELEX (``62018CJ0511`` from "C-511/18") or by **ECLI**
+    (``ECLI:EU:C:2020:791``) — the ECLI is mapped to its CELEX via one SPARQL hop,
+    so EU case citations resolve whichever form they take."""
+    from .adapters.eu_cellar import CJEUCaseAdapter, EUCellarAdapter
+
+    cu = candidate.upper()
+    if re.fullmatch(r"\d{5}[A-Z]{1,2}\d{4}", cu):
+        return CJEUCaseAdapter(cu)
+    if cu.startswith("ECLI:EU:"):
+        meta = EUCellarAdapter().case_metadata(ecli=candidate)
+        if meta.get("celex"):
+            return CJEUCaseAdapter(meta["celex"])
+    return None
+
+
+def _targeted_echr(candidate: str):
+    """An ECtHR case by ECLI (``ECLI:CE:ECHR:…``) or application number (``58170/13``) —
+    the HUDOC adapter resolves either via the same app-number lookup."""
+    from .adapters.registry import get_adapter
+
+    return get_adapter("echr", ids=candidate)
+
+
+def _targeted_nl_rechtspraak(candidate: str):
+    """A Dutch judgment by ECLI — Rechtspraak fetches the content directly by ECLI."""
+    if not candidate.upper().startswith("ECLI:NL:"):
+        return None
+    from .adapters.nl_rechtspraak import CONTENT_URL
+    from .adapters.registry import get_adapter
+    from .core.models import Stub
+
+    base = get_adapter("nl-rechtspraak")
+    stub = Stub(stable_id=candidate, raw_url=f"{CONTENT_URL}?id={candidate}",
+                landing_url=f"https://uitspraken.rechtspraak.nl/details?id={candidate}")
+    return _SingleStubAdapter(base, stub)
+
+
+# adapter key (from the snowball classifier) → a builder that returns a one-item
+# adapter run for a given candidate id. Extend as adapters gain id-fetch support.
+_TARGETED_HARVEST = {
+    "uk-legislation": _targeted_uk_legislation,
+    "eu-legislation": _targeted_eu_legislation,
+    "uk-caselaw": _targeted_uk_caselaw,
+    "eu-cellar": _targeted_eu_cellar,
+    "echr": _targeted_echr,
+    "nl-rechtspraak": _targeted_nl_rechtspraak,
+}
+
+
+def _rel_type(value: str | None, default: RelationshipType | None = None) -> RelationshipType | None:
+    if not value:
+        return default
+    try:
+        return RelationshipType(value)
+    except ValueError:
+        return default
+
+
+class Facade:
+    def __init__(self, config: Config | None = None) -> None:
+        self.config = config or Config.from_env()
+        self.settings = SettingsStore(self.config.settings_path)
+        # short-TTL cache for the expensive dashboard aggregates (full scans over the
+        # ~1.5M-row relations table). Stale-while-revalidate: once warm, every request is
+        # instant — a stale entry is served immediately and refreshed in the background, so
+        # no user request ever blocks on the scan (only the very first, cold call does).
+        self._cache: dict[str, tuple[float, dict]] = {}
+        self._refreshing: set[str] = set()
+
+    def _cached(self, key: str, ttl: float, fn, *, placeholder: dict | None = None):
+        """Stale-while-revalidate cache. With a ``placeholder``, a request NEVER blocks:
+        the first cold call kicks off a background compute and returns ``{_warming}`` (the
+        UI polls until it's ready); a stale entry is served instantly and refreshed behind
+        the scenes. Without a placeholder the first call computes synchronously."""
+        import threading
+        import time as _t
+
+        def _compute_async():
+            self._refreshing.add(key)
+
+            def _run():
+                try:
+                    self._cache[key] = (_t.time(), fn())
+                except Exception:  # noqa: BLE001 — keep serving stale / retry next time
+                    pass
+                finally:
+                    self._refreshing.discard(key)
+            threading.Thread(target=_run, daemon=True).start()
+
+        hit = self._cache.get(key)
+        if hit is not None:
+            age = _t.time() - hit[0]
+            if age >= ttl and key not in self._refreshing:
+                _compute_async()
+            return {**hit[1], "_cached": True, "_stale": age >= ttl}
+        # cold: nothing cached yet
+        if placeholder is not None:
+            if key not in self._refreshing:
+                _compute_async()
+            return {**placeholder, "_warming": True}
+        val = fn()  # synchronous (used for the cheap aggregates)
+        self._cache[key] = (_t.time(), val)
+        return val
+
+    def _invalidate_caches(self) -> None:
+        """Drop the cached dashboard aggregates after an op that changes the citation
+        graph (harvest/resolve), so the worklist's per-source "remaining" counts and
+        coverage refresh instead of serving the pre-harvest snapshot."""
+        for key in ("coverage", "stats", "corpus_map"):
+            self._cache.pop(key, None)
+            self._refreshing.discard(key)
+
+    def warm_caches(self) -> None:
+        """Pre-compute the heavy dashboard aggregates in the background (called on app
+        startup) so the first page load after a restart is instant, not a cold scan."""
+        import threading
+
+        def _warm():
+            for fn in (self.coverage, self.stats, self.corpus_map):
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001
+                    pass
+        threading.Thread(target=_warm, daemon=True).start()
+
+    @contextmanager
+    def _open(self) -> Iterator[tuple[Catalogue, RawStore, TextStore]]:
+        cat = Catalogue(self.config.catalogue_path)
+        try:
+            yield cat, RawStore(self.config.raw_dir), TextStore(self.config.text_dir)
+        finally:
+            cat.close()
+
+    def _provider(self):
+        """Build the embedding provider from live settings (env > file), so the UI
+        can switch provider/model without a restart."""
+        from .embeddings import get_provider
+
+        name = self.settings.resolve("RAGLEX_EMBED_PROVIDER") or self.config.embed_provider
+        model = self.settings.resolve("RAGLEX_EMBED_MODEL") or self.config.embed_model
+        return get_provider(name, **({"model": model} if model else {}))
+
+    # -- settings (UI-editable secrets, §ops) ------------------------------
+    def get_settings(self) -> dict:
+        return self.settings.masked()
+
+    def update_settings(self, patch: dict) -> dict:
+        masked = self.settings.update(patch)
+        self.settings.apply_to_env()  # pick up new file values this process (env still wins)
+        return masked
+
+    # -- read / research ---------------------------------------------------
+    def search(self, query: str, *, k: int = 5, filters: dict | None = None) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            engine = SearchEngine(cat, self._provider())
+            hits = engine.search(query, k=k, filters=filters or None)
+            return [
+                {
+                    "doc_id": h.doc_id, "ecli": h.ecli, "title": h.title, "court": h.court,
+                    "source": h.source, "score": h.score, "structural_unit": h.structural_unit,
+                    "char_start": h.char_start, "char_end": h.char_end, "chunk_text": h.chunk_text,
+                    "neighbours": [
+                        {"id": n.dst_id, "relationship_type": n.relationship_type, "direction": n.direction}
+                        for n in (h.neighbours.neighbours if h.neighbours else [])
+                    ],
+                }
+                for h in hits
+            ]
+
+    def get_document(self, stable_id: str) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            doc = cat.get_document(stable_id)
+            if doc is None:
+                return {"error": "not found", "stable_id": stable_id}
+            rels = [dict(r) for r in cat.relations_for(stable_id)]
+            suppressed = [r for r in rels if r["relationship_type"] == "suppressed"]
+            # "Cited by" (JADE's reverse-citation gloss) — one row per citing document
+            # (a doc may cite this many times), enriched with the citing doc's name +
+            # HOW it cites this one (treatment), which JADE doesn't surface. The true
+            # distinct count is reported; only the first N are title-enriched (avoid an
+            # N+1 over a heavily-cited authority).
+            _RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
+                     "considers": 4, "mentions": 5}
+            best: dict[str, dict] = {}
+            for r in cat.relations_to(stable_id):
+                cur = best.get(r["src_id"])
+                if cur is None or _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
+                    best[r["src_id"]] = dict(r)
+            incoming = []
+            for sid, r in list(best.items())[:200]:
+                src = cat.get_document(sid)
+                incoming.append({**r, "src_title": src["title"] if src else None,
+                                 "src_court": src["court"] if src else None,
+                                 "src_date": src["decision_date"] if src else None})
+            return {
+                "document": dict(doc),
+                "meta": cat.document_meta(stable_id),  # adapter extras (celex, origin_country, …)
+                "tags": [dict(t) for t in cat.tags_for(stable_id)],
+                "relations": [r for r in rels if r["relationship_type"] != "suppressed"],
+                "suppressed_count": len(suppressed),
+                "incoming": incoming,
+                "cited_by_count": len(best),
+                "assets": [dict(a) for a in cat.assets_for(stable_id)],
+                "versions": [dict(v) for v in cat.list_versions(stable_id)],
+            }
+
+    def document_body(self, stable_id: str) -> dict:
+        """The document's extracted text + structural segments (§6b) for the reader.
+        Segments carry kind/level so legislation renders as a hierarchy."""
+        with self._open() as (cat, _rs, ts):
+            doc = cat.get_document(stable_id)
+            if doc is None or not doc["payload_hash"]:
+                return {"text": None, "segments": [], "doc_type": doc["doc_type"] if doc else None}
+            ph = doc["payload_hash"]
+            try:
+                text = ts.get(ph)
+            except OSError:
+                text = None
+            # Inline citations (JADE-style): each recognised reference with its exact
+            # char span, resolved to its target document where we hold it, plus its
+            # pinpoint — so the reader can wrap the matched text in a live link to the
+            # cited authority (and deep-link to the pinpointed section).
+            citations = []
+            for c in cat.citations_for(stable_id):
+                cand = c["candidate_id"]
+                resolved = cat.find_document_id(cand) if cand else None
+                citations.append({
+                    "char_start": c["char_start"], "char_end": c["char_end"],
+                    "raw": c["raw"], "candidate_id": cand, "pinpoint": c["pinpoint"],
+                    "entity_kind": c["entity_kind"], "resolved_id": resolved,
+                    "method": c["method"],
+                    # resolved | pending (have an id, not harvested) | maybe (a case
+                    # reference with no resolvable id, e.g. a law-report citation)
+                    "state": "resolved" if resolved else ("pending" if cand else "maybe"),
+                })
+            return {
+                "text": text,
+                "segments": [asdict(s) for s in ts.get_segments(ph)],
+                "citations": citations,
+                "doc_type": doc["doc_type"],
+                "title": doc["title"],
+            }
+
+    def list_documents(self, **filters) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            return [dict(r) for r in cat.list_documents(**filters)]
+
+    def count_documents(self, **filters) -> dict:
+        """Total documents matching the filters (for the Corpus page count/paging)."""
+        filters.pop("limit", None)
+        filters.pop("offset", None)
+        with self._open() as (cat, _rs, _ts):
+            return {"total": cat.count_documents(**filters)}
+
+    def graph(self, stable_id: str, *, rel: list[str] | None = None) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            exp = expand(cat, stable_id, relationship_types=rel)
+            return {
+                "focus": stable_id,
+                "neighbours": [
+                    {"id": n.dst_id, "relationship_type": n.relationship_type,
+                     "direction": n.direction, "title": n.title, "court": n.court,
+                     "src_anchor": n.src_anchor, "dst_anchor": n.dst_anchor,
+                     "extracted_via": n.extracted_via}
+                    for n in exp.neighbours
+                ],
+            }
+
+    def stats(self) -> dict:
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                return corpus_stats(cat).to_dict()
+        return self._cached("stats", 30, _compute)
+
+    def sources(self) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            return [s.to_dict() for s in source_dashboard(cat)]
+
+    def queues(self) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return pipeline_queues(cat)
+
+    def alerts(self) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            return [a.to_dict() for a in check_alerts(cat)]
+
+    def worklist(self, *, limit: int = 50) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            return resolution_worklist(cat, limit=limit)
+
+    def snowball(self, *, limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
+        """The citation frontier (§5a): forms the corpus cites but doesn't yet
+        hold, grouped by (form, jurisdiction, adapter) and ranked by frequency.
+        ``only_unharvestable=True`` narrows to forms with no adapter — the
+        build-an-adapter list."""
+        from .citations import snowball
+
+        with self._open() as (cat, _rs, _ts):
+            return snowball(cat, limit=limit, only_unharvestable=only_unharvestable)
+
+    def coverage(self) -> dict:
+        """A completeness/uncertainty dashboard for the corpus (§8): per-source
+        counts + date spans + text coverage, the citation-resolution rate, how many
+        references are still hanging (what we *know* we're missing), and the top
+        frontiers the corpus keeps citing but doesn't hold (the snowball). The data
+        an academic needs to judge "is my dataset complete for this area, and what's
+        the uncertainty about what exists?"."""
+        # never block: serve a "warming" placeholder on the first cold call (scanning
+        # >1M pending edges takes seconds) while it computes in the background.
+        return self._cached("coverage", 90, self._coverage_uncached, placeholder={
+            "stats": None, "sources": [], "hanging_references": None,
+            "routable_references": None, "frontier": [], "hanging_sample": []})
+
+    def _coverage_uncached(self) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            base = corpus_stats(cat).to_dict()
+            sources = [dict(r) for r in cat.source_date_ranges()]
+        # snowball + unresolved open their own connections (separate methods)
+        frontier = self.snowball(limit=10)
+        # uncapped: count EVERY distinct hanging reference (the grouping is built in full
+        # regardless of limit, so this is no extra cost) — the headline number must not
+        # plateau at an arbitrary cap.
+        hanging = self.unresolved_references(limit=None)
+        low_conf = [h for h in hanging if h["confidence"] == "low"]
+        # The TRUE count of one-click-harvestable references (distinct docs we could
+        # fetch), as opposed to the frontier's *occurrence* counts (one instrument can
+        # be cited hundreds of times) — so the "Harvest all routable (N)" button can
+        # show the real total instead of only what a page happens to have loaded.
+        routable = [h for h in hanging if h["suggested_adapter"]
+                    and h["confidence"] != "low" and not h["needs_identifier"]]
+        # routable counts broken down by source, and UK legislation by primary/secondary/
+        # assimilated — so the worklist can show "Harvest all (N)" per category.
+        from collections import Counter
+        by_cat: Counter = Counter()
+        for h in routable:
+            by_cat[h["suggested_adapter"]] += 1
+            if h["suggested_adapter"] == "uk-legislation" and h.get("leg_kind"):
+                by_cat[f"uk-legislation:{h['leg_kind']}"] += 1
+        return {
+            "stats": base,
+            "sources": sources,
+            "hanging_references": len(hanging),
+            "low_confidence_references": len(low_conf),
+            "needs_identifier": sum(1 for h in hanging if h["needs_identifier"]),
+            "routable_references": len(routable),
+            "routable_by_category": dict(by_cat),
+            "frontier": frontier,
+            "hanging_sample": hanging[:10],
+        }
+
+    def unresolved_references(self, *, limit: int | None = 100) -> list[dict]:
+        """The hanging references the corpus can't satisfy — one row per distinct
+        reference, ranked by how often it's cited. Each says what it *looks like*
+        (form/jurisdiction/suggested adapter), how confidently it was recognised,
+        whether it still needs an identifier (recognised by name only, no candidate),
+        and which documents cite it — the data a human or agent needs to resolve it
+        by upload / scrape / link / supplying the missing citation (§5b, §5a)."""
+        from .citations.snowball import _classify, uk_leg_category as _uk_leg_category
+        from .resolve.matchers import first_candidate
+
+        with self._open() as (cat, _rs, _ts):
+            groups: dict[str, dict] = {}
+            for r in cat.pending_relations():
+                # Carry-forward edges (extracted_via='inferred') are heuristic guesses —
+                # a bare "Section 1122"/"Schedule 15" pinned to the last-named Act. They're
+                # useful in-document pinpoints but too ambiguous to drive harvesting, so
+                # they never enter the worklist (the Act, if truly cited, arrives via a
+                # real citation edge).
+                if r["extracted_via"] == "inferred":
+                    continue
+                raw = r["raw_citation_string"]
+                # A normalised candidate is what makes the reference routable. Use the
+                # adapter-supplied one, else derive it from the raw string (so a bare
+                # legislation/caselaw URL collapses to its id and merges with the
+                # same case's neutral-citation form), else None → name-only.
+                candidate = r["dst_id"]
+                # Normalise a missing OR URL-shaped candidate to its canonical id
+                # (a stored legislation/caselaw URL → its slug), so the worklist
+                # shows a routable reference rather than a raw link.
+                if (not candidate or candidate.startswith("http")) and (candidate or raw):
+                    cand = first_candidate(candidate or raw) or first_candidate(raw or "")
+                    candidate = cand.value if cand else candidate
+                candidate = _act_level(candidate)  # section → its Act (one node only)
+                ref = candidate or raw
+                if not ref or _is_junk_ref(ref):
+                    continue
+                g = groups.get(ref)
+                if g is None:
+                    g = groups[ref] = {"ref": ref, "candidate": candidate, "raw": raw,
+                                       "src_ids": set(), "methods": set(),
+                                       "anchor": r["dst_anchor"]}
+                g["src_ids"].add(r["src_id"])
+                if r["extracted_via"]:
+                    g["methods"].add(r["extracted_via"])
+            rows = []
+            for g in groups.values():
+                cand = g["candidate"]
+                if cand:
+                    form, juris, adapter = _classify(cand, "case")
+                    needs_identifier = False
+                else:
+                    form, juris, adapter = "unidentified (name only)", None, None
+                    needs_identifier = True
+                # low confidence: no candidate, an LLM-surfaced reference, a form we can't
+                # route to an adapter, OR a fuzzy name-based ECHR match (keep these out of
+                # auto-harvest — a HUDOC docname guess wants a human's eye).
+                low = (needs_identifier or "llm" in g["methods"] or adapter is None
+                       or (cand or "").lower().startswith("echr:"))
+                rows.append({
+                    "ref": g["ref"], "candidate": cand, "raw": g["raw"],
+                    "pinpoint": g["anchor"], "form": form, "jurisdiction": juris,
+                    "suggested_adapter": adapter, "needs_identifier": needs_identifier,
+                    # UK legislation sub-category, so the worklist can filter/harvest
+                    # primary vs secondary vs assimilated separately
+                    "leg_kind": _uk_leg_category(cand) if adapter == "uk-legislation" else None,
+                    "confidence": "low" if low else "ok",
+                    "methods": sorted(g["methods"]),
+                    "citing_count": len(g["src_ids"]),
+                    "citing_documents": sorted(x for x in g["src_ids"] if x)[:10],
+                })
+            rows.sort(key=lambda r: (r["citing_count"], r["confidence"] == "low"), reverse=True)
+            return rows if limit is None else rows[:limit]
+
+    # -- Corpus Map: held-vs-pending by category & sub-type (§8) ------------
+    def corpus_map(self) -> dict:
+        """The dashboard's coverage table: every legal category and sub-type with how much we
+        HOLD vs how much is PENDING (cited-but-not-held, routable) vs NAME-ONLY (recognised but
+        not routable). Cached + warmed → loads instantly; the heavy per-category "cites"
+        breakdown is computed separately and lazily by :meth:`corpus_map_cites`."""
+        return self._cached("corpus_map", 90, self._corpus_map_uncached,
+                            placeholder={"categories": [], "totals": {}})
+
+    def _corpus_map_uncached(self) -> dict:
+        from .citations.taxonomy import (CATEGORY_LABELS, CATEGORY_ORDER,
+                                         classify_candidate, classify_document)
+        cats: dict[str, dict] = {}
+
+        def _cat(key: str) -> dict:
+            c = cats.get(key)
+            if c is None:
+                c = cats[key] = {"key": key, "label": CATEGORY_LABELS.get(key, key),
+                                 "held": 0, "pending": 0, "name_only": 0, "subtypes": {}}
+            return c
+
+        def _sub(c: dict, tax) -> dict:
+            s = c["subtypes"].get(tax.subtype)
+            if s is None:
+                s = c["subtypes"][tax.subtype] = {"key": tax.subtype, "label": tax.subtype_label,
+                                                  "held": 0, "pending": 0, "name_only": 0,
+                                                  "filter": tax.filter}
+            return s
+
+        # held — one GROUP BY query, classified in Python
+        with self._open() as (cat, _rs, _ts):
+            held_rows = cat.document_subtype_counts()
+        for r in held_rows:
+            tax = classify_document(source=r["source"], doc_type=r["doc_type"],
+                                    court=r["court"], stable_id=r["prefix"] or "")
+            c = _cat(tax.category); s = _sub(c, tax)
+            c["held"] += r["n"]; s["held"] += r["n"]
+
+        # pending — reuse the (uncapped) hanging-reference grouping
+        for h in self.unresolved_references(limit=None):
+            tax = classify_candidate(h["candidate"] or "", "" if h["candidate"] else "case")
+            c = _cat(tax.category); s = _sub(c, tax)
+            if h["needs_identifier"] or h["confidence"] == "low" or not h["suggested_adapter"]:
+                c["name_only"] += 1; s["name_only"] += 1
+            else:
+                c["pending"] += 1; s["pending"] += 1
+
+        # ECHR: re-split the held cases by HUDOC formation (Grand Chamber / Chamber / …) — the
+        # one sub-division CELLAR/HUDOC actually stores. Pending cases have no formation, so they
+        # stay on a generic "ECHR case" row; the Convention row is preserved.
+        if "echr" in cats:
+            from .citations.taxonomy import echr_formation
+            c = cats["echr"]
+            old = c["subtypes"]
+            new_subs: dict[str, dict] = {}
+            with self._open() as (cat, _rs, _ts):
+                for r in cat.echr_formation_counts():
+                    key, label = echr_formation(r["branch"])
+                    s = new_subs.get(key)
+                    if s is None:
+                        s = new_subs[key] = {"key": key, "label": label, "held": 0,
+                                             "pending": 0, "name_only": 0, "filter": {"source": "echr"}}
+                    s["held"] += r["n"]
+            if "convention" in old:
+                new_subs["convention"] = old["convention"]
+            case = old.get("case")
+            if case and (case["pending"] or case["name_only"]):  # pending/name-only have no formation
+                new_subs["case"] = {**case, "held": 0, "label": "ECHR case (pending / by name)"}
+            c["subtypes"] = new_subs
+
+        order = {k: i for i, k in enumerate(CATEGORY_ORDER)}
+        out = sorted(cats.values(), key=lambda c: order.get(c["key"], 99))
+        for c in out:
+            c["subtypes"] = sorted(c["subtypes"].values(),
+                                   key=lambda s: (-s["held"], -s["pending"], s["label"]))
+        totals = {k: sum(c[k] for c in out) for k in ("held", "pending", "name_only")}
+        return {"categories": out, "totals": totals}
+
+    def corpus_map_cites(self, *, category: str) -> dict:
+        """LAZY: what the held documents of ``category`` cite, broken down by target category —
+        ``unique`` distinct targets (a doc citing the same case 3× counts once) and ``total``
+        occurrences. Scans one source's edges; cached 5 min per category."""
+        return self._cached(f"corpus_cites:{category}", 300,
+                            lambda: self._corpus_map_cites_uncached(category))
+
+    def _corpus_map_cites_uncached(self, category: str) -> dict:
+        from .citations.taxonomy import CATEGORY_LABELS, classify_candidate
+        from .resolve.matchers import first_candidate
+        buckets: dict[str, dict] = {}
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.outgoing_citation_targets(category)  # category key == source key
+        for r in rows:
+            dst = r["dst_id"]
+            if (not dst or dst.startswith("http")):
+                fc = first_candidate(dst or r["raw"] or "")
+                dst = fc.value if fc else dst
+            if not dst:
+                continue
+            tax = classify_candidate(dst, "")
+            b = buckets.get(tax.category)
+            if b is None:
+                b = buckets[tax.category] = {"category": tax.category,
+                    "label": CATEGORY_LABELS.get(tax.category, tax.category),
+                    "_uniq": set(), "total": 0}
+            b["_uniq"].add(dst); b["total"] += 1
+        targets = [{"category": b["category"], "label": b["label"],
+                    "unique": len(b["_uniq"]), "total": b["total"]} for b in buckets.values()]
+        targets.sort(key=lambda t: t["total"], reverse=True)
+        return {"category": category, "targets": targets}
+
+    def refresh_category(self, *, category: str, on_progress=None, cancel_check=None) -> dict:
+        """"Total refresh" for one category: harvest its pending routable references, then —
+        for EU case-law — pull the cases that cite our held EU cases. (A global citation
+        re-scan stays a separate action; it isn't category-scoped.)"""
+        out: dict = {"category": category}
+        _progress(on_progress, stage=f"harvesting pending — {category}", done=0, total=0)
+        out["harvest"] = self.harvest_all_references(
+            adapter=category, limit=1000000, on_progress=on_progress, cancel_check=cancel_check)
+        if category == "eu-cellar" and not (cancel_check and cancel_check()):
+            _progress(on_progress, stage="finding citing EU cases", done=0, total=0)
+            out["expand"] = self.expand_citing_cases(
+                source="eu-cellar", on_progress=on_progress, cancel_check=cancel_check)
+        self._invalidate_caches()
+        return out
+
+    def pull_ag_opinions(self, *, limit: int = 100000, on_progress=None, cancel_check=None) -> dict:
+        """Pull the Advocate General's Opinion for every held CJEU judgment that lacks one.
+        A CJEU judgment CELEX ``6yyyyCJnnnn`` has its AG opinion at ``6yyyyCCnnnn`` — so this
+        derives the opinion CELEX and harvests it via CELLAR. Court-of-Justice cases only (the
+        General Court has no Advocate General). Skips opinions already held; idempotent."""
+        import re as _re
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.list_documents(source="eu-cellar", doc_type="judgment", limit=200000)
+            wanted: list[str] = []
+            for r in rows:
+                if (r["court"] or "").lower() != "court of justice":
+                    continue
+                celex = cat.document_meta(r["stable_id"]).get("celex") or r["stable_id"]
+                m = _re.match(r"^(6\d{4})CJ(\d.*)$", (celex or "").upper())
+                if m:
+                    wanted.append(f"{m.group(1)}CC{m.group(2)}")
+        wanted = sorted(set(wanted))[:limit]
+        pulled, held, failed = [], 0, 0
+        for i, op in enumerate(wanted, 1):
+            if cancel_check and cancel_check():
+                break
+            with self._open() as (cat, _rs, _ts):
+                if cat.find_document_id(op) is not None:
+                    held += 1
+                    _progress(on_progress, stage="pulling AG opinions", done=i, total=len(wanted),
+                              item=op, ok=True, msg="already held")
+                    continue
+            _progress(on_progress, stage="pulling AG opinions", done=i, total=len(wanted), item=op)
+            try:
+                res = self.harvest_reference(ref=op, candidate=op)
+                if res.get("stored") or res.get("resolved") or res.get("ok"):
+                    pulled.append(op)
+                else:
+                    failed += 1
+            except Exception:  # noqa: BLE001 — one missing opinion mustn't stop the run
+                failed += 1
+        self._invalidate_caches()
+        return {"cjeu_judgments": len(wanted), "opinions_pulled": len(pulled),
+                "already_held": held, "no_opinion_or_failed": failed, "new_ids": pulled[:200]}
+
+    def resolve_reference(
+        self, *, ref: str, identifier: str | None = None, jurisdiction: str | None = None,
+        existing_id: str | None = None, url: str | None = None,
+        content_base64: str | None = None, filename: str | None = None,
+        title: str | None = None, doc_type: str = "commentary",
+    ) -> dict:
+        """Manually satisfy a hanging reference (§5b). Four interchangeable, combinable
+        modes — supply whichever the situation allows:
+
+        - ``identifier`` (+ optional ``jurisdiction``): the missing citation for a
+          reference recognised by *name only* — e.g. a neutral citation, ECLI, or
+          CELEX. It's parsed by the same grammars into a canonical candidate id, so
+          the reference resolves now (if that target is already in the corpus) or
+          the moment it's harvested, and the snowball can route it.
+        - ``existing_id``: point the reference at a document already in the corpus.
+        - ``url``: fetch the source (via the configured scraping engine) as a new
+          document and resolve to it.
+        - ``content_base64`` (+ ``filename``): upload the source file and resolve to it.
+
+        Returns what it did, including how many edges became live."""
+        from .citations import extract_citations
+
+        # 1. Parse a user-supplied identifier into a canonical candidate id.
+        canonical: str | None = None
+        if identifier:
+            for c in extract_citations(identifier):
+                if c.candidate_id:
+                    canonical = c.candidate_id
+                    break
+            canonical = canonical or identifier.strip()
+
+        # 2. If the user is providing the source material, import it → a target doc.
+        target: str | None = existing_id
+        imported: dict | None = None
+        if url:
+            imported = self.import_url(url=url, doc_type=doc_type, title=title or identifier or ref)
+            target = imported.get("stable_id")
+        elif content_base64:
+            imported = self.import_base64(content_base64=content_base64,
+                                          filename=filename or "reference.pdf",
+                                          doc_type=doc_type, title=title or identifier or ref)
+            target = imported.get("stable_id")
+
+        with self._open() as (cat, _rs, _ts):
+            if existing_id and cat.get_document(existing_id) is None:
+                return {"error": f"no document {existing_id!r} in corpus", "ref": ref}
+
+            # 3. Re-key the hanging edges and/or register the alias so resolution links.
+            new_candidate = canonical or target
+            rekeyed = 0
+            if new_candidate and new_candidate != ref:
+                rekeyed = cat.set_pending_candidate(ref, new_candidate)
+            if canonical and target:
+                # canonical id (e.g. an ECLI) is what the edges now carry; alias it
+                # to the concrete document so find_document_id() lands on it.
+                cat.put_alias(canonical.casefold(), target, source="manual-resolve")
+            elif jurisdiction and canonical:
+                cat.put_alias(canonical.casefold(), canonical, source=f"manual:{jurisdiction}")
+
+            # 4. Resolve — turns every now-satisfiable hanging edge live.
+            resolved = Resolver(cat).run()
+            still = cat.find_document_id(new_candidate) if new_candidate else None
+            self._invalidate_caches()
+            return {
+                "ref": ref, "canonical": canonical, "target": target,
+                "imported": imported, "edges_rekeyed": rekeyed,
+                "resolved_edges": resolved.resolved,
+                "resolved": still is not None,
+            }
+
+    def reparse_document(self, *, stable_id: str) -> dict:
+        """Re-derive a document's text + structural segments from its **immutable raw**
+        using the current format parser — the projection-refresh path when a parser
+        improves (e.g. better legislation formatting / recitals), without re-fetching
+        (§1.2: raw is canonical, everything else is re-derivable). No-op for docs with
+        no structural format."""
+        from .formats import parse as parse_format
+        from pathlib import Path
+
+        with self._open() as (cat, _rs, ts):
+            doc = cat.get_document(stable_id)
+            if doc is None or not doc["raw_path"] or not doc["payload_hash"]:
+                return {"stable_id": stable_id, "reparsed": False, "reason": "no raw"}
+            try:
+                raw = Path(doc["raw_path"]).read_bytes()
+            except OSError:
+                return {"stable_id": stable_id, "reparsed": False, "reason": "raw missing"}
+            # CJEU judgments use the bespoke Formex judgment parser (NP.ECR/GR.SEQ grounds
+            # + ruling), NOT the legislation Formex parser the format registry would pick.
+            if doc["source"] == "eu-cellar":
+                from .adapters.eu_cellar import extract_formex
+                text, segments = extract_formex(raw)
+                fmt = "formex-judgment"
+            else:
+                fmt = _sniff_format(raw)
+                if fmt is None:
+                    return {"stable_id": stable_id, "reparsed": False, "reason": "no structural format"}
+                pd = parse_format(fmt, raw)
+                text, segments = pd.text, pd.segments
+            if not text:
+                return {"stable_id": stable_id, "reparsed": False, "reason": "parser produced no text"}
+            ts.put(doc["payload_hash"], text)            # overwrite (same hash → same path)
+            ts.put_segments(doc["payload_hash"], segments)
+            return {"stable_id": stable_id, "reparsed": True, "format": fmt,
+                    "segments": len(segments)}
+
+    def backfill_document_metadata(self, *, on_progress=None) -> dict:
+        """Repair already-stored docs from their immutable raw (no re-fetch): derive the
+        UK court from the FCL slug where the column is blank; **re-parse CJEU judgments**
+        (fixing any that came out ruling-only) and re-extract their citations from the now
+        full text; and derive a case-name title from the Formex where CELLAR gave none."""
+        from pathlib import Path
+
+        from .adapters.eu_cellar import extract_formex, formex_case_title
+        from .adapters.uk_caselaw import court_from_slug
+        from .citations import extract_document
+
+        fixed = {"uk_court": 0, "eu_reparsed": 0, "eu_titled": 0, "eu_recovered": 0}
+        with self._open() as (cat, _rs, ts):
+            # 1) UK court from the slug
+            for src in ("uk-caselaw", "uk-grc"):
+                for r in cat.list_documents(source=src, limit=100000):
+                    if not r["court"]:
+                        c = court_from_slug(r["stable_id"])
+                        if c:
+                            cat.update_document_fields(r["stable_id"], {"court": c}, curate=False)
+                            fixed["uk_court"] += 1
+            # 2) re-parse CJEU judgments + titles
+            eu = cat.list_documents(source="eu-cellar", limit=100000)
+            for i, r in enumerate(eu, 1):
+                _progress(on_progress, stage="reparsing CJEU", done=i, total=len(eu), item=r["stable_id"])
+                doc = cat.get_document(r["stable_id"])
+                if not doc or not doc["raw_path"] or not doc["payload_hash"]:
+                    continue
+                try:
+                    raw = Path(doc["raw_path"]).read_bytes()
+                except OSError:
+                    continue
+                text, segments = extract_formex(raw)
+                if text:
+                    before = (ts.get(doc["payload_hash"]) if doc["has_text"] else "") or ""
+                    ts.put(doc["payload_hash"], text)
+                    ts.put_segments(doc["payload_hash"], segments)
+                    fixed["eu_reparsed"] += 1
+                    if len(text.split()) > len(before.split()) + 200:  # recovered real body
+                        fixed["eu_recovered"] += 1
+                        extract_document(cat, ts, r["stable_id"])  # re-mine the full text
+                # (re)title when missing OR when the stored title is a raw parties dump
+                # (very long / full of "represented by …" boilerplate)
+                title = doc["title"] or ""
+                if not title or len(title) > 160 or "represented" in title.lower():
+                    t = formex_case_title(raw)
+                    if t and t != title and len(t) < len(title or "x" * 999):
+                        cat.update_document_fields(r["stable_id"], {"title": t}, curate=False)
+                        fixed["eu_titled"] += 1
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            Resolver(cat).run()
+        return fixed
+
+    def reparse_all(self, *, doc_type: str | None = "legislation") -> dict:
+        """Re-derive text+segments for every structural document (default: legislation)
+        — run after a parser upgrade so already-harvested docs pick up the new
+        formatting/recitals."""
+        with self._open() as (cat, _rs, _ts):
+            ids = [r["stable_id"] for r in cat.list_documents(limit=100000, doc_type=doc_type)]
+        n = sum(1 for sid in ids if self.reparse_document(stable_id=sid).get("reparsed"))
+        return {"candidates": len(ids), "reparsed": n}
+
+    def _resolve_seeds(self, cat, seeds: list[str] | None, seed_rule: dict | None) -> set[str]:
+        """Turn a seed spec into a concrete set of document/candidate ids. Seeds can
+        be given explicitly, or *by rule* — the building blocks for "find cases related
+        to X" research:
+        - ``{"cites": "32016R0679"}`` → every corpus doc that cites the GDPR
+          (add ``"hops": 2`` for "… that cites any case which cites the GDPR");
+        - ``{"tag": "data_protection"}`` → a tagged category/collection;
+        - ``{"query": "right to erasure"}`` → corpus keyword hits.
+        """
+        from .resolve.matchers import first_candidate
+
+        out: set[str] = set()
+        for s in (seeds or []):
+            c = first_candidate(s)
+            out.add(c.value if c else s)
+        if seed_rule:
+            cites = seed_rule.get("cites")
+            if cites:
+                tgt = cat.find_document_id(cites) or cites
+                layer = {tgt}
+                for _ in range(int(seed_rule.get("hops", 1))):
+                    nxt = set()
+                    for t in layer:
+                        for r in cat.relations_to(t):  # resolved incoming = who cites t
+                            out.add(r["src_id"])
+                            nxt.add(r["src_id"])
+                    layer = nxt
+            if seed_rule.get("tag"):
+                for d in cat.list_documents(tag=seed_rule["tag"], limit=10000):
+                    out.add(d["stable_id"])
+            if seed_rule.get("query"):
+                for d in cat.list_documents(query=seed_rule["query"], limit=500):
+                    out.add(d["stable_id"])
+        return out
+
+    def radiate(self, *, seeds: list[str] | None = None, seed_rule: dict | None = None,
+                degrees: int = 2, max_per_degree: int = 40, dry_run: bool = False,
+                on_progress=None, cancel_check=None) -> dict:
+        """Snowball-sample the citation network from a seed set, ``degrees`` hops out.
+
+        Each hop: take the current frontier's outbound citations, **targeted-harvest**
+        the routable ones (fetching exactly those cases/instruments), extract + resolve,
+        and make the newly-fetched documents the next frontier. This is the engine
+        behind "seed with a case/piece of legislation and radiate three degrees" and
+        autosnowball. ``dry_run`` returns the seed set without harvesting."""
+        from .citations import extract_corpus
+
+        summary: dict = {"seed_count": 0, "degrees": [], "harvested": []}
+        with self._open() as (cat, rs, ts):
+            seedset = self._resolve_seeds(cat, seeds, seed_rule)
+            summary["seed_count"] = len(seedset)
+            if dry_run:
+                return {**summary, "seeds": sorted(seedset)[:200]}
+
+            # degree 0 — make sure the seeds themselves are in the corpus
+            frontier: set[str] = set()
+            for i, s in enumerate(seedset, 1):
+                _progress(on_progress, stage="seeding", done=i, total=len(seedset), item=s)
+                res = self._fetch_reference(cat, rs, ts, ref=s, candidate=None)
+                if "error" not in res:
+                    frontier.add(res["candidate"])
+            self._extract_ids(cat, ts, frontier)  # only the seeds, not the whole corpus
+            Resolver(cat).run()
+            seen = set(frontier)
+
+            for deg in range(1, max(1, degrees) + 1):
+                # candidates this hop = outbound citations of the current frontier
+                cands: set[str] = set()
+                for sid in frontier:
+                    real = cat.find_document_id(sid) or sid
+                    for rel in cat.relations_for(real):
+                        c = rel["dst_id"]
+                        if c and c not in seen and cat.find_document_id(c) is None:
+                            cands.add(c)
+                # Fetch until we have max_per_degree *successes* (don't let
+                # un-routable / 404 candidates burn the budget); cap total attempts.
+                newly: list[str] = []
+                attempts = 0
+                target = min(max_per_degree, len(cands))
+                for c in list(cands):
+                    if len(newly) >= max_per_degree or attempts >= max_per_degree * 3:
+                        break
+                    if cancel_check and cancel_check():
+                        summary["cancelled"] = True
+                        self._extract_ids(cat, ts, newly)
+                        Resolver(cat).run()
+                        return summary
+                    attempts += 1
+                    seen.add(c)
+                    _progress(on_progress, stage=f"degree {deg}", done=len(newly), total=target, item=c)
+                    res = self._fetch_reference(cat, rs, ts, ref=c, candidate=c)
+                    ok = bool(res.get("stored") or res.get("present"))
+                    if ok:
+                        newly.append(res["candidate"])
+                    _progress(on_progress, stage=f"degree {deg}", done=len(newly), total=target,
+                              item=res.get("candidate") or c, ok=ok)
+                self._extract_ids(cat, ts, newly)  # only the newly fetched docs
+                Resolver(cat).run()
+                summary["degrees"].append({"degree": deg, "candidates": len(cands),
+                                           "harvested": len(newly)})
+                summary["harvested"] += newly
+                frontier = set(newly)
+                if not frontier:
+                    break
+        return summary
+
+    # The Convention's article marginal-headings (factual labels) — enough structure for
+    # "Article 10 of the Convention" to resolve and pinpoint, without the treaty's text.
+    _ECHR_ARTICLES = {
+        1: "Obligation to respect human rights", 2: "Right to life", 3: "Prohibition of torture",
+        4: "Prohibition of slavery and forced labour", 5: "Right to liberty and security",
+        6: "Right to a fair trial", 7: "No punishment without law",
+        8: "Right to respect for private and family life",
+        9: "Freedom of thought, conscience and religion", 10: "Freedom of expression",
+        11: "Freedom of assembly and association", 12: "Right to marry",
+        13: "Right to an effective remedy", 14: "Prohibition of discrimination",
+        15: "Derogation in time of emergency", 16: "Restrictions on political activity of aliens",
+        17: "Prohibition of abuse of rights", 18: "Limitation on use of restrictions on rights",
+    }
+
+    def ensure_echr_convention(self) -> dict:
+        """Make sure the European Convention on Human Rights exists as a corpus node
+        (``echr/convention``) so "Article N of the Convention" citations resolve and
+        pinpoint to the right article. Idempotent: pulls the full treaty text once (via
+        ``import_echr_convention``), falling back to article *headings* only if offline."""
+        with self._open() as (cat, _rs, _ts):
+            if cat.get_document("echr/convention") is not None:
+                return {"stable_id": "echr/convention", "present": True}
+        try:
+            return self.import_echr_convention()
+        except Exception:  # noqa: BLE001 — offline / source change → headings-only stub
+            return self._echr_convention_stub()
+
+    def _echr_convention_stub(self) -> dict:
+        from .core.models import DocType, ExtractedVia, Record
+        from .core.segmentation import assemble
+
+        with self._open() as (cat, _rs, ts):
+            blocks = [(f"Article {n}", "article", f"Article {n} — {title}")
+                      for n, title in sorted(self._ECHR_ARTICLES.items())]
+            self._store_echr_convention(cat, ts, assemble(blocks))
+            return {"stable_id": "echr/convention", "created": True, "source": "headings-stub"}
+
+    def import_echr_convention(self) -> dict:
+        """Fetch the European Convention on Human Rights (ETS No. 5) — an official, freely
+        reproducible treaty — from Wikisource and store its **full text**, segmented by
+        Article (the citable unit), so "Article 10 of the Convention" deep-links to the real
+        Article 10. Reproducible: re-run to refresh."""
+        import re as _re
+
+        from bs4 import BeautifulSoup
+
+        from .core.http import build_client
+        from .core.segmentation import assemble
+
+        client = build_client(timeout=45)
+        resp = client.get("https://en.wikisource.org/w/api.php", params={
+            "action": "parse", "format": "json", "formatversion": "2", "prop": "text",
+            "page": "European_Convention_for_the_Protection_of_Human_Rights_and_Fundamental_Freedoms",
+        })
+        soup = BeautifulSoup(resp.json()["parse"]["text"], "html.parser")
+        for junk in soup.select("sup.reference, .mw-editsection, style, .toc, table.ws-noexport"):
+            junk.decompose()
+        blocks: list[tuple[str, str, str]] = []
+        label, kind, buf = "Preamble", "section", []
+        _ART = _re.compile(r"^Article\s+(\d+)\s*[–-]\s*(.+)$")
+        for el in soup.find_all(["h2", "h3", "h4", "p", "li"]):
+            txt = _re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip().rstrip("¹²³ ")
+            if not txt:
+                continue
+            if el.name in ("h2", "h3", "h4"):
+                if buf:
+                    blocks.append((label, kind, "\n".join(buf)))
+                m = _ART.match(txt)
+                if m:
+                    label, kind, buf = f"Article {m.group(1)}", "article", [f"Article {m.group(1)} — {m.group(2)}"]
+                else:
+                    label, kind, buf = txt, "section", []
+            else:
+                buf.append(txt)
+        if buf:
+            blocks.append((label, kind, "\n".join(buf)))
+        n_articles = sum(1 for b in blocks if b[1] == "article")
+        if n_articles < 10:
+            raise ValueError(f"ECHR parse looks wrong ({n_articles} articles)")
+        with self._open() as (cat, _rs, ts):
+            self._store_echr_convention(cat, ts, assemble(blocks))
+        return {"stable_id": "echr/convention", "created": True, "source": "wikisource",
+                "articles": n_articles}
+
+    def _store_echr_convention(self, cat, ts, parsed) -> None:
+        from .core.models import DocType, ExtractedVia, Record
+
+        text, segments = parsed
+        rec = Record(
+            source="echr", stable_id="echr/convention", doc_type=DocType.LEGISLATION,
+            title="European Convention on Human Rights (ETS No. 5)",
+            language="en", source_language="en",
+            landing_url="https://www.echr.coe.int/documents/d/echr/convention_eng",
+            text=text, segments=segments, raw_bytes=text.encode("utf-8"), raw_ext="txt",
+            extracted_via=ExtractedVia.STRUCTURED,
+            extra={"treaty": "ECHR", "ets": "5", "source_url":
+                   "https://en.wikisource.org/wiki/European_Convention_for_the_Protection_of_Human_Rights_and_Fundamental_Freedoms"},
+        )
+        rec.ensure_payload_hash()
+        text_path = str(ts.put(rec.payload_hash, text))
+        ts.put_segments(rec.payload_hash, segments)  # the per-article structure for pinpoints
+        cat.upsert_document(rec, text_path=text_path)
+
+    def expand_citing_cases(self, *, source: str = "eu-cellar", limit: int = 5000,
+                            max_workers: int = 6, on_progress=None, cancel_check=None) -> dict:
+        """Find every case that CITES a case already in the corpus, via CELLAR's
+        ``work_cites_work`` inverse — recorded as a **deferred** backward-citation edge
+        (``cited_by``) WITHOUT downloading the citing case. So the sweep is just one SPARQL
+        per held case, run in PARALLEL — not thousands of inline Formex downloads (the slow
+        part). The citing cases land in the harvest worklist; their full text is pulled
+        later (in parallel) by "Harvest all (eu-cellar)". Idempotent."""
+        import re as _re
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from .adapters.eu_cellar import EUCellarAdapter
+        from .core.models import ExtractedVia, RelationshipType, ResolutionStatus, TypedRelation
+
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.list_documents(source=source, limit=100000)
+            seeds: dict[str, str] = {}  # case CELEX -> the held doc's stable_id
+            for r in rows:
+                if r["doc_type"] not in ("judgment", "opinion"):
+                    continue
+                sid = r["stable_id"]
+                celex = cat.document_meta(sid).get("celex")
+                celex = celex if (celex and _re.match(r"^6\d{4}[A-Z]", celex)) else (
+                    sid if _re.match(r"^6\d{4}[A-Z]", sid) else None)
+                if celex:
+                    seeds.setdefault(celex, sid)
+        targets = sorted(seeds)[:limit]
+
+        # 1) gather "who cites this" for every seed IN PARALLEL (independent SPARQL calls)
+        results: dict[str, list[dict]] = {}
+        done = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(EUCellarAdapter(cited_by_celex=c, per_page=200).citing_works, c): c
+                       for c in targets}
+            for fut in as_completed(futures):
+                c = futures[fut]
+                done += 1
+                if cancel_check and cancel_check():
+                    break
+                try:
+                    results[c] = fut.result()
+                except Exception:  # noqa: BLE001 — one bad query mustn't stop the sweep
+                    results[c] = []
+                _progress(on_progress, stage="finding citing cases", done=done, total=len(targets),
+                          item=c, ok=True, msg=f"+{len(results[c])} citing")
+
+        # 2) record deferred cited_by edges (held seed -> citing case); the citing case is a
+        # dangling dst, so it surfaces in the worklist for a later parallel pull. No downloads.
+        _progress(on_progress, stage="recording citation edges", done=0, total=0)
+        citers: set[str] = set()
+        with self._open() as (cat, _rs, _ts):
+            for celex, works in results.items():
+                edges = []
+                for w in works:
+                    cid = (w.get("ecli") or w.get("celex") or "").strip()
+                    if not cid or cid == celex:
+                        continue
+                    citers.add(cid)
+                    edges.append(TypedRelation(
+                        relationship_type=RelationshipType.CITED_BY,
+                        raw_citation_string=cid, dst_id=cid,
+                        extracted_via=ExtractedVia.STRUCTURED,
+                        resolution_status=ResolutionStatus.PENDING))
+                if edges:
+                    cat.clear_relations_of_type(seeds[celex], str(RelationshipType.CITED_BY))
+                    cat.add_relations(seeds[celex], edges)
+            resolved = Resolver(cat).run()  # link any citers already held
+            to_harvest = sum(1 for c in citers if cat.find_document_id(c) is None)
+        self._invalidate_caches()
+        return {"cases_scanned": len(targets), "citing_relations": len(citers),
+                "to_harvest": to_harvest, "resolved_edges": resolved.resolved,
+                "note": "edges recorded — pull the bodies via Harvest all (eu-cellar)"}
+
+    def detect_citations(self, *, text: str) -> dict:
+        """Recognise every citation in a block of pasted text (ECLI, CELEX, neutral
+        citation, legislation, CJEU case number, …) and report the routable candidates —
+        the preview step before seeding. No fetching."""
+        from .citations import extract_citations
+        from .citations.snowball import _classify
+
+        seen: dict[str, dict] = {}
+        for c in extract_citations(text or ""):
+            if not c.candidate_id or c.candidate_id in seen:
+                continue
+            form, juris, adapter = _classify(c.candidate_id, c.entity_kind)
+            seen[c.candidate_id] = {"candidate": c.candidate_id, "raw": c.raw,
+                                    "form": form, "adapter": adapter, "routable": adapter is not None}
+        with self._open() as (cat, _rs, _ts):
+            for d in seen.values():
+                d["in_corpus"] = cat.find_document_id(d["candidate"]) is not None
+        return {"detected": len(seen), "citations": list(seen.values())}
+
+    def seed_from_text(self, *, text: str, degrees: int = 1, max_per_degree: int = 40,
+                       include_citing: bool = True, citing_limit: int = 25, citing_pages: int = 1,
+                       on_progress=None, cancel_check=None) -> dict:
+        """Paste a block of text → detect every citation in it, harvest those items, then
+        radiate ``degrees`` hops over what they cite/link to AND (``include_citing``) pull
+        what *cites* them from the live source. The one-shot "seed a set of cases and go
+        forwards and backwards from them" — ECLIs, neutral citations, CELEX, legislation
+        are all detected and pulled to whatever degree the data sources allow."""
+        det = self.detect_citations(text=text)
+        cands = [c["candidate"] for c in det["citations"]]
+        if not cands:
+            return {"detected": 0, "note": "no citations recognised in the text"}
+
+        # 1) seed those candidates + radiate outward (things they cite / link to)
+        rad = self.radiate(seeds=cands, degrees=degrees, max_per_degree=max_per_degree,
+                           on_progress=on_progress, cancel_check=cancel_check)
+        result = {"detected": len(cands), "detected_citations": det["citations"], "radiate": rad}
+
+        # 2) inbound — who cites the seeds (live FCL / CELLAR), one layer, bounded.
+        # Backward-discovery is precise for CASES (search by citation) and EU CELEX
+        # (CELLAR's "cases interpreting this legislation"), but a UK *statute* title search
+        # returns a flood of mostly off-topic judgments — slow and noisy — so we skip
+        # UK-legislation seeds here (their relationships come through the forward radiate).
+        if include_citing and not (cancel_check and cancel_check()):
+            discovered: list[str] = []
+            seeds = [c["candidate"] for c in det["citations"]
+                     if c["adapter"] != "uk-legislation"][:citing_limit]
+            for i, cand in enumerate(seeds, 1):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="finding citing cases", done=i, total=len(seeds), item=cand)
+                try:
+                    # resolve=False: don't re-resolve the whole graph after each seed —
+                    # do it ONCE at the end (below), so 25 seeds cost one resolve, not 25
+                    d = self.discover_citing(target=cand, max_pages=citing_pages, resolve=False)
+                    discovered += d.get("discovered", [])
+                    _progress(on_progress, stage="finding citing cases", done=i, total=len(seeds),
+                              item=cand, ok=True, msg=f"+{d.get('count', 0)} citing")
+                except Exception:  # noqa: BLE001 — one bad lookup mustn't stop the run
+                    pass
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            with self._open() as (cat, _rs, _ts):
+                Resolver(cat).run()
+            result["citing_discovered"] = sorted(set(discovered))
+            result["citing_count"] = len(result["citing_discovered"])
+        return result
+
+    def harvest_all_references(self, *, limit: int = 25, min_citing: int = 1,
+                               adapter: str | None = None, leg_kind: str | None = None,
+                               on_progress=None, cancel_check=None) -> dict:
+        """Drain the routable part of the hanging-reference queue in one go: for every
+        reference that is high-enough confidence *and* has a targeted adapter, fetch
+        its exact item, then extract + resolve **once** at the end. Bounded by
+        ``limit`` (most-cited first) so a UI click returns; ``min_citing`` skips
+        one-off references. Un-routable / low-confidence references are left for
+        manual handling."""
+        # Consider EVERY hanging reference, not just the top-N by frequency — otherwise a
+        # category whose items are each cited only a few times (e.g. UK case-law) is starved
+        # out of the global ranking by high-frequency legislation, and a per-category harvest
+        # only sees a handful. The full grouping is the same scan coverage already does.
+        candidates = [r for r in self.unresolved_references(limit=None)
+                      if r["suggested_adapter"] and r["confidence"] != "low"
+                      and r["citing_count"] >= min_citing and not r["needs_identifier"]
+                      # optional category filter: harvest just one source, and within UK
+                      # legislation just primary / secondary / assimilated
+                      and (not adapter or r["suggested_adapter"] == adapter)
+                      and (not leg_kind or r.get("leg_kind") == leg_kind)]
+        # Skip references that FAILED to fetch recently (e.g. a giant Act like FSMA 2000
+        # that legislation.gov.uk can't serve) so a re-run doesn't re-stall on the same dead
+        # item. TTL'd (≤14 days) — nothing is flagged forever; it's retried automatically.
+        with self._open() as (cat, _rs, _ts):
+            recent_misses = cat.enrichment_misses("harvest-miss", max_age_days=14)
+        skipped = sum(1 for r in candidates if r["candidate"] in recent_misses)
+        # honour the requested limit — one click can drain everything now that the run
+        # fails-fast on dead items, skips them, stays responsive, and is cancellable.
+        rows = [r for r in candidates if r["candidate"] not in recent_misses][:limit]
+        fetched, fetched_ids, failed, new_misses = [], [], [], []
+        with self._open() as (cat, rs, ts):
+            for i, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="harvesting", done=i, total=len(rows), item=r["ref"])
+                res = self._fetch_reference(cat, rs, ts, ref=r["ref"], candidate=r["candidate"])
+                ok = bool(res.get("stored") or res.get("present"))
+                if ok:
+                    fetched.append({"ref": r["ref"]})
+                    fetched_ids.append(res["candidate"])
+                else:
+                    failed.append({"ref": r["ref"], **({} if "error" not in res else {"error": res["error"]})})
+                    new_misses.append(r["candidate"])  # don't re-attempt this one for a while
+                _progress(on_progress, stage="harvesting", done=i, total=len(rows),
+                          item=res.get("candidate") or r["ref"], ok=ok,
+                          msg=res.get("error") if not ok else None)
+            if new_misses:
+                cat.record_enrichment_misses("harvest-miss", new_misses)
+            # extract just the newly-fetched docs, then resolve once — both AFTER the
+            # fetch loop, so report them as their own stages (this is the phase that
+            # looked "stuck" because the progress bar had finished the harvest loop).
+            self._extract_ids(cat, ts, fetched_ids, on_progress=on_progress)
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            resolved = Resolver(cat).run()
+        self._invalidate_caches()  # refresh the worklist's per-source "remaining" counts
+        remaining = len(candidates) - skipped - len(fetched)
+        return {"attempted": len(rows), "harvested": len(fetched),
+                "resolved_edges": resolved.resolved, "failed": failed,
+                "skipped_recent_fail": skipped, "remaining": max(remaining, 0)}
+
+    def _extract_ids(self, cat, ts, candidates, *, on_progress=None) -> None:
+        """Extract citations from just these (newly-fetched) docs — far cheaper than
+        re-extracting the whole corpus on every snowball hop."""
+        from .citations import extract_document
+
+        ids = list(set(candidates))
+        for i, cand in enumerate(ids, 1):
+            _progress(on_progress, stage="extracting citations", done=i, total=len(ids), item=cand)
+            real = cat.find_document_id(cand) or cand
+            extract_document(cat, ts, real)
+
+    def _fetch_reference(self, cat, rs, ts, *, ref: str, candidate: str | None):
+        """Fetch one routable reference's exact item into the corpus (no resolve).
+        Returns what happened; the caller resolves. Shared by the single- and
+        all-reference harvest paths."""
+        from .citations.snowball import _classify
+        from .pipeline import Pipeline
+        from .resolve.matchers import first_candidate
+
+        cand = candidate
+        if not cand:
+            c = first_candidate(ref)
+            cand = c.value if c else ref
+        cand = _act_level(cand)  # never fetch a section in isolation — fetch its Act
+        if cat.find_document_id(cand) is not None:
+            return {"candidate": cand, "present": True, "stored": 0}
+        _form, _juris, adapter_key = _classify(cand, "case")
+        builder = _TARGETED_HARVEST.get(adapter_key)
+        if builder is None:
+            return {"error": f"no targeted adapter for {cand!r} (form: {_form}); "
+                             f"use upload / scrape / link instead", "candidate": cand}
+        adapter = builder(cand)
+        if adapter is None:
+            return {"error": f"could not build a {adapter_key} fetch for {cand!r}", "candidate": cand}
+        # backfill=False so this one-item fetch never rewrites the source's real
+        # watermark; the targeted adapters ignore `since` and yield just our id.
+        stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(adapter, max_pages=1)
+        return {"candidate": cand, "adapter": adapter_key, "stored": stats.stored}
+
+    def harvest_legislation_at(self, *, stable_id: str, date: str) -> dict:
+        """Fetch UK legislation as it stood on ``date`` (YYYY-MM-DD) — the point-in-time
+        version, so an old case can be read against the live provisions instead of
+        today's (often repealed/blank) text. Stored as ``{id}@{date}`` and linked to
+        the base instrument (``point_in_time_of``)."""
+        import re as _re
+
+        if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", date or ""):
+            return {"error": "date must be YYYY-MM-DD"}
+        base = _act_level(stable_id.split("@")[0])
+        from .adapters.registry import get_adapter
+        from .pipeline import Pipeline
+
+        adapter = get_adapter("uk-legislation", ids=base, version_date=date)
+        with self._open() as (cat, rs, ts):
+            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(adapter, max_pages=1)
+            from .citations import extract_corpus
+            extract_corpus(cat, ts, stable_id=f"{base}@{date}")
+            Resolver(cat).run()
+            doc = cat.get_document(f"{base}@{date}")
+            return {"stable_id": f"{base}@{date}", "base_id": base, "date": date,
+                    "stored": stats.stored, "present": doc is not None,
+                    "title": doc["title"] if doc else None}
+
+    def legislation_versions(self, *, stable_id: str) -> dict:
+        """Point-in-time versions of a piece of legislation already in the corpus
+        (``{id}@{date}`` docs), for the versioning interface."""
+        base = _act_level(stable_id.split("@")[0])
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.list_documents(query=f"{base}@", limit=1000)
+            versions = sorted(
+                [{"stable_id": r["stable_id"], "date": r["stable_id"].split("@", 1)[1],
+                  "title": r["title"]} for r in rows if r["stable_id"].startswith(f"{base}@")],
+                key=lambda v: v["date"], reverse=True)
+            return {"base_id": base, "versions": versions}
+
+    def outstanding_effects(self, *, limit: int = 500) -> list[dict]:
+        """Legislation we hold that has *unapplied amendments* — changes the editors
+        know about but haven't yet written into the published text (§0). Each row shows
+        how many effects are outstanding, which instruments are amending it, and when
+        we'll next re-check. This is the queue that keeps the corpus honest about the
+        editorial lag without polling the whole statute book."""
+        with self._open() as (cat, _rs, _ts):
+            out = []
+            for r in cat.list_effects_refresh(limit=limit):
+                try:
+                    affecting = json.loads(r["affecting"] or "[]")
+                except (ValueError, TypeError):
+                    affecting = []
+                doc = cat.get_document(r["stable_id"])
+                out.append({
+                    "stable_id": r["stable_id"],
+                    "title": doc["title"] if doc else None,
+                    "outstanding": r["outstanding"],
+                    "affecting": affecting,
+                    # which amending instruments we already hold vs. still need to pull
+                    "affecting_held": [a for a in affecting if cat.find_document_id(a)],
+                    "checks": r["checks"],
+                    "first_seen": r["first_seen"],
+                    "next_check_at": r["next_check_at"],
+                })
+            return out
+
+    def effects_caused_by(self, *, stable_id: str) -> list[dict]:
+        """What an *amending* instrument changes — read from the same edges, the other
+        way round. `amended_by` is directional (affected ← affecting) but the graph is
+        bidirectional: this is just the affecting act's *incoming* amended_by edges. So a
+        new Act, once harvested, "describes everything it changes" without us storing the
+        fact twice. Each row: the affected instrument, the provision touched, and how."""
+        with self._open() as (cat, _rs, _ts):
+            out: dict[str, dict] = {}
+            # affected-side: this act's *incoming* amended_by edges (affected ← affecting)
+            for r in cat.relations_to(stable_id):
+                if r["relationship_type"] != "amended_by":
+                    continue
+                affected = cat.get_document(r["src_id"])
+                out.setdefault(r["src_id"], {
+                    "affected_id": r["src_id"],
+                    "affected_title": affected["title"] if affected else None,
+                    "affected_provision": r["src_anchor"], "effect_type": r["dst_anchor"]})
+            # affecting-side: this act's *outgoing* amends edges (affecting → affected),
+            # which also carry applied changes the affected-side backlog has dropped
+            for r in cat.relations_for(stable_id):
+                if r["relationship_type"] != "amends":
+                    continue
+                affected = cat.get_document(r["dst_id"])
+                out.setdefault(r["dst_id"], {
+                    "affected_id": r["dst_id"],
+                    "affected_title": affected["title"] if affected else None,
+                    "affected_provision": r["dst_anchor"], "effect_type": r["raw_citation_string"]})
+            return list(out.values())
+
+    def refresh_effects(self, *, limit: int = 10) -> dict:
+        """Re-pull the legislation whose outstanding-effects re-check is *due*, to see
+        whether the editors have incorporated the amendments yet (§0). Bounded per call
+        so it can run every scheduler tick cheaply — usually nothing is due. Each re-pull
+        reschedules (backing off) or, if all effects are now applied, drops the item from
+        the queue. Returns what it checked and what got cleared."""
+        from .adapters.registry import get_adapter
+        from .pipeline import Pipeline
+        from .citations import extract_corpus
+
+        with self._open() as (cat, rs, ts):
+            due = cat.due_effects_refresh(limit=limit)
+            if not due:
+                return {"due": 0, "checked": 0, "cleared": 0, "still_outstanding": 0}
+            ids = [r["stable_id"] for r in due]
+            before = {r["stable_id"]: r["outstanding"] for r in due}
+            adapter = get_adapter("uk-legislation", ids=",".join(ids))
+            # backfill=True ignores the watermark; skip the topic gate (already in corpus).
+            # Each fetch re-records the effects state via the pipeline (_ingest), so the
+            # queue is rescheduled/cleared as a side effect of the re-pull.
+            Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(adapter, backfill=True)
+            cleared, still = 0, 0
+            for sid in ids:
+                row = cat.conn.execute(
+                    "SELECT outstanding FROM effects_refresh WHERE stable_id = ?", (sid,)
+                ).fetchone()
+                if row is None:
+                    cleared += 1
+                    extract_corpus(cat, ts, stable_id=sid)  # text changed → re-extract
+                else:
+                    still += 1
+            Resolver(cat).run()
+            return {"due": len(due), "checked": len(ids), "cleared": cleared,
+                    "still_outstanding": still, "ids": ids, "before": before}
+
+    def propagate_changes_from(self, *, stable_id: str, max_pages: int = 20) -> dict:
+        """Push an amending act's changes OUT to the instruments it affects (§0). Reads
+        the affecting-side "Changes to Legislation" feed, mints ``amends`` edges to the
+        affected instruments we hold, and — for any change not yet incorporated — flags
+        the affected act for re-pull NOW, so the amendment is reflected even though that
+        old act might otherwise never be fetched again. This is the steady-state path:
+        new amending acts emanate their effects rather than waiting on the affected side."""
+        from .adapters.registry import get_adapter
+        from .core.models import RelationshipType, ExtractedVia, ResolutionStatus, TypedRelation
+
+        base = _act_level(stable_id.split("@")[0])
+        adapter = get_adapter("uk-legislation")
+        effects = adapter.changes_affecting(base, max_pages=max_pages)
+        with self._open() as (cat, _rs, _ts):
+            # group by affected instrument; track distinct effects + any unapplied ones
+            by_affected: dict[str, dict] = {}
+            for e in effects:
+                if not e.affected_id or e.affected_id == base:
+                    continue
+                g = by_affected.setdefault(e.affected_id, {"effects": [], "unapplied": 0})
+                g["effects"].append(e)
+                if not e.applied:
+                    g["unapplied"] += 1
+            cat.clear_relations_of_type(base, str(RelationshipType.AMENDS))  # idempotent
+            edges, flagged, held = [], 0, 0
+            seen: set[tuple] = set()
+            for affected_id, g in by_affected.items():
+                present = cat.find_document_id(affected_id)
+                if not present:
+                    continue  # held-only: don't flood the corpus with every old act touched
+                held += 1
+                for e in g["effects"]:
+                    key = (affected_id, e.affected_provision, e.type)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    edges.append(TypedRelation(
+                        relationship_type=RelationshipType.AMENDS,
+                        raw_citation_string=e.type or affected_id, dst_id=affected_id,
+                        dst_anchor=e.affected_provision,
+                        extracted_via=ExtractedVia.STRUCTURED,
+                        resolution_status=ResolutionStatus.RESOLVED,
+                    ))
+                # a change not yet written into the affected text → re-pull it to track it
+                if g["unapplied"]:
+                    cat.mark_effects_due(affected_id, [base], count=g["unapplied"])
+                    flagged += 1
+            if edges:
+                cat.add_relations(base, edges)
+            return {"act": base, "effects": len(effects), "affected_total": len(by_affected),
+                    "affected_held": held, "edges": len(edges), "flagged_for_repull": flagged}
+
+    def propagate_changes(self, *, limit: int = 5, max_age_days: int = 90) -> dict:
+        """Scan recently-held legislation we haven't scanned lately for the changes it
+        makes (affecting-side), and propagate. Bounded per call for the scheduler; the
+        ``changes-feed`` enrichment marker means each act is scanned once per
+        ``max_age_days`` rather than every tick."""
+        with self._open() as (cat, _rs, _ts):
+            done = cat.enrichment_misses("changes-feed", max_age_days=max_age_days)
+            rows = cat.list_documents(doc_type="legislation", limit=2000)
+            todo = [r["stable_id"] for r in rows
+                    if r["stable_id"] not in done and "@" not in r["stable_id"]][:limit]
+        results = []
+        for sid in todo:
+            try:
+                results.append(self.propagate_changes_from(stable_id=sid))
+            except Exception as exc:  # noqa: BLE001 — one bad feed mustn't stop the batch
+                results.append({"act": sid, "error": str(exc)})
+        with self._open() as (cat, _rs, _ts):
+            if todo:
+                cat.record_enrichment_misses("changes-feed", todo)
+        return {"scanned": len(todo),
+                "flagged": sum(r.get("flagged_for_repull", 0) for r in results),
+                "edges": sum(r.get("edges", 0) for r in results), "results": results}
+
+    def harvest_reference(self, *, ref: str, candidate: str | None = None) -> dict:
+        """The one-click resolution for a *routable* hanging reference: fetch exactly
+        that item from the adapter that holds it, then resolve. ``ref`` is a row from
+        ``unresolved_references``; we normalise it to a candidate id, pick the adapter
+        from the candidate's shape, and run a **targeted single-item harvest**
+        (uk-legislation by id, eu-legislation by CELEX, uk-caselaw by document URI)
+        rather than making the user upload or scrape what the system already knows
+        how to fetch."""
+        with self._open() as (cat, rs, ts):
+            res = self._fetch_reference(cat, rs, ts, ref=ref, candidate=candidate)
+            if "error" in res:
+                return {"ref": ref, **res}
+            # extract only the newly-fetched doc (NOT the whole 20k-doc corpus), then
+            # resolve — the same fix as harvest(); a single click shouldn't re-mine everything.
+            self._extract_ids(cat, ts, [res["candidate"]])
+            resolved = Resolver(cat).run()
+            now = cat.find_document_id(res["candidate"])
+        self._invalidate_caches()
+        return {"ref": ref, "candidate": res["candidate"],
+                "adapter": res.get("adapter"), "stored": res.get("stored", 0),
+                "resolved_edges": resolved.resolved,
+                "resolved": now is not None, "document": now}
+
+    # -- write / augment (the agent surface) -------------------------------
+    def import_bytes(
+        self, *, data: bytes, filename: str, doc_type: str = "commentary",
+        title: str | None = None, link_to: str | None = None, relationship: str | None = None,
+    ) -> dict:
+        with self._open() as (cat, rs, ts):
+            res = import_file(
+                cat, rs, ts, data=data, filename=filename,
+                doc_type=_doc_type(doc_type, DocType.COMMENTARY), title=title,
+                link_to=link_to, relationship=_rel_type(relationship),
+            )
+            return asdict(res)
+
+    def import_base64(self, *, content_base64: str, filename: str, **kw) -> dict:
+        """Posting mode for an agent that holds the bytes (e.g. a PDF it generated
+        or downloaded with another tool)."""
+        return self.import_bytes(data=base64.b64decode(content_base64), filename=filename, **kw)
+
+    def import_url(
+        self, *, url: str, doc_type: str = "commentary", title: str | None = None,
+        link_to: str | None = None, relationship: str | None = None,
+    ) -> dict:
+        with self._open() as (cat, rs, ts):
+            res = import_url(
+                cat, rs, ts, url=url, doc_type=_doc_type(doc_type, DocType.COMMENTARY),
+                title=title, link_to=link_to, relationship=_rel_type(relationship),
+            )
+            return asdict(res)
+
+    def add_note(
+        self, *, text: str, title: str | None = None, link_to: str | None = None,
+        relationship: str = "summarises",
+    ) -> dict:
+        with self._open() as (cat, _rs, ts):
+            res = add_note(
+                cat, ts, text=text, title=title, link_to=link_to,
+                relationship=_rel_type(relationship, RelationshipType.SUMMARISES),
+            )
+            return asdict(res)
+
+    def attach(self, *, doc_id: str, data: bytes, filename: str, kind: str = "exhibit") -> dict:
+        with self._open() as (cat, rs, _ts):
+            asset_id = attach_asset(cat, rs, doc_id=doc_id, data=data, filename=filename, kind=kind)
+            return {"asset_id": asset_id, "doc_id": doc_id, "kind": kind}
+
+    def attach_base64(self, *, doc_id: str, content_base64: str, filename: str, kind: str = "exhibit") -> dict:
+        return self.attach(doc_id=doc_id, data=base64.b64decode(content_base64), filename=filename, kind=kind)
+
+    def link(self, *, src_id: str, dst_id: str, relationship: str,
+             src_anchor: str | None = None, dst_anchor: str | None = None) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            rel = _rel_type(relationship, RelationshipType.ANALYSES)
+            resolved = link_documents(cat, src_id=src_id, dst_id=dst_id, relationship=rel,
+                                      src_anchor=src_anchor, dst_anchor=dst_anchor)
+            return {"src_id": src_id, "dst_id": dst_id, "relationship": rel.value,
+                    "src_anchor": src_anchor, "dst_anchor": dst_anchor, "resolved": resolved}
+
+    def tag(self, *, doc_id: str, tag: str) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            written = tag_document(cat, doc_id, tag)
+            return {"doc_id": doc_id, "tag": tag, "written": written}
+
+    # -- named aliases / shorthand rules (e.g. "UK GDPR" → a document) ------
+    def create_named_alias(self, *, phrase: str, target_id: str, apply: bool = False) -> dict:
+        """Define a shorthand *rule*: every occurrence of ``phrase`` (e.g. "UK GDPR")
+        links to ``target_id``. It propagates across the corpus on the next extraction;
+        ``apply=True`` re-extracts now (can be slow on a big corpus)."""
+        phrase = (phrase or "").strip()
+        if not phrase or not target_id:
+            return {"error": "phrase and target_id required"}
+        with self._open() as (cat, _rs, ts):
+            present = cat.find_document_id(target_id)
+            cat.put_alias(phrase, target_id, source="named")
+            result = {"phrase": phrase, "target_id": target_id, "target_present": present is not None}
+            if apply:
+                from .citations import extract_corpus
+                extract_corpus(cat, ts)
+                Resolver(cat).run()
+                result["applied"] = True
+        return result
+
+    def list_named_aliases(self) -> list[dict]:
+        """All shorthand rules (with whether the target is in the corpus)."""
+        with self._open() as (cat, _rs, _ts):
+            out = []
+            for r in cat.list_named_aliases():
+                out.append({"phrase": r["alias"], "target_id": r["dst_id"],
+                            "target_present": cat.find_document_id(r["dst_id"]) is not None})
+            return out
+
+    def delete_named_alias(self, *, phrase: str) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            cat.delete_alias(phrase)
+            return {"phrase": phrase, "deleted": True}
+
+    def apply_rules(self, *, on_progress=None, cancel_check=None) -> dict:
+        """Re-extract EVERY document's text with the current grammars + user rules — the
+        "re-scan the whole corpus for new potential citations" action. Run this after a new
+        adapter/grammar lands (e.g. ECHR app numbers, EHRR reports) so already-stored docs
+        pick them up. Heavy (minutes over a big corpus) → always run it as a background job."""
+        from .citations import extract_document
+
+        with self._open() as (cat, _rs, ts):
+            aliases = cat.named_alias_map()
+            ids = [r["stable_id"] for r in cat.list_documents(limit=200000) if r["has_text"]]
+            docs = cites = 0
+            cancelled = False
+            for i, sid in enumerate(ids, 1):
+                if cancel_check and cancel_check():
+                    cancelled = True
+                    break
+                _progress(on_progress, stage="re-scanning citations", done=i, total=len(ids), item=sid)
+                n = extract_document(cat, ts, sid, aliases=aliases)
+                if n:
+                    docs += 1
+                    cites += n
+            # don't run the (long, un-interruptible) resolve if the user cancelled —
+            # so a cancel actually stops promptly instead of grinding to completion.
+            if cancelled:
+                return {"documents": docs, "citations": cites, "cancelled": True, "resolved_edges": 0}
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            resolved = Resolver(cat).run()
+            return {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
+
+    def untag(self, *, doc_id: str, tag: str) -> dict:
+        """Remove a manual tag (a mis-tag correction). Rule tags are re-derived, so
+        they're corrected by editing the rule, not here."""
+        with self._open() as (cat, _rs, _ts):
+            removed = cat.remove_document_tag(doc_id, tag, method="manual")
+            return {"doc_id": doc_id, "tag": tag, "removed": removed}
+
+    def tag_many(self, *, doc_ids: list[str], tag: str) -> dict:
+        """Bulk-tag a selection — the academic's "drop these into a collection" gesture
+        (a collection is just a shared manual tag)."""
+        with self._open() as (cat, _rs, _ts):
+            n = sum(1 for d in doc_ids if tag_document(cat, d, tag))
+            return {"tag": tag, "documents": len(doc_ids), "written": n}
+
+    # -- corrections (fix misclassification; human curation wins) -----------
+    def update_document(self, *, stable_id: str, doc_type: str | None = None,
+                        title: str | None = None, court: str | None = None,
+                        source_language: str | None = None) -> dict:
+        """Correct a misclassified document's metadata (type / title / court /
+        language)."""
+        if doc_type is not None:
+            try:
+                doc_type = DocType(doc_type).value
+            except ValueError:
+                valid = ", ".join(t.value for t in DocType)
+                return {"error": f"unknown doc_type {doc_type!r}; valid: {valid}"}
+        with self._open() as (cat, _rs, _ts):
+            ok = cat.update_document_fields(stable_id, {
+                "doc_type": doc_type, "title": title, "court": court,
+                "source_language": source_language,
+            })
+            doc = cat.get_document(stable_id)
+            return {"stable_id": stable_id, "updated": ok,
+                    "document": dict(doc) if doc else None}
+
+    def correct_citation(self, *, relation_id: int, treatment: str | None = None,
+                         dst_id: str | None = None, suppress: bool = False) -> dict:
+        """Fix one citation edge: ``suppress`` a false positive (it won't come back on
+        re-extraction); re-point a wrong resolution to ``dst_id`` (an existing doc);
+        or correct the ``treatment`` (e.g. follows → distinguishes). All record the
+        edit as ``manual`` so the automatic passes never overwrite it (§1.3a)."""
+        with self._open() as (cat, _rs, _ts):
+            rel = cat.get_relation(relation_id)
+            if rel is None:
+                return {"error": f"no relation {relation_id}"}
+            if suppress:
+                cat.suppress_relation(relation_id)
+                return {"relation_id": relation_id, "action": "suppressed"}
+            if dst_id is not None:
+                if cat.get_document(dst_id) is None:
+                    return {"error": f"no document {dst_id!r} in corpus", "relation_id": relation_id}
+                cat.resolve_relation(relation_id, dst_id)
+                cat.set_relationship_type(relation_id, rel["relationship_type"], extracted_via="manual")
+                return {"relation_id": relation_id, "action": "repointed", "dst_id": dst_id}
+            if treatment is not None:
+                rel_type = _rel_type(treatment, RelationshipType.MENTIONS)
+                cat.set_relationship_type(relation_id, rel_type.value, extracted_via="manual")
+                return {"relation_id": relation_id, "action": "reclassified",
+                        "relationship_type": rel_type.value}
+            return {"error": "nothing to do — pass treatment, dst_id, or suppress"}
+
+    def embed(self, *, limit: int | None = None) -> dict:
+        with self._open() as (cat, _rs, ts):
+            return asdict(EmbedStage(cat, self._provider(), textstore=ts).run(limit=limit))
+
+    def resolve(self) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return asdict(Resolver(cat).run())
+
+    def _llm_passes(self, use_llm: bool | None):
+        """Build the optional LLM extractor + treatment classifier. ``use_llm``:
+        None → auto (use them iff an LLM endpoint is configured & reachable);
+        True → require; False → off (grammars + heuristics only). Returns
+        ``(citation_extractor_or_None, treatment_classifier)``."""
+        from .treatment import HeuristicTreatmentClassifier
+
+        if use_llm is False:
+            return None, HeuristicTreatmentClassifier()
+        from .citations import LLMCitationExtractor
+        from .llm import get_llm_client
+        from .treatment import LLMTreatmentClassifier
+
+        client = get_llm_client()
+        if use_llm is None and not client.available():
+            return None, HeuristicTreatmentClassifier()
+        return LLMCitationExtractor(client), LLMTreatmentClassifier(client)
+
+    def extract_citations(self, *, stable_id: str | None = None, limit: int | None = None,
+                          use_llm: bool | None = None) -> dict:
+        """Extract citations from document text into hanging edges (§5), classify
+        treatments (§1.3a), then resolve them. A judgment that cites "Article 17
+        GDPR" gets a pinpoint edge to the GDPR (resolving when it's in the corpus).
+        When an LLM endpoint is configured, an extra batched LLM pass adds
+        narrative citations and refines treatments (``use_llm`` forces on/off)."""
+        from .citations import extract_corpus
+        from .treatment import classify_corpus
+
+        llm_cite, classifier = self._llm_passes(use_llm)
+        with self._open() as (cat, _rs, ts):
+            stats = extract_corpus(cat, ts, stable_id=stable_id, limit=limit, llm=llm_cite)
+            treat = classify_corpus(cat, ts, stable_id=stable_id, classifier=classifier)
+            resolved = Resolver(cat).run()
+            return {**asdict(stats), "reclassified": treat.reclassified,
+                    "resolved_edges": resolved.resolved,
+                    "llm": llm_cite is not None}
+
+    # -- watches (saved harvest plans + scheduler, §5a) --------------------
+    def source_catalog(self) -> list[dict]:
+        """Per-source capabilities (what it pulls, keyword-search vs post-filter,
+        options) — the morphing-UI metadata."""
+        from .adapters.registry import source_catalog
+
+        return source_catalog()
+
+    def create_watch(self, *, name: str, spec: dict, cadence_minutes: int = 1440,
+                     enabled: bool = True) -> dict:
+        """Save a harvest plan. ``spec`` keys: ``source`` (+ ``source_options``),
+        ``keywords`` (list), ``seed_rule`` (e.g. {"cites": "32016R0679"}),
+        ``degrees`` (autosnowball hops), ``max_pages``, ``max_per_degree``,
+        ``tag`` (label everything brought in), ``backfill``."""
+        with self._open() as (cat, _rs, _ts):
+            wid = cat.add_watch(name, json.dumps(spec), cadence_minutes, enabled=enabled)
+            return self._watch_dict(cat.get_watch(wid))
+
+    def list_watches(self) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            return [self._watch_dict(w) for w in cat.list_watches()]
+
+    def update_watch(self, *, watch_id: int, name: str | None = None, spec: dict | None = None,
+                     cadence_minutes: int | None = None, enabled: bool | None = None) -> dict:
+        fields: dict = {}
+        if name is not None:
+            fields["name"] = name
+        if spec is not None:
+            fields["spec_json"] = json.dumps(spec)
+        if cadence_minutes is not None:
+            fields["cadence_minutes"] = cadence_minutes
+        if enabled is not None:
+            fields["enabled"] = 1 if enabled else 0
+        with self._open() as (cat, _rs, _ts):
+            cat.update_watch(watch_id, fields)
+            return self._watch_dict(cat.get_watch(watch_id))
+
+    def delete_watch(self, *, watch_id: int) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            cat.delete_watch(watch_id)
+            return {"watch_id": watch_id, "deleted": True}
+
+    @staticmethod
+    def _watch_dict(row) -> dict:
+        if row is None:
+            return {}
+        d = dict(row)
+        d["spec"] = json.loads(d.pop("spec_json", "{}") or "{}")
+        if d.get("last_result_json"):
+            try:
+                d["last_result"] = json.loads(d.pop("last_result_json"))
+            except (ValueError, TypeError):
+                d["last_result"] = None
+        d["enabled"] = bool(d.get("enabled"))
+        return d
+
+    def _keyword_seed_docs(self, source: str, keywords: list[str] | None, *, limit: int = 60) -> list[str]:
+        """Documents from ``source`` matching the watch keywords — the universal
+        keyword limiter (works regardless of API search support): scans title + text
+        for any term. No keywords → the source's most-recent docs."""
+        terms = [k.lower() for k in (keywords or []) if k.strip()]
+        out: list[str] = []
+        with self._open() as (cat, _rs, ts):
+            for r in cat.list_documents(source=source, limit=1000):
+                if not terms:
+                    out.append(r["stable_id"])
+                else:
+                    hay = (r["title"] or "").lower()
+                    if not any(t in hay for t in terms) and r["has_text"] and r["payload_hash"]:
+                        try:
+                            hay = (ts.get(r["payload_hash"]) or "").lower()
+                        except OSError:
+                            hay = ""
+                    if any(t in hay for t in terms):
+                        out.append(r["stable_id"])
+                if len(out) >= limit:
+                    break
+        return out
+
+    _CELEX_FULL = re.compile(r"^\d{5}[A-Z]{1,2}\d{4}$")
+
+    def _search_query_for(self, cat, target: str) -> str:
+        """A full-text search string that finds cases *citing* ``target``. Cases cite by
+        NEUTRAL CITATION ("[2021] UKSC 12"), not by the case name — so for a UK case slug
+        we rebuild the citation (searching the title only finds the case itself). Falls
+        back to the title, then the raw target (already a citation like '[2014] UKSC 38')."""
+        nc = _neutral_citation_from_slug(target.split("@")[0])
+        if nc:
+            return nc
+        doc = cat.get_document(target) or (
+            cat.get_document(cat.find_document_id(target)) if cat.find_document_id(target) else None)
+        if doc and doc["title"]:
+            return doc["title"]
+        return target
+
+    def backfill_titles(self, *, limit: int = 500, reset_misses: bool = False) -> dict:
+        """Augment already-harvested CJEU judgments/opinions from the authoritative
+        EUR-Lex webservice with everything the free CELLAR RDF omits — the official
+        **case name** and the **subject-matter / EuroVoc** classification (added as
+        tags). **Quota-friendly**: one CELLAR SPARQL maps every ECLI→CELEX, then the
+        metadata comes back in batches of 50 per credentialed call; CELEXes the
+        webservice has nothing for are flagged so they're not retried daily. Needs
+        EURLEX_USERNAME/PASSWORD (Settings); without them it's a no-op."""
+        from .adapters.eu_cellar import EUCellarAdapter, concise_case_title, eurlex_metadata
+        from .adapters.eu_legislation import _is_generic_title, celex_title
+
+        with self._open() as (cat, _rs, _ts):
+            if reset_misses:
+                cat.clear_enrichment_misses("cjeu_title")
+            rows = [dict(r) for r in cat.list_documents(source="eu-cellar", limit=limit)]
+            missed = cat.enrichment_misses("cjeu_title")  # don't re-query daily failures
+            # First, locally shorten any already-stored *long* EXPRESSION_TITLEs to
+            # "parties (case no)" — no webservice quota needed.
+            shortened = 0
+            for r in rows:
+                t = r["title"]
+                if t and ("—" in t or "#" in t) and len(t) > 90:
+                    short = concise_case_title(t)
+                    if short and short != t:
+                        cat.update_document_fields(r["stable_id"], {"title": short}, curate=False)
+                        r["title"] = short
+                        shortened += 1
+            # And give EU-legislation docs a real name where the source gave a generic
+            # one ("EUR-Lex - 12008E267 - EN", "ANNEX", an OJ filename) — derived from
+            # the CELEX (e.g. "Article 267 TFEU"). Local, no webservice.
+            for r in cat.list_documents(source="eu-legislation", limit=100000):
+                if _is_generic_title(r["title"]):
+                    name = celex_title(r["stable_id"])
+                    if name:
+                        cat.update_document_fields(r["stable_id"], {"title": name}, curate=False)
+                        shortened += 1
+        # needs the case name OR has never been enriched (no subjects/tags yet)
+        targets = [r for r in rows if r["doc_type"] in ("judgment", "opinion")
+                   and (not r["title"] or r["title"] == r["stable_id"]
+                        or str(r["title"]).startswith("ECLI:"))]
+        if not targets:
+            return {"candidates": 0, "updated": 0, "shortened": shortened}
+
+        cellar = EUCellarAdapter()
+        eclis = [r["stable_id"] for r in targets if r["stable_id"].startswith("ECLI:")]
+        celex_by_ecli = cellar.celex_for_eclis(eclis)  # 1 SPARQL for all
+        want: dict[str, str] = {}
+        for r in targets:
+            sid = r["stable_id"]
+            celex = celex_by_ecli.get(sid) if sid.startswith("ECLI:") else (
+                sid if re.fullmatch(r"\d{5}[A-Z]{1,2}\d{4}", sid) else None)
+            if celex and celex not in missed:
+                want[celex] = sid
+        meta = eurlex_metadata(list(want))  # batched: ⌈N/50⌉ credentialed calls
+        titled = tagged = 0
+        with self._open() as (cat, _rs, _ts):
+            for celex, sid in want.items():
+                m = meta.get(celex) or {}
+                if m.get("title") and m["title"] != sid:
+                    cat.update_document_fields(sid, {"title": m["title"]}, curate=False)
+                    titled += 1
+                for subj in (m.get("subjects") or []):
+                    if cat.upsert_document_tag(sid, subj, method="eurlex"):
+                        tagged += 1
+            # Only flag misses when the call actually *worked* (returned some data) —
+            # otherwise an auth/network outage would poison every CELEX permanently.
+            if meta:
+                cat.record_enrichment_misses("cjeu_title", [c for c in want if c not in meta])
+        return {"candidates": len(targets), "mapped_celex": len(want), "shortened": shortened,
+                "webservice_calls": -(-len(want) // 50), "titled": titled,
+                "subject_tags_added": tagged,
+                "flagged_no_data": len([c for c in want if c not in meta])}
+
+    def discover_citing(self, *, target: str, via: str = "auto", query: str | None = None,
+                        max_pages: int = 1, resolve: bool = True) -> dict:
+        """Forward-citation discovery — find **new** cases that cite ``target``, by
+        querying the live source (this is what genuinely grows over time):
+        - an EU instrument (CELEX) → CELLAR structured "cases interpreting this
+          legislation" (``eu-cellar``);
+        - a UK act/case → Find Case Law **full-text search** for its citation/title
+          (``uk-caselaw``), which surfaces judgments that mention it.
+        Returns the ids of newly-harvested citing documents (seeds for enrichment)."""
+        t = target.strip()
+        if via == "auto":
+            via = "eu-cellar" if self._CELEX_FULL.match(t.upper()) else "uk-caselaw"
+        if via not in ("eu-cellar", "uk-caselaw"):
+            return {"error": f"unknown discovery source {via!r}"}
+
+        with self._open() as (cat, _rs, _ts):
+            before = {r["stable_id"] for r in cat.list_documents(source=via, limit=100000)}
+            search = (query or t) if via == "eu-cellar" else (query or self._search_query_for(cat, t))
+
+        # ignore_watermark: this is a SEARCH for citing cases, not an incremental crawl —
+        # the newest-first recency cutoff would otherwise drop every older match (the bug
+        # behind "find citing cases" always reporting +0).
+        if via == "eu-cellar":
+            # a CJEU *case* CELEX (sector 6, e.g. 62020CJ0245) → cases CITING it; a piece of
+            # EU *legislation* (sector 3) → cases interpreting it. Using the legislation
+            # query on a case CELEX is why CJEU seeds always reported "+0 citing".
+            opts = {"cited_by_celex": t} if re.match(r"^6\d{4}[A-Z]", t.upper()) else {"legislation_celex": t}
+            h = self.harvest("eu-cellar", options=opts, max_pages=max_pages,
+                             resolve=resolve, ignore_watermark=True)
+        else:
+            h = self.harvest("uk-caselaw", options={"query": search}, max_pages=max_pages,
+                             resolve=resolve, ignore_watermark=True)
+
+        with self._open() as (cat, _rs, _ts):
+            after = {r["stable_id"] for r in cat.list_documents(source=via, limit=100000)}
+        discovered = sorted(after - before)
+        return {"via": via, "query": search, "harvested": h.get("stored", 0),
+                "discovered": discovered, "count": len(discovered)}
+
+    def run_watch(self, *, watch_id: int) -> dict:
+        """Execute one watch: (1) harvest its source (keywords searched at the API
+        where supported, else used to limit the seeds); (2) gather seeds (the keyword-
+        matching source docs + any ``seed_rule`` set); (3) autosnowball ``degrees``
+        hops; (4) tag everything brought in. Records the result + last-run time."""
+        with self._open() as (cat, _rs, _ts):
+            w = cat.get_watch(watch_id)
+        if w is None:
+            return {"error": f"no watch {watch_id}"}
+        spec = json.loads(w["spec_json"] or "{}")
+        from .adapters.registry import SOURCE_INFO
+
+        source = spec.get("source")
+        keywords = spec.get("keywords") or []
+        result: dict = {"watch_id": watch_id, "name": w["name"]}
+        seed_ids: list[str] = []
+
+        if source:
+            opts = dict(spec.get("source_options") or {})
+            info = SOURCE_INFO.get(source)
+            if keywords and info and info.keyword_search and "query" not in opts:
+                opts["query"] = " ".join(keywords)  # search at the source API
+            h = self.harvest(source, backfill=bool(spec.get("backfill")),
+                             max_pages=spec.get("max_pages", 1), options=opts)
+            result["harvest"] = h
+            seed_ids = self._keyword_seed_docs(source, keywords, limit=spec.get("max_seeds", 60))
+            result["seeds_from_source"] = len(seed_ids)
+
+        # Forward-citation discovery: NEW cases citing a target (the renewing seed).
+        disc = spec.get("discover")
+        if disc and disc.get("citing"):
+            d = self.discover_citing(target=disc["citing"], via=disc.get("via", "auto"),
+                                     query=disc.get("query"), max_pages=spec.get("max_pages", 1))
+            result["discover"] = {k: d.get(k) for k in ("via", "query", "count")}
+            seed_ids = list({*seed_ids, *d.get("discovered", [])})
+
+        degrees = int(spec.get("degrees", 1))
+        rad = self.radiate(seeds=seed_ids or None, seed_rule=spec.get("seed_rule"),
+                           degrees=degrees, max_per_degree=spec.get("max_per_degree", 40))
+        result["radiate"] = rad
+
+        # tag everything this watch brought in (seeds + snowballed) into a collection
+        if spec.get("tag"):
+            brought = list({*seed_ids, *rad.get("harvested", [])})
+            if brought:
+                self.tag_many(doc_ids=brought, tag=spec["tag"])
+                result["tagged"] = len(brought)
+
+        with self._open() as (cat, _rs, _ts):
+            cat.update_watch(watch_id, {"last_run_at": _now_iso(),
+                                        "last_result_json": json.dumps(result)})
+        return result
+
+    def tick_watches(self) -> dict:
+        """Run every enabled watch whose cadence is due (the scheduler's unit of
+        work). Idempotent and safe to call on a timer."""
+        import datetime as _dt
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        ran = []
+        for w in self.list_watches():
+            if not w["enabled"]:
+                continue
+            last = w.get("last_run_at")
+            due = True
+            if last:
+                try:
+                    prev = _dt.datetime.fromisoformat(last)
+                    due = (now - prev).total_seconds() >= w["cadence_minutes"] * 60
+                except ValueError:
+                    due = True
+            if due:
+                ran.append(self.run_watch(watch_id=w["watch_id"]))
+        return {"ran": len(ran), "results": ran}
+
+    def harvest(
+        self, source: str, *, backfill: bool = False, since: str | None = None,
+        max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
+        ignore_watermark: bool = False,
+    ) -> dict:
+        """Run one source through the pipeline, then resolve + tag — the §8
+        "trigger a backfill / re-run a source from the browser" action. ``options``
+        are passed to the adapter (e.g. ``{"query": "data protection"}`` for the
+        Find Case Law keyword search, ``{"court": "ewca/civ"}``). Foreground and
+        bounded by ``max_pages`` so a UI click returns; large backfills run via the
+        CLI/cron."""
+        from .adapters.registry import IN_SCOPE_SOURCES, get_adapter
+        from .pipeline import Pipeline
+        from .tagging import RuleEngine
+
+        try:
+            adapter = get_adapter(source, **(options or {}))
+        except (KeyError, TypeError) as exc:
+            return {"error": str(exc)}
+        with self._open() as (cat, rs, ts):
+            pipe = Pipeline(
+                cat, rs, textstore=ts, topic_threshold=self.config.topic_threshold,
+                skip_topic_gate=source in IN_SCOPE_SOURCES,
+            )
+            before = cat.all_stable_ids()
+            stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
+                             ignore_watermark=ignore_watermark)
+            # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.
+            # (Re-extracting all ~20k docs on every harvest was O(minutes) of pure-CPU
+            # grammar work; resolution already links existing pending edges to the new
+            # nodes without re-mining their text.)
+            new_ids = list(cat.all_stable_ids() - before)
+            from .citations import extract_document
+            from .treatment import classify_corpus
+            llm_cite, classifier = self._llm_passes(None)  # auto: LLM iff configured
+            aliases = cat.named_alias_map()
+            for sid in new_ids:
+                extract_document(cat, ts, sid, llm=llm_cite, aliases=aliases)
+                classify_corpus(cat, ts, classifier=classifier, stable_id=sid)
+            # ``resolve=False`` lets a batch caller (e.g. seed-from-text over many seeds)
+            # resolve ONCE at the end instead of re-resolving the whole graph per call.
+            resolved_n = Resolver(cat).run().resolved if resolve else 0
+            if resolve:
+                RuleEngine(cat).run_all(enabled_only=True)
+            return {**asdict(stats), "resolved_edges": resolved_n,
+                    "new_documents": len(new_ids)}
+
+    def list_sources(self) -> list[str]:
+        from .adapters.registry import ADAPTERS
+
+        return sorted(ADAPTERS)
+
+    def provider_health(self) -> dict:
+        """Whether the configured embedding provider is usable (key present etc.)."""
+        p = self._provider()
+        return {"provider": p.name, "model": p.model, "dimensions": p.dimensions,
+                "healthy": p.health()}
+
+    def create_index(self) -> dict:
+        """Build the pgvector HNSW index for the configured provider's dimension
+        (§7). No-op on SQLite."""
+        with self._open() as (cat, _rs, _ts):
+            dims = self._provider().dimensions
+            created = cat.create_vector_index(dims)
+            return {"backend": cat.backend, "dimensions": dims, "created": created}
+
+    def import_zotero(
+        self, *, library_id: str | None = None, api_key: str | None = None,
+        library_type: str | None = None, limit: int = 50, fetch_pdfs: bool = False, http=None,
+    ) -> dict:
+        from .core.http import build_client
+
+        # Fall back to stored credentials so the UI button needs no re-entry.
+        library_id = library_id or self.settings.resolve("ZOTERO_LIBRARY_ID")
+        api_key = api_key or self.settings.resolve("ZOTERO_API_KEY")
+        library_type = library_type or self.settings.resolve("ZOTERO_LIBRARY_TYPE") or "users"
+        if not library_id or not api_key:
+            return {"error": "Zotero library_id and api_key required (set them in Settings)"}
+        client = http or build_client(timeout=60)  # proxy-aware (§5a)
+        with self._open() as (cat, rs, ts):
+            importer = ZoteroImporter(client, library_id, api_key, library_type)
+            ids = importer.import_into(cat, rs, ts, limit=limit, fetch_pdfs=fetch_pdfs)
+            return {"imported": len(ids), "stable_ids": ids}

@@ -1,0 +1,54 @@
+# RagLex stack. The data bind mount holds the raw + text stores and settings.json
+# (API keys / Zotero login, set via the UI). The catalogue can be the bundled
+# SQLite file (in ./data) or the Postgres spine below — flip with RAGLEX_DB_URL.
+services:
+  db:
+    image: pgvector/pgvector:pg16        # Postgres 16 + pgvector (§7 production spine)
+    environment:
+      POSTGRES_PASSWORD: raglex
+      POSTGRES_DB: raglex
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["55432:5432"]
+
+  raglex-api:
+    build: .
+    command: ["raglex", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["8000:8000"]
+    depends_on: [db]
+    volumes:
+      - ./data:/data            # ← bind mount: raw/, text/, settings.json
+    environment:
+      RAGLEX_DATA_DIR: /data
+      # Use the Postgres spine; omit to fall back to SQLite at /data/catalogue.sqlite
+      RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
+      # OPENROUTER_API_KEY: ...  # optional: env overrides the settings file
+
+  raglex-mcp:
+    build: .
+    command: ["raglex", "mcp", "--http"]
+    ports: ["8001:8001"]
+    depends_on: [db]
+    volumes:
+      - ./data:/data
+    environment:
+      RAGLEX_DATA_DIR: /data
+      RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
+
+  # Scheduler: runs due watches (keyword-limited harvest + autosnowball) on a loop.
+  # A separate service so it survives API restarts. Tune the tick interval; each
+  # watch has its own cadence, so a short tick just checks more often.
+  raglex-scheduler:
+    build: .
+    command: ["raglex", "watch", "serve", "--interval", "900"]
+    depends_on: [db]
+    volumes:
+      - ./data:/data
+    environment:
+      RAGLEX_DATA_DIR: /data
+      RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
+      PYTHONUNBUFFERED: "1"      # so scheduler tick logs stream to `docker compose logs`
+    restart: unless-stopped
+
+volumes:
+  pgdata:

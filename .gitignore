@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Design references — large third-party material (IBM Carbon source, fonts), not part
+# of the app. The real folder name has spaces, so match both it and the hyphenated form.
+raglex design docs/
+raglex-design-docs/
+
+# Local agent state
+.claude/
+
+# RagLex runtime data — raw store + catalogue + settings.json (API keys / Zotero login).
+# Re-derivable from sources; settings.json holds SECRETS and must never be committed.
+/data/
+*.sqlite
+*.sqlite-journal
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store

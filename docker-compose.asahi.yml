@@ -1,0 +1,73 @@
+# RagLex — production stack for the Asahi (aarch64) server.
+#
+# Differences from the dev docker-compose.yml:
+#  - app services run the PREBUILT image from GHCR (no local build)
+#  - ALL persistent state lives under one host folder on the Nextcloud disk:
+#       /mnt/nextcloud_data/docker-binds/raglex-data/
+#         ├── pg/    → Postgres data dir   (the database container's storage)
+#         └── app/   → raw/, text/, settings.json  (the app's data dir)
+#    Bind mounts (not named volumes) so the bytes are plainly on disk and survive
+#    `docker compose down -v`, backups, etc.
+#
+# First-time setup (folders are root-owned, hence sudo):
+#   sudo mkdir -p /mnt/nextcloud_data/docker-binds/raglex-data/{pg,app}
+# Pull + run:
+#   docker compose -f docker-compose.asahi.yml pull
+#   docker compose -f docker-compose.asahi.yml up -d
+#
+# Override the image tag / DB password without editing this file via a .env beside it:
+#   RAGLEX_IMAGE=ghcr.io/veale/raglex:latest
+#   POSTGRES_PASSWORD=raglex
+
+x-app-env: &app-env
+  RAGLEX_DATA_DIR: /data
+  RAGLEX_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-raglex}@db:5432/raglex
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raglex}
+      POSTGRES_DB: raglex
+    volumes:
+      - /mnt/nextcloud_data/docker-binds/raglex-data/pg:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d raglex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  raglex-api:
+    image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
+    command: ["raglex", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - /mnt/nextcloud_data/docker-binds/raglex-data/app:/data
+    environment: *app-env
+    restart: unless-stopped
+
+  raglex-mcp:
+    image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
+    command: ["raglex", "mcp", "--http"]
+    ports: ["8001:8001"]
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - /mnt/nextcloud_data/docker-binds/raglex-data/app:/data
+    environment: *app-env
+    restart: unless-stopped
+
+  raglex-scheduler:
+    image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
+    command: ["raglex", "watch", "serve", "--interval", "900"]
+    depends_on:
+      db: {condition: service_healthy}
+    volumes:
+      - /mnt/nextcloud_data/docker-binds/raglex-data/app:/data
+    environment:
+      <<: *app-env
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
