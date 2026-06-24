@@ -41,7 +41,8 @@ services:
   raglex-api:
     image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
     command: ["raglex", "serve", "--host", "0.0.0.0", "--port", "8000"]
-    ports: ["8000:8000"]
+    # host 8200 → container 8000 (host 8000/8001 are taken by other services on this box)
+    ports: ["8200:8000"]
     depends_on:
       db: {condition: service_healthy}
     volumes:
@@ -52,7 +53,7 @@ services:
   raglex-mcp:
     image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
     command: ["raglex", "mcp", "--http"]
-    ports: ["8001:8001"]
+    ports: ["8201:8001"]   # host 8201 → container 8001
     depends_on:
       db: {condition: service_healthy}
     volumes:
