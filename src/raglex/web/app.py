@@ -609,15 +609,35 @@ def serve_app(config: Config | None = None) -> FastAPI:
     """The app the ``serve`` command runs: the API, plus the built React UI served
     at the same origin when present (so one ``docker compose up`` is the whole app).
     Unit tests use the bare ``create_app`` instead, so route paths stay stable."""
-    api = create_app(config)
-    dist = _frontend_dist()
-    if dist is None:
-        return api
+    from contextlib import asynccontextmanager
+
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 
-    app = FastAPI(title="RagLex", version="0.1.0")
+    from ..mcp_server import build_server
+
+    api = create_app(config)
+    dist = _frontend_dist()
+
+    # Serve the MCP server at /mcp on this same origin (instead of a second process/port):
+    # FastMCP hands back a mountable ASGI app. Its streamable-HTTP endpoint defaults to
+    # "/mcp", so point it at "/" and mount the app at "/mcp" → the endpoint lands exactly
+    # at /mcp. The sub-app's lifespan (the MCP session manager) doesn't run on its own when
+    # mounted, so we thread it into the parent app's lifespan.
+    mcp = build_server(config)
+    mcp.settings.streamable_http_path = "/"
+    mcp_app = mcp.streamable_http_app()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
+
+    app = FastAPI(title="RagLex", version="0.1.0", lifespan=lifespan)
     app.mount("/api", api)
+    app.mount("/mcp", mcp_app)
+    if dist is None:
+        return app
     app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
 
     @app.get("/")

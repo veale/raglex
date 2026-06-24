@@ -24,16 +24,9 @@ services:
       RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
       # OPENROUTER_API_KEY: ...  # optional: env overrides the settings file
 
-  raglex-mcp:
-    build: .
-    command: ["raglex", "mcp", "--http"]
-    ports: ["8001:8001"]
-    depends_on: [db]
-    volumes:
-      - ./data:/data
-    environment:
-      RAGLEX_DATA_DIR: /data
-      RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
+  # The MCP server is served by raglex-api at http://localhost:8000/mcp (same origin) —
+  # no separate service/port. For a standalone stdio MCP (editor integrations), run
+  # `raglex mcp` directly.
 
   # Scheduler: runs due watches (keyword-limited harvest + autosnowball) on a loop.
   # A separate service so it survives API restarts. Tune the tick interval; each

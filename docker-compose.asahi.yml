@@ -2,6 +2,7 @@
 #
 # Differences from the dev docker-compose.yml:
 #  - app services run the PREBUILT image from GHCR (no local build)
+#  - the API serves everything on one port: UI + REST at :8200, MCP at :8200/mcp
 #  - ALL persistent state lives under one host folder on the Nextcloud disk:
 #       /mnt/nextcloud_data/docker-binds/raglex-data/
 #         ├── pg/    → Postgres data dir   (the database container's storage)
@@ -50,16 +51,8 @@ services:
     environment: *app-env
     restart: unless-stopped
 
-  raglex-mcp:
-    image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
-    command: ["raglex", "mcp", "--http"]
-    ports: ["8201:8001"]   # host 8201 → container 8001
-    depends_on:
-      db: {condition: service_healthy}
-    volumes:
-      - /mnt/nextcloud_data/docker-binds/raglex-data/app:/data
-    environment: *app-env
-    restart: unless-stopped
+  # NB: the MCP server is now served by raglex-api at http://<host>:8200/mcp (same origin),
+  # so there is no separate raglex-mcp service / port any more.
 
   raglex-scheduler:
     image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}
