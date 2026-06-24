@@ -636,6 +636,17 @@ def serve_app(config: Config | None = None) -> FastAPI:
     app = FastAPI(title="RagLex", version="0.1.0", lifespan=lifespan)
     app.mount("/api", api)
     app.mount("/mcp", mcp_app)
+
+    # The mounted app's endpoint is /mcp/ (mount prefix + its "/" route). A client hitting
+    # /mcp (no trailing slash) would otherwise fall through to the SPA catch-all below and
+    # 405. Redirect /mcp → /mcp/ with 307 (preserves the POST method + body) so the bare
+    # URL works for MCP clients. Defined before the catch-all so it wins.
+    from starlette.responses import RedirectResponse
+
+    @app.api_route("/mcp", methods=["GET", "POST", "DELETE"], include_in_schema=False)
+    async def _mcp_no_slash() -> RedirectResponse:
+        return RedirectResponse(url="/mcp/", status_code=307)
+
     if dist is None:
         return app
     app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
