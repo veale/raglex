@@ -41,7 +41,12 @@ class PgConnShim:
         self.raw.commit()
 
     def commit(self) -> None:
-        self.raw.commit()
+        self.raw.commit()  # no-op under autocommit; kept so the shared code path is happy
+
+    def transaction(self):
+        """An explicit all-or-nothing block for multi-statement writes (the connection is
+        otherwise autocommit, so each statement commits on its own)."""
+        return self.raw.transaction()
 
     def close(self) -> None:
         self.raw.close()
@@ -51,7 +56,12 @@ def connect(dsn: str) -> PgConnShim:
     import psycopg
     from psycopg.rows import dict_row
 
-    raw = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
+    # autocommit=True: a read-only open then never sits 'idle in transaction' holding a
+    # lock between statements (e.g. while a long Python loop processes a result set, or a
+    # harvest waits on the network) — which once queued behind a schema-migration ALTER and
+    # stalled the whole `documents` table. Multi-statement writes that must be atomic use an
+    # explicit transaction (see Catalogue._atomic / PgConnShim.transaction).
+    raw = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
     return PgConnShim(raw)
 
 

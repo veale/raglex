@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -333,6 +334,23 @@ class Catalogue:
         self._migrate()
         self.conn.commit()
 
+    @contextmanager
+    def _atomic(self):
+        """Run a multi-statement write as one all-or-nothing unit on either backend.
+        Postgres connects in autocommit mode (so reads never linger 'idle in transaction'
+        holding locks), so writes that must be atomic open an explicit transaction here;
+        SQLite uses its implicit transaction plus a final commit."""
+        if self.backend == "postgres":
+            with self.conn.transaction():
+                yield
+        else:
+            try:
+                yield
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
     def _migrate(self) -> None:
         """Additive, idempotent column migrations for DBs created before a column existed
         (the DDL is CREATE-IF-NOT-EXISTS, which doesn't add columns to a live table)."""
@@ -400,13 +418,17 @@ class Catalogue:
         """
         existing = self.get_document(record.stable_id)
         version = record.version
-        if existing is not None and existing["payload_hash"] != record.payload_hash:
-            # content changed upstream → archive the prior version, then advance
-            self._archive_version(existing)
-            version = (existing["version"] or 1) + 1
+        changed = existing is not None and existing["payload_hash"] != record.payload_hash
+        # archive-old-version + upsert-doc + rewrite-edges is one atomic unit (so a crash
+        # can't leave a doc with half its edges, or a lost version row).
+        with self._atomic():
+            if changed:
+                # content changed upstream → archive the prior version, then advance
+                self._archive_version(existing)
+                version = (existing["version"] or 1) + 1
 
-        self.conn.execute(
-            """
+            self.conn.execute(
+                """
             INSERT INTO documents (
                 stable_id, ecli, source, doc_type, title, court, decision_date,
                 language, source_language, version, is_latest, landing_url,
@@ -450,12 +472,11 @@ class Catalogue:
                 json.dumps(record.extra) if record.extra else None,
             ),
         )
-        # Edges are re-derived from the record each upsert (a re-derivable
-        # projection, §1.2): clear this src's prior edges, then re-add.
-        self.conn.execute("DELETE FROM relations WHERE src_id = ?", (record.stable_id,))
-        for rel in record.relations:
-            self._add_relation(record.stable_id, rel)
-        self.conn.commit()
+            # Edges are re-derived from the record each upsert (a re-derivable
+            # projection, §1.2): clear this src's prior edges, then re-add.
+            self.conn.execute("DELETE FROM relations WHERE src_id = ?", (record.stable_id,))
+            for rel in record.relations:
+                self._add_relation(record.stable_id, rel)
 
     def _add_relation(self, src_id: str, rel: TypedRelation) -> None:
         self.conn.execute(
