@@ -1238,6 +1238,30 @@ class Catalogue:
         ).fetchall()
         return [r["src_id"] for r in rows]
 
+    def citing_documents_for(self, refs: list[str], *, per_ref: int = 10) -> dict[str, list[str]]:
+        """Citing documents for MANY hanging references in one scan. Matching on the
+        ``COALESCE(candidate_id, raw_citation_string)`` expression isn't indexable, so
+        doing it once for the visible page beats one seq-scan of the pending edges per
+        row (which made the worklist endpoint take 20s+)."""
+        refs = [r for r in dict.fromkeys(refs) if r]
+        if not refs:
+            return {}
+        out: dict[str, list[str]] = {r: [] for r in refs}
+        for i in range(0, len(refs), 800):
+            chunk = refs[i: i + 800]
+            qs = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT COALESCE(candidate_id, raw_citation_string) AS ref, src_id "
+                f"FROM relations WHERE resolution_status = 'pending' AND extracted_via <> 'inferred' "
+                f"AND COALESCE(candidate_id, raw_citation_string) IN ({qs})",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                bucket = out.get(r["ref"])
+                if bucket is not None and len(bucket) < per_ref and r["src_id"]:
+                    bucket.append(r["src_id"])
+        return {k: sorted(v) for k, v in out.items()}
+
     def set_pending_candidate(self, ref: str, new_candidate: str) -> int:
         """Re-key the *pending* edges of a hanging reference to a new candidate id —
         the manual-resolution counterpart of automatic resolution (§5b). ``ref`` is

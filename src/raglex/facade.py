@@ -676,8 +676,9 @@ class Facade:
             rows.sort(key=lambda r: (r["citing_count"], r["confidence"] == "low"), reverse=True)
             out = rows if limit is None else rows[:limit]
             if with_citing:
+                citing = cat.citing_documents_for([r["ref"] for r in out])
                 for r in out:
-                    r["citing_documents"] = cat.citing_documents(r["ref"])
+                    r["citing_documents"] = citing.get(r["ref"], [])
             return out
 
     # -- Corpus Map: held-vs-pending by category & sub-type (§8) ------------
