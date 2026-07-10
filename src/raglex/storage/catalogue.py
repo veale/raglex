@@ -1124,15 +1124,35 @@ class Catalogue:
     def backfill_edge_keys(self, *, batch: int = 20000, on_progress=None) -> int:
         """Populate ``candidate_id``/``raw_fold`` on edges written before those columns
         existed. Runs the matcher ladder once per DISTINCT raw string (a few hundred
-        thousand) rather than once per edge (millions), then updates by string."""
+        thousand) rather than once per edge (millions), then updates by string.
+
+        The per-string UPDATE keys on ``raw_citation_string``, which isn't indexed in
+        steady state (candidate_id is the hot column), so over millions of edges that would
+        be a full scan each. Build a throwaway index for the duration and drop it after."""
         from ..resolve.matchers import normalise_candidate
         from ..topics.gate import fold
+
+        temp_index = False
+        try:
+            # CONCURRENTLY can't run inside a txn; the connection is autocommit on PG.
+            concurrently = "CONCURRENTLY" if self.backend == "postgres" else ""
+            self.conn.execute(
+                f"CREATE INDEX {concurrently} IF NOT EXISTS tmp_relations_rawcite "
+                "ON relations (raw_citation_string)"
+            )
+            temp_index = True
+        except Exception:  # noqa: BLE001 — the backfill is correct without it, just slower
+            pass
 
         rows = self.conn.execute(
             "SELECT DISTINCT raw_citation_string AS raw, dst_id FROM relations "
             "WHERE raw_fold IS NULL AND raw_citation_string IS NOT NULL"
         ).fetchall()
         done = 0
+        # ``CAST(? AS TEXT) IS NULL`` — a bare parameter beside IS NULL has no type for the
+        # Postgres planner to infer ("could not determine data type of parameter"); the cast
+        # gives it one. SQLite is untyped and tolerated the bare form.
+        null_clause = "CAST(? AS TEXT) IS NULL" if self.backend == "postgres" else "? IS NULL"
         for i in range(0, len(rows), batch):
             with self._atomic():
                 for r in rows[i: i + batch]:
@@ -1140,7 +1160,7 @@ class Catalogue:
                     self.conn.execute(
                         "UPDATE relations SET candidate_id = ?, raw_fold = ? "
                         "WHERE raw_citation_string = ? AND raw_fold IS NULL "
-                        "AND (dst_id = ? OR (dst_id IS NULL AND ? IS NULL))",
+                        f"AND (dst_id = ? OR (dst_id IS NULL AND {null_clause}))",
                         (normalise_candidate(dst, raw), fold(raw), raw, dst, dst),
                     )
                     done += 1
@@ -1152,6 +1172,11 @@ class Catalogue:
                 "UPDATE relations SET candidate_id = dst_id "
                 "WHERE candidate_id IS NULL AND dst_id IS NOT NULL"
             )
+        if temp_index:
+            try:
+                self.conn.execute("DROP INDEX IF EXISTS tmp_relations_rawcite")
+            except Exception:  # noqa: BLE001
+                pass
         return done
 
     def pending_reference_groups(self) -> list[sqlite3.Row]:
