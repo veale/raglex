@@ -81,24 +81,9 @@ def _sniff_format(raw: bytes) -> str | None:
 
 
 def _act_level(candidate: str | None) -> str | None:
-    """Collapse a section/part-level legislation id to its Act so only the high-level
-    instrument is ever listed/harvested (the section becomes a pinpoint, not a
-    separate document): ``ukpga/2000/36/section/14`` → ``ukpga/2000/36``."""
-    if not candidate:
-        return candidate
-    from .citations.snowball import UK_LEG_TYPES
+    from .resolve.matchers import act_level
 
-    parts = candidate.split("/")
-    if parts[0].lower() not in UK_LEG_TYPES:
-        return candidate
-    # A pre-1963 Act is cited by regnal year — type/monarch/session/number (4 segments,
-    # e.g. ukpga/Eliz2/9-10/18) — so its Act level is FOUR parts, not three. Truncating to
-    # three drops the chapter and yields an ambiguous whole-session id. Detect regnal by a
-    # non-numeric second segment.
-    act_len = 4 if (len(parts) > 1 and not parts[1].isdigit()) else 3
-    if len(parts) > act_len:
-        return "/".join(parts[:act_len])
-    return candidate
+    return act_level(candidate)
 
 
 def _neutral_citation_from_slug(stable_id: str) -> str | None:
@@ -181,12 +166,20 @@ def _targeted_uk_caselaw(candidate: str):
 def _targeted_eu_cellar(candidate: str):
     """A CJEU case by CELEX (``62018CJ0511`` from "C-511/18") or by **ECLI**
     (``ECLI:EU:C:2020:791``) — the ECLI is mapped to its CELEX via one SPARQL hop,
-    so EU case citations resolve whichever form they take."""
-    from .adapters.eu_cellar import CJEUCaseAdapter, EUCellarAdapter
+    so EU case citations resolve whichever form they take.
+
+    A case-number citation carries no signal about whether the case ended in a judgment
+    or an order, so the grammar's CELEX is a guess. Confirm it against CELLAR (probing
+    the order/judgment variants) before fetching, and carry the guessed form through as
+    an alias so the citing edges resolve to whatever the case really is."""
+    from .adapters.eu_cellar import CJEUCaseAdapter, EUCellarAdapter, resolve_case_celex
 
     cu = candidate.upper()
     if re.fullmatch(r"\d{5}[A-Z]{1,2}\d{4}", cu):
-        return CJEUCaseAdapter(cu)
+        real = resolve_case_celex(cu)
+        if real is None:
+            return None  # absent from CELLAR under any descriptor
+        return CJEUCaseAdapter(real, celex_aliases=(cu,))
     if cu.startswith("ECLI:EU:"):
         meta = EUCellarAdapter().case_metadata(ecli=candidate)
         if meta.get("celex"):
@@ -283,11 +276,14 @@ class Facade:
         self._cache[key] = (_t.time(), val)
         return val
 
+    _VOLATILE_CACHE_PREFIXES = ("coverage", "stats", "corpus_map", "queues", "worklist", "snowball")
+
     def _invalidate_caches(self) -> None:
         """Drop the cached dashboard aggregates after an op that changes the citation
         graph (harvest/resolve), so the worklist's per-source "remaining" counts and
         coverage refresh instead of serving the pre-harvest snapshot."""
-        for key in ("coverage", "stats", "corpus_map"):
+        for key in [k for k in self._cache
+                    if k.startswith(self._VOLATILE_CACHE_PREFIXES)]:
             self._cache.pop(key, None)
             self._refreshing.discard(key)
 
@@ -321,6 +317,13 @@ class Facade:
         model = self.settings.resolve("RAGLEX_EMBED_MODEL") or self.config.embed_model
         return get_provider(name, **({"model": model} if model else {}))
 
+    def _reranker(self):
+        """The §6c precision stage — the ML sidecar's cross-encoder when configured,
+        otherwise the identity (fused RRF order)."""
+        from .embeddings import get_reranker
+
+        return get_reranker(self.settings.resolve("RAGLEX_RERANKER"))
+
     # -- settings (UI-editable secrets, §ops) ------------------------------
     def get_settings(self) -> dict:
         return self.settings.masked()
@@ -333,7 +336,7 @@ class Facade:
     # -- read / research ---------------------------------------------------
     def search(self, query: str, *, k: int = 5, filters: dict | None = None) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
-            engine = SearchEngine(cat, self._provider())
+            engine = SearchEngine(cat, self._provider(), reranker=self._reranker())
             hits = engine.search(query, k=k, filters=filters or None)
             return [
                 {
@@ -362,8 +365,16 @@ class Facade:
             # N+1 over a heavily-cited authority).
             _RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
                      "considers": 4, "mentions": 5}
+            # `inferred` edges are heuristic carry-forwards — a bare "Section 12" pinned to
+            # the last-named Act — not citations anyone made. They are 36% of the resolved
+            # graph, so folding them into "cited by" silently inflates every authority
+            # count. Report them, separately.
             best: dict[str, dict] = {}
+            inferred_srcs: set[str] = set()
             for r in cat.relations_to(stable_id):
+                if r["extracted_via"] == "inferred":
+                    inferred_srcs.add(r["src_id"])
+                    continue
                 cur = best.get(r["src_id"])
                 if cur is None or _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
                     best[r["src_id"]] = dict(r)
@@ -381,6 +392,7 @@ class Facade:
                 "suppressed_count": len(suppressed),
                 "incoming": incoming,
                 "cited_by_count": len(best),
+                "inferred_by_count": len(inferred_srcs - set(best)),
                 "assets": [dict(a) for a in cat.assets_for(stable_id)],
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
             }
@@ -458,16 +470,46 @@ class Facade:
             return [s.to_dict() for s in source_dashboard(cat)]
 
     def queues(self) -> dict:
-        with self._open() as (cat, _rs, _ts):
-            return pipeline_queues(cat)
+        # Counting across relations/documents is a second of scanning; the dashboard polls
+        # it. Serve it stale-while-revalidate like the other aggregates.
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                return pipeline_queues(cat)
+        return self._cached("queues", 30, _compute)
 
     def alerts(self) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
             return [a.to_dict() for a in check_alerts(cat)]
 
-    def worklist(self, *, limit: int = 50) -> list[dict]:
+    def push_alerts(self, *, seen: set | None = None) -> list[dict]:
+        """Compute alerts and push the NEW ones to the configured notifier (webhook, else
+        the log). ``seen`` carries the (code, subject) pairs already notified, so a
+        standing condition — "this source has been stale for 40 days" — is announced once
+        rather than every scheduler tick. Returns only what was pushed."""
+        from .ops.alerts import default_notifier
+
+        notifier = default_notifier()
+        pushed = []
         with self._open() as (cat, _rs, _ts):
-            return resolution_worklist(cat, limit=limit)
+            alerts = check_alerts(cat)
+        live = {(a.code, a.subject) for a in alerts}
+        for alert in alerts:
+            key = (alert.code, alert.subject)
+            if seen is not None and key in seen:
+                continue
+            notifier.notify(alert)
+            if seen is not None:
+                seen.add(key)
+            pushed.append(alert.to_dict())
+        if seen is not None:  # a condition that cleared may be announced again if it returns
+            seen.intersection_update(live)
+        return pushed
+
+    def worklist(self, *, limit: int = 50) -> list[dict]:
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                return {"rows": resolution_worklist(cat, limit=limit)}
+        return self._cached(f"worklist:{limit}", 60, _compute)["rows"]
 
     def snowball(self, *, limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
         """The citation frontier (§5a): forms the corpus cites but doesn't yet
@@ -476,8 +518,36 @@ class Facade:
         build-an-adapter list."""
         from .citations import snowball
 
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                return {"rows": snowball(cat, limit=limit, only_unharvestable=only_unharvestable)}
+        # The frontier is a corpus-wide roll-up; it doesn't move between page loads.
+        return self._cached(f"snowball:{limit}:{only_unharvestable}", 300, _compute)["rows"]
+
+    def rebuild_citation_counts(self) -> dict:
+        """Refresh the snowball's frequency roll-up (scheduler; ~13s over 10M citations)."""
         with self._open() as (cat, _rs, _ts):
-            return snowball(cat, limit=limit, only_unharvestable=only_unharvestable)
+            n = cat.rebuild_citation_counts()
+        self._invalidate_caches()
+        return {"candidates": n}
+
+    def backfill_edge_keys(self, *, on_progress=None, cancel_check=None) -> dict:
+        """One-off: populate candidate_id/raw_fold on edges written before those columns
+        existed, so the set-based resolver and the SQL worklist see the whole graph."""
+        with self._open() as (cat, _rs, _ts):
+            done = cat.backfill_edge_keys(on_progress=on_progress)
+        self._invalidate_caches()
+        return {"strings_backfilled": done}
+
+    def retry_failed_references(self) -> dict:
+        """Clear the harvest cool-down lists so the next drain re-attempts everything.
+        The escape hatch for a poisoned skip-list — a bad afternoon at a source used to
+        write thousands of live documents off for three months."""
+        with self._open() as (cat, _rs, _ts):
+            cat.clear_enrichment_misses("harvest-miss")
+            cat.clear_enrichment_misses("harvest-retry")
+        self._invalidate_caches()
+        return {"cleared": True}
 
     def coverage(self) -> dict:
         """A completeness/uncertainty dashboard for the corpus (§8): per-source
@@ -509,11 +579,23 @@ class Facade:
         # show the real total instead of only what a page happens to have loaded.
         routable = [h for h in hanging if h["suggested_adapter"]
                     and h["confidence"] != "low" and not h["needs_identifier"]]
+        # How many routable references a drain would actually attempt right now. The rest
+        # are cooling off after an earlier failure — the difference between these two
+        # numbers is the whole explanation for a "Harvest all" that appears to do nothing.
+        import os as _os
+        miss_ttl = float(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
+        retry_ttl_days = float(_os.environ.get("RAGLEX_RETRY_TTL_HOURS") or 6) / 24.0
+        with self._open() as (cat, _rs, _ts):
+            absent_keys = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
+            retry_keys = cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl_days)
+        cooled = absent_keys | retry_keys
+        ready = [h for h in routable if h["candidate"] not in cooled]
         # routable counts broken down by source, and UK legislation by primary/secondary/
-        # assimilated — so the worklist can show "Harvest all (N)" per category.
+        # assimilated — so the worklist can show "Harvest all (N)" per category. Counted
+        # over the READY set so the per-category buttons promise only what they can do.
         from collections import Counter
         by_cat: Counter = Counter()
-        for h in routable:
+        for h in ready:
             by_cat[h["suggested_adapter"]] += 1
             if h["suggested_adapter"] == "uk-legislation" and h.get("leg_kind"):
                 by_cat[f"uk-legislation:{h['leg_kind']}"] += 1
@@ -524,87 +606,79 @@ class Facade:
             "low_confidence_references": len(low_conf),
             "needs_identifier": sum(1 for h in hanging if h["needs_identifier"]),
             "routable_references": len(routable),
+            "ready_references": len(ready),
+            "cooling_off": len(routable) - len(ready),
+            "cooling_off_absent": sum(1 for h in routable if h["candidate"] in absent_keys),
+            "cooling_off_retry": sum(1 for h in routable if h["candidate"] in retry_keys),
             "routable_by_category": dict(by_cat),
             "frontier": frontier,
             "hanging_sample": hanging[:10],
         }
 
-    def unresolved_references(self, *, limit: int | None = 100) -> list[dict]:
+    def unresolved_references(self, *, limit: int | None = 100,
+                             with_citing: bool = False) -> list[dict]:
         """The hanging references the corpus can't satisfy — one row per distinct
         reference, ranked by how often it's cited. Each says what it *looks like*
         (form/jurisdiction/suggested adapter), how confidently it was recognised,
         whether it still needs an identifier (recognised by name only, no candidate),
         and which documents cite it — the data a human or agent needs to resolve it
-        by upload / scrape / link / supplying the missing citation (§5b, §5a)."""
-        from .citations.snowball import _classify, uk_leg_category as _uk_leg_category
-        from .resolve.matchers import first_candidate
+        by upload / scrape / link / supplying the missing citation (§5b, §5a).
+
+        The grouping is one SQL GROUP BY over the persisted ``candidate_id``; the
+        per-reference citing-document list costs a query each, so it's only filled for
+        the rows a human will actually look at (``with_citing``)."""
+        from .citations.snowball import ECHR_APPNO_RE, _classify, uk_leg_category as _uk_leg_category
         from .adapters.bailii import bailii_url as _bailii_url
 
         with self._open() as (cat, _rs, _ts):
-            groups: dict[str, dict] = {}
-            for r in cat.pending_relations():
-                # Carry-forward edges (extracted_via='inferred') are heuristic guesses —
-                # a bare "Section 1122"/"Schedule 15" pinned to the last-named Act. They're
-                # useful in-document pinpoints but too ambiguous to drive harvesting, so
-                # they never enter the worklist (the Act, if truly cited, arrives via a
-                # real citation edge).
-                if r["extracted_via"] == "inferred":
-                    continue
-                raw = r["raw_citation_string"]
-                # A normalised candidate is what makes the reference routable. Use the
-                # adapter-supplied one, else derive it from the raw string (so a bare
-                # legislation/caselaw URL collapses to its id and merges with the
-                # same case's neutral-citation form), else None → name-only.
-                candidate = r["dst_id"]
-                # Normalise a missing OR URL-shaped candidate to its canonical id
-                # (a stored legislation/caselaw URL → its slug), so the worklist
-                # shows a routable reference rather than a raw link.
-                if (not candidate or candidate.startswith("http")) and (candidate or raw):
-                    cand = first_candidate(candidate or raw) or first_candidate(raw or "")
-                    candidate = cand.value if cand else candidate
-                candidate = _act_level(candidate)  # section → its Act (one node only)
-                ref = candidate or raw
+            rows = []
+            for g in cat.pending_reference_groups():
+                ref = g["ref"]
                 if not ref or _is_junk_ref(ref):
                     continue
-                g = groups.get(ref)
-                if g is None:
-                    g = groups[ref] = {"ref": ref, "candidate": candidate, "raw": raw,
-                                       "src_ids": set(), "methods": set(),
-                                       "anchor": r["dst_anchor"]}
-                g["src_ids"].add(r["src_id"])
-                if r["extracted_via"]:
-                    g["methods"].add(r["extracted_via"])
-            rows = []
-            for g in groups.values():
                 cand = g["candidate"]
+                methods = sorted((g["methods"] or "").split(",")) if g["methods"] else []
                 if cand:
                     form, juris, adapter = _classify(cand, "case")
                     needs_identifier = False
                 else:
                     form, juris, adapter = "unidentified (name only)", None, None
                     needs_identifier = True
+                # A bare "115/92" is an ECtHR application number in a Strasbourg judgment
+                # and an old CJEU case number everywhere else — the shape alone cannot tell
+                # them apart. Route it to HUDOC only if something Strasbourg-shaped cites
+                # it; otherwise it is a guess, and guesses must not drive auto-harvest.
+                misrouted_appno = (
+                    adapter == "echr" and cand and ECHR_APPNO_RE.match(cand)
+                    and not g["echr_citing"]
+                )
                 # low confidence: no candidate, an LLM-surfaced reference, a form we can't
                 # route to an adapter, OR a fuzzy name-based ECHR match (keep these out of
                 # auto-harvest — a HUDOC docname guess wants a human's eye).
-                low = (needs_identifier or "llm" in g["methods"] or adapter is None
+                low = (needs_identifier or "llm" in methods or adapter is None
+                       or misrouted_appno
                        or (cand or "").lower().startswith("echr:"))
                 rows.append({
-                    "ref": g["ref"], "candidate": cand, "raw": g["raw"],
+                    "ref": ref, "candidate": cand, "raw": g["raw"],
                     "pinpoint": g["anchor"], "form": form, "jurisdiction": juris,
                     "suggested_adapter": adapter, "needs_identifier": needs_identifier,
                     # UK legislation sub-category, so the worklist can filter/harvest
                     # primary vs secondary vs assimilated separately
                     "leg_kind": _uk_leg_category(cand) if adapter == "uk-legislation" else None,
                     "confidence": "low" if low else "ok",
-                    "methods": sorted(g["methods"]),
-                    "citing_count": len(g["src_ids"]),
-                    "citing_documents": sorted(x for x in g["src_ids"] if x)[:10],
+                    "methods": methods,
+                    "citing_count": g["citing_count"],
+                    "citing_documents": [],
                     # BAILII link: for UK case-law that 404s on TNA, provide a direct
                     # download link so the user can grab the RTF and drop it in manually.
                     "bailii_url": _bailii_url(cand) if adapter == "uk-caselaw" and cand else None,
                 })
             rows.sort(key=lambda r: (r["citing_count"], r["confidence"] == "low"), reverse=True)
-            return rows if limit is None else rows[:limit]
+            out = rows if limit is None else rows[:limit]
+            if with_citing:
+                for r in out:
+                    r["citing_documents"] = cat.citing_documents(r["ref"])
+            return out
 
     # -- Corpus Map: held-vs-pending by category & sub-type (§8) ------------
     def corpus_map(self) -> dict:
@@ -1307,38 +1381,61 @@ class Facade:
                       # legislation just primary / secondary / assimilated
                       and (not adapter or r["suggested_adapter"] == adapter)
                       and (not leg_kind or r.get("leg_kind") == leg_kind)]
-        # Skip references that FAILED to fetch recently (e.g. a giant Act like FSMA 2000
-        # that legislation.gov.uk can't serve) so a re-run doesn't re-stall on the same dead
-        # item. TTL is user-configurable (RAGLEX_MISS_TTL_DAYS, default 90d) — a longer
-        # cooldown means old/dead URLs (pre-digital UK cases, absent CELLAR renditions) waste
-        # much less drain budget before they're permanently skipped.
+        # Skip references we recently established are ABSENT (a pre-digital UK case, a
+        # CELLAR rendition that doesn't exist) so a re-run doesn't re-stall on the same
+        # dead item. Two cooldowns, because the two failures mean different things:
+        #   harvest-miss  — the source said "no such document". Long TTL (RAGLEX_MISS_TTL_DAYS,
+        #                   default 90d): asking again tomorrow will get the same answer.
+        #   harvest-retry — we couldn't tell (timeout, 5xx, still-generating). SHORT TTL
+        #                   (RAGLEX_RETRY_TTL_HOURS, default 6h): the document probably
+        #                   exists and the source was just having a bad afternoon.
+        # Conflating these is how a whole worklist gets written off: one slow hour at
+        # legislation.gov.uk used to mark thousands of live Acts dead for three months.
         import os as _os
-        miss_ttl = int(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
+        miss_ttl = float(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
+        retry_ttl_days = float(_os.environ.get("RAGLEX_RETRY_TTL_HOURS") or 6) / 24.0
         with self._open() as (cat, _rs, _ts):
-            recent_misses = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
-        skipped = sum(1 for r in candidates if r["candidate"] in recent_misses)
+            cooled = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
+            cooled |= cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl_days)
+        skipped = sum(1 for r in candidates if r["candidate"] in cooled)
         # honour the requested limit — one click can drain everything now that the run
         # fails-fast on dead items, skips them, stays responsive, and is cancellable.
-        rows = [r for r in candidates if r["candidate"] not in recent_misses][:limit]
-        fetched, fetched_ids, failed, new_misses = [], [], [], []
+        rows = [r for r in candidates if r["candidate"] not in cooled][:limit]
+        fetched, fetched_ids, failed = [], [], []
+        absent, transient, rate_limited = [], [], False
         with self._open() as (cat, rs, ts):
             for i, r in enumerate(rows, 1):
                 if cancel_check and cancel_check():
                     break
                 _progress(on_progress, stage="harvesting", done=i, total=len(rows), item=r["ref"])
                 res = self._fetch_reference(cat, rs, ts, ref=r["ref"], candidate=r["candidate"])
-                ok = bool(res.get("stored") or res.get("present"))
+                outcome = res.get("outcome")
+                ok = outcome in ("stored", "present")
                 if ok:
                     fetched.append({"ref": r["ref"]})
                     fetched_ids.append(res["candidate"])
                 else:
-                    failed.append({"ref": r["ref"], **({} if "error" not in res else {"error": res["error"]})})
-                    new_misses.append(r["candidate"])  # don't re-attempt this one for a while
+                    failed.append({"ref": r["ref"], "outcome": outcome,
+                                   **({} if "error" not in res else {"error": res["error"]})})
+                    if outcome in ("absent", "no_adapter"):
+                        absent.append(r["candidate"])
+                    else:
+                        transient.append(r["candidate"])
                 _progress(on_progress, stage="harvesting", done=i, total=len(rows),
                           item=res.get("candidate") or r["ref"], ok=ok,
                           msg=res.get("error") if not ok else None)
-            if new_misses:
-                cat.record_enrichment_misses("harvest-miss", new_misses)
+                if outcome == "rate_limited":
+                    # The source is pushing back. Every remaining reference would now
+                    # "fail" for reasons that say nothing about it, so stop the batch
+                    # rather than cooling off the rest of the worklist (§5a).
+                    rate_limited = True
+                    _progress(on_progress, stage="rate limited — pausing", done=i,
+                              total=len(rows), msg="source is throttling; stopping batch")
+                    break
+            if absent:
+                cat.record_enrichment_misses("harvest-miss", absent)
+            if transient:
+                cat.record_enrichment_misses("harvest-retry", transient)
             # extract just the newly-fetched docs, then resolve once — both AFTER the
             # fetch loop, so report them as their own stages (this is the phase that
             # looked "stuck" because the progress bar had finished the harvest loop).
@@ -1349,6 +1446,10 @@ class Facade:
         remaining = len(candidates) - skipped - len(fetched)
         return {"attempted": len(rows), "harvested": len(fetched),
                 "resolved_edges": resolved.resolved, "failed": failed,
+                "absent": len(absent), "retry_later": len(transient),
+                "rate_limited": rate_limited,
+                # The count the UI must show: a drain that "did nothing" is nearly always
+                # a drain whose whole candidate set was still cooling off.
                 "skipped_recent_fail": skipped, "remaining": max(remaining, 0)}
 
     def _extract_ids(self, cat, ts, candidates, *, on_progress=None) -> None:
@@ -1365,7 +1466,12 @@ class Facade:
     def _fetch_reference(self, cat, rs, ts, *, ref: str, candidate: str | None):
         """Fetch one routable reference's exact item into the corpus (no resolve).
         Returns what happened; the caller resolves. Shared by the single- and
-        all-reference harvest paths."""
+        all-reference harvest paths.
+
+        ``outcome`` is the load-bearing field — it tells the drain whether the reference
+        is genuinely absent (cool it off for months), merely unreachable right now (retry
+        in hours), or whether the source is rate-limiting us (stop the batch immediately,
+        before the rest of the worklist is written off as absent)."""
         from .citations.snowball import _classify
         from .pipeline import Pipeline
         from .resolve.matchers import first_candidate
@@ -1376,23 +1482,39 @@ class Facade:
             cand = c.value if c else ref
         cand = _act_level(cand)  # never fetch a section in isolation — fetch its Act
         if cat.find_document_id(cand) is not None:
-            return {"candidate": cand, "present": True, "stored": 0}
+            return {"candidate": cand, "present": True, "stored": 0, "outcome": "present"}
         _form, _juris, adapter_key = _classify(cand, "case")
         builder = _TARGETED_HARVEST.get(adapter_key)
         if builder is None:
             return {"error": f"no targeted adapter for {cand!r} (form: {_form}); "
-                             f"use upload / scrape / link instead", "candidate": cand}
-        adapter = builder(cand)
+                             f"use upload / scrape / link instead",
+                    "candidate": cand, "outcome": "no_adapter"}
+        try:
+            adapter = builder(cand)
+        except Exception as exc:  # noqa: BLE001 — a builder may hit the network (CELLAR probe)
+            return {"error": f"could not reach {adapter_key} to build a fetch for {cand!r}: {exc}",
+                    "candidate": cand, "outcome": "transient"}
         if adapter is None:
-            return {"error": f"could not build a {adapter_key} fetch for {cand!r}", "candidate": cand}
+            # The builder positively established the item isn't there (e.g. absent from
+            # CELLAR under every case-CELEX descriptor) — a genuine absence.
+            return {"error": f"could not build a {adapter_key} fetch for {cand!r}",
+                    "candidate": cand, "outcome": "absent"}
         # backfill=False so this one-item fetch never rewrites the source's real
         # watermark; the targeted adapters ignore `since` and yield just our id.
         # record_health=False: a 404 for a single item means "this item isn't available"
         # (pre-digital case, absent CELLAR rendition), not "the source feed is broken" —
         # don't let it increment the source's consecutive_failures counter.
-        stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
-            adapter, max_pages=1, record_health=False)
-        return {"candidate": cand, "adapter": adapter_key, "stored": stats.stored}
+        try:
+            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                adapter, max_pages=1, record_health=False)
+        except Exception as exc:  # noqa: BLE001
+            return {"candidate": cand, "adapter": adapter_key, "stored": 0,
+                    "outcome": "transient", "error": str(exc)}
+        out = {"candidate": cand, "adapter": adapter_key, "stored": stats.stored,
+               "outcome": stats.outcome}
+        if stats.outcome not in ("stored", "present") and stats.notes:
+            out["error"] = stats.notes[-1]
+        return out
 
     def harvest_legislation_at(self, *, stable_id: str, date: str) -> dict:
         """Fetch UK legislation as it stood on ``date`` (YYYY-MM-DD) — the point-in-time
@@ -1577,10 +1699,15 @@ class Facade:
         """Scan recently-held legislation we haven't scanned lately for the changes it
         makes (affecting-side), and propagate. Bounded per call for the scheduler; the
         ``changes-feed`` enrichment marker means each act is scanned once per
-        ``max_age_days`` rather than every tick."""
+        ``max_age_days`` rather than every tick.
+
+        Only UK instruments have a "Changes to Legislation" feed: scanning EU legislation
+        asks legislation.gov.uk about a CELEX (``/changes/affecting/31964R0038``) and gets
+        a guaranteed 404, burning the whole per-tick budget on documents that can never
+        yield an effect."""
         with self._open() as (cat, _rs, _ts):
             done = cat.enrichment_misses("changes-feed", max_age_days=max_age_days)
-            rows = cat.list_documents(doc_type="legislation", limit=2000)
+            rows = cat.list_documents(source="uk-legislation", doc_type="legislation", limit=2000)
             todo = [r["stable_id"] for r in rows
                     if r["stable_id"] not in done and "@" not in r["stable_id"]][:limit]
         results = []
@@ -2103,6 +2230,10 @@ class Facade:
         return {"candidates": len(targets), "mapped_celex": len(want), "shortened": shortened,
                 "webservice_calls": -(-len(want) // 50), "titled": titled,
                 "subject_tags_added": tagged,
+                # We asked for CELEXes and got nothing at all back: the webservice is down
+                # or the credentials are wrong. Distinct from "it answered, and had no data
+                # for these" — the scheduler backs off on the former, not the latter.
+                "provider_down": bool(want) and not meta,
                 "flagged_no_data": len([c for c in want if c not in meta])}
 
     def discover_citing(self, *, target: str, via: str = "auto", query: str | None = None,

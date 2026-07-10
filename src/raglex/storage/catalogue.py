@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS relations (
     src_id             TEXT NOT NULL,
     dst_id             TEXT,
     raw_citation_string TEXT,
+    -- The canonical id this edge points AT, normalised once at write time (§5b): the
+    -- adapter's dst_id, else the matcher ladder over raw_citation_string, collapsed to
+    -- Act level. Resolution, the hanging-reference worklist and the coverage aggregates
+    -- all key off this, so they are indexed SQL rather than a regex ladder re-run over
+    -- millions of edges on every read. NULL = recognised by name only, no identifier.
+    candidate_id       TEXT,
+    -- The case/accent-folded raw string — the join key for named aliases ("UK GDPR").
+    raw_fold           TEXT,
     resolution_status  TEXT NOT NULL DEFAULT 'pending',
     relationship_type  TEXT NOT NULL DEFAULT 'mentions',
     extracted_via      TEXT NOT NULL DEFAULT 'structured',
@@ -80,15 +88,20 @@ CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
 
-CREATE TABLE IF NOT EXISTS pending_resolution (
-    string_hash      TEXT PRIMARY KEY,
-    raw_citation_string TEXT NOT NULL,
-    src_id           TEXT,
-    hints_json       TEXT NOT NULL DEFAULT '{}',
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    last_attempt_at  TEXT,
-    cite_count       INTEGER NOT NULL DEFAULT 1
+-- Rolled-up citation frequencies (the substrate for the §5a snowball). Aggregating the
+-- 10M-row `citations` table live costs ~13s, so it is rebuilt on a cadence instead.
+-- No PK: entity_kind is nullable (an unclassified candidate), and the table is
+-- rebuilt wholesale rather than upserted into.
+CREATE TABLE IF NOT EXISTS citation_counts (
+    candidate_id  TEXT NOT NULL,
+    entity_kind   TEXT,
+    method        TEXT,
+    sample        TEXT,
+    occurrences   INTEGER NOT NULL DEFAULT 0,
+    documents     INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at    TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 
 -- Extracted citations (§5): the raw *observations* (one per occurrence) with
 -- entity kind, candidate, pinpoint, char span (the context window for treatment
@@ -257,11 +270,45 @@ CREATE TABLE IF NOT EXISTS embeddings (
 CREATE INDEX IF NOT EXISTS embeddings_family_idx
     ON embeddings (provider, model, model_version);
 
+-- Background jobs (§8). In-process dicts died with the process, so a deploy erased a
+-- running harvest's history and the scheduler's own work was invisible to the UI.
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id        TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    params_json   TEXT NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL DEFAULT 'running',
+    progress_json TEXT NOT NULL DEFAULT '{}',
+    log_json      TEXT NOT NULL DEFAULT '[]',
+    result_json   TEXT,
+    origin        TEXT NOT NULL DEFAULT 'api',
+    cancel        INTEGER NOT NULL DEFAULT 0,
+    started_at    TEXT NOT NULL,
+    heartbeat_at  TEXT,
+    finished_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, started_at);
+
 -- FTS5 keyword index over chunk text — the lexical half of hybrid search (§6c).
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     chunk_text, doc_id UNINDEXED, chunk_id UNINDEXED, family UNINDEXED
 );
 """
+
+# Indexes created after the additive column migrations (they reference columns the
+# original DDL didn't have). Partial on the pending slice: that's the only hot one —
+# ~400k rows out of 6.6M, and it's what the resolver and the worklist scan.
+_POST_MIGRATE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS relations_pending_candidate_idx ON relations (candidate_id) "
+    "WHERE resolution_status = 'pending'",
+    "CREATE INDEX IF NOT EXISTS relations_pending_fold_idx ON relations (raw_fold) "
+    "WHERE resolution_status = 'pending'",
+)
+
+
+# DSNs whose schema this process has already ensured. Postgres DDL is idempotent but not
+# free, and the catalogue is opened per request.
+_PG_SCHEMA_READY: set[str] = set()
 
 
 def _now() -> str:
@@ -316,7 +363,13 @@ class Catalogue:
         if _postgres.is_postgres_dsn(self.db_path):
             self.backend = "postgres"
             self.conn = _postgres.connect(self.db_path)
-            self.conn.executescript(_postgres.PG_DDL)
+            # The catalogue is opened per request; running ~30 CREATE-IF-NOT-EXISTS
+            # statements plus the migrations on every open is work no request should do.
+            # The schema can only change when the process starts, so do it once.
+            if self.db_path not in _PG_SCHEMA_READY:
+                self.conn.executescript(_postgres.PG_DDL)
+                self._migrate()
+                _PG_SCHEMA_READY.add(self.db_path)
             # Iterative index scans (pgvector ≥ 0.8) so a partition pre-filter +
             # HNSW search doesn't under-return under heavy WHERE filtering (§7).
             try:
@@ -331,7 +384,7 @@ class Catalogue:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA foreign_keys = ON")
             self.conn.executescript(_DDL)
-        self._migrate()
+            self._migrate()
         self.conn.commit()
 
     @contextmanager
@@ -354,7 +407,11 @@ class Catalogue:
     def _migrate(self) -> None:
         """Additive, idempotent column migrations for DBs created before a column existed
         (the DDL is CREATE-IF-NOT-EXISTS, which doesn't add columns to a live table)."""
-        for table, col, decl in (("documents", "meta_json", "TEXT"),):
+        for table, col, decl in (
+            ("documents", "meta_json", "TEXT"),
+            ("relations", "candidate_id", "TEXT"),
+            ("relations", "raw_fold", "TEXT"),
+        ):
             try:
                 if self.backend == "postgres":
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {decl}")
@@ -364,6 +421,17 @@ class Catalogue:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             except Exception:  # noqa: BLE001 — a migration mustn't block startup
                 pass
+        for stmt in _POST_MIGRATE_INDEXES:
+            try:
+                self.conn.execute(stmt)
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def reset_schema_cache() -> None:
+        """Forget which DSNs have had their DDL applied — for tests that drop the schema
+        out from under the process."""
+        _PG_SCHEMA_READY.clear()
 
     def close(self) -> None:
         self.conn.close()
@@ -478,19 +546,34 @@ class Catalogue:
             for rel in record.relations:
                 self._add_relation(record.stable_id, rel)
 
+    @staticmethod
+    def _edge_keys(rel: TypedRelation) -> tuple[str | None, str | None]:
+        """``(candidate_id, raw_fold)`` for an edge — the normalised target id and the
+        folded raw string, computed once here so every later read is an indexed lookup
+        instead of re-running the matcher ladder (§5b)."""
+        # Imported lazily: resolve/ imports the catalogue, so a module-level import cycles.
+        from ..resolve.matchers import normalise_candidate
+        from ..topics.gate import fold
+
+        raw = rel.raw_citation_string
+        return normalise_candidate(rel.dst_id, raw), (fold(raw) if raw else None)
+
     def _add_relation(self, src_id: str, rel: TypedRelation) -> None:
+        candidate_id, raw_fold = self._edge_keys(rel)
         self.conn.execute(
             """
             INSERT INTO relations (
-                src_id, dst_id, raw_citation_string, resolution_status,
-                relationship_type, extracted_via, src_anchor, dst_anchor,
-                context_start, context_end
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                src_id, dst_id, raw_citation_string, candidate_id, raw_fold,
+                resolution_status, relationship_type, extracted_via, src_anchor,
+                dst_anchor, context_start, context_end
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 src_id,
                 rel.dst_id,
                 rel.raw_citation_string,
+                candidate_id,
+                raw_fold,
                 str(rel.resolution_status),
                 str(rel.relationship_type),
                 str(rel.extracted_via),
@@ -565,11 +648,12 @@ class Catalogue:
             """
         ).fetchall()
 
-    def enrichment_misses(self, kind: str, *, max_age_days: int = 30) -> set[str]:
+    def enrichment_misses(self, kind: str, *, max_age_days: float = 30) -> set[str]:
         """Keys whose external lookup recently came back empty — skipped on the next
-        run to save quota, but **only for ``max_age_days``**. Nothing is flagged
-        forever: a miss expires and is retried later, so a transient/batch failure can
-        never permanently stop an item being fetched."""
+        run to save quota, but **only for ``max_age_days``** (fractional days allowed, so
+        a merely-unreachable item can cool off for hours rather than months). Nothing is
+        flagged forever: a miss expires and is retried later, so a transient/batch failure
+        can never permanently stop an item being fetched."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
         rows = self.conn.execute(
             "SELECT key FROM enrichment_misses WHERE kind = ? AND attempted_at >= ?",
@@ -657,13 +741,12 @@ class Catalogue:
             (limit,),
         ).fetchall()
 
-    def candidate_frequencies(self) -> list[sqlite3.Row]:
-        """Aggregate the citations audit table by distinct candidate: how often
-        each is cited and from how many documents, with its kind + grammar. The
-        substrate for the snowball (citations.snowball) — which references the
-        corpus makes most that aren't yet nodes."""
+    def count_pending_relations(self) -> int:
         return self.conn.execute(
-            """
+            "SELECT COUNT(*) AS n FROM relations WHERE resolution_status = 'pending'"
+        ).fetchone()["n"]
+
+    _CANDIDATE_FREQ_SQL = """
             SELECT candidate_id, entity_kind,
                    MIN(method)        AS method,
                    MIN(raw)           AS sample,
@@ -672,9 +755,43 @@ class Catalogue:
             FROM citations
             WHERE candidate_id IS NOT NULL
             GROUP BY candidate_id, entity_kind
-            ORDER BY occurrences DESC
-            """
+    """
+
+    def candidate_frequencies(self, *, live: bool = False) -> list[sqlite3.Row]:
+        """Aggregate the citations audit table by distinct candidate: how often
+        each is cited and from how many documents, with its kind + grammar. The
+        substrate for the snowball (citations.snowball) — which references the
+        corpus makes most that aren't yet nodes.
+
+        Served from the ``citation_counts`` roll-up, which the scheduler rebuilds: the
+        live aggregate is a ~13s scan of a 10M-row table, and the frontier does not move
+        between ticks. ``live=True`` forces the scan (and is what rebuild uses)."""
+        if not live:
+            rows = self.conn.execute(
+                "SELECT candidate_id, entity_kind, method, sample, occurrences, documents "
+                "FROM citation_counts ORDER BY occurrences DESC"
+            ).fetchall()
+            if rows:
+                return rows
+            # never rolled up yet (fresh DB / test) → fall through to the live scan
+        return self.conn.execute(
+            self._CANDIDATE_FREQ_SQL + " ORDER BY occurrences DESC"
         ).fetchall()
+
+    def rebuild_citation_counts(self) -> int:
+        """Recompute the citation frequency roll-up. One pass; run on a cadence."""
+        with self._atomic():
+            self.conn.execute("DELETE FROM citation_counts")
+            self.conn.execute(
+                "INSERT INTO citation_counts "
+                "(candidate_id, entity_kind, method, sample, occurrences, documents, rebuilt_at) "
+                "SELECT candidate_id, entity_kind, method, sample, occurrences, documents, ? "
+                f"FROM ({self._CANDIDATE_FREQ_SQL}) s",
+                (_now(),),
+            )
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM citation_counts"
+        ).fetchone()["n"]
 
     def clear_relations(self, src_id: str, *, extracted_via: str) -> None:
         """Drop a source's edges from one extraction method, so re-running that
@@ -940,6 +1057,145 @@ class Catalogue:
             """
         ).fetchall()
 
+    # -- set-based resolution (§5b) -----------------------------------------
+    # Each pass flips whole classes of pending edges live in ONE statement. The old
+    # per-edge Python loop re-derived a candidate id for 450k edges every scheduler
+    # tick to usually resolve nothing; these run off the persisted candidate_id /
+    # raw_fold and their partial indexes.
+    _RESOLVE_PASSES = (
+        # 1. the candidate IS a document (by stable_id or ECLI) — the common case
+        """
+        UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+        FROM documents d
+        WHERE relations.resolution_status = 'pending'
+          AND relations.candidate_id IS NOT NULL
+          AND (d.stable_id = relations.candidate_id OR d.ecli = relations.candidate_id)
+        """,
+        # 2. the candidate is an alias of a document (CELEX→ECLI, chamber-less slug)
+        """
+        UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+        FROM citation_aliases a JOIN documents d
+          ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+        WHERE relations.resolution_status = 'pending'
+          AND relations.candidate_id IS NOT NULL
+          AND a.alias = lower(relations.candidate_id)
+        """,
+        # 3. the raw string is a named alias ("UK GDPR" → the assimilated regulation)
+        """
+        UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+        FROM citation_aliases a JOIN documents d
+          ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+        WHERE relations.resolution_status = 'pending'
+          AND relations.raw_fold IS NOT NULL
+          AND a.alias = relations.raw_fold
+        """,
+    )
+
+    def resolve_pending(self) -> int:
+        """Flip every pending edge whose target is now a node. Returns the number
+        resolved. Idempotent and safe to re-run after each ingest — that is how a
+        citation to a freshly-harvested target becomes a live edge (§5b)."""
+        total = 0
+        with self._atomic():
+            for sql in self._RESOLVE_PASSES:
+                cur = self.conn.execute(sql)
+                total += max(cur.rowcount, 0)
+        return total
+
+    def resolve_pending_for(self, stable_id: str, ecli: str | None = None) -> int:
+        """The incremental case: only edges pointing at THIS document (just harvested)
+        can newly resolve, so a single indexed lookup replaces a whole-graph pass."""
+        keys = [k for k in (stable_id, ecli) if k]
+        qs = ",".join("?" * len(keys))
+        with self._atomic():
+            cur = self.conn.execute(
+                f"""
+                UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
+                WHERE resolution_status = 'pending' AND (
+                    candidate_id IN ({qs})
+                    OR lower(candidate_id) IN (SELECT alias FROM citation_aliases WHERE dst_id IN ({qs}))
+                    OR raw_fold IN (SELECT alias FROM citation_aliases WHERE dst_id IN ({qs}))
+                )
+                """,
+                (stable_id, *keys, *keys, *keys),
+            )
+            return max(cur.rowcount, 0)
+
+    def backfill_edge_keys(self, *, batch: int = 20000, on_progress=None) -> int:
+        """Populate ``candidate_id``/``raw_fold`` on edges written before those columns
+        existed. Runs the matcher ladder once per DISTINCT raw string (a few hundred
+        thousand) rather than once per edge (millions), then updates by string."""
+        from ..resolve.matchers import normalise_candidate
+        from ..topics.gate import fold
+
+        rows = self.conn.execute(
+            "SELECT DISTINCT raw_citation_string AS raw, dst_id FROM relations "
+            "WHERE raw_fold IS NULL AND raw_citation_string IS NOT NULL"
+        ).fetchall()
+        done = 0
+        for i in range(0, len(rows), batch):
+            with self._atomic():
+                for r in rows[i: i + batch]:
+                    raw, dst = r["raw"], r["dst_id"]
+                    self.conn.execute(
+                        "UPDATE relations SET candidate_id = ?, raw_fold = ? "
+                        "WHERE raw_citation_string = ? AND raw_fold IS NULL "
+                        "AND (dst_id = ? OR (dst_id IS NULL AND ? IS NULL))",
+                        (normalise_candidate(dst, raw), fold(raw), raw, dst, dst),
+                    )
+                    done += 1
+            if on_progress:
+                on_progress(stage="backfilling edge keys", done=done, total=len(rows))
+        # Edges with no raw string at all (adapter-supplied dst only) still want a candidate.
+        with self._atomic():
+            self.conn.execute(
+                "UPDATE relations SET candidate_id = dst_id "
+                "WHERE candidate_id IS NULL AND dst_id IS NOT NULL"
+            )
+        return done
+
+    def pending_reference_groups(self) -> list[sqlite3.Row]:
+        """One row per distinct hanging reference — the worklist, as a single GROUP BY
+        instead of a 450k-row Python pass (§5b, §8).
+
+        ``inferred`` edges are heuristic carry-forwards (a bare "Section 12" pinned to the
+        last-named Act); useful as in-document pinpoints, too ambiguous to drive harvesting,
+        so they never enter the worklist. ``echr_citing`` says whether any citing document
+        is a Strasbourg one — a bare ``115/92`` is an ECtHR application number there and an
+        old CJEU case number anywhere else, and nothing but the citing document tells them
+        apart."""
+        agg = "string_agg(DISTINCT r.extracted_via, ',')" if self.backend == "postgres" \
+            else "group_concat(DISTINCT r.extracted_via)"
+        return self.conn.execute(
+            f"""
+            SELECT COALESCE(r.candidate_id, r.raw_citation_string) AS ref,
+                   MAX(r.candidate_id)          AS candidate,
+                   MIN(r.raw_citation_string)   AS raw,
+                   MIN(r.dst_anchor)            AS anchor,
+                   {agg}                        AS methods,
+                   COUNT(*)                     AS occurrences,
+                   COUNT(DISTINCT r.src_id)     AS citing_count,
+                   MAX(CASE WHEN d.source = 'echr' THEN 1 ELSE 0 END) AS echr_citing
+            FROM relations r
+            JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.resolution_status = 'pending'
+              AND r.extracted_via <> 'inferred'
+              AND COALESCE(r.candidate_id, r.raw_citation_string) IS NOT NULL
+            GROUP BY COALESCE(r.candidate_id, r.raw_citation_string)
+            ORDER BY citing_count DESC
+            """
+        ).fetchall()
+
+    def citing_documents(self, ref: str, *, limit: int = 10) -> list[str]:
+        """Which documents cite one hanging reference (for the worklist row's detail)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT src_id FROM relations "
+            "WHERE resolution_status = 'pending' AND extracted_via <> 'inferred' "
+            "AND COALESCE(candidate_id, raw_citation_string) = ? ORDER BY src_id LIMIT ?",
+            (ref, limit),
+        ).fetchall()
+        return [r["src_id"] for r in rows]
+
     def set_pending_candidate(self, ref: str, new_candidate: str) -> int:
         """Re-key the *pending* edges of a hanging reference to a new candidate id —
         the manual-resolution counterpart of automatic resolution (§5b). ``ref`` is
@@ -947,13 +1203,17 @@ class Catalogue:
         name only (no candidate), its raw citation string. Used when a user supplies
         the missing identifier (a neutral citation / ECLI) or points the reference at
         a freshly-imported document. Resolution then links it like any other."""
+        # candidate_id is what resolution keys off (§5b), so re-key it alongside dst_id —
+        # otherwise the user supplies the missing identifier and the edge stays pending
+        # against its old, unresolvable candidate.
         cur = self.conn.execute(
             """
-            UPDATE relations SET dst_id = ?
+            UPDATE relations SET dst_id = ?, candidate_id = ?
             WHERE resolution_status = 'pending'
-              AND (dst_id = ? OR (dst_id IS NULL AND raw_citation_string = ?))
+              AND (dst_id = ? OR candidate_id = ?
+                   OR (dst_id IS NULL AND raw_citation_string = ?))
             """,
-            (new_candidate, ref, ref),
+            (new_candidate, new_candidate, ref, ref, ref),
         )
         self.conn.commit()
         return cur.rowcount
@@ -1008,35 +1268,10 @@ class Catalogue:
         self.conn.execute("DELETE FROM citation_aliases WHERE alias = ?", (alias,))
         self.conn.commit()
 
-    def enqueue_pending(
-        self, string_hash: str, raw_citation_string: str, src_id: str | None,
-        hints: dict | None = None, *, commit: bool = True
-    ) -> None:
-        """Record/retry an unresolved citation. A miss usually means the target
-        isn't harvested yet, so ``cite_count`` ranks "frequently cited but absent"
-        into a harvest worklist (§5b, §8)."""
-        self.conn.execute(
-            """
-            INSERT INTO pending_resolution (
-                string_hash, raw_citation_string, src_id, hints_json, attempts, last_attempt_at, cite_count
-            ) VALUES (?,?,?,?,1,?,1)
-            ON CONFLICT(string_hash) DO UPDATE SET
-                attempts = pending_resolution.attempts + 1,
-                last_attempt_at = excluded.last_attempt_at,
-                cite_count = pending_resolution.cite_count + 1
-            """,
-            (string_hash, raw_citation_string, src_id, json.dumps(hints or {}), _now()),
-        )
-        if commit:
-            self.conn.commit()
-
-    def clear_pending(self, string_hash: str, *, commit: bool = True) -> None:
-        """Drop a queue entry once its citation resolves."""
-        self.conn.execute(
-            "DELETE FROM pending_resolution WHERE string_hash = ?", (string_hash,)
-        )
-        if commit:
-            self.conn.commit()
+    # `pending_resolution` used to mirror the hanging references as its own table. Nothing
+    # has written to it since the worklist became a live aggregate over `relations`, so it
+    # only ever accumulated stale rows (135k of them in production) that no read consulted.
+    # The relations graph is the single source of truth for what is unresolved.
 
     def resolution_worklist(self, limit: int = 50) -> list[sqlite3.Row]:
         """Most-cited unresolved citations first — what to harvest next (§8). Derived
@@ -1545,7 +1780,12 @@ class Catalogue:
             "unresolved_edges": q(
                 "SELECT COUNT(*) AS n FROM relations WHERE resolution_status = 'pending'"
             ),
-            "pending_resolution": q("SELECT COUNT(*) AS n FROM pending_resolution"),
+            # Edges recognised by name only — no identifier to resolve against, so they
+            # can never leave the pending pile without a human or an LLM naming them.
+            "unidentified_edges": q(
+                "SELECT COUNT(*) AS n FROM relations "
+                "WHERE resolution_status = 'pending' AND candidate_id IS NULL"
+            ),
         }
 
     def resolution_stats(self) -> dict:
@@ -1678,6 +1918,101 @@ class Catalogue:
         sql = (f"SELECT source, doc_type, court, {prefix} AS prefix, COUNT(*) AS n "
                "FROM documents GROUP BY source, doc_type, court, prefix")
         return self.conn.execute(sql).fetchall()
+
+    # -- background jobs (§8) ----------------------------------------------
+    # The registry used to be a dict in the API process. That made a deploy erase a
+    # running harvest, made restart-after-freeze impossible across a restart, and — the
+    # expensive one — made the scheduler's own work invisible: the auto-drain ran in a
+    # different container, so nothing in the UI ever showed that it had been storing
+    # zero documents for seventeen days.
+    def create_job(self, job_id: str, kind: str, label: str, params: dict,
+                   *, origin: str = "api") -> None:
+        now = _now()
+        self.conn.execute(
+            "INSERT INTO jobs (job_id, kind, label, params_json, status, origin, "
+            "started_at, heartbeat_at) VALUES (?,?,?,?,'running',?,?,?)",
+            (job_id, kind, label, json.dumps(params or {}), origin, now, now),
+        )
+        self.conn.commit()
+
+    def heartbeat_job(self, job_id: str, progress: dict, log_tail: list[str]) -> None:
+        self.conn.execute(
+            "UPDATE jobs SET progress_json = ?, log_json = ?, heartbeat_at = ? WHERE job_id = ?",
+            (json.dumps(progress or {}), json.dumps(log_tail[-300:]), _now(), job_id),
+        )
+        self.conn.commit()
+
+    def finish_job(self, job_id: str, status: str, result: dict | None,
+                   log_tail: list[str] | None = None) -> None:
+        self.conn.execute(
+            "UPDATE jobs SET status = ?, result_json = ?, finished_at = ?, heartbeat_at = ?"
+            + (", log_json = ?" if log_tail is not None else "")
+            + " WHERE job_id = ?",
+            ((status, json.dumps(result, default=str) if result is not None else None,
+              _now(), _now())
+             + ((json.dumps(log_tail[-300:]),) if log_tail is not None else ())
+             + (job_id,)),
+        )
+        self.conn.commit()
+
+    def get_job(self, job_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+
+    def list_jobs(self, *, limit: int = 60) -> list[sqlite3.Row]:
+        """Running jobs first, then most-recent finished — what the global panel shows."""
+        return self.conn.execute(
+            "SELECT * FROM jobs ORDER BY (status = 'running') DESC, started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def running_jobs(self, kind: str | None = None) -> list[sqlite3.Row]:
+        if kind:
+            return self.conn.execute(
+                "SELECT * FROM jobs WHERE status = 'running' AND kind = ?", (kind,)
+            ).fetchall()
+        return self.conn.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()
+
+    def request_job_cancel(self, job_id: str) -> bool:
+        """Ask a job to stop. Works across processes — the worker polls this flag, so the
+        UI can cancel a job running inside the scheduler container."""
+        cur = self.conn.execute(
+            "UPDATE jobs SET cancel = 1 WHERE job_id = ? AND status = 'running'", (job_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def job_cancelled(self, job_id: str) -> bool:
+        row = self.conn.execute("SELECT cancel FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        return bool(row and row["cancel"])
+
+    def orphan_running_jobs(self, origin: str) -> int:
+        """On startup, a job this process's predecessor left 'running' has no thread behind
+        it — its worker died with the process. Mark it, rather than leaving a ghost that
+        the panel shows as live forever."""
+        cur = self.conn.execute(
+            "UPDATE jobs SET status = 'interrupted', finished_at = ? "
+            "WHERE status = 'running' AND origin = ?",
+            (_now(), origin),
+        )
+        self.conn.commit()
+        return max(cur.rowcount, 0)
+
+    def prune_jobs(self, *, keep: int = 200) -> None:
+        self.conn.execute(
+            "DELETE FROM jobs WHERE status <> 'running' AND job_id NOT IN "
+            "(SELECT job_id FROM jobs WHERE status <> 'running' ORDER BY started_at DESC LIMIT ?)",
+            (keep,),
+        )
+        self.conn.commit()
+
+    def recent_job_results(self, kind: str, *, limit: int = 20) -> list[sqlite3.Row]:
+        """The last N outcomes for one job kind — the substrate for "auto-drain has stored
+        nothing for three days", the alert that would have caught the poisoned skip-list."""
+        return self.conn.execute(
+            "SELECT * FROM jobs WHERE kind = ? AND status = 'done' "
+            "ORDER BY started_at DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
 
     def all_sources(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM sources ORDER BY key").fetchall()

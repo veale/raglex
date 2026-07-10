@@ -125,6 +125,18 @@ class RateLimitedClient:
                 attempt += 1
                 continue
 
+            if resp.status_code >= 500:
+                # The source is broken, not the item. Retry, then report it as transient so
+                # callers cool the item off for hours — never for months (a 500 says nothing
+                # about whether the document exists).
+                if attempt >= self.max_retries:
+                    raise FetchError(
+                        f"{self.source}: HTTP {resp.status_code} for {url}", transient=True
+                    )
+                self._backoff(attempt)
+                attempt += 1
+                continue
+
             if resp.status_code >= 400 and raise_for_4xx:
                 # 404/410 etc. are fatal for this stub — caller decides upstream_status.
                 raise FetchError(

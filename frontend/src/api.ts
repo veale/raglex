@@ -2,13 +2,35 @@
 // to the FastAPI backend) and configurable via VITE_API_BASE for other deploys.
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 
+// When the API requires a bearer token (RAGLEX_API_TOKEN), the UI reads it from a build
+// env var or, failing that, localStorage — so a token-protected deploy is still usable
+// from the browser without hardcoding a secret in the bundle.
+function apiToken(): string | null {
+  const env = import.meta.env.VITE_API_TOKEN as string | undefined;
+  if (env) return env;
+  try { return localStorage.getItem("raglex-api-token"); } catch { return null; }
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = apiToken();
+  return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra };
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...init,
+    headers: authHeaders({ "Content-Type": "application/json", ...(init?.headers as Record<string, string> || {}) }),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
+}
+
+// Multipart POST (file upload) — same auth, but let the browser set the multipart
+// Content-Type + boundary, so don't pass one.
+async function postForm(path: string, fd: FormData): Promise<any> {
+  const res = await fetch(`${BASE}${path}`, { method: "POST", body: fd, headers: authHeaders() });
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
 }
 
 export interface Hit {
@@ -67,6 +89,7 @@ export const api = {
     req<any>("/unresolved/resolve", { method: "POST", body: JSON.stringify({ ref, url }) }),
   harvestAllReferences: (limit = 25, min_citing = 1) =>
     req<any>("/unresolved/harvest-all", { method: "POST", body: JSON.stringify({ limit, min_citing }) }),
+  retryFailed: () => req<any>("/unresolved/retry-failed", { method: "POST" }),
   radiate: (body: Record<string, unknown>) =>
     req<any>("/radiate", { method: "POST", body: JSON.stringify(body) }),
   discoverCiting: (target: string, via = "auto") =>
@@ -109,9 +132,7 @@ export const api = {
     fd.append("file", file);
     fd.append("ref", ref);
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
-    const res = await fetch(`${BASE}/unresolved/resolve-file`, { method: "POST", body: fd });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json();
+    return postForm("/unresolved/resolve-file", fd);
   },
   sourceList: () => req<string[]>("/sources/list"),
   harvest: (body: Record<string, unknown>) =>
@@ -126,9 +147,7 @@ export const api = {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("kind", kind);
-    const res = await fetch(`${BASE}/documents/${encodeURIComponent(doc_id)}/attach`, { method: "POST", body: fd });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json();
+    return postForm(`/documents/${encodeURIComponent(doc_id)}/attach`, fd);
   },
   getSettings: () => req<{ settings: Setting[]; path: string }>("/settings"),
   saveSettings: (values: Record<string, string>) =>
@@ -143,18 +162,14 @@ export const api = {
     const fd = new FormData();
     fd.append("file", file);
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
-    const res = await fetch(`${BASE}/import/file`, { method: "POST", body: fd });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json();
+    return postForm("/import/file", fd);
   },
   importBailii: async (stable_id: string, file: File, title?: string) => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("stable_id", stable_id);
     if (title) fd.append("title", title);
-    const res = await fetch(`${BASE}/import/bailii`, { method: "POST", body: fd });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json() as Promise<{ stable_id: string; chars: number; resolved_edges: number }>;
+    return postForm("/import/bailii", fd) as Promise<{ stable_id: string; chars: number; resolved_edges: number }>;
   },
   embed: () => req<any>("/embed", { method: "POST", body: "{}" }),
 };

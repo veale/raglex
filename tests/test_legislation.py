@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from raglex.adapters.eu_legislation import EULegislationAdapter
 from raglex.adapters.uk_legislation import UKLegislationAdapter
+from raglex.core.errors import FetchError
 from raglex.core.models import DocType
 from raglex.formats import available, parse
 
@@ -181,9 +184,11 @@ class _StatusResp:
         self.status_code = status_code
 
 
-def test_uk_adapter_returns_none_on_202_async_generation(monkeypatch):
-    # large representations answer 202 + empty body while legislation.gov.uk builds them;
-    # the adapter must retry then give up cleanly (None) rather than store an empty stub.
+def test_uk_adapter_raises_transient_on_202_async_generation(monkeypatch):
+    # Large representations answer 202 + empty body while legislation.gov.uk builds them.
+    # The adapter must retry, then report a TRANSIENT failure rather than store an empty
+    # stub — the document exists, so the drain must retry it in hours, not write it off
+    # as absent for months.
     import raglex.adapters.uk_legislation as ukl
     monkeypatch.setattr(ukl.time, "sleep", lambda *_: None)
 
@@ -192,7 +197,9 @@ def test_uk_adapter_returns_none_on_202_async_generation(monkeypatch):
             return _StatusResp(b"", status_code=202)
 
     ad = UKLegislationAdapter(ids="eur/2008/1272", client=_Always202())
-    assert ad.fetch(list(ad.discover(None))[0]) is None
+    with pytest.raises(FetchError) as exc:
+        ad.fetch(list(ad.discover(None))[0])
+    assert exc.value.transient is True
 
 
 def test_eu_legislation_adapter_builds_from_formex():

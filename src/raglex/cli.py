@@ -272,9 +272,20 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 0
     if sub == "serve":
         import os
+
+        from .jobs import JobManager
+
         print(f"[watch] scheduler up; ticking every {args.interval}s")
+        # The scheduler's own work is recorded as jobs, in the same table the API reads —
+        # so the auto-drain finally appears in the jobs panel, with its per-tick outcome.
+        # An auto-drain quietly storing zero documents for a fortnight was invisible before.
+        jobs = JobManager(f, origin="scheduler")
+        jobs.reap_orphans()
         last_backfill = 0.0
         last_effects = 0.0
+        last_counts = 0.0
+        eurlex_broken_until = 0.0
+        pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
             try:
                 res = f.tick_watches()
@@ -285,16 +296,23 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 Config.from_env()  # refresh settings → env (RAGLEX_AUTOHARVEST)
                 batch = int(os.environ.get("RAGLEX_AUTOHARVEST") or 0)
                 if batch > 0:
-                    hr = f.harvest_all_references(limit=batch)
-                    if hr.get("harvested"):
-                        print(f"[watch] auto-drain: harvested {hr['harvested']}, "
-                              f"resolved {hr['resolved_edges']} edge(s)")
+                    started = jobs.start("auto-drain", f"auto-drain worklist ({batch}/tick)",
+                                         {"limit": batch})
+                    if started.get("already_running"):
+                        print("[watch] auto-drain: previous tick still running; skipping")
+                    elif started.get("error"):
+                        print(f"[watch] auto-drain: {started['error']}")
                 # Once a day: pull EU case names/subjects from the EUR-Lex webservice
-                # (batched, skipping known-empty CELEXes). No-op without creds.
-                if time.time() - last_backfill >= 86400:
+                # (batched, skipping known-empty CELEXes). No-op without creds. The service
+                # 500s for days at a time; when it does, stop asking until tomorrow rather
+                # than grinding the whole batch against it every tick.
+                if time.time() - last_backfill >= 86400 and time.time() >= eurlex_broken_until:
                     last_backfill = time.time()
                     bf = f.backfill_titles()
-                    if bf.get("titled") or bf.get("subject_tags_added"):
+                    if bf.get("provider_down"):
+                        eurlex_broken_until = time.time() + 86400
+                        print("[watch] eurlex backfill: service erroring; backing off 24h")
+                    elif bf.get("titled") or bf.get("subject_tags_added"):
                         print(f"[watch] eurlex backfill: {bf}")
                 # Hourly: re-pull legislation whose outstanding-effects re-check is due
                 # (§0). Bounded; usually a no-op (backoff is weeks). Only touches items
@@ -312,6 +330,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     if pc.get("flagged") or pc.get("edges"):
                         print(f"[watch] changes propagate: scanned {pc['scanned']}, "
                               f"flagged {pc['flagged']} for re-pull, {pc['edges']} amends edge(s)")
+                # Hourly: refresh the citation-frequency roll-up the snowball reads. The
+                # live aggregate is a ~13s scan of a 10M-row table; the frontier doesn't
+                # move between ticks, so a page load must never pay for it.
+                if time.time() - last_counts >= 3600:
+                    last_counts = time.time()
+                    cc = f.rebuild_citation_counts()
+                    print(f"[watch] citation counts: {cc['candidates']} distinct candidates")
+                # Push the alerts a solo operator can't get by watching a dashboard —
+                # to RAGLEX_ALERT_WEBHOOK if set, otherwise the log. Deduped by (code,
+                # subject) so a standing condition isn't re-pushed every 15 minutes.
+                for alert in f.push_alerts(seen=pushed_alerts):
+                    print(f"[watch] ALERT {alert['code']} {alert['subject']}: {alert['message']}")
             except Exception as exc:  # noqa: BLE001 — a scheduler must not die on one error
                 print(f"[watch] tick error: {exc}")
             time.sleep(args.interval)
@@ -344,6 +374,25 @@ def cmd_index(_: argparse.Namespace) -> int:
         print(f"created HNSW index for {result['dimensions']}-dim vectors")
     else:
         print(f"no index created (backend={result['backend']}; pgvector only)")
+    return 0
+
+
+def cmd_migrate(_: argparse.Namespace) -> int:
+    """One-off data migration after an upgrade: backfill candidate_id/raw_fold on edges
+    written before those columns existed (§5b), then rebuild the citation-frequency
+    roll-up. Idempotent — safe to re-run."""
+    from .facade import Facade
+
+    f = Facade(Config.from_env())
+    print("backfilling edge candidate ids (may take a few minutes over a large graph)…")
+    bf = f.backfill_edge_keys(on_progress=lambda **p: None)
+    print(f"  backfilled {bf['strings_backfilled']} distinct citation strings")
+    print("resolving now-linkable edges…")
+    res = f.resolve()
+    print(f"  resolved {res.get('resolved', 0)} edge(s)")
+    print("rebuilding the citation-frequency roll-up…")
+    cc = f.rebuild_citation_counts()
+    print(f"  {cc['candidates']} distinct candidates")
     return 0
 
 
@@ -495,6 +544,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     idx = sub.add_parser("index", help="build the pgvector HNSW index (Postgres, §7)")
     idx.set_defaults(func=cmd_index)
+
+    mig = sub.add_parser("migrate", help="one-off post-upgrade backfill: edge keys + counts (§5b)")
+    mig.set_defaults(func=cmd_migrate)
 
     ex = sub.add_parser("extract", help="extract citations from text into edges (§5)")
     ex.add_argument("--doc", default=None, help="a single stable_id (default: whole corpus)")

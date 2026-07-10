@@ -164,6 +164,44 @@ def first_candidate(raw: str) -> Candidate | None:
     return None
 
 
+def act_level(candidate: str | None) -> str | None:
+    """Collapse a section/part-level legislation id to its Act so only the high-level
+    instrument is ever listed/harvested (the section becomes a pinpoint, not a
+    separate document): ``ukpga/2000/36/section/14`` → ``ukpga/2000/36``."""
+    if not candidate:
+        return candidate
+    from ..citations.snowball import UK_LEG_TYPES
+
+    parts = candidate.split("/")
+    if parts[0].lower() not in UK_LEG_TYPES:
+        return candidate
+    # A pre-1963 Act is cited by regnal year — type/monarch/session/number (4 segments,
+    # e.g. ukpga/Eliz2/9-10/18) — so its Act level is FOUR parts, not three. Truncating to
+    # three drops the chapter and yields an ambiguous whole-session id. Detect regnal by a
+    # non-numeric second segment.
+    act_len = 4 if (len(parts) > 1 and not parts[1].isdigit()) else 3
+    if len(parts) > act_len:
+        return "/".join(parts[:act_len])
+    return candidate
+
+
+def normalise_candidate(dst_id: str | None, raw: str | None) -> str | None:
+    """The canonical target id an edge points at, derived once at write time and stored
+    on ``relations.candidate_id`` (§5b). Prefers the adapter-supplied ``dst_id``, but
+    re-derives it when it's absent or URL-shaped (a stored legislation/caselaw URL
+    collapses to its slug, so a URL cite and a neutral-citation cite of the same case
+    merge into one reference). Section-level ids collapse to their Act.
+
+    Persisting this is what lets resolution, the hanging-reference worklist, and the
+    coverage aggregates run as indexed SQL rather than re-deriving the same regex ladder
+    over millions of edges on every read."""
+    candidate = dst_id
+    if (not candidate or candidate.startswith("http")) and (candidate or raw):
+        cand = first_candidate(candidate or raw or "") or first_candidate(raw or "")
+        candidate = cand.value if cand else candidate
+    return act_level(candidate)
+
+
 def extract_citation_strings(text: str) -> list[str]:
     """Find every ECLI / CELEX literal in a free-text blob (e.g. a Zotero abstract
     or an imported article), de-duplicated in order. Each becomes a dangling

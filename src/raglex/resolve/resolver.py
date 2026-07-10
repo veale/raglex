@@ -36,22 +36,24 @@ def string_hash(raw: str) -> str:
 class ResolveStats:
     resolved: int = 0
     still_pending: int = 0
-    aliases_added: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
-            f"[resolve] resolved={self.resolved} still_pending={self.still_pending} "
-            f"aliases_added={self.aliases_added}"
-        )
+        return f"[resolve] resolved={self.resolved} still_pending={self.still_pending}"
 
 
 class Resolver:
-    def __init__(self, catalogue: Catalogue, *, grow_aliases: bool = True) -> None:
+    """Resolution is now set-based over the persisted ``candidate_id``/``raw_fold``.
+
+    The resolver used to cache every resolved citation string back into
+    ``citation_aliases`` so the next identical string took the cheap alias rung. That
+    lookup is now an indexed column on the edge itself, so the cache bought nothing and
+    cost a million rows. The alias table keeps only the *semantic* mappings — CELEX→ECLI,
+    chamber-less slugs, user shorthand — which are rules, not memoisation.
+    """
+
+    def __init__(self, catalogue: Catalogue) -> None:
         self.catalogue = catalogue
-        # When a structured match resolves, cache the colloquial string → id so a
-        # future identical citation resolves by the cheap alias rung (§5b).
-        self.grow_aliases = grow_aliases
 
     def candidate_for(self, raw: str) -> Candidate | None:
         """Run the ladder: alias first (cheapest), then structured patterns."""
@@ -70,45 +72,17 @@ class Resolver:
 
     def run(self) -> ResolveStats:
         """Resolve every pending edge once. Safe to re-run after each ingest (§5b):
-        re-running is how citations to newly-harvested targets become live edges."""
+        re-running is how citations to newly-harvested targets become live edges.
+
+        Three set-based UPDATEs off the persisted ``candidate_id``/``raw_fold`` and their
+        partial indexes — the candidate ladder already ran, once, at extraction time."""
         stats = ResolveStats()
-        pending = self.catalogue.pending_relations()
-
-        # 1. Work out each edge's candidate id once (adapter-supplied dst, else the
-        #    matcher ladder over the raw string), collecting the distinct candidates.
-        edges: list[tuple[int, str, str | None, object]] = []  # (relation_id, raw, candidate, Candidate|None)
-        cand_set: set[str] = set()
-        for rel in pending:
-            raw = rel["raw_citation_string"]
-            supplied = rel["dst_id"]
-            if supplied:
-                cand_obj, cand = None, supplied
-            else:
-                cand_obj = self.candidate_for(raw)
-                cand = cand_obj.value if cand_obj else None
-            edges.append((rel["relation_id"], raw, cand, cand_obj))
-            if cand:
-                cand_set.add(cand)
-
-        # 2. ONE batch query: which candidates are present as documents (the per-edge
-        #    find_document_id over 100k+ edges was the bottleneck, alongside the commits).
-        present = self.catalogue.find_existing(cand_set)
-
-        # 3. Resolve the edges whose candidate is present (deferred commit); the rest
-        #    simply stay pending — the worklist is derived from the relations graph, so
-        #    there's no per-edge worklist write to redo every run (and no count inflation).
-        for relation_id, raw, cand, cand_obj in edges:
-            dst = present.get(cand) if cand else None
-            if dst is not None:
-                self.catalogue.resolve_relation(relation_id, dst, commit=False)
-                stats.resolved += 1
-                if self.grow_aliases and raw and cand_obj and cand_obj.method != "alias":
-                    folded = fold(raw)
-                    if folded != dst.lower() and not self.catalogue.get_alias(folded):
-                        self.catalogue.put_alias(folded, dst, source="resolver", commit=False)
-                        stats.aliases_added += 1
-            else:
-                stats.still_pending += 1
-        self.catalogue.commit()
+        stats.resolved = self.catalogue.resolve_pending()
+        stats.still_pending = self.catalogue.count_pending_relations()
         log.info(stats.summary())
         return stats
+
+    def run_for(self, stable_id: str, ecli: str | None = None) -> int:
+        """Resolve only the edges that point at one just-harvested document. Nothing else
+        can have become resolvable, so the whole-graph pass is wasted work on ingest."""
+        return self.catalogue.resolve_pending_for(stable_id, ecli)

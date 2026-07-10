@@ -17,6 +17,7 @@ to a pluggable notifier (Slack/Discord/email later; a logging notifier now) on:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -48,6 +49,7 @@ class AlertThresholds:
     stale_days: int = 14  # default "no new docs in X days"; tune per source
     queue_backlog: int = 1000
     llm_extract_ratio: float = 0.5
+    drain_window: int = 5  # consecutive auto-drains that stored nothing before alerting
 
 
 def _days_since(iso: str | None) -> float | None:
@@ -95,7 +97,47 @@ def check_alerts(catalogue: Catalogue, thresholds: AlertThresholds | None = None
                 "queue_backlog", WARNING, name,
                 f"queue {name!r} has {depth} items pending (ingestion outrunning processing)",
             ))
+    alerts.extend(_drain_alerts(catalogue, t))
     return alerts
+
+
+def _drain_alerts(catalogue: Catalogue, t: AlertThresholds) -> list[Alert]:
+    """The auto-drain is the only thing that shrinks the worklist unattended, and it fails
+    *quietly*: every reference it tries can be skipped, or fail, and the tick still reports
+    success. A drain that has stored nothing across its last N runs is either finished or
+    broken — and "broken" once went unnoticed for seventeen days, because nothing watched
+    this number. Also flag a drain whose candidates are all cooling off after failures,
+    which is the specific shape that bug took."""
+    runs = catalogue.recent_job_results("auto-drain", limit=t.drain_window)
+    if len(runs) < t.drain_window:
+        return []  # not enough history to judge
+    import json
+
+    harvested = attempted = skipped = 0
+    for r in runs:
+        try:
+            res = json.loads(r["result_json"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        harvested += int(res.get("harvested") or 0)
+        attempted += int(res.get("attempted") or 0)
+        skipped += int(res.get("skipped_recent_fail") or 0)
+    if harvested:
+        return []
+    if attempted == 0 and skipped > 0:
+        return [Alert(
+            "drain_all_cooling_off", CRITICAL, "auto-drain",
+            f"the last {len(runs)} auto-drains attempted nothing: all {skipped} routable "
+            f"references are cooling off after earlier failures. Clear the cool-down "
+            f"(Unresolved → retry failed) if a source was merely unavailable.",
+        )]
+    if attempted:
+        return [Alert(
+            "drain_storing_nothing", WARNING, "auto-drain",
+            f"the last {len(runs)} auto-drains attempted {attempted} references and stored "
+            f"none — the worklist may be exhausted, or every fetch is failing",
+        )]
+    return []
 
 
 @runtime_checkable
@@ -118,6 +160,38 @@ class LogNotifier:
             log.warning(line)
 
 
+class WebhookNotifier:
+    """POST each alert to a webhook — ntfy.sh, Discord, Slack, anything that takes a
+    body. A dashboard only helps when you're looking at it; this is the half of §8 that
+    reaches a solo operator who isn't.
+
+    ``RAGLEX_ALERT_WEBHOOK`` is the URL. ntfy takes the plain message as the body, which
+    is why the default payload is text rather than JSON.
+    """
+
+    def __init__(self, url: str, *, json_field: str | None = None) -> None:
+        self.url = url
+        self.json_field = json_field or os.environ.get("RAGLEX_ALERT_WEBHOOK_FIELD")
+
+    def notify(self, alert: Alert) -> None:
+        import httpx
+
+        line = f"[{alert.severity.upper()}] {alert.code} ({alert.subject}): {alert.message}"
+        try:
+            if self.json_field:  # Slack: {"text": …}; Discord: {"content": …}
+                httpx.post(self.url, json={self.json_field: line}, timeout=10)
+            else:
+                httpx.post(self.url, content=line.encode("utf-8"),
+                           headers={"Title": f"RagLex {alert.severity}"}, timeout=10)
+        except Exception:  # noqa: BLE001 — a broken notifier must not break the scheduler
+            log.warning("could not push alert to %s: %s", self.url, line)
+
+
+def default_notifier() -> Notifier:
+    url = os.environ.get("RAGLEX_ALERT_WEBHOOK")
+    return WebhookNotifier(url) if url else LogNotifier()
+
+
 def push_alerts(
     catalogue: Catalogue,
     notifier: Notifier | None = None,
@@ -125,7 +199,7 @@ def push_alerts(
     thresholds: AlertThresholds | None = None,
 ) -> list[Alert]:
     """Compute alerts and push each to the notifier. Returns them for the dashboard."""
-    notifier = notifier or LogNotifier()
+    notifier = notifier or default_notifier()
     alerts = check_alerts(catalogue, thresholds)
     for alert in alerts:
         notifier.notify(alert)

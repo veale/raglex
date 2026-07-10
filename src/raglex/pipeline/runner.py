@@ -36,9 +36,33 @@ class RunStats:
     stored: int = 0
     off_topic: int = 0
     errors: int = 0
+    # Why a fetch failed decides whether the caller may cool the item off for months.
+    # A 404/410 (or an adapter that found nothing upstream) means "this item does not
+    # exist" — safe to skip for a long time. A timeout / transport error / 429 means
+    # "we couldn't tell" — cooling those off is how a whole worklist gets written out
+    # of existence by one bad afternoon at the source.
+    errors_fatal: int = 0
+    errors_transient: int = 0
+    not_found: int = 0
     rate_limited: bool = False
     watermark: str | None = None
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def outcome(self) -> str:
+        """One word for what happened to a *targeted single-item* run — the vocabulary
+        the harvest-drain uses to decide miss/retry/abort."""
+        if self.rate_limited:
+            return "rate_limited"
+        if self.stored:
+            return "stored"
+        if self.errors_transient:
+            return "transient"
+        if self.errors_fatal or self.not_found:
+            return "absent"
+        if self.deduped:
+            return "present"
+        return "empty"
 
     def summary(self) -> str:
         return (
@@ -116,16 +140,24 @@ class Pipeline:
                     break
                 except FetchError as exc:
                     stats.errors += 1
-                    if not exc.transient and stub.stable_id:
-                        # A 404/410 for a known doc → flag upstream_status, never delete (§1.4a).
-                        if self.catalogue.get_document(stub.stable_id) is not None:
-                            self.catalogue.mark_upstream_status(
-                                stub.stable_id, UpstreamStatus.GONE_404
-                            )
+                    if exc.transient:
+                        stats.errors_transient += 1
+                    else:
+                        stats.errors_fatal += 1
+                        if stub.stable_id:
+                            # A 404/410 for a known doc → flag upstream_status, never delete (§1.4a).
+                            if self.catalogue.get_document(stub.stable_id) is not None:
+                                self.catalogue.mark_upstream_status(
+                                    stub.stable_id, UpstreamStatus.GONE_404
+                                )
+                    stats.notes.append(f"{stub.stable_id}: {exc}")
                     log.warning("fetch failed for %s: %s", stub.stable_id, exc)
                     continue
 
                 if record is None:
+                    # The adapter reached the source and found nothing there — an absence,
+                    # not a failure (no bytes, no metadata). Distinct from a FetchError.
+                    stats.not_found += 1
                     continue
                 stats.fetched += 1
 
@@ -201,6 +233,14 @@ class Pipeline:
         celex = record.extra.get("celex")
         if celex and record.ecli:
             self.catalogue.put_alias(celex.casefold(), record.ecli, source="celex-ecli")
+        # Alternate CELEXes the corpus *cites* this document by (§5b). A CJEU case number
+        # gives no hint whether the case ended in a judgment (…CJ…) or an order (…CO…), so
+        # the grammar guesses; the targeted fetch resolves the real descriptor and records
+        # the guess here. Without these aliases the fetched case would sit in the corpus
+        # while every edge citing the guessed form stayed pending forever.
+        for alias in record.extra.get("celex_aliases") or ():
+            if alias and record.ecli:
+                self.catalogue.put_alias(str(alias).casefold(), record.ecli, source="celex-ecli")
         # Tribunal/court chamber recovery (§5b): a UK Find Case Law id carries the
         # chamber as a path segment (ukut/aac/2012/440), but a citation may omit it
         # ("[2012] UKUT 440" → ukut/2012/440). Mint the chamber-less alias so the

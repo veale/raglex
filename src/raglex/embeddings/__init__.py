@@ -8,6 +8,7 @@ from .provider import (
     HashingEmbeddingProvider,
     OpenRouterEmbeddingProvider,
     get_provider,
+    get_reranker,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "HashingEmbeddingProvider",
     "OpenRouterEmbeddingProvider",
     "get_provider",
+    "get_reranker",
 ]

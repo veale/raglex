@@ -31,7 +31,8 @@ pytestmark = pytest.mark.skipif(not PG_URL, reason="set RAGLEX_TEST_PG_URL to te
 
 _TABLES = [
     "embeddings", "document_tags", "rule_runs", "tag_rules", "document_assets",
-    "pending_resolution", "citation_aliases", "relations", "sources", "documents",
+    "citation_aliases", "citations", "citation_counts", "jobs", "relations",
+    "sources", "documents",
 ]
 
 
@@ -42,6 +43,8 @@ def pg(tmp_path):
     with psycopg.connect(PG_URL) as conn:  # fresh schema each test
         conn.execute("DROP TABLE IF EXISTS " + ", ".join(_TABLES) + " CASCADE")
         conn.commit()
+    # The DDL is applied once per process per DSN; the drop above invalidates that.
+    Catalogue.reset_schema_cache()
     cat = Catalogue(PG_URL)
     yield cat, TextStore(tmp_path / "text")
     cat.close()

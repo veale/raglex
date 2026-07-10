@@ -31,8 +31,15 @@ class SettingSpec:
 
 # The known settings the UI renders. Adding a credentialed source = one row here.
 KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
-    SettingSpec("RAGLEX_EMBED_PROVIDER", "Embedding provider", False, "Embeddings", "local-hashing | openrouter"),
-    SettingSpec("RAGLEX_EMBED_MODEL", "Embedding model", False, "Embeddings", "openai/text-embedding-3-small"),
+    SettingSpec("RAGLEX_EMBED_PROVIDER", "Embedding provider", False, "Embeddings", "local-hashing | openrouter | mcp"),
+    SettingSpec("RAGLEX_EMBED_MODEL", "Embedding model", False, "Embeddings", "openai/text-embedding-3-small | bge-m3"),
+    SettingSpec("RAGLEX_EMBED_DIMENSIONS", "Embedding dimensions", False, "Embeddings",
+                "must match the model; changing it starts a NEW vector family and re-embeds"),
+    SettingSpec("RAGLEX_ML_URL", "ML sidecar MCP URL", False, "Embeddings",
+                "http://raglex-ml:9000/mcp — serves embed + rerank"),
+    SettingSpec("RAGLEX_ML_TOKEN", "ML sidecar token", True, "Embeddings"),
+    SettingSpec("RAGLEX_RERANKER", "Reranker", False, "Embeddings", "identity | mcp"),
+    SettingSpec("RAGLEX_RERANK_MODEL", "Reranker model", False, "Embeddings", "bge-reranker-v2-m3"),
     SettingSpec("OPENROUTER_API_KEY", "OpenRouter API key", True, "Embeddings"),
     SettingSpec("VOYAGE_API_KEY", "Voyage API key", True, "Embeddings"),
     # LLM passes (citation extraction + treatment classification, §5). Any
@@ -55,8 +62,14 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
                 "httpx | stealth | playwright"),
     SettingSpec("RAGLEX_AUTOHARVEST", "Auto-drain worklist (refs/tick)", False, "Network",
                 "0 = off; e.g. 25 — the scheduler slowly fetches routable citations each tick"),
-    SettingSpec("RAGLEX_MISS_TTL_DAYS", "Harvest-miss cooldown (days)", False, "Network",
-                "90 — days to skip a URL that returned 404 before retrying; higher = less wasted drain budget on dead URLs"),
+    SettingSpec("RAGLEX_MISS_TTL_DAYS", "Absent-reference cooldown (days)", False, "Network",
+                "90 — days to skip a reference the source said does not exist (404). Only genuine absences land here"),
+    SettingSpec("RAGLEX_RETRY_TTL_HOURS", "Unreachable-reference cooldown (hours)", False, "Network",
+                "6 — hours to skip a reference we merely couldn't fetch (timeout, 5xx). Short: the document probably exists"),
+    SettingSpec("RAGLEX_API_TOKEN", "API bearer token", True, "Network",
+                "blank = open. Set it and the REST API + MCP endpoint both require it"),
+    SettingSpec("RAGLEX_ALERT_WEBHOOK", "Alert webhook URL", True, "Network",
+                "ntfy.sh/your-topic — pushes source-failure and drain-stalled alerts"),
 )
 _SPEC_BY_KEY = {s.key: s for s in KNOWN_SETTINGS}
 

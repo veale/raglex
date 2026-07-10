@@ -5,13 +5,14 @@
 #  - the API serves everything on one port: UI + REST at :8200, MCP at :8200/mcp
 #  - ALL persistent state lives under one host folder on the Nextcloud disk:
 #       /mnt/nextcloud_data/docker-binds/raglex-data/
-#         ├── pg/    → Postgres data dir   (the database container's storage)
-#         └── app/   → raw/, text/, settings.json  (the app's data dir)
+#         ├── pg/       → Postgres data dir   (the database container's storage)
+#         ├── app/      → raw/, text/, settings.json  (the app's data dir)
+#         └── backups/  → nightly pg_dump.gz (14 kept)
 #    Bind mounts (not named volumes) so the bytes are plainly on disk and survive
 #    `docker compose down -v`, backups, etc.
 #
 # First-time setup (folders are root-owned, hence sudo):
-#   sudo mkdir -p /mnt/nextcloud_data/docker-binds/raglex-data/{pg,app}
+#   sudo mkdir -p /mnt/nextcloud_data/docker-binds/raglex-data/{pg,app,backups}
 # Pull + run:
 #   docker compose -f docker-compose.asahi.yml pull
 #   docker compose -f docker-compose.asahi.yml up -d
@@ -19,10 +20,14 @@
 # Override the image tag / DB password without editing this file via a .env beside it:
 #   RAGLEX_IMAGE=ghcr.io/veale/raglex:latest
 #   POSTGRES_PASSWORD=raglex
+#   RAGLEX_API_TOKEN=…            # require a bearer token on the API + MCP
+#   RAGLEX_ALERT_WEBHOOK=…        # push alerts (ntfy/Discord/Slack)
 
 x-app-env: &app-env
   RAGLEX_DATA_DIR: /data
   RAGLEX_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-raglex}@db:5432/raglex
+  RAGLEX_API_TOKEN: ${RAGLEX_API_TOKEN:-}
+  RAGLEX_ALERT_WEBHOOK: ${RAGLEX_ALERT_WEBHOOK:-}
 
 services:
   db:
@@ -30,14 +35,57 @@ services:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raglex}
       POSTGRES_DB: raglex
+    # Postgres ships defaults sized for a 1990s workstation: 128MB of cache, 4MB of
+    # working memory. This box has 15GB, and the corpus aggregates group over a 10M-row
+    # citations table — under the stock work_mem they spill to disk on every run.
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c effective_cache_size=8GB
+      -c work_mem=64MB
+      -c maintenance_work_mem=512MB
+      -c random_page_cost=1.1
+      -c max_connections=60
+      -c log_min_duration_statement=1000
     volumes:
       - /mnt/nextcloud_data/docker-binds/raglex-data/pg:/var/lib/postgresql/data
+    shm_size: 1gb   # parallel workers hash/sort in shared memory
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d raglex"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Nightly pg_dump, 14 kept. raw/ and text/ are content-addressed files that rsync
+  # happily, but the DATABASE holds what is NOT re-derivable: manual tags, aliases,
+  # suppressed citations, curation. Losing it loses the human work.
+  db-backup:
+    image: postgres:16
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-raglex}
+    volumes:
+      - /mnt/nextcloud_data/docker-binds/raglex-data/backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          ts=$$(date -u +%Y%m%dT%H%M%SZ)
+          echo "[backup] dumping raglex at $$ts"
+          if pg_dump -h db -U postgres -d raglex --no-owner \
+               | gzip -c > "/backups/raglex-$$ts.sql.gz.part"; then
+            mv "/backups/raglex-$$ts.sql.gz.part" "/backups/raglex-$$ts.sql.gz"
+            echo "[backup] wrote raglex-$$ts.sql.gz"
+          else
+            echo "[backup] FAILED"; rm -f "/backups/raglex-$$ts.sql.gz.part"
+          fi
+          # keep the 14 newest
+          ls -1t /backups/raglex-*.sql.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
+          sleep 86400
+        done
+    restart: unless-stopped
 
   raglex-api:
     image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}

@@ -16,7 +16,7 @@ dependencies = [
 # The production spine is PostgreSQL (pgvector/FTS/partitioning land in later
 # build steps, §7). The catalogue repository is portable; the SQLite backend is
 # the zero-dependency local/dev/test default, psycopg is the Postgres backend.
-postgres = ["psycopg[binary]>=3.2"]
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 # The §8 ops/research web API.
 web = [
     "fastapi>=0.110",
@@ -44,6 +44,7 @@ dev = [
     "python-multipart>=0.0.9",
     "mcp>=1.2",
     "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
     "beautifulsoup4>=4.15.0",
 ]
 

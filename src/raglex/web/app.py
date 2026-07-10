@@ -11,123 +11,62 @@ Facade, so the two never drift.
 from __future__ import annotations
 
 import os
-import threading
-import time
-import uuid
 
-from fastapi import Body, FastAPI, File, Form, Query, UploadFile
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from ..config import Config
 from ..facade import Facade
+from ..jobs import JobManager
 
-# In-process background jobs for long operations (radiate / harvest-all), so the UI
-# can poll progress ("fetching 5/30") instead of waiting on one blocking request.
-_JOBS: dict[str, dict] = {}
-
-
-def _fmt_progress(p: dict) -> str:
-    """One human log line from a progress event: 'degree 1  5/40 — ukpga/2018/12 ✓'."""
-    if not p:
-        return ""
-    parts = [str(p["stage"])] if p.get("stage") else []
-    if p.get("total"):
-        parts.append(f"{p.get('done', 0)}/{p['total']}")
-    elif "done" in p:
-        parts.append(str(p["done"]))
-    if p.get("item"):
-        parts.append("— " + str(p["item"]))
-    if "ok" in p:
-        parts.append("✓" if p["ok"] else "✗")
-    if p.get("msg"):
-        parts.append(str(p["msg"]))
-    return "  ".join(parts).strip()
+# Endpoints reachable without the API token: the liveness probe (so a healthcheck needn't
+# hold a secret) and the CORS preflight the browser sends before it can add a header.
+_PUBLIC_PATHS = frozenset({"/health"})
 
 
-# Jobs that pass over the WHOLE corpus — pointless (and CPU-wasteful) to run two at once,
-# so these stay one-at-a-time. Everything else (seed-from-text, harvest a category, radiate,
-# expand-citing) is keyed to a specific input and may run simultaneously.
-_SINGLETON_KINDS = {"rescan-citations", "backfill-metadata"}
-_MAX_CONCURRENT_JOBS = 6
-# A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
-# its worker thread is parked on a network socket that died when the host slept/woke. We
-# can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
-_STALL_SECONDS = 150.0
+def _install_auth(app: FastAPI) -> None:
+    """Require a bearer token when ``RAGLEX_API_TOKEN`` is set.
 
+    Unauthenticated, the write surface lets anyone on the network rewrite settings —
+    including the stored API keys — and run corrections against the corpus. The token is
+    opt-in so existing local/dev setups keep working untouched; set it and the whole API
+    (and the MCP endpoint mounted beside it) is closed.
+    """
+    token = os.environ.get("RAGLEX_API_TOKEN")
+    if not token:
+        return
 
-def _job_idle_s(j: dict) -> float:
-    """Seconds since this job last made progress (its heartbeat). 0 for finished jobs."""
-    if j["status"] != "running":
-        return 0.0
-    return max(0.0, time.monotonic() - j.get("last_progress_at", time.monotonic()))
+    @app.middleware("http")
+    async def _require_token(request: Request, call_next):  # noqa: ANN001
+        if request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
+            return await call_next(request)
+        header = request.headers.get("authorization", "")
+        supplied = header[7:] if header.lower().startswith("bearer ") else \
+            request.headers.get("x-api-key", "")
+        # constant-time compare: a token check that leaks timing is a token check that
+        # can be guessed byte by byte.
+        import hmac
 
-
-def _start_job(kind: str, label: str, fn) -> dict:
-    running = [j for j in _JOBS.values() if j["status"] == "running"]
-    if kind in _SINGLETON_KINDS:
-        for j in running:
-            if j["kind"] == kind:
-                return {"job_id": j["id"], "already_running": True}
-    if len(running) >= _MAX_CONCURRENT_JOBS:
-        return {"error": f"too many jobs running ({len(running)}); let some finish first"}
-    job_id = uuid.uuid4().hex[:8]
-    job = _JOBS[job_id] = {"id": job_id, "kind": kind, "label": label, "status": "running",
-                           "progress": {}, "log": [], "result": None, "cancel": False,
-                           "started_at": _now_iso(), "last_progress_at": time.monotonic(),
-                           # the (reusable, idempotent) closure, kept so a frozen job — one
-                           # whose network socket died on host sleep/wake — can be re-launched
-                           # from where the persisted data left off. See /jobs/{id}/restart.
-                           "fn": fn}
-    if len(_JOBS) > 200:  # keep the registry bounded
-        for k in list(_JOBS)[:100]:
-            if _JOBS[k]["status"] != "running":
-                _JOBS.pop(k, None)
-
-    # How long the job thread sleeps on each progress tick. A job runs in a thread inside
-    # the API process; a CPU-bound loop (e.g. extracting 20k docs) would otherwise hold the
-    # GIL and starve the web server until it's unreachable. sleeping RELEASES the GIL, so
-    # the event loop keeps serving requests — the API stays responsive throughout a job.
-    yield_s = float(os.environ.get("RAGLEX_JOB_YIELD_S") or 0.003)
-
-    def worker() -> None:
-        try:
-            def on_progress(**p):
-                job["progress"] = p
-                job["last_progress_at"] = time.monotonic()  # heartbeat — drives stall detection
-                line = _fmt_progress(p)
-                # append a log line only when it actually changes (avoid spam), capped
-                if line and (not job["log"] or job["log"][-1] != line):
-                    job["log"].append(line)
-                    if len(job["log"]) > 300:
-                        del job["log"][:100]
-                if yield_s:
-                    time.sleep(yield_s)  # yield the GIL so the API never starves (see above)
-            job["result"] = fn(on_progress, lambda: job["cancel"])
-            job["status"] = "cancelled" if job["cancel"] else "done"
-            job["log"].append(f"— {job['status']} —")
-        except Exception as exc:  # noqa: BLE001 — surface to the poller, don't crash
-            job["status"] = "error"
-            job["result"] = {"error": str(exc)}
-            job["log"].append(f"✗ error: {exc}")
-
-    threading.Thread(target=worker, daemon=True).start()
-    return {"job_id": job_id}
-
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
+        if not hmac.compare_digest(supplied, token):
+            return JSONResponse({"error": "unauthorised"}, status_code=401)
+        return await call_next(request)
 
 
 def create_app(config: Config | None = None) -> FastAPI:
     facade = Facade(config or Config.from_env())
     facade.warm_caches()  # pre-compute heavy dashboard aggregates so first load is instant
+    jobs = JobManager(facade, origin="api")
+    jobs.reap_orphans()  # rows the previous process left 'running' have no thread behind them
     app = FastAPI(title="RagLex", version="0.1.0", summary="Legal corpus ops + research API")
     # The React dev server lives on another origin; allow it (tighten in prod).
     app.add_middleware(
         CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
     )
+    _install_auth(app)
+
+    def _start_job(kind: str, label: str, params: dict | None = None) -> dict:
+        return jobs.start(kind, label, params or {})
 
     # -- ops (build/observe first, §8) ------------------------------------
     @app.get("/health")
@@ -158,7 +97,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.get("/unresolved")
     def unresolved(limit: int = 100) -> list[dict]:
         """Hanging references the corpus can't satisfy — the manual-resolution queue."""
-        return facade.unresolved_references(limit=limit)
+        return facade.unresolved_references(limit=limit, with_citing=True)
 
     @app.get("/coverage")
     def coverage() -> dict:
@@ -259,8 +198,23 @@ def create_app(config: Config | None = None) -> FastAPI:
     def job_rescan_ep() -> dict:
         """Re-extract every document with the current grammars/rules (picks up new adapters
         like ECHR) — as a progress-tracked background job."""
-        return _start_job("rescan-citations", "re-scan corpus for new citations",
-                          lambda cb, cancel: facade.apply_rules(on_progress=cb, cancel_check=cancel))
+        return _start_job("rescan-citations", "re-scan corpus for new citations")
+
+    @app.post("/jobs/backfill-edge-keys")
+    def job_backfill_edge_keys_ep() -> dict:
+        """One-off after upgrade: populate candidate_id/raw_fold on pre-existing edges so
+        the set-based resolver and the SQL worklist see the whole graph."""
+        return _start_job("backfill-edge-keys", "backfill edge candidate ids")
+
+    @app.post("/jobs/rebuild-citation-counts")
+    def job_rebuild_counts_ep() -> dict:
+        """Refresh the snowball's citation-frequency roll-up."""
+        return _start_job("rebuild-citation-counts", "rebuild citation frequency roll-up")
+
+    @app.post("/unresolved/retry-failed")
+    def retry_failed_ep() -> dict:
+        """Clear the harvest cool-down lists so the next drain re-attempts every reference."""
+        return facade.retry_failed_references()
 
     @app.post("/unresolved/harvest-all")
     def harvest_all_ep(payload: dict = Body(default={})) -> dict:
@@ -288,33 +242,25 @@ def create_app(config: Config | None = None) -> FastAPI:
         case-law, via CELLAR's citation graph). Runs as a background job."""
         p = payload or {}
         return _start_job("expand-citing", "pull cases citing held cases",
-                          lambda cb, cancel: facade.expand_citing_cases(
-                              source=p.get("source", "eu-cellar"), limit=int(p.get("limit", 1000)),
-                              on_progress=cb, cancel_check=cancel))
+                          {"source": p.get("source", "eu-cellar"), "limit": int(p.get("limit", 1000))})
 
     @app.post("/jobs/refresh-category")
     def job_refresh_category_ep(payload: dict = Body(...)) -> dict:
         """"Total refresh" for one Corpus Map category: harvest its pending references, then
         (EU case-law) pull citing cases. Runs as a background job."""
         cat = (payload or {}).get("category", "")
-        return _start_job("refresh-category", f"total refresh — {cat}",
-                          lambda cb, cancel: facade.refresh_category(
-                              category=cat, on_progress=cb, cancel_check=cancel))
+        return _start_job("refresh-category", f"total refresh — {cat}", {"category": cat})
 
     @app.post("/jobs/pull-ag-opinions")
     def job_pull_ag_ep() -> dict:
         """Pull the AG Opinion for every held CJEU judgment that lacks one. Background job."""
-        return _start_job("pull-ag-opinions", "pull AG opinions for held CJEU cases",
-                          lambda cb, cancel: facade.pull_ag_opinions(on_progress=cb, cancel_check=cancel))
+        return _start_job("pull-ag-opinions", "pull AG opinions for held CJEU cases")
 
     @app.post("/jobs/seed-text")
     def job_seed_text_ep(payload: dict = Body(...)) -> dict:
         """Paste text → detect citations → harvest + radiate (forwards) and pull citing
         cases (backwards), as a background job."""
-        opts = {k: v for k, v in (payload or {}).items() if k != "text"}
-        return _start_job("seed-text", "seed from pasted text",
-                          lambda cb, cancel: facade.seed_from_text(
-                              text=payload.get("text", ""), **opts, on_progress=cb, cancel_check=cancel))
+        return _start_job("seed-text", "seed from pasted text", dict(payload or {}))
 
     @app.post("/backfill-titles")
     def backfill_titles_ep(payload: dict = Body(default={})) -> dict:
@@ -325,58 +271,35 @@ def create_app(config: Config | None = None) -> FastAPI:
     def job_backfill_metadata_ep() -> dict:
         """Repair stored docs from raw: UK court from slug, re-parse ruling-only CJEU
         judgments, derive CJEU titles from the Formex parties. Runs as a job."""
-        return _start_job("backfill-metadata", "repair court/title/ruling-only metadata",
-                          lambda cb, cancel: facade.backfill_document_metadata(on_progress=cb))
+        return _start_job("backfill-metadata", "repair court/title/ruling-only metadata")
 
     # -- background jobs (so long ops report progress instead of blocking) --
     @app.post("/jobs/radiate")
     def job_radiate_ep(payload: dict = Body(...)) -> dict:
         label = "snowball " + ", ".join(payload.get("seeds") or [str(payload.get("seed_rule"))])
-        return _start_job("radiate", label[:80],
-                          lambda cb, cancel: facade.radiate(**payload, on_progress=cb, cancel_check=cancel))
+        return _start_job("radiate", label[:80], dict(payload or {}))
 
     @app.post("/jobs/harvest-all")
     def job_harvest_all_ep(payload: dict = Body(default={})) -> dict:
-        return _start_job("harvest-all", "harvest all routable references",
-                          lambda cb, cancel: facade.harvest_all_references(
-                              **(payload or {}), on_progress=cb, cancel_check=cancel))
+        return _start_job("harvest-all", "harvest all routable references", dict(payload or {}))
 
     @app.get("/jobs")
-    def jobs_list_ep() -> list[dict]:
+    def jobs_list_ep(limit: int = 60) -> list[dict]:
         """All recent jobs (running first) for the global jobs panel — each with its
-        latest log line so the panel shows live activity without fetching every job."""
-        out = []
-        for j in _JOBS.values():
-            idle = _job_idle_s(j)
-            out.append({"id": j["id"], "kind": j["kind"], "label": j["label"],
-                        "status": j["status"], "progress": j.get("progress", {}),
-                        "started_at": j["started_at"],
-                        "idle_s": round(idle, 1), "stalled": idle >= _STALL_SECONDS,
-                        "last": (j.get("log") or [""])[-1],
-                        "result": j.get("result") if j["status"] != "running" else None})
-        out.sort(key=lambda j: (j["status"] != "running", j["started_at"]), reverse=False)
-        return out[::-1] if out else out
+        latest log line so the panel shows live activity without fetching every job.
+        Includes jobs started by the *scheduler* container, which the old in-process
+        registry could never see."""
+        return jobs.list(limit=limit)
 
     @app.get("/jobs/{job_id}")
     def job_status_ep(job_id: str, tail: int = 40) -> dict:
         """Full status of one job incl. the rolling log (last ``tail`` lines) — polled by
         the jobs panel for the live, verbose, item-by-item view."""
-        j = _JOBS.get(job_id)
-        if not j:
-            return {"status": "unknown"}
-        idle = _job_idle_s(j)
-        return {"id": j["id"], "kind": j["kind"], "label": j["label"], "status": j["status"],
-                "progress": j.get("progress", {}), "started_at": j["started_at"],
-                "idle_s": round(idle, 1), "stalled": idle >= _STALL_SECONDS,
-                "log": (j.get("log") or [])[-tail:], "result": j.get("result")}
+        return jobs.get(job_id, tail=tail)
 
     @app.post("/jobs/{job_id}/cancel")
     def job_cancel_ep(job_id: str) -> dict:
-        j = _JOBS.get(job_id)
-        if j and j["status"] == "running":
-            j["cancel"] = True
-            return {"job_id": job_id, "cancelling": True}
-        return {"job_id": job_id, "cancelling": False}
+        return jobs.cancel(job_id)
 
     @app.post("/jobs/{job_id}/restart")
     def job_restart_ep(job_id: str) -> dict:
@@ -384,19 +307,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         slept and its network socket died) or any finished/cancelled one. The work is
         idempotent: dedup skips held docs, recorded misses are skipped, so a restart only
         does what's left. The old (maybe still-parked) thread is signalled to cancel."""
-        j = _JOBS.get(job_id)
-        if not j:
-            return {"error": "unknown job"}
-        fn = j.get("fn")
-        if fn is None:
-            return {"error": "this job can't be restarted (no stored closure)"}
-        j["cancel"] = True  # ask the old thread to stop at its next checkpoint
-        if j["status"] == "running":
-            j["status"] = "cancelled"
-            j["log"].append("— superseded by restart —")
-        res = _start_job(j["kind"], j["label"], fn)
-        res["restarted_from"] = job_id
-        return res
+        return jobs.restart(job_id)
 
     # -- watches (saved harvest plans + scheduler, §5a) --------------------
     @app.get("/sources/catalog")

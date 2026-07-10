@@ -561,7 +561,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         {versions.length > 0 && <p className="versions">Version history: v{d.version} (latest){versions.map((v: any) =>
           <span key={v.version}> · v{v.version} archived {String(v.archived_at).slice(0, 10)}</span>)}</p>}
       </div>
-      {(doc.incoming || []).length > 0 && <CitedByPanel incoming={doc.incoming} count={doc.cited_by_count} />}
+      {(doc.incoming || []).length > 0 && <CitedByPanel incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} />}
       <div className="panel">
         <h3>{d.doc_type === "legislation" ? "Legislation" : "Document"} text
           <span className="muted"> — citations & ¶-refs pop up on the side; ＋link attaches commentary</span></h3>
@@ -596,7 +596,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
 
 // "Cited by" — JADE's reverse-citation gloss, but treatment-aware: it shows not
 // just who cites this authority, but HOW (follows / distinguishes / overrules …).
-function CitedByPanel({ incoming, count }: { incoming: any[]; count?: number }) {
+function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: number; inferred?: number }) {
   const peek = usePeek();
   const open = (id: string, a?: string) => peek.push({ kind: "doc", id, anchor: a });
   const byType: Record<string, number> = {};
@@ -605,7 +605,10 @@ function CitedByPanel({ incoming, count }: { incoming: any[]; count?: number }) 
   const colour: Record<string, string> = { overrules: "#ff6b6b", distinguishes: "#ffb454", applies: "#7ee787", follows: "#7ee787" };
   return (
     <div className="panel">
-      <h3>Cited by <span className="muted">({count ?? incoming.length}) — later documents that cite this one, and how</span></h3>
+      <h3>Cited by <span className="muted">({count ?? incoming.length}) — later documents that cite this one, and how</span>
+        {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" "}
+          <Info t={`Plus ${inferred} inferred link${inferred === 1 ? "" : "s"} — heuristic carry-forwards (a bare "Section 12" pinned to the last-named Act), not citations anyone made. Excluded from the count above so they don't inflate it.`} />
+          {" +"}{inferred} inferred</span> : null}</h3>
       <div className="row" style={{ flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
         {order.filter((t) => byType[t]).map((t) => (
           <span key={t} className="tag" style={{ borderColor: colour[t] || "var(--line)", color: colour[t] || "inherit" }}>
@@ -1202,6 +1205,7 @@ export function JobsPanel() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any>(null);
   const [collapsed, setCollapsed] = useState(false);
+  const anyRunning = jobs.some((j) => j.status === "running");
   useEffect(() => {
     let live = true;
     const tick = async () => {
@@ -1215,18 +1219,22 @@ export function JobsPanel() {
       } catch { /* ignore */ }
     };
     tick();
-    const iv = setInterval(tick, 1500);
+    // Poll fast while something runs, slowly when idle: the panel used to hit /jobs every
+    // 1.5s forever, ~40 req/min of pure noise even on a quiet system.
+    const iv = setInterval(tick, anyRunning ? 1500 : 10000);
     return () => { live = false; clearInterval(iv); };
-  }, []);
+  }, [anyRunning]);
   // poll the open job's full log (only one job at a time → cheap)
   useEffect(() => {
     if (!openId) { setDetail(null); return; }
     let live = true;
     const tick = async () => { try { const d = await api.jobStatus(openId); if (live) setDetail(d); } catch { /* ignore */ } };
     tick();
-    const iv = setInterval(tick, 1200);
+    // only worth fast-polling a job that's actually moving
+    const openRunning = jobs.find((j) => j.id === openId)?.status === "running";
+    const iv = setInterval(tick, openRunning ? 1200 : 8000);
     return () => { live = false; clearInterval(iv); };
-  }, [openId]);
+  }, [openId, jobs]);
 
   const active = jobs.filter((j) => j.status === "running");
   const recent = jobs.filter((j) => j.status !== "running").slice(0, 4);
@@ -1248,7 +1256,8 @@ export function JobsPanel() {
             <div key={j.id} className={`job${j.stalled ? " job-stalled" : ""}`}>
               <div className="row" style={{ alignItems: "center", gap: 6 }}>
                 <a onClick={() => setOpenId(isOpen ? null : j.id)} style={{ flex: 1, cursor: "pointer", fontSize: 12 }}>
-                  {isOpen ? "▾" : "▸"} {j.label || j.kind}</a>
+                  {isOpen ? "▾" : "▸"} {j.label || j.kind}
+                  {j.origin === "scheduler" && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }} title="Started by the background scheduler, not from this UI">scheduler</span>}</a>
                 {j.stalled && <span className="job-stall-tag" title={`No progress for ${Math.round(j.idle_s)}s — the job is probably frozen (its network connection died, e.g. after the host slept). Restart to resume from where the data left off; it skips work already done.`}>frozen?</span>}
                 <button className="mini" title="Re-run this job from where its saved data left off (skips work already done). Use it when a job has frozen after the machine slept/woke." onClick={() => api.restartJob(j.id)}>↻ restart</button>
                 <button className="mini" onClick={() => api.cancelJob(j.id)}>cancel</button>
@@ -1326,12 +1335,33 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
       if (showLeg && legFilter) body.leg_kind = legFilter;
       const r = await runJob("harvest-all", body,
         (p) => setBulk(p.total ? `${p.stage}: ${p.done}/${p.total}…` : `${p.stage}…`));
-      setBulk(`✓ fetched ${r.harvested}/${r.attempted} · resolved ${r.resolved_edges} edge(s)` +
-        (r.failed?.length ? ` · ${r.failed.length} failed (skipped, retried later)` : "") +
-        (r.remaining ? ` · ${r.remaining} still routable` : ""));
+      // Explain a do-nothing run instead of silently claiming success: an empty attempt
+      // is almost always the whole candidate set still cooling off after earlier failures.
+      if (r.rate_limited) {
+        setBulk(`⏸ the source began rate-limiting — stopped after ${r.harvested} to avoid burning the rest of the worklist. Try again shortly.`);
+      } else if (r.attempted === 0 && r.skipped_recent_fail > 0) {
+        setBulk(`nothing attempted — all ${r.skipped_recent_fail} routable references are cooling off after earlier failures. Use “retry failed” to clear the cool-down if a source was just unavailable.`);
+      } else {
+        setBulk(`✓ fetched ${r.harvested}/${r.attempted} · resolved ${r.resolved_edges} edge(s)` +
+          (r.absent ? ` · ${r.absent} absent (cooled 90d)` : "") +
+          (r.retry_later ? ` · ${r.retry_later} unreachable (retry ~6h)` : "") +
+          (r.remaining ? ` · ${r.remaining} still routable` : ""));
+      }
       reloadAll();
     } catch (e: any) { setBulk("error: " + e); }
   }
+
+  async function retryFailed() {
+    setBulk("clearing the failure cool-down…");
+    try {
+      await api.retryFailed();
+      setBulk("✓ cool-down cleared — every reference is eligible again on the next harvest");
+      reloadAll();
+    } catch (e: any) { setBulk("error: " + e); }
+  }
+
+  const cooling = cov?.cooling_off ?? 0;
+  const ready = cov?.ready_references;
   return (
     <div>
     <CorpusMap cov={cov} navigate={navigate} />
@@ -1353,11 +1383,19 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
           </select>}
           <AutoDrain />
           <MissTTL />
+          {cooling > 0 && <button className="mini" style={{ flex: "0 0 auto" }} onClick={retryFailed}
+            title={`${cooling} routable references are cooling off after an earlier failure (${cov?.cooling_off_absent ?? 0} the source said don't exist, ${cov?.cooling_off_retry ?? 0} merely unreachable). Clear the cool-down to retry them all now — do this if a source was simply down.`}>
+            ↻ retry {cooling} failed</button>}
           {routableCount > 0 && <button className="primary" style={{ flex: "0 0 auto" }} onClick={harvestAll}
             title="Fetch every routable reference in the current filter and resolve — runs in the background, survives closing this tab">
             ⤓ Harvest {srcFilter ? "filtered" : "all routable"} ({routableCount})</button>}
         </div>
       </div>
+      {!srcFilter && ready != null && ready < routableCount && (
+        <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          {ready.toLocaleString()} ready to harvest now · {cooling.toLocaleString()} cooling off after earlier failures <Info t="A harvest attempts only the 'ready' references. The rest failed recently and are skipped for a while so a dead URL doesn't stall every run — genuine 404s for 90 days, mere timeouts for ~6 hours. 'retry failed' clears that early." />
+        </p>
+      )}
       {bulk && <p className={bulk.startsWith("error") ? "err" : "ok"}>{bulk}</p>}
       {list.length === 0 && <p className="muted">Nothing hanging — every citation resolves. ✓</p>}
       <table className="grid">

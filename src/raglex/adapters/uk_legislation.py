@@ -111,19 +111,21 @@ class UKLegislationAdapter(BaseAdapter):
         headers = {"Accept": "application/akn+xml", "Accept-Language": "en"} if is_assim else None
         # legislation.gov.uk *async-generates* large representations: it answers 202 with
         # an empty body while building them. Retry a few times; if it never materialises,
-        # return None so the item stays in the worklist rather than being stored empty.
+        # that's a TRANSIENT failure (the item exists, the server is still building it) —
+        # raising it as such keeps the item in the worklist instead of writing it off as
+        # absent for months. A 404/410 raises a fatal FetchError from the client.
         raw = b""
         for attempt in range(4):
-            try:
-                resp = self._client.get(url, headers=headers) if headers else self._client.get(url)
-            except FetchError:
-                return None
+            resp = self._client.get(url, headers=headers) if headers else self._client.get(url)
             raw = resp.content or b""
             if raw and getattr(resp, "status_code", 200) != 202:
                 break
             time.sleep(2 * (attempt + 1))
         if not raw:
-            return None
+            raise FetchError(
+                f"{self.source}: {url} still generating (HTTP 202) after 4 attempts",
+                transient=True,
+            )
         parsed = parse("akoma-ntoso", raw)
         title = parsed.title or stub.stable_id
         relations = list(parsed.relations)

@@ -131,13 +131,31 @@ def test_unresolved_goes_to_worklist_then_resolves_on_harvest(catalogue):
     assert catalogue.resolution_worklist() == []  # cleared from the queue
 
 
-def test_grows_alias_from_structured_resolution(catalogue):
+def test_structured_resolution_does_not_grow_the_alias_table(catalogue):
+    # Resolution keys off the edge's persisted candidate_id, so memoising every resolved
+    # citation string as an alias buys nothing. The alias table holds *rules* only.
     _doc(catalogue, "ECLI:EU:C:2020:559")
     _doc(catalogue, "src-1", citing="Schrems II ECLI:EU:C:2020:559")
     stats = Resolver(catalogue).run()
-    assert stats.aliases_added == 1
-    # the cached colloquial phrase now resolves by the cheap alias rung next time
-    assert catalogue.get_alias("schrems ii ecli:eu:c:2020:559") == "ECLI:EU:C:2020:559"
+    assert stats.resolved == 1
+    assert catalogue.get_alias("schrems ii ecli:eu:c:2020:559") is None
+
+
+def test_named_alias_resolves_a_by_name_reference(catalogue):
+    # …and the rules the alias table DOES hold still resolve, via the raw_fold rung.
+    _doc(catalogue, "ukpga/2018/12")
+    _doc(catalogue, "src-1", citing="the DPA 2018")
+    catalogue.put_alias("the dpa 2018", "ukpga/2018/12", source="named")
+    assert Resolver(catalogue).run().resolved == 1
+    assert catalogue.relations_for("src-1")[0]["dst_id"] == "ukpga/2018/12"
+
+
+def test_resolve_pending_for_only_touches_the_new_document(catalogue):
+    _doc(catalogue, "src-1", citing="[2024] UKSC 12")
+    _doc(catalogue, "src-2", citing="[2023] UKSC 1")
+    _doc(catalogue, "uksc/2024/12")
+    assert catalogue.resolve_pending_for("uksc/2024/12") == 1
+    assert catalogue.count_pending_relations() == 1  # src-2's edge is untouched
 
 
 def test_cite_count_ranks_worklist(catalogue):

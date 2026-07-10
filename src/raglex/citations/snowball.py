@@ -42,7 +42,8 @@ _NEUTRAL_RE = re.compile(r"^(?P<court>[a-z]+)(?:/[a-z]+)?/(?:19|20)\d{2}/\d+$")
 _ECLI_ADAPTER = {"EU": "eu-cellar", "NL": "nl-rechtspraak", "GB": "uk-caselaw", "CE": "echr"}
 # A bare ECHR application number (4451/70, 36022/97) — the resolvable key for an ECtHR
 # case (the HUDOC adapter looks it up). Distinct from a CJEU number, which has a C-/T- prefix.
-_ECHR_APPNO_RE = re.compile(r"^\d{1,5}/\d{2}$")  # app-number year is always 2 digits
+ECHR_APPNO_RE = re.compile(r"^\d{1,5}/\d{2}$")  # app-number year is always 2 digits
+_ECHR_APPNO_RE = ECHR_APPNO_RE  # back-compat alias
 # UK legislation slug prefixes (ukpga/1998/42, nisi/1981/1675, wsi/2016/413) —
 # distinct from neutral citations. legislation.gov.uk hosts ALL UK jurisdictions
 # (England/Wales/Scotland/NI), so every one of these is fetchable via uk-legislation.
@@ -147,9 +148,13 @@ def snowball(catalogue: Catalogue, *, limit: int = 50, only_unresolved: bool = T
     ``only_unharvestable`` narrows further to forms with no adapter — the
     "build-an-adapter" list."""
     buckets: dict[tuple[str, str | None, str | None], Frontier] = {}
-    for row in catalogue.candidate_frequencies():
+    rows = catalogue.candidate_frequencies()
+    # Which of these candidates are already nodes? ONE batched lookup — asking per
+    # candidate was ~165k round trips, and dominated the endpoint's runtime.
+    held: dict = catalogue.find_existing([r["candidate_id"] for r in rows]) if only_unresolved else {}
+    for row in rows:
         candidate = row["candidate_id"]
-        if only_unresolved and catalogue.find_document_id(candidate) is not None:
+        if only_unresolved and candidate in held:
             continue  # already a node — not part of the frontier
         form, juris, adapter = _classify(candidate, row["entity_kind"])
         key = (form, juris, adapter)

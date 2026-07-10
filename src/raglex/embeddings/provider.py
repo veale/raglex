@@ -146,10 +146,21 @@ class OpenRouterEmbeddingProvider(_FamilyMixin):
         return [d["embedding"] for d in data]
 
 
+def _mcp_provider(**kwargs):
+    """The ML sidecar (§6d). Imported lazily so the default path never pays for it."""
+    from .remote import MCPEmbeddingProvider
+
+    dims = os.environ.get("RAGLEX_EMBED_DIMENSIONS")
+    if dims and "dimensions" not in kwargs:
+        kwargs["dimensions"] = int(dims)
+    return MCPEmbeddingProvider(**kwargs)
+
+
 # Provider registry — config, not code (Appendix B embedding_providers).
 _PROVIDERS = {
     "local-hashing": HashingEmbeddingProvider,
     "openrouter": OpenRouterEmbeddingProvider,
+    "mcp": _mcp_provider,
 }
 
 
@@ -160,3 +171,16 @@ def get_provider(name: str = "local-hashing", **kwargs) -> EmbeddingProvider:
         known = ", ".join(sorted(_PROVIDERS))
         raise KeyError(f"unknown embedding provider {name!r}; known: {known}") from None
     return cls(**kwargs)
+
+
+def get_reranker(name: str | None = None):
+    """The §6c precision stage. ``mcp`` routes to the sidecar's cross-encoder; anything
+    else (or nothing configured) keeps the fused RRF order."""
+    name = name or os.environ.get("RAGLEX_RERANKER") or "identity"
+    if name == "mcp":
+        from .remote import MCPReranker
+
+        return MCPReranker()
+    from ..retrieval.hybrid import IdentityReranker
+
+    return IdentityReranker()

@@ -26,10 +26,15 @@ class PgConnShim:
     """Make a psycopg connection look enough like a sqlite3 connection for the
     shared catalogue code: ``execute(sql, params)`` (translating ``?`` → ``%s``),
     ``executescript``, ``commit``, ``close``. Rows are dicts (``row['col']`` and
-    ``dict(row)`` both work, matching ``sqlite3.Row`` usage)."""
+    ``dict(row)`` both work, matching ``sqlite3.Row`` usage).
 
-    def __init__(self, raw) -> None:
+    ``close()`` returns the connection to the pool rather than tearing it down — the
+    catalogue is opened and closed per request, and the UI polls several endpoints a
+    second, so dialling Postgres afresh each time was pure overhead."""
+
+    def __init__(self, raw, pool=None) -> None:
         self.raw = raw
+        self._pool = pool
 
     def execute(self, sql: str, params=()):  # noqa: ANN001
         return self.raw.execute(sql.replace("?", "%s"), params)
@@ -49,20 +54,63 @@ class PgConnShim:
         return self.raw.transaction()
 
     def close(self) -> None:
+        if self._pool is not None:
+            self._pool.putconn(self.raw)
+            self.raw = None
+            return
         self.raw.close()
 
 
-def connect(dsn: str) -> PgConnShim:
-    import psycopg
-    from psycopg.rows import dict_row
+# One pool per DSN per process. Bounded: the API's threads (request handlers + job
+# workers) are the only consumers, and an unbounded pool against a 15GB box is how you
+# find out what max_connections is.
+_POOLS: dict[str, object] = {}
+_POOL_LOCK = None
 
+
+def _get_pool(dsn: str):
+    global _POOL_LOCK
+    import threading
+
+    if _POOL_LOCK is None:
+        _POOL_LOCK = threading.Lock()
+    with _POOL_LOCK:
+        pool = _POOLS.get(dsn)
+        if pool is not None:
+            return pool
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
+        except ImportError:
+            _POOLS[dsn] = False  # psycopg_pool absent → fall back to direct connections
+            return False
+        import os
+
+        pool = ConnectionPool(
+            dsn,
+            min_size=int(os.environ.get("RAGLEX_PG_POOL_MIN") or 2),
+            max_size=int(os.environ.get("RAGLEX_PG_POOL_MAX") or 12),
+            kwargs={"row_factory": dict_row, "autocommit": True},
+            open=True,
+        )
+        _POOLS[dsn] = pool
+        return pool
+
+
+def connect(dsn: str) -> PgConnShim:
     # autocommit=True: a read-only open then never sits 'idle in transaction' holding a
     # lock between statements (e.g. while a long Python loop processes a result set, or a
     # harvest waits on the network) — which once queued behind a schema-migration ALTER and
     # stalled the whole `documents` table. Multi-statement writes that must be atomic use an
     # explicit transaction (see Catalogue._atomic / PgConnShim.transaction).
-    raw = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
-    return PgConnShim(raw)
+    pool = _get_pool(dsn)
+    if pool:
+        return PgConnShim(pool.getconn(), pool=pool)
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    return PgConnShim(psycopg.connect(dsn, row_factory=dict_row, autocommit=True))
 
 
 # Postgres DDL. Booleans are INTEGER (0/1) so inserts match the SQLite path
@@ -109,6 +157,8 @@ CREATE TABLE IF NOT EXISTS relations (
     src_id             TEXT NOT NULL,
     dst_id             TEXT,
     raw_citation_string TEXT,
+    candidate_id       TEXT,
+    raw_fold           TEXT,
     resolution_status  TEXT NOT NULL DEFAULT 'pending',
     relationship_type  TEXT NOT NULL DEFAULT 'mentions',
     extracted_via      TEXT NOT NULL DEFAULT 'structured',
@@ -122,15 +172,35 @@ CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
 
-CREATE TABLE IF NOT EXISTS pending_resolution (
-    string_hash      TEXT PRIMARY KEY,
-    raw_citation_string TEXT NOT NULL,
-    src_id           TEXT,
-    hints_json       TEXT NOT NULL DEFAULT '{}',
-    attempts         INTEGER NOT NULL DEFAULT 0,
-    last_attempt_at  TEXT,
-    cite_count       INTEGER NOT NULL DEFAULT 1
+CREATE TABLE IF NOT EXISTS citation_counts (
+    candidate_id  TEXT NOT NULL,
+    entity_kind   TEXT,
+    method        TEXT,
+    sample        TEXT,
+    occurrences   INTEGER NOT NULL DEFAULT 0,
+    documents     INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at    TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
+
+-- Background jobs (§8). In-process dicts died with the process, so a deploy erased a
+-- running harvest's history and the scheduler's own work was invisible to the UI.
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id        TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    label         TEXT NOT NULL,
+    params_json   TEXT NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL DEFAULT 'running',
+    progress_json TEXT NOT NULL DEFAULT '{}',
+    log_json      TEXT NOT NULL DEFAULT '[]',
+    result_json   TEXT,
+    origin        TEXT NOT NULL DEFAULT 'api',
+    cancel        INTEGER NOT NULL DEFAULT 0,
+    started_at    TEXT NOT NULL,
+    heartbeat_at  TEXT,
+    finished_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, started_at);
 
 CREATE TABLE IF NOT EXISTS citation_aliases (
     alias    TEXT PRIMARY KEY,

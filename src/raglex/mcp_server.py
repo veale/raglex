@@ -420,6 +420,25 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
 
     @mcp.tool()
+    def retry_failed_references() -> dict:
+        """Clear the harvest cool-down lists so the next drain re-attempts every routable
+        reference. Use when a source was merely unavailable and its references were
+        wrongly parked — a drain that reports attempting nothing is the tell."""
+        return facade.retry_failed_references()
+
+    @mcp.tool()
+    def rebuild_citation_counts() -> dict:
+        """Refresh the citation-frequency roll-up the snowball reads (the live aggregate
+        over the citations table is slow at scale, so it's cached; this recomputes it)."""
+        return facade.rebuild_citation_counts()
+
+    @mcp.tool()
+    def backfill_edge_keys() -> dict:
+        """One-off after upgrade: populate candidate_id/raw_fold on edges written before
+        those columns existed, so set-based resolution and the SQL worklist see them."""
+        return facade.backfill_edge_keys()
+
+    @mcp.tool()
     def get_settings() -> dict:
         """View configured settings/credentials (secrets masked; shows env vs file)."""
         return facade.get_settings()

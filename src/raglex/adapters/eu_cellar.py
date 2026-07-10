@@ -92,7 +92,8 @@ _EURLEX_SUBJECT_FIELDS = ("SUBJECT_MATTER", "RESOURCE_LEGAL_IS_ABOUT_CONCEPT_EUR
 
 
 def eurlex_metadata(celexes: list[str], *, username: str | None = None,
-                    password: str | None = None) -> dict[str, dict]:
+                    password: str | None = None,
+                    max_consecutive_failures: int = 3) -> dict[str, dict]:
     """Augment a batch of CJEU cases from the authoritative EUR-Lex webservice with
     everything useful the free CELLAR RDF omits — the official **title** and the
     **subject-matter / EuroVoc** classification. **One credentialed call per ≤50
@@ -109,6 +110,10 @@ def eurlex_metadata(celexes: list[str], *, username: str | None = None,
     import httpx
 
     out: dict[str, dict] = {}
+    # The webservice 500s for days at a time. Grinding every remaining chunk against a
+    # dead endpoint just burns an hour of the scheduler's tick; give up after a few
+    # consecutive failures and let the caller back off.
+    consecutive_failures = 0
     for i in range(0, len(celexes), EURLEX_PAGE_SIZE):
         chunk = celexes[i: i + EURLEX_PAGE_SIZE]
         query = " OR ".join(f"DN = {c}" for c in chunk)
@@ -120,7 +125,11 @@ def eurlex_metadata(celexes: list[str], *, username: str | None = None,
                               timeout=60)
             resp.raise_for_status()
             out.update(_parse_eurlex_metadata(resp.content))
+            consecutive_failures = 0
         except Exception:  # noqa: BLE001 — best-effort enrichment
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                break
             continue
     return out
 
@@ -779,6 +788,38 @@ LIMIT {self.per_page}
         return out
 
 
+# A case number ("C-217/12") says nothing about how the case ENDED, but a CELEX must:
+# …CJ… is a Court of Justice judgment, …CO… an order, …TJ…/…TO… the General Court's.
+# The grammar can only guess (it guesses judgment), so a case disposed of by order is
+# minted as a CELEX that does not exist. These are the descriptors to probe in turn.
+_CELEX_CASE_VARIANTS = {
+    "CJ": ("CJ", "CO"),
+    "CO": ("CO", "CJ"),
+    "TJ": ("TJ", "TO"),
+    "TO": ("TO", "TJ"),
+}
+
+
+def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -> str | None:
+    """The CELEX that actually exists in CELLAR for a guessed case CELEX, or None if the
+    case is absent under every plausible descriptor (§5b).
+
+    ``62012CJ0217`` (guessed judgment) → ``62012CO0217`` when the case ended in an order.
+    Costs one cheap SPARQL hop per variant, only on the targeted-fetch path, and the
+    caller aliases the guess to the real document so it is never paid twice."""
+    cu = (celex or "").upper()
+    if len(cu) < 7:
+        return None
+    desc = cu[5:7]
+    variants = _CELEX_CASE_VARIANTS.get(desc, (desc,))
+    cellar = EUCellarAdapter(client=client)
+    for variant in variants:
+        cand = cu[:5] + variant + cu[7:]
+        if cellar.case_metadata(celex=cand):
+            return cand
+    return None
+
+
 class CJEUCaseAdapter(BaseAdapter):
     """Targeted single-judgment fetch by CELEX (e.g. ``62018CJ0511`` from a citation
     like "C-511/18"). Unlike the legislation-discovery adapter it adds **no** spurious
@@ -789,8 +830,13 @@ class CJEUCaseAdapter(BaseAdapter):
     source = "eu-cellar"
     min_interval = 0.5
 
-    def __init__(self, celex: str, *, client: RateLimitedClient | None = None) -> None:
+    def __init__(self, celex: str, *, client: RateLimitedClient | None = None,
+                 celex_aliases: tuple[str, ...] = ()) -> None:
         self.celex = celex.upper()
+        # CELEXes the corpus cites this case by but which aren't its real id (a guessed
+        # …CJ… for a case that ended in an order). Aliased to the stored document on
+        # ingest, so the citing edges resolve.
+        self.celex_aliases = tuple(a.upper() for a in celex_aliases if a.upper() != self.celex)
         self._cellar = EUCellarAdapter(client=client)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
@@ -829,5 +875,6 @@ class CJEUCaseAdapter(BaseAdapter):
             raw_ext=raw_ext,
             text=text, segments=segments, extracted_via=ExtractedVia.STRUCTURED,
             extra={"celex": celex,
+                   **({"celex_aliases": list(self.celex_aliases)} if self.celex_aliases else {}),
                    **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {})},
         )

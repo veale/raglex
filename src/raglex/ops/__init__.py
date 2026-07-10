@@ -5,7 +5,9 @@ from .alerts import (
     AlertThresholds,
     LogNotifier,
     Notifier,
+    WebhookNotifier,
     check_alerts,
+    default_notifier,
     push_alerts,
 )
 from .views import (
@@ -22,7 +24,9 @@ __all__ = [
     "AlertThresholds",
     "LogNotifier",
     "Notifier",
+    "WebhookNotifier",
     "check_alerts",
+    "default_notifier",
     "push_alerts",
     "CorpusStats",
     "SourceHealth",
