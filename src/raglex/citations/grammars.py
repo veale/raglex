@@ -420,11 +420,16 @@ def _resolve_named_statute(m: "re.Match[str]") -> Normalised:
 
 register(Grammar(
     "uk_statute_named", "act",
+    # Many Act short titles have internal commas — "Local Government, Economic Development
+    # and Construction Act 2009", "Housing Grants, Construction and Regeneration Act 1996",
+    # "Police, Crime, Sentencing and Courts Act 2022" — so a comma is allowed between title
+    # tokens (``,?\s+``), or the first clause is lost. Over-capture is harmless: a candidate
+    # is only minted when the gazetteer confirms the exact title+year.
     re.compile(
         r"(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\(\d+[A-Za-z]?\))*)\s+of\s+)?"
         r"(?:the\s+)?"
         r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
-        r"(?:\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\)))*?"
+        r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\)))*?"
         r"\s+(?:Act|Measure))\s+(?P<year>(?:1[6-9]|20)\d{2})\b"
     ),
     _resolve_named_statute,
