@@ -198,6 +198,13 @@ class Pipeline:
                 record.stable_id, eff.get("outstanding", 0), eff.get("affecting", []),
             )
 
+        # Mint this record's resolution aliases BEFORE the dedup early-return. They are
+        # cheap idempotent writes that citing edges resolve against, and a re-fetch of an
+        # already-held case (a CJEU case cited by a guessed …CJ… descriptor that we already
+        # hold under its real …CO…/ECLI) dedups here — so minting only on the store path
+        # would leave those edges pending forever even though the target is present.
+        self._mint_aliases(record)
+
         # Content-hash dedup (§5): identical bytes → skip the expensive downstream
         # work even when the feed bumped 'last modified'.
         if record.payload_hash and self.catalogue.payload_hash_seen(record.payload_hash):
@@ -228,9 +235,15 @@ class Pipeline:
             self.textstore.put_segments(record.payload_hash, record.segments)
 
         self.catalogue.upsert_document(record, raw_path=raw_path, text_path=text_path)
+        return True
+
+    def _mint_aliases(self, record: Record) -> None:
+        """Register the resolution aliases a document's citing edges key off (§5b).
+        Idempotent, and safe to call for a node that isn't stored yet — the resolver
+        confirms the target exists at resolve time."""
         # Map this doc's CELEX → its ECLI so case-number citations ("C-311/18",
         # whose grammar candidate is the CELEX) resolve to the ECLI-keyed node (§5b).
-        celex = record.extra.get("celex")
+        celex = record.extra.get("celex") if record.extra else None
         if celex and record.ecli:
             self.catalogue.put_alias(celex.casefold(), record.ecli, source="celex-ecli")
         # Alternate CELEXes the corpus *cites* this document by (§5b). A CJEU case number
@@ -238,7 +251,7 @@ class Pipeline:
         # the grammar guesses; the targeted fetch resolves the real descriptor and records
         # the guess here. Without these aliases the fetched case would sit in the corpus
         # while every edge citing the guessed form stayed pending forever.
-        for alias in record.extra.get("celex_aliases") or ():
+        for alias in (record.extra.get("celex_aliases") if record.extra else None) or ():
             if alias and record.ecli:
                 self.catalogue.put_alias(str(alias).casefold(), record.ecli, source="celex-ecli")
         # Tribunal/court chamber recovery (§5b): a UK Find Case Law id carries the
@@ -248,7 +261,6 @@ class Pipeline:
         bare = _chamberless_alias(record.stable_id)
         if bare:
             self.catalogue.put_alias(bare, record.stable_id, source="chamber-alias")
-        return True
 
 
 def _chamberless_alias(stable_id: str) -> str | None:
