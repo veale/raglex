@@ -166,20 +166,24 @@ class ScraplingMcpFetcher:
     def _mcp_fetch(self, url: str) -> str | None:
         from ..embeddings.remote import MCPToolClient
 
-        client = MCPToolClient(self.url, token=self.api_key, timeout=120)
+        client = MCPToolClient(self.url, token=self.api_key, timeout=180)
+        # Scrapling's stealthy_fetch solves Cloudflare and returns raw HTML; extraction_type
+        # html keeps it as markup (not markdown), which the HoL parser needs.
+        args = {"url": url, "extraction_type": "html", "solve_cloudflare": True, "timeout": 120000}
         last_exc: Exception | None = None
         for tool in ("stealthy_fetch", "fetch", "get", "scrape"):
             try:
-                res = client.call_tool(tool, {"url": url})
-            except Exception as exc:  # noqa: BLE001 — tool may not exist; try the next
+                res = client.call_tool(tool, args)
+            except Exception as exc:  # noqa: BLE001 — tool may not exist / bad arg; try the next
                 last_exc = exc
-                continue
-            if isinstance(res, str) and res:
-                return res
-            for key in ("html", "content", "body", "text", "result"):
-                val = res.get(key) if isinstance(res, dict) else None
-                if isinstance(val, str) and val:
-                    return val
+                # a tool that rejects the extra args might still work with just the url
+                try:
+                    res = client.call_tool(tool, {"url": url})
+                except Exception:  # noqa: BLE001
+                    continue
+            html = _extract_html(res)
+            if html:
+                return html
         if last_exc:
             raise last_exc
         return None
@@ -199,6 +203,30 @@ class ScraplingMcpFetcher:
     def close(self) -> None:  # pragma: no cover
         if self._fallback:
             self._fallback.close()
+
+
+def _extract_html(res) -> str | None:
+    """Pull the page HTML out of a scrapling-MCP tool result, whatever the shape: a bare
+    string, ``{html|body|text: str}``, or ``{content: [str]|str}`` (scrapling wraps the
+    markup in a ``content`` list alongside status/url)."""
+    if isinstance(res, str):
+        return res or None
+    if not isinstance(res, dict):
+        return None
+    for key in ("html", "body", "text"):
+        val = res.get(key)
+        if isinstance(val, str) and val:
+            return val
+    content = res.get("content")
+    if isinstance(content, str) and content:
+        return content
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, str) and item:
+                return item
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                return item["text"]
+    return None
 
 
 _FETCHERS = {
