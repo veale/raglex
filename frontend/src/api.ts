@@ -90,6 +90,7 @@ export const api = {
   harvestAllReferences: (limit = 25, min_citing = 1) =>
     req<any>("/unresolved/harvest-all", { method: "POST", body: JSON.stringify({ limit, min_citing }) }),
   retryFailed: () => req<any>("/unresolved/retry-failed", { method: "POST" }),
+  unfetchable: (limit = 200) => req<any>(`/unresolved/unfetchable?limit=${limit}`),
   radiate: (body: Record<string, unknown>) =>
     req<any>("/radiate", { method: "POST", body: JSON.stringify(body) }),
   discoverCiting: (target: string, via = "auto") =>

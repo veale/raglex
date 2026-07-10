@@ -169,24 +169,10 @@ register(Grammar(
     _neutral,
 ))
 
-# Law-report citation: "[2023] 1 WLR 1327", "[2022] AACR 4", "[2024] 2 All ER 1".
-# A real case reference but candidate-less ("maybe") — it has no neutral citation,
-# so it can only be found by a lookup (the UI offers a Find-Case-Law search).
-_SERIES_RE = "|".join([r"All\s+ER", r"Cr\s+App\s+R", r"Lloyd's\s+Rep"] +
-                      sorted((s for s in REPORT_SERIES), key=len, reverse=True))
-register(Grammar(
-    "law_report", "case",
-    re.compile(rf"\[(?:19|20)\d{{2}}\]\s+(?:\d+\s+)?(?:{_SERIES_RE})\s+\d+"),
-    lambda m: (None, None, "case"),  # no candidate — a "maybe" the user can search
-))
-
-# ECHR / commonwealth reports use ROUND brackets: "(2000) 29 EHRR 245",
-# "(1979-80) 1 EHRR 524" — candidate-less "maybe" (resolve via the app number/ECLI instead).
-register(Grammar(
-    "round_bracket_report", "case",
-    re.compile(rf"\((?:19|20)\d{{2}}(?:-\d{{2}})?\)\s+\d+\s+(?:{_SERIES_RE})\s+\d+"),
-    lambda m: (None, None, "case"),
-))
+# Classic law reports live in citations/reporters.py — an exhaustive, punctuation-tolerant
+# set of series and three structural shapes (modern "[1982] AC 1", English Reports
+# "150 ER 1030", old Law Reports "(1868) LR 3 HL 330"). Registered near the bottom of this
+# module, after the neutral-citation grammar so a genuine neutral citation wins any overlap.
 
 # An ECtHR case cited by name + EHRR ("Osman v UK (2000) 29 EHRR 245"). HUDOC has no
 # EHRR-number index, but it DOES index the case name (docname), so we capture the
@@ -298,6 +284,40 @@ register(Grammar(
     ),
     lambda m: (None, None, "case"),  # candidate-less → flagged for manual handling
 ))
+
+# Classic UK/Irish/Commonwealth law reports — "[1982] AC 1", "(1985) 80 Cr App R 1",
+# "(1868) LR 3 HL 330", "150 ER 1030". The pre-neutral-citation way of citing a case;
+# there's no fetchable id, so like the ECR these are candidate-less, but recognising them
+# surfaces heavily-cited pre-2001 authorities the corpus can't hold (reporters.py owns the
+# series list and the three structural shapes). entity_kind ``law_report`` keeps them out
+# of the routable worklist and into the "cited but unfetchable" frontier, where the reader
+# offers a BAILII link and an upload resolves them.
+from .reporters import (  # noqa: E402
+    ENGLISH_REPORTS_RE,
+    OLD_LAW_REPORTS_RE,
+    REPORT_RE,
+    REPORT_SERIES as _ALL_REPORT_SERIES,
+    SCOTS_BARE_RE,
+)
+
+# Fold every report-series token into the set the neutral-citation grammars use to reject
+# a court, so "1999 SC 583" (Session Cases) is never minted as a fake sc/1999/583 slug.
+REPORT_SERIES |= {re.sub(r"[.\s'’&]", "", s).upper() for s in _ALL_REPORT_SERIES}
+
+
+def _law_report(m: "re.Match[str]") -> Normalised:
+    # candidate-less (no fetchable id) — recognising it makes an unfetchable authority
+    # visible + rankable; entity_kind 'case' keeps pinpoint + treatment logic working.
+    return None, None, "case"
+
+
+for _name, _pat in (
+    ("law_report", REPORT_RE),
+    ("law_report_old_lr", OLD_LAW_REPORTS_RE),
+    ("law_report_er", ENGLISH_REPORTS_RE),
+    ("law_report_scots", SCOTS_BARE_RE),
+):
+    register(Grammar(_name, "case", _pat, _law_report))
 
 
 def _celex_kind(celex: str) -> str:

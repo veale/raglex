@@ -276,7 +276,8 @@ class Facade:
         self._cache[key] = (_t.time(), val)
         return val
 
-    _VOLATILE_CACHE_PREFIXES = ("coverage", "stats", "corpus_map", "queues", "worklist", "snowball")
+    _VOLATILE_CACHE_PREFIXES = ("coverage", "stats", "corpus_map", "queues", "worklist",
+                                "snowball", "unfetchable")
 
     def _invalidate_caches(self) -> None:
         """Drop the cached dashboard aggregates after an op that changes the citation
@@ -680,6 +681,54 @@ class Facade:
                 for r in out:
                     r["citing_documents"] = citing.get(r["ref"], [])
             return out
+
+    def unfetchable_references(self, *, limit: int = 200) -> dict:
+        """The **most-cited references the system cannot fetch** — the pre-neutral-citation
+        frontier (§5). Distinct from the routable worklist: these have no adapter route at
+        all — a classic law report ("[1982] AC 1"), a case cited only by name, or a court
+        with no adapter. Each is ranked by how often the corpus reaches for it and carries
+        a BAILII link (a direct RTF where a neutral citation exists, else a citation
+        search) plus whether an upload can resolve it in place.
+
+        This is the answer to "what heavily-cited authority am I missing that I'll have to
+        source by hand?" — the thing a completeness-minded corpus most needs to surface."""
+        return self._cached(f"unfetchable:{limit}", 300,
+                            lambda: self._unfetchable_uncached(limit),
+                            placeholder={"total": None, "references": []})
+
+    def _unfetchable_uncached(self, limit: int) -> dict:
+        from .citations.reporters import report_series
+        from .citations.snowball import _classify
+        from .adapters.bailii import external_link
+
+        rows = []
+        with self._open() as (cat, _rs, _ts):
+            for g in cat.pending_reference_groups():
+                ref, raw, cand = g["ref"], g["raw"], g["candidate"]
+                if not ref or _is_junk_ref(ref):
+                    continue
+                series = report_series(raw) or report_series(ref)
+                if cand and not series:
+                    _form, _juris, adapter = _classify(cand, "case")
+                    if adapter is not None:
+                        continue  # routable — belongs in the harvest worklist, not here
+                    form = _form
+                elif series:
+                    form = f"law report ({series})"
+                else:
+                    form = "case (by name)"
+                rows.append({
+                    "ref": ref, "raw": raw, "candidate": cand, "form": form,
+                    "is_report": bool(series), "citing_count": g["citing_count"],
+                    "link": external_link(cand, raw),
+                })
+            rows.sort(key=lambda r: r["citing_count"], reverse=True)
+            out = rows[:limit]
+            refs = [r["ref"] for r in out]
+            citing = cat.citing_documents_for(refs) if refs else {}
+        for r in out:
+            r["citing_documents"] = citing.get(r["ref"], [])
+        return {"total": len(rows), "references": out}
 
     # -- Corpus Map: held-vs-pending by category & sub-type (§8) ------------
     def corpus_map(self) -> dict:

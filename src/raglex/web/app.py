@@ -99,6 +99,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Hanging references the corpus can't satisfy — the manual-resolution queue."""
         return facade.unresolved_references(limit=limit, with_citing=True)
 
+    @app.get("/unresolved/unfetchable")
+    def unfetchable(limit: int = 200) -> dict:
+        """Most-cited references with NO fetch route — classic law reports, cases by name,
+        courts with no adapter — each with a BAILII link + upload-to-resolve."""
+        return facade.unfetchable_references(limit=limit)
+
     @app.get("/coverage")
     def coverage() -> dict:
         """Completeness/uncertainty dashboard: counts, date spans, resolution rate,

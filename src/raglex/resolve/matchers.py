@@ -81,11 +81,21 @@ def match_celex(raw: str) -> Candidate | None:
 
 def match_uk_ncn(raw: str) -> Candidate | None:
     """Map a UK neutral citation to its Find Case Law document URI form
-    (``court[/sub]/year/number``), mirroring how we mint stable_ids for UK docs."""
+    (``court[/sub]/year/number``), mirroring how we mint stable_ids for UK docs.
+
+    A neutral citation ("[2024] EWCA Civ 1") and a law report ("[1932] AC 562") share the
+    ``[year] TOKEN number`` shape; only the token tells them apart. A report token (AC,
+    WLR, All ER, …) has no Find Case Law URI, so minting one produces a slug that 404s and
+    hides the report from the unfetchable frontier — reject it (the report grammars record
+    these as the candidate-less authorities they are)."""
     m = _UK_NCN_RE.search(raw)
     if not m:
         return None
     court = m.group("court").lower()
+    from ..citations.grammars import REPORT_SERIES
+
+    if court.upper() in REPORT_SERIES:
+        return None
     parts = [court]
     if m.group("sub"):
         parts.append(m.group("sub").lower())

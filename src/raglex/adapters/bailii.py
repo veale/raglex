@@ -98,3 +98,34 @@ def bailii_url(stable_id: str) -> str | None:
         return f"https://www.bailii.org/{juris}/cases/{court_up}/{div}/{year}/{num}.rtf"
 
     return None
+
+
+def bailii_search_url(citation: str) -> str:
+    """BAILII's find-by-citation search — the link for a case with no constructible direct
+    URL (a classic law report like "[1982] AC 1", or a case cited by name). The user
+    clicks through, finds the judgment, and downloads whatever format BAILII offers."""
+    from urllib.parse import quote_plus
+
+    return f"https://www.bailii.org/cgi-bin/find_by_citation.cgi?citation={quote_plus(citation.strip())}"
+
+
+def external_link(candidate: str | None, raw: str | None) -> dict | None:
+    """The best external link for an *unfetchable* reference, plus whether an upload can
+    resolve it in place.
+
+    - a UK neutral-citation slug → the direct BAILII **RTF** (one-click download); an
+      uploaded RTF is imported under that stable_id, resolving every pending citation to
+      it (``import_bailii``);
+    - anything else (a classic law report, a case by name) → a BAILII **search** link; the
+      user resolves it by uploading the file against the reference (``resolve-file``).
+    """
+    if candidate:
+        rtf = bailii_url(candidate)
+        if rtf:
+            return {"kind": "rtf", "url": rtf, "label": "BAILII RTF ↓",
+                    "can_upload": True, "stable_id": candidate}
+    cite = (raw or candidate or "").strip()
+    if cite:
+        return {"kind": "search", "url": bailii_search_url(cite), "label": "find on BAILII ↗",
+                "can_upload": True}
+    return None

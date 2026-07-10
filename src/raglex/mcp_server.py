@@ -420,6 +420,15 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
 
     @mcp.tool()
+    def unfetchable_references(limit: int = 200) -> dict:
+        """The most-cited references the system CANNOT fetch — classic law reports
+        ("[1982] AC 1"), cases cited by name, courts with no adapter — ranked by how often
+        the corpus cites them, each with a BAILII link (direct RTF where a neutral citation
+        exists, else a citation search) and whether an uploaded file can resolve it. The
+        pre-neutral-citation frontier a completeness-minded corpus must source by hand."""
+        return facade.unfetchable_references(limit=limit)
+
+    @mcp.tool()
     def retry_failed_references() -> dict:
         """Clear the harvest cool-down lists so the next drain re-attempts every routable
         reference. Use when a source was merely unavailable and its references were

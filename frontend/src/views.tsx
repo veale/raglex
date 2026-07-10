@@ -1409,6 +1409,92 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
         </tbody>
       </table>
     </div>
+    <UnfetchablePanel />
+    </div>
+  );
+}
+
+// --- Cited but unfetchable: the pre-neutral-citation frontier ----------------
+// Most-cited references the system CAN'T fetch — classic law reports ("[1982] AC 1"),
+// cases by name, courts with no adapter. Each carries a BAILII link (direct RTF where a
+// neutral citation exists, else a citation search) and an upload that resolves it in place.
+function UnfetchablePanel() {
+  const [data, err, reload] = useAsync(() => api.unfetchable(200), []);
+  useEffect(() => {
+    if (!data?._warming) return;
+    const iv = setInterval(() => reload(), 2500);
+    return () => clearInterval(iv);
+  }, [data?._warming]);
+  const [upRef, setUpRef] = useState<string | null>(null);
+  const refs: any[] = data?.references || [];
+  if (err) return null;
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Cited but unfetchable
+        <span className="muted"> — most-cited authorities the system can’t fetch (classic reporters, cases by name). Follow the BAILII link, then upload the file to resolve every citation to it at once.</span>
+        {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
+      </h3>
+      {data?._warming && <p className="muted loading-pulse">⏳ ranking the unfetchable frontier…</p>}
+      {!data?._warming && refs.length === 0 && <p className="muted">Nothing recognised as unfetchable. ✓</p>}
+      {refs.length > 0 && (
+        <table className="grid">
+          <thead><tr><th>cites</th><th>reference</th><th>looks like</th><th>source</th><th></th></tr></thead>
+          <tbody>
+            {refs.map((r) => (
+              <Fragment key={r.ref}>
+                <tr>
+                  <td className="num" style={{ whiteSpace: "nowrap" }}>{r.citing_count}</td>
+                  <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }}>{r.raw || r.ref}</td>
+                  <td className="muted">{r.form}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {r.link
+                      ? <a href={r.link.url} target="_blank" rel="noopener noreferrer">{r.link.label}</a>
+                      : <span className="muted">—</span>}
+                  </td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {r.link?.can_upload && <a style={{ cursor: "pointer" }}
+                      onClick={() => setUpRef(upRef === r.ref ? null : r.ref)}>{upRef === r.ref ? "cancel" : "⬆ upload"}</a>}
+                  </td>
+                </tr>
+                {upRef === r.ref && (
+                  <tr><td colSpan={5}>
+                    <UnfetchableUpload r={r} onDone={() => { setUpRef(null); reload(); }} />
+                  </td></tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// Upload the file the user downloaded (from BAILII etc.) and resolve the reference to it.
+// A neutral-citation slug imports under that stable_id (import_bailii for RTF); a
+// candidate-less report resolves the pasted-citation edge to the uploaded document.
+function UnfetchableUpload({ r, onDone }: { r: any; onDone: () => void }) {
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const slug = r.link?.stable_id as string | undefined;
+  async function upload(file: File) {
+    setBusy(true); setMsg("importing…");
+    try {
+      const res = slug && file.name.toLowerCase().endsWith(".rtf")
+        ? await api.importBailii(slug, file)
+        : await api.resolveReferenceFile(r.ref, file, { title: r.raw || r.ref, doc_type: "judgment" });
+      setMsg(`✓ imported · resolved ${res.resolved_edges ?? 0} citation(s)`);
+      setTimeout(onDone, 900);
+    } catch (e: any) { setMsg("error: " + e.message); } finally { setBusy(false); }
+  }
+  return (
+    <div style={{ padding: "4px 0" }}>
+      <p className="muted" style={{ margin: "0 0 4px", fontSize: 12 }}>
+        Download the judgment from the source link{slug ? " (RTF for a direct import)" : ""}, then drop it here:
+      </p>
+      <input type="file" disabled={busy} accept=".rtf,.pdf,.html,.htm,.txt,.doc,.docx"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }} />
+      {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
     </div>
   );
 }
