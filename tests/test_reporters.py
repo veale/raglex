@@ -93,3 +93,37 @@ def test_unfetchable_gives_a_direct_rtf_link_for_a_neutral_citation_court_with_n
     _cite(f, "case-2", ["[2019] FooCt 3"])
     res = f._unfetchable_uncached(50)
     assert any(r["ref"] == "fooct/2019/3" or "FooCt" in (r["raw"] or "") for r in res["references"])
+
+
+# -- frontier classification (the "looks like" labels + links) ----------------
+from raglex.citations.frontier import classify
+
+
+@pytest.mark.parametrize("raw,form", [
+    ("[1974] ECR 837", "law report (ECR)"),           # European Court Reports, not a neutral cite
+    ("[1995] ECR I-4921", "law report (ECR)"),
+    ("(2000) 29 EHRR 245", "law report (EHRR)"),
+    ("[1982] AC 1", "law report (AC)"),
+    ("the Limitation Act 1980", "legislation (by name)"),
+    ("Part II of the Road Traffic Act 1991", "legislation (by name)"),
+    ("Council Decision 94/800", "EU instrument (by name)"),
+    ("Directive 95/46", "EU instrument (by name)"),
+])
+def test_frontier_labels(raw, form):
+    c = classify(raw, None)
+    assert c is not None and c["form"] == form and c["link"]
+
+
+def test_frontier_drops_junk_urls():
+    assert classify("https://webarchive.nationalarchives.gov.uk/eu-exit/foo", None) is None
+
+
+def test_frontier_resolves_statute_name_via_gazetteer():
+    # a statute name in the offline gazetteer is routable, not merely unfetchable
+    c = classify("section 5 of the Consumer Rights Act 2015", None)
+    assert c["gazetteer_id"] == "ukpga/2015/15"
+
+
+def test_frontier_returns_none_for_plain_case_name():
+    # a case by name isn't specially classifiable here — caller falls back
+    assert classify("Donoghue v Stevenson", None) is None

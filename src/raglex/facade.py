@@ -697,7 +697,7 @@ class Facade:
                             placeholder={"total": None, "references": []})
 
     def _unfetchable_uncached(self, limit: int) -> dict:
-        from .citations.reporters import report_series
+        from .citations.frontier import classify as _frontier_classify
         from .citations.snowball import _classify
         from .adapters.bailii import external_link
 
@@ -707,20 +707,29 @@ class Facade:
                 ref, raw, cand = g["ref"], g["raw"], g["candidate"]
                 if not ref or _is_junk_ref(ref):
                     continue
-                series = report_series(raw) or report_series(ref)
-                if cand and not series:
+                # 1. specific classification from the raw string — report / statute by
+                #    name / EU instrument by name (or None → junk URL, dropped).
+                fc = _frontier_classify(raw, cand)
+                if fc is not None:
+                    # a statute name that resolves in the offline gazetteer IS routable —
+                    # skip it here so it appears in the harvest worklist, not the dead list.
+                    if fc.get("gazetteer_id"):
+                        continue
+                    form, link, is_report = fc["form"], fc["link"], fc["is_report"]
+                elif cand:
                     _form, _juris, adapter = _classify(cand, "case")
                     if adapter is not None:
                         continue  # routable — belongs in the harvest worklist, not here
-                    form = _form
-                elif series:
-                    form = f"law report ({series})"
+                    form, link, is_report = _form, external_link(cand, raw), False
                 else:
-                    form = "case (by name)"
+                    # a raw we can't specifically classify AND with no candidate: could be a
+                    # junk URL that slipped through, or a genuine case-by-name.
+                    if raw and raw.startswith("http"):
+                        continue
+                    form, link, is_report = "case (by name)", external_link(cand, raw), False
                 rows.append({
                     "ref": ref, "raw": raw, "candidate": cand, "form": form,
-                    "is_report": bool(series), "citing_count": g["citing_count"],
-                    "link": external_link(cand, raw),
+                    "is_report": is_report, "citing_count": g["citing_count"], "link": link,
                 })
             rows.sort(key=lambda r: r["citing_count"], reverse=True)
             out = rows[:limit]

@@ -124,11 +124,27 @@ SCOTS_BARE_RE = re.compile(
 _ALL_REPORT_RES = (OLD_LAW_REPORTS_RE, REPORT_RE, SCOTS_BARE_RE, ENGLISH_REPORTS_RE)
 
 
+# Report series that are NOT registered as grammars (they have dedicated adapters/grammars
+# — ECR → CJEU, EHRR → ECtHR) but which still need a report *label* when they surface as
+# unfetchable (a report page number resolves to no fetchable id either way).
+_LABEL_ONLY = (
+    (re.compile(r"\bE\.?\s?C\.?\s?R\.?\b"), "ECR"),
+    (re.compile(r"\bE\.?\s?H\.?\s?R\.?\s?R\.?\b"), "EHRR"),
+)
+
+
 def report_series(raw: str | None) -> str | None:
-    """The report series a citation string names ("AC", "All ER", "LR", "ER"), or None if
-    it isn't a recognised report citation. Labels and groups the unfetchable frontier."""
+    """The report series a citation string names ("AC", "All ER", "LR", "ER", "ECR"), or
+    None if it isn't a recognised report citation. Labels and groups the unfetchable
+    frontier — so a European Court Reports page ("[1974] ECR 837") reads as the *report*
+    it is, not a spurious neutral citation."""
     if not raw:
         return None
+    # a bracketed/parenthesised year with ECR/EHRR is that report (page number, no id)
+    if re.search(r"[\[(](?:1[6-9]|20)\d{2}", raw):
+        for pat, label in _LABEL_ONLY:
+            if pat.search(raw):
+                return label
     m = REPORT_RE.search(raw)
     if m:
         # normalise the matched series back to its canonical form (strip dots/spaces)
