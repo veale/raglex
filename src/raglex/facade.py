@@ -2353,19 +2353,45 @@ class Facade:
         case name the citing text puts beside the report against a harvested judgment of the
         right year (§5b, citations.report_match). Mints an alias per confident, unambiguous
         match, then resolves — so the citation and all its siblings go live."""
-        from collections import Counter
+        import re as _re
+        from collections import Counter, defaultdict
 
-        from .citations.report_match import extract_preceding_name, match_report
+        from .citations.report_match import (
+            HOL_PLAUSIBLE_SERIES, extract_preceding_name, match_report,
+        )
+        from .citations.reporters import report_series
         from .topics.gate import fold
 
         def _year(d):
             return int(d[:4]) if d and len(d) >= 4 and d[:4].isdigit() else None
 
+        def _report_year(raw):
+            m = _re.search(r"[\[(](1[6-9]\d{2}|20\d{2})[\])]", raw or "")
+            return int(m.group(1)) if m else None
+
         with self._open() as (cat, _rs, ts):
             pool = [{"stable_id": r["stable_id"], "title": r["title"], "year": _year(r["decision_date"])}
                     for r in cat.judgment_pool()]
+            # index the pool by year for a cheap "any candidate this year?" pre-filter
+            pool_years: set[int] = {p["year"] for p in pool if p["year"] is not None}
             contexts = cat.report_citation_contexts(limit=limit)
-            # cache each citing doc's text once (several report cites can share a document)
+
+            # group occurrences by raw string, and pre-filter BEFORE any text I/O: keep only
+            # report strings a HoL case could actually be in (plausible series) AND for which
+            # the pool holds a judgment in the reporting-lag window. This skips reading text
+            # for the ~majority of report citations that can't match, which was the cost.
+            by_raw: dict[str, list[tuple[str, int]]] = defaultdict(list)
+            for c in contexts:
+                if c["char_start"] is not None:
+                    by_raw[c["raw"]].append((c["src_id"], c["char_start"]))
+            viable = []
+            for raw in by_raw:
+                series = report_series(raw)
+                ry = _report_year(raw)
+                if series in HOL_PLAUSIBLE_SERIES and ry is not None \
+                        and any(y in pool_years for y in (ry, ry - 1, ry - 2, ry + 1)):
+                    viable.append(raw)
+
             text_cache: dict[str, str | None] = {}
 
             def _text(src_id: str) -> str | None:
@@ -2378,36 +2404,32 @@ class Facade:
                         text_cache[src_id] = None
                 return text_cache[src_id]
 
-            # accumulate the best-supported name per distinct report string
-            names: dict[str, Counter] = {}
-            for i, c in enumerate(contexts):
+            aliased = 0
+            for i, raw in enumerate(viable):
                 if cancel_check and cancel_check():
                     break
-                raw, src_id, start = c["raw"], c["src_id"], c["char_start"]
-                if start is None:
-                    continue
-                txt = _text(src_id)
-                if not txt:
-                    continue
-                name = extract_preceding_name(txt[max(0, start - 200): start])
-                if name:
-                    names.setdefault(raw, Counter())[name] += 1
-                if on_progress and i % 200 == 0:
-                    _progress(on_progress, stage="matching reporter citations", done=i, total=len(contexts))
-
-            aliased = 0
-            for raw, name_counts in names.items():
-                name, _ = name_counts.most_common(1)[0]
-                hit = match_report(raw, name, pool, confirm_text=False)
-                if hit:
-                    stable_id, _score = hit
-                    # key the alias on the folded raw so the resolver's raw_fold rung links
-                    # this citation and every sibling occurrence of the same report string.
-                    cat.put_alias(fold(raw), stable_id, source="report-match", commit=False)
-                    aliased += 1
+                # read the name from up to a few citing occurrences; take the most common
+                names: Counter = Counter()
+                for src_id, start in by_raw[raw][:5]:
+                    txt = _text(src_id)
+                    if txt:
+                        nm = extract_preceding_name(txt[max(0, start - 200): start])
+                        if nm:
+                            names[nm] += 1
+                if names:
+                    name, _ = names.most_common(1)[0]
+                    hit = match_report(raw, name, pool, confirm_text=False)
+                    if hit:
+                        # key the alias on the folded raw so the resolver's raw_fold rung
+                        # links this citation and every sibling occurrence at once.
+                        cat.put_alias(fold(raw), hit[0], source="report-match", commit=False)
+                        aliased += 1
+                if on_progress and i % 100 == 0:
+                    _progress(on_progress, stage="matching reporter citations", done=i, total=len(viable))
             cat.commit()
             resolved = Resolver(cat).run()
-        return {"report_strings": len(names), "aliased": aliased, "resolved_edges": resolved.resolved}
+        return {"report_strings": len(by_raw), "viable": len(viable),
+                "aliased": aliased, "resolved_edges": resolved.resolved}
 
     def discover_citing(self, *, target: str, via: str = "auto", query: str | None = None,
                         max_pages: int = 1, resolve: bool = True) -> dict:
