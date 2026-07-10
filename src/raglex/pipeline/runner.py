@@ -13,6 +13,7 @@ the step-1 ingest path.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from ..core.adapter import Adapter
@@ -254,6 +255,17 @@ class Pipeline:
         for alias in (record.extra.get("celex_aliases") if record.extra else None) or ():
             if alias and record.ecli:
                 self.catalogue.put_alias(str(alias).casefold(), record.ecli, source="celex-ecli")
+        # ECHR application numbers → ECLI (§5b): Strasbourg cases are cited by application
+        # number ("6878/75"), often several per case, but the document is keyed by ECLI —
+        # so without this every appno citation of a held case stays pending forever. Bare
+        # appno candidates are ECHR by construction (the CJEU grammars mint a CELEX, never
+        # a bare number), so the mapping is unambiguous.
+        appnos = record.extra.get("appno") if record.extra else None
+        if appnos and record.ecli:
+            for a in re.split(r"[;,]", str(appnos)):
+                a = a.strip()
+                if a:
+                    self.catalogue.put_alias(a.casefold(), record.ecli, source="echr-appno")
         # Tribunal/court chamber recovery (§5b): a UK Find Case Law id carries the
         # chamber as a path segment (ukut/aac/2012/440), but a citation may omit it
         # ("[2012] UKUT 440" → ukut/2012/440). Mint the chamber-less alias so the

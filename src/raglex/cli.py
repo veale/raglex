@@ -387,6 +387,10 @@ def cmd_migrate(_: argparse.Namespace) -> int:
     print("backfilling edge candidate ids (may take a few minutes over a large graph)…")
     bf = f.backfill_edge_keys(on_progress=lambda **p: None)
     print(f"  backfilled {bf['strings_backfilled']} distinct citation strings")
+    print("minting aliases implied by held documents (ECHR appno → ECLI)…")
+    with f._open() as (cat, _rs, _ts):
+        am = cat.backfill_alias_from_meta()
+    print(f"  minted {am.get('echr_appno', 0)} ECHR application-number aliases")
     print("resolving now-linkable edges…")
     res = f.resolve()
     print(f"  resolved {res.get('resolved', 0)} edge(s)")

@@ -788,34 +788,62 @@ LIMIT {self.per_page}
         return out
 
 
-# A case number ("C-217/12") says nothing about how the case ENDED, but a CELEX must:
-# …CJ… is a Court of Justice judgment, …CO… an order, …TJ…/…TO… the General Court's.
-# The grammar can only guess (it guesses judgment), so a case disposed of by order is
-# minted as a CELEX that does not exist. These are the descriptors to probe in turn.
-_CELEX_CASE_VARIANTS = {
-    "CJ": ("CJ", "CO"),
-    "CO": ("CO", "CJ"),
-    "TJ": ("TJ", "TO"),
-    "TO": ("TO", "TJ"),
+# A case number ("C-217/12") says nothing about how the case ENDED, nor reliably which
+# court heard it, but a CELEX must encode both: the descriptor is court (C/T/F) + type
+# (J judgment, O order, C Opinion of the AG, V Opinion of the Court). The grammar can only
+# guess — it guesses a CJ judgment — so a case that ended in an order, was an AG opinion,
+# or was actually heard by the General Court is minted as a CELEX that does not exist. So
+# instead of probing a couple of hand-picked variants, ask CELLAR which descriptor the
+# number REALLY has, and rank the answers: prefer the citation's own court family, and
+# within a family a decision (judgment > order > opinion) over an ancillary notice.
+_DECISION_DESCRIPTORS = {
+    "C": ("CJ", "CO", "CC", "CV"),   # Court of Justice: judgment, order, AG opinion, Court opinion
+    "T": ("TJ", "TO"),                # General Court: judgment, order
+    "F": ("FJ", "FO"),                # Civil Service Tribunal (historic)
 }
+# every descriptor that denotes an actual decision (not a notice/communication), so a
+# stray ``…CN…`` / ``…TA…`` OJ notice is never mistaken for the case itself.
+_ALL_DECISION_DESCRIPTORS = frozenset(d for ds in _DECISION_DESCRIPTORS.values() for d in ds)
 
 
 def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -> str | None:
     """The CELEX that actually exists in CELLAR for a guessed case CELEX, or None if the
-    case is absent under every plausible descriptor (§5b).
+    case is genuinely absent (§5b).
 
-    ``62012CJ0217`` (guessed judgment) → ``62012CO0217`` when the case ended in an order.
-    Costs one cheap SPARQL hop per variant, only on the targeted-fetch path, and the
-    caller aliases the guess to the real document so it is never paid twice."""
+    One SPARQL hop finds every descriptor CELLAR holds for the case *number*
+    (``62016CJ0113`` guessed → CELLAR has ``62016CC0113`` + ``62016TJ0113``); we then pick
+    the best decision, preferring the citation's court family (a ``C-`` cite → a C-sector
+    descriptor) and a judgment over an order over an opinion. The caller aliases the guess
+    to the resolved document, so this lookup is paid once per cited case, not per citation."""
     cu = (celex or "").upper()
-    if len(cu) < 7:
+    if len(cu) < 9:
         return None
-    desc = cu[5:7]
-    variants = _CELEX_CASE_VARIANTS.get(desc, (desc,))
+    year, guessed_desc, num = cu[:5], cu[5:7], cu[7:]
+    family = guessed_desc[0]
     cellar = EUCellarAdapter(client=client)
-    for variant in variants:
-        cand = cu[:5] + variant + cu[7:]
-        if cellar.case_metadata(celex=cand):
+    q = (
+        f"PREFIX cdm: <{CDM}>\n"
+        "SELECT DISTINCT ?celex WHERE { ?w cdm:resource_legal_id_celex ?celex . "
+        f'FILTER(REGEX(STR(?celex), "^{year}[A-Z][A-Z]{num}$")) }}'
+    )
+    try:
+        found = {r["celex"].upper() for r in cellar._sparql(q) if r.get("celex")}
+    except Exception:  # noqa: BLE001 — best-effort; caller treats None as "couldn't resolve"
+        return None
+    if not found:
+        return None
+    # ranked preference: this family's decisions (best type first), then the other
+    # families' decisions (a "C-" citation that only exists as a "T-" case = a citation
+    # error we still want to resolve).
+    ranked = list(_DECISION_DESCRIPTORS.get(family, ()))
+    ranked += [d for fam, ds in _DECISION_DESCRIPTORS.items() if fam != family for d in ds]
+    for desc in ranked:
+        cand = f"{year}{desc}{num}"
+        if cand in found:
+            return cand
+    # a decision descriptor we don't rank explicitly, but still a real decision
+    for cand in sorted(found):
+        if cand[5:7] in _ALL_DECISION_DESCRIPTORS:
             return cand
     return None
 

@@ -1057,6 +1057,37 @@ class Catalogue:
             """
         ).fetchall()
 
+    def backfill_alias_from_meta(self) -> dict:
+        """Mint the resolution aliases that already-held documents imply but which were
+        never recorded — ECHR application numbers and cited-CELEX variants → the ECLI.
+        A one-off for a corpus harvested before the alias-minting existed; new harvests
+        get these at ingest. Returns counts by kind."""
+        import re as _re
+
+        if self.backend == "postgres":
+            appno_expr = "meta_json::jsonb ->> 'appno'"
+        else:
+            appno_expr = "json_extract(meta_json, '$.appno')"
+        minted = {"echr_appno": 0}
+        rows = self.conn.execute(
+            f"SELECT ecli, {appno_expr} AS appno FROM documents "
+            "WHERE source = 'echr' AND ecli IS NOT NULL AND meta_json IS NOT NULL"
+        ).fetchall()
+        with self._atomic():
+            for r in rows:
+                if not r["appno"]:
+                    continue
+                for a in _re.split(r"[;,]", str(r["appno"])):
+                    a = a.strip().casefold()
+                    if a:
+                        self.conn.execute(
+                            "INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?) "
+                            "ON CONFLICT(alias) DO UPDATE SET dst_id = excluded.dst_id, source = excluded.source",
+                            (a, r["ecli"], "echr-appno"),
+                        )
+                        minted["echr_appno"] += 1
+        return minted
+
     def held_key_set(self) -> set[str]:
         """Every string that identifies a held document — stable_id, ECLI, and the aliases
         pointing at one (CELEX/chamber-less/named). The snowball tests ~165k frontier
