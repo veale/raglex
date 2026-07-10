@@ -1164,6 +1164,36 @@ function AutoDrain() {
   );
 }
 
+// How long to remember a failed harvest before retrying — prevents burning drain
+// budget on dead URLs (pre-digital cases, absent CELLAR renditions).
+function MissTTL() {
+  const [val, setVal] = useState<string>("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    api.getSettings().then((s) => {
+      const row = s.settings.find((x: any) => x.key === "RAGLEX_MISS_TTL_DAYS");
+      setVal(row?.display || "90");
+    }).catch(() => {});
+  }, []);
+  async function set(v: string) {
+    setVal(v); await api.saveSettings({ RAGLEX_MISS_TTL_DAYS: v }); setSaved(true); setTimeout(() => setSaved(false), 1500);
+  }
+  return (
+    <label className="muted" style={{ flex: "0 0 auto", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}
+      title="Days to skip a URL that returned 404 before retrying. Higher = less wasted drain budget on old cases that are simply not available online.">
+      miss cooldown
+      <select value={val || "90"} onChange={(e) => set(e.target.value)} style={{ width: 72 }}>
+        <option value="14">14d</option>
+        <option value="30">30d</option>
+        <option value="90">90d</option>
+        <option value="180">180d</option>
+        <option value="365">1yr</option>
+      </select>
+      {saved && <span className="ok">✓</span>}
+    </label>
+  );
+}
+
 // The single, app-wide jobs panel (rendered once in App): a floating, collapsible card
 // that shows every background job with a live progress bar AND a verbose, item-by-item
 // log. Polls the job list while anything runs, and the open job's log for detail.
@@ -1322,6 +1352,7 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
             <option value="assimilated">Assimilated EU ({byCat["uk-legislation:assimilated"] ?? 0})</option>
           </select>}
           <AutoDrain />
+          <MissTTL />
           {routableCount > 0 && <button className="primary" style={{ flex: "0 0 auto" }} onClick={harvestAll}
             title="Fetch every routable reference in the current filter and resolve — runs in the background, survives closing this tab">
             ⤓ Harvest {srcFilter ? "filtered" : "all routable"} ({routableCount})</button>}
@@ -1529,6 +1560,11 @@ function ResolveRow({ r, open, active, toggle, onDone }:
         <td>{r.suggested_adapter
           ? <><button title={`Fetch this exact item from ${r.suggested_adapter} and resolve`}
               disabled={busy} onClick={harvest}>⤓ {busy ? "harvesting…" : `harvest (${r.suggested_adapter})`}</button>
+              {r.bailii_url && (
+                <a href={r.bailii_url} target="_blank" rel="noopener noreferrer"
+                   title="Right-click → Save As to download the RTF, then use 'other…' to upload it"
+                   style={{ fontSize: 11, marginLeft: 8, whiteSpace: "nowrap" }}>↗ BAILII</a>
+              )}
               {!active && msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ marginLeft: 6 }}>{msg}</span>}</>
           : <span className="err">no adapter</span>}</td>
         <td><button onClick={toggle}>{active ? "close" : "other…"}</button></td>
@@ -1541,6 +1577,7 @@ function ResolveRow({ r, open, active, toggle, onDone }:
               <option value="existing">Link to an existing item</option>
               <option value="url">Scrape from a URL</option>
               <option value="file">Upload the source file</option>
+              {r.bailii_url && <option value="bailii">Upload BAILII RTF</option>}
             </select>
             {mode === "identifier" && <>
               <input value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="e.g. [2016] EWHC 2768 / ECLI:EU:C:2020:559" />
@@ -1549,7 +1586,40 @@ function ResolveRow({ r, open, active, toggle, onDone }:
             {mode === "existing" && <input value={existing} onChange={(e) => setExisting(e.target.value)} placeholder="existing stable_id in the corpus" />}
             {mode === "url" && <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…  (fetched via the scraping engine)" />}
             {mode === "file" && <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />}
-            <button className="primary" style={{ flex: "0 0 auto" }} onClick={go}>Resolve</button>
+            {mode === "bailii" && r.bailii_url && (
+              <div
+                style={{ flex: 1, border: "1px dashed #555", borderRadius: 4, padding: "8px 12px", background: "rgba(255,255,255,0.03)" }}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={async (e) => {
+                  e.preventDefault();
+                  const f = e.dataTransfer.files[0];
+                  if (!f) return;
+                  setBusy(true); setMsg("importing…");
+                  try {
+                    const res = await api.importBailii(r.candidate, f);
+                    setMsg(`✓ imported ${res.chars} chars · resolved ${res.resolved_edges} edge(s)`);
+                    setTimeout(onDone, 700);
+                  } catch (err: any) { setMsg("error: " + err.message); }
+                  finally { setBusy(false); }
+                }}>
+                <p className="muted" style={{ margin: "0 0 6px", fontSize: 11 }}>
+                  <a href={r.bailii_url} target="_blank" rel="noopener noreferrer">Download the RTF from BAILII ↗</a>
+                  {" "}then drag it here, or use the picker:
+                </p>
+                <input type="file" accept=".rtf"
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0]; if (!f) return;
+                    setBusy(true); setMsg("importing…");
+                    try {
+                      const res = await api.importBailii(r.candidate, f);
+                      setMsg(`✓ imported ${res.chars} chars · resolved ${res.resolved_edges} edge(s)`);
+                      setTimeout(onDone, 700);
+                    } catch (err: any) { setMsg("error: " + err.message); }
+                    finally { setBusy(false); }
+                  }} />
+              </div>
+            )}
+            {mode !== "bailii" && <button className="primary" style={{ flex: "0 0 auto" }} onClick={go}>Resolve</button>}
           </div>
           {r.citing_documents?.length > 0 && (
             <p className="muted" style={{ marginTop: 4 }}>cited by: {r.citing_documents.map((d: string) => (

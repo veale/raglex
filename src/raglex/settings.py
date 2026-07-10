@@ -55,6 +55,8 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
                 "httpx | stealth | playwright"),
     SettingSpec("RAGLEX_AUTOHARVEST", "Auto-drain worklist (refs/tick)", False, "Network",
                 "0 = off; e.g. 25 — the scheduler slowly fetches routable citations each tick"),
+    SettingSpec("RAGLEX_MISS_TTL_DAYS", "Harvest-miss cooldown (days)", False, "Network",
+                "90 — days to skip a URL that returned 404 before retrying; higher = less wasted drain budget on dead URLs"),
 )
 _SPEC_BY_KEY = {s.key: s for s in KNOWN_SETTINGS}
 

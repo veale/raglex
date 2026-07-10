@@ -147,5 +147,14 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status}`);
     return res.json();
   },
+  importBailii: async (stable_id: string, file: File, title?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("stable_id", stable_id);
+    if (title) fd.append("title", title);
+    const res = await fetch(`${BASE}/import/bailii`, { method: "POST", body: fd });
+    if (!res.ok) throw new Error(`${res.status}`);
+    return res.json() as Promise<{ stable_id: string; chars: number; resolved_edges: number }>;
+  },
   embed: () => req<any>("/embed", { method: "POST", body: "{}" }),
 };

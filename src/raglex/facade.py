@@ -538,6 +538,7 @@ class Facade:
         by upload / scrape / link / supplying the missing citation (§5b, §5a)."""
         from .citations.snowball import _classify, uk_leg_category as _uk_leg_category
         from .resolve.matchers import first_candidate
+        from .adapters.bailii import bailii_url as _bailii_url
 
         with self._open() as (cat, _rs, _ts):
             groups: dict[str, dict] = {}
@@ -598,6 +599,9 @@ class Facade:
                     "methods": sorted(g["methods"]),
                     "citing_count": len(g["src_ids"]),
                     "citing_documents": sorted(x for x in g["src_ids"] if x)[:10],
+                    # BAILII link: for UK case-law that 404s on TNA, provide a direct
+                    # download link so the user can grab the RTF and drop it in manually.
+                    "bailii_url": _bailii_url(cand) if adapter == "uk-caselaw" and cand else None,
                 })
             rows.sort(key=lambda r: (r["citing_count"], r["confidence"] == "low"), reverse=True)
             return rows if limit is None else rows[:limit]
@@ -1305,9 +1309,13 @@ class Facade:
                       and (not leg_kind or r.get("leg_kind") == leg_kind)]
         # Skip references that FAILED to fetch recently (e.g. a giant Act like FSMA 2000
         # that legislation.gov.uk can't serve) so a re-run doesn't re-stall on the same dead
-        # item. TTL'd (≤14 days) — nothing is flagged forever; it's retried automatically.
+        # item. TTL is user-configurable (RAGLEX_MISS_TTL_DAYS, default 90d) — a longer
+        # cooldown means old/dead URLs (pre-digital UK cases, absent CELLAR renditions) waste
+        # much less drain budget before they're permanently skipped.
+        import os as _os
+        miss_ttl = int(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
         with self._open() as (cat, _rs, _ts):
-            recent_misses = cat.enrichment_misses("harvest-miss", max_age_days=14)
+            recent_misses = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
         skipped = sum(1 for r in candidates if r["candidate"] in recent_misses)
         # honour the requested limit — one click can drain everything now that the run
         # fails-fast on dead items, skips them, stays responsive, and is cancellable.
@@ -1379,7 +1387,11 @@ class Facade:
             return {"error": f"could not build a {adapter_key} fetch for {cand!r}", "candidate": cand}
         # backfill=False so this one-item fetch never rewrites the source's real
         # watermark; the targeted adapters ignore `since` and yield just our id.
-        stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(adapter, max_pages=1)
+        # record_health=False: a 404 for a single item means "this item isn't available"
+        # (pre-digital case, absent CELLAR rendition), not "the source feed is broken" —
+        # don't let it increment the source's consecutive_failures counter.
+        stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+            adapter, max_pages=1, record_health=False)
         return {"candidate": cand, "adapter": adapter_key, "stored": stats.stored}
 
     def harvest_legislation_at(self, *, stable_id: str, date: str) -> dict:
@@ -1635,6 +1647,94 @@ class Facade:
                 title=title, link_to=link_to, relationship=_rel_type(relationship),
             )
             return asdict(res)
+
+    def import_bailii_file(
+        self, *, stable_id: str, data: bytes, title: str | None = None,
+    ) -> dict:
+        """Import a BAILII RTF as a UK case-law judgment keyed by the FCL stable_id.
+
+        The user downloads the RTF manually from BAILII (no scraping), drops it into
+        the UI, and this method stores it under the same ``stable_id`` that all the
+        pending citations already reference — so they resolve immediately.
+
+        Args:
+            stable_id: The Find Case Law stable_id, e.g. ``ewca/civ/2006/717``.
+            data: Raw RTF bytes from the downloaded file.
+            title: Optional display title (defaults to the stable_id).
+
+        Returns a dict with ``stable_id``, ``chars`` (text length) and
+        ``resolved_edges`` (citations this import resolved).
+        """
+        from .formats.rtf import strip_rtf
+        from .core.models import DocType as _DT, ExtractedVia as _EV, Record as _Rec, Segment
+        from .citations import extract_document as _extract_doc
+        from datetime import date as _date
+
+        parsed = strip_rtf(data)
+
+        # Extract year from slug: ewca/civ/2006/717 → 2006
+        decision_date: _date | None = None
+        for part in stable_id.split("/"):
+            if len(part) == 4 and part.isdigit():
+                try:
+                    decision_date = _date(int(part), 1, 1)
+                except ValueError:
+                    pass
+                break
+
+        # Derive court label from first slug segment (e.g. "ewca" → "Court of Appeal")
+        court_slug = stable_id.split("/")[0].lower()
+        _COURT_LABELS: dict[str, str] = {
+            "ewca": "Court of Appeal",
+            "ewhc": "High Court",
+            "uksc": "Supreme Court",
+            "ukhl": "House of Lords",
+            "ukpc": "Privy Council",
+            "ukftt": "First-tier Tribunal",
+            "ukut": "Upper Tribunal",
+            "csoh": "Court of Session (Outer House)",
+            "csih": "Court of Session (Inner House)",
+        }
+        court = _COURT_LABELS.get(court_slug, court_slug.upper())
+
+        record = _Rec(
+            source="uk-caselaw",
+            stable_id=stable_id,
+            doc_type=_DT.JUDGMENT,
+            title=title or stable_id,
+            language="en",
+            source_language="en",
+            landing_url=f"https://caselaw.nationalarchives.gov.uk/{stable_id}",
+            raw_bytes=data,
+            raw_ext="rtf",
+            text=parsed or None,
+            segments=[],
+            extracted_via=_EV.UNSTRUCTURED,
+            decision_date=decision_date,
+            court=court,
+            extra={"via": "bailii-upload"},
+        )
+        record.ensure_payload_hash()
+
+        with self._open() as (cat, rs, ts):
+            from .storage.raw import RawStore as _RS  # already open via rs
+            digest = rs.put(data, ext="rtf")
+            raw_path = str(rs.path_for(digest, "rtf"))
+            text_path: str | None = None
+            if parsed and record.payload_hash:
+                text_path = str(ts.put(record.payload_hash, parsed))
+            cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+            if parsed:
+                _extract_doc(cat, ts, stable_id)
+            resolved = Resolver(cat).run()
+
+        self._invalidate_caches()
+        return {
+            "stable_id": stable_id,
+            "stored": True,
+            "chars": len(parsed) if parsed else 0,
+            "resolved_edges": resolved.resolved,
+        }
 
     def add_note(
         self, *, text: str, title: str | None = None, link_to: str | None = None,

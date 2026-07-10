@@ -556,6 +556,22 @@ def create_app(config: Config | None = None) -> FastAPI:
     def import_zotero_ep(payload: dict = Body(...)) -> dict:
         return facade.import_zotero(**payload)
 
+    @app.post("/import/bailii")
+    async def import_bailii_ep(
+        file: UploadFile = File(...),
+        stable_id: str = Form(...),
+        title: str | None = Form(None),
+    ) -> dict:
+        """Accept a manually-downloaded BAILII RTF and store it as a UK judgment.
+
+        The file must be the RTF served by BAILII (e.g. the one linked from the
+        ``bailii_url`` field on an unresolved reference). ``stable_id`` must match
+        the Find Case Law key already cited in the corpus (e.g. ``ewca/civ/2006/717``)
+        — this is what connects the upload to all outstanding citations.
+        """
+        data = await file.read()
+        return facade.import_bailii_file(stable_id=stable_id, data=data, title=title or None)
+
     @app.post("/documents/{doc_id:path}/attach")
     async def attach_ep(doc_id: str, file: UploadFile = File(...), kind: str = Form("exhibit")) -> dict:
         data = await file.read()

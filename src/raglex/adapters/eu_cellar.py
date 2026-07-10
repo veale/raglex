@@ -568,10 +568,21 @@ LIMIT {self.per_page}
         celex = stub.hints.get("celex") or stub.stable_id
         doc_type, court = classify_celex(celex, stub.hints.get("rtype"))
         raw = self._fetch_formex(stub.raw_url)
-        text, segments = extract_formex(raw) if raw else (None, [])
+        if raw is not None:
+            text, segments = extract_formex(raw)
+            raw_ext = "xml"
+        else:
+            # Formex not available (common for pre-2010 cases) — fall back to HTML.
+            html = self._fetch_html(stub.raw_url)
+            if html is not None:
+                text = self._html_to_text(html)
+                segments = []
+                raw, raw_ext = html, "html"
+            else:
+                text, segments, raw_ext = None, [], "txt"
         # the CELLAR webservice often gives no title — derive a concise case name from
         # the judgment's own parties + case number ("ZZ v … (C-300/11)").
-        title = stub.title or (formex_case_title(raw) if raw else None)
+        title = stub.title or (formex_case_title(raw) if raw is not None and raw_ext == "xml" else None)
 
         relations: list[TypedRelation] = []
         # 1) the typed edge to the legislation that surfaced this case (§1A).
@@ -650,13 +661,14 @@ LIMIT {self.per_page}
             source_language="en",
             landing_url=stub.landing_url,
             raw_bytes=raw if raw is not None else stub.raw_url.encode(),
-            raw_ext="xml" if raw is not None else "txt",
+            raw_ext=raw_ext,
             text=text,
             segments=segments,
             relations=relations,
             extracted_via=ExtractedVia.STRUCTURED,
             extra={
                 "celex": celex,
+                **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {}),
                 **({"origin_country": origin_country} if origin_country else {}),
                 **({"referring_courts": referring_courts} if referring_courts else {}),
             },
@@ -673,6 +685,45 @@ LIMIT {self.per_page}
         except FetchError:
             return None
         return unzip_formex(resp.content)
+
+    def _fetch_html(self, url: str) -> bytes | None:
+        """HTML fallback: fetch the EUR-Lex HTML rendering when no Formex exists.
+        Many pre-2010 CJEU cases have no Formex in CELLAR but do have HTML.
+        The same CELLAR content-negotiation URL serves HTML with the right Accept header."""
+        try:
+            resp = self._client.get(
+                url,
+                headers={"Accept": "text/html;q=0.9,*/*;q=0.8", "Accept-Language": "en"},
+            )
+        except FetchError:
+            return None
+        content = resp.content
+        low = content[:512].lower()
+        if b"<html" in low or b"<!doctype" in low:
+            return content
+        return None
+
+    @staticmethod
+    def _html_to_text(html_bytes: bytes) -> str | None:
+        """Strip EUR-Lex HTML to judgment text (best-effort). Targets the known content
+        div to cut navigation noise; falls back to full page text if not found."""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_bytes, "html.parser")
+            for junk in soup(["script", "style", "nav", "header", "footer"]):
+                junk.decompose()
+            # EUR-Lex judgment HTML puts the text in one of these containers:
+            body = (soup.find(id="document-content")
+                    or soup.find(class_="EurlexContent")
+                    or soup.find(id="mainContent")
+                    or soup.body)
+            if body is None:
+                return None
+            import re as _re
+            text = body.get_text("\n", strip=True)
+            return _re.sub(r"\n{3,}", "\n\n", text).strip() or None
+        except Exception:  # noqa: BLE001 — best-effort
+            return None
 
     def case_metadata(self, *, celex: str | None = None, ecli: str | None = None) -> dict:
         """One SPARQL hop returning ``{celex, ecli, title}`` for a CJEU case, keyed by
@@ -753,15 +804,30 @@ class CJEUCaseAdapter(BaseAdapter):
         meta = self._cellar.case_metadata(celex=celex)
         ecli, title = meta.get("ecli"), meta.get("title")
         raw = self._cellar._fetch_formex(stub.raw_url)
-        text, segments = extract_formex(raw) if raw else (None, [])
-        if raw is None and ecli is None:
-            return None  # nothing fetchable — let the caller report "not found"
+        if raw is not None:
+            text, segments = extract_formex(raw)
+            raw_bytes, raw_ext = raw, "xml"
+        else:
+            # Formex unavailable — try HTML (common for pre-2010 cases in CELLAR).
+            html = self._cellar._fetch_html(stub.raw_url)
+            if html is not None:
+                text = self._cellar._html_to_text(html)
+                segments = []
+                raw_bytes, raw_ext = html, "html"
+            else:
+                text, segments, raw_bytes, raw_ext = None, [], None, "txt"
+        # Return None only when we have literally nothing — no content AND no ECLI
+        # to key the record by. If we have any content, store it (metadata-only is
+        # already handled by SPARQL in EUCellarAdapter; this path is targeted fetch).
+        if raw_bytes is None and ecli is None:
+            return None  # genuinely absent from CELLAR — let the caller report "not found"
         return Record(
             source=self.source, stable_id=ecli or celex,
             ecli=ecli, doc_type=doc_type, court=court, title=title,
             landing_url=stub.landing_url,
-            raw_bytes=raw if raw is not None else celex.encode(),
-            raw_ext="xml" if raw is not None else "txt",
+            raw_bytes=raw_bytes if raw_bytes is not None else celex.encode(),
+            raw_ext=raw_ext,
             text=text, segments=segments, extracted_via=ExtractedVia.STRUCTURED,
-            extra={"celex": celex, "format": "formex-legislation"},
+            extra={"celex": celex,
+                   **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {})},
         )

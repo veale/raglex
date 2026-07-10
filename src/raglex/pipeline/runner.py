@@ -74,12 +74,15 @@ class Pipeline:
         since: str | None = None,
         max_pages: int | None = None,
         ignore_watermark: bool = False,
+        record_health: bool = True,
     ) -> RunStats:
         """Run one source. ``backfill`` ignores the stored watermark and pages deep
         from ``since`` (§5). ``ignore_watermark`` runs with NO date cursor at all and
         doesn't advance the watermark — for a targeted **search** (e.g. discover-citing),
         which isn't an incremental feed crawl, so the newest-first cutoff would otherwise
-        drop every older result."""
+        drop every older result. ``record_health=False`` skips the consecutive-failures
+        counter — used for targeted single-item fetches where a 404 means "this item
+        doesn't exist" rather than "the source feed is broken"."""
         stats = RunStats(source=adapter.source)
         watermark = None if ignore_watermark else (since if backfill else self.catalogue.get_watermark(adapter.source))
         highest = watermark
@@ -135,9 +138,10 @@ class Pipeline:
             stats.rate_limited = True
         finally:
             failed = stats.errors > 0 and stats.stored == 0
-            self.catalogue.record_run(
-                adapter.source, yielded=stats.stored > 0, failed=failed
-            )
+            if record_health:
+                self.catalogue.record_run(
+                    adapter.source, yielded=stats.stored > 0, failed=failed
+                )
 
         # Advance the watermark only on a clean (non-rate-limited) crawl (§5) — never for
         # a targeted search, which isn't an incremental pass over the recency feed.
