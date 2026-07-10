@@ -195,6 +195,14 @@ def _targeted_echr(candidate: str):
     return get_adapter("echr", ids=candidate)
 
 
+def _targeted_uk_hol(candidate: str):
+    """A House of Lords case by ``ukhl/YYYY/N`` — scraped from publications.parliament.uk
+    when Find Case Law doesn't hold it (older HoL judgments live there, not on TNA)."""
+    from .adapters.registry import get_adapter
+
+    return get_adapter("uk-hol", ids=candidate)
+
+
 def _targeted_nl_rechtspraak(candidate: str):
     """A Dutch judgment by ECLI — Rechtspraak fetches the content directly by ECLI."""
     if not candidate.upper().startswith("ECLI:NL:"):
@@ -215,6 +223,7 @@ _TARGETED_HARVEST = {
     "uk-legislation": _targeted_uk_legislation,
     "eu-legislation": _targeted_eu_legislation,
     "uk-caselaw": _targeted_uk_caselaw,
+    "uk-hol": _targeted_uk_hol,
     "eu-cellar": _targeted_eu_cellar,
     "echr": _targeted_echr,
     "nl-rechtspraak": _targeted_nl_rechtspraak,
@@ -1569,6 +1578,19 @@ class Facade:
         except Exception as exc:  # noqa: BLE001
             return {"candidate": cand, "adapter": adapter_key, "stored": 0,
                     "outcome": "transient", "error": str(exc)}
+        # Old House of Lords judgments (ukhl/YYYY/N, 1996–2009) often aren't on Find Case
+        # Law — fall back to the publications.parliament.uk scrape for those (§5a).
+        if (stats.outcome == "absent" and adapter_key == "uk-caselaw"
+                and cand.lower().startswith("ukhl/")):
+            try:
+                hol = _targeted_uk_hol(cand)
+                hstats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                    hol, max_pages=1, record_health=False)
+                if hstats.stored:
+                    return {"candidate": cand, "adapter": "uk-hol", "stored": hstats.stored,
+                            "outcome": "stored"}
+            except Exception:  # noqa: BLE001 — the scrape is best-effort here
+                pass
         out = {"candidate": cand, "adapter": adapter_key, "stored": stats.stored,
                "outcome": stats.outcome}
         if stats.outcome not in ("stored", "present") and stats.notes:
@@ -2297,6 +2319,95 @@ class Facade:
                 # for these" — the scheduler backs off on the former, not the latter.
                 "provider_down": bool(want) and not meta,
                 "flagged_no_data": len([c for c in want if c not in meta])}
+
+    def harvest_house_of_lords(self, *, ids: str | None = None, limit: int | None = None,
+                               match_reports: bool = True, on_progress=None, cancel_check=None) -> dict:
+        """Scrape the House of Lords archive (publications.parliament.uk, 1996–2009) and,
+        after, link the classic-reporter citations to what was harvested (§5a/§5b).
+
+        Post-2001 cases resolve every "[YYYY] UKHL N"; pre-2001 cases become documents a
+        "[1998] AC 1" can be matched to. ``ids`` scopes to specific stable_ids (e.g. from the
+        worklist); otherwise the whole index is walked."""
+        from .adapters.registry import get_adapter
+        from .pipeline import Pipeline
+
+        adapter = get_adapter("uk-hol", ids=ids) if ids else get_adapter("uk-hol")
+        stored_ids: list[str] = []
+        with self._open() as (cat, rs, ts):
+            _progress(on_progress, stage="scraping House of Lords index", done=0, total=0)
+            before = cat.all_stable_ids()
+            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                adapter, max_pages=limit, record_health=True)
+            stored_ids = [s for s in cat.all_stable_ids() - before]
+            self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
+            resolved = Resolver(cat).run()
+        matched = {}
+        if match_reports and not (cancel_check and cancel_check()):
+            matched = self.match_report_citations(on_progress=on_progress, cancel_check=cancel_check)
+        self._invalidate_caches()
+        return {"stored": stats.stored, "extracted_docs": len(stored_ids),
+                "resolved_edges": resolved.resolved, "report_match": matched}
+
+    def match_report_citations(self, *, limit: int = 8000, on_progress=None, cancel_check=None) -> dict:
+        """Link reporter-only citations ("[1998] AC 1") to harvested cases by matching the
+        case name the citing text puts beside the report against a harvested judgment of the
+        right year (§5b, citations.report_match). Mints an alias per confident, unambiguous
+        match, then resolves — so the citation and all its siblings go live."""
+        from collections import Counter
+
+        from .citations.report_match import extract_preceding_name, match_report
+        from .topics.gate import fold
+
+        def _year(d):
+            return int(d[:4]) if d and len(d) >= 4 and d[:4].isdigit() else None
+
+        with self._open() as (cat, _rs, ts):
+            pool = [{"stable_id": r["stable_id"], "title": r["title"], "year": _year(r["decision_date"])}
+                    for r in cat.judgment_pool()]
+            contexts = cat.report_citation_contexts(limit=limit)
+            # cache each citing doc's text once (several report cites can share a document)
+            text_cache: dict[str, str | None] = {}
+
+            def _text(src_id: str) -> str | None:
+                if src_id not in text_cache:
+                    doc = cat.get_document(src_id)
+                    ph = doc["payload_hash"] if doc else None
+                    try:
+                        text_cache[src_id] = ts.get(ph) if ph else None
+                    except OSError:
+                        text_cache[src_id] = None
+                return text_cache[src_id]
+
+            # accumulate the best-supported name per distinct report string
+            names: dict[str, Counter] = {}
+            for i, c in enumerate(contexts):
+                if cancel_check and cancel_check():
+                    break
+                raw, src_id, start = c["raw"], c["src_id"], c["char_start"]
+                if start is None:
+                    continue
+                txt = _text(src_id)
+                if not txt:
+                    continue
+                name = extract_preceding_name(txt[max(0, start - 200): start])
+                if name:
+                    names.setdefault(raw, Counter())[name] += 1
+                if on_progress and i % 200 == 0:
+                    _progress(on_progress, stage="matching reporter citations", done=i, total=len(contexts))
+
+            aliased = 0
+            for raw, name_counts in names.items():
+                name, _ = name_counts.most_common(1)[0]
+                hit = match_report(raw, name, pool, confirm_text=False)
+                if hit:
+                    stable_id, _score = hit
+                    # key the alias on the folded raw so the resolver's raw_fold rung links
+                    # this citation and every sibling occurrence of the same report string.
+                    cat.put_alias(fold(raw), stable_id, source="report-match", commit=False)
+                    aliased += 1
+            cat.commit()
+            resolved = Resolver(cat).run()
+        return {"report_strings": len(names), "aliased": aliased, "resolved_edges": resolved.resolved}
 
     def discover_citing(self, *, target: str, via: str = "auto", query: str | None = None,
                         max_pages: int = 1, resolve: bool = True) -> dict:

@@ -141,18 +141,85 @@ def _page_html(page) -> str:  # noqa: ANN001
     return str(page)
 
 
-_FETCHERS = {"httpx": HttpxFetcher, "stealth": StealthyFetcher, "playwright": PlaywrightFetcher}
+class ScraplingMcpFetcher:
+    """Fetch via a **scrapling-MCP service** (a shared Scrapling/Camoufox instance behind an
+    MCP endpoint) instead of running a browser in-process. Preferred when one is deployed
+    alongside — the raglex image needn't ship a browser — and it **falls back to in-process
+    Camoufox** (:class:`StealthyFetcher`) when the service is unreachable, so a scrape never
+    hard-fails just because the shared instance is down.
+
+    Config: ``RAGLEX_SCRAPLING_MCP_URL`` (e.g. ``http://scrapling-mcp:8000/mcp``) + optional
+    ``RAGLEX_SCRAPLING_MCP_KEY``. The service is expected to expose a fetch tool
+    (``stealthy_fetch`` / ``fetch`` / ``get``) returning the page HTML."""
+
+    name = "scrapling-mcp"
+
+    def __init__(self, *, url: str | None = None, api_key: str | None = None,
+                 proxy: str | None = None) -> None:
+        import os
+
+        self.url = url or os.environ.get("RAGLEX_SCRAPLING_MCP_URL")
+        self.api_key = api_key or os.environ.get("RAGLEX_SCRAPLING_MCP_KEY")
+        self.proxy = proxy
+        self._fallback: "StealthyFetcher | None" = None
+
+    def _mcp_fetch(self, url: str) -> str | None:
+        from ..embeddings.remote import MCPToolClient
+
+        client = MCPToolClient(self.url, token=self.api_key, timeout=120)
+        last_exc: Exception | None = None
+        for tool in ("stealthy_fetch", "fetch", "get", "scrape"):
+            try:
+                res = client.call_tool(tool, {"url": url})
+            except Exception as exc:  # noqa: BLE001 — tool may not exist; try the next
+                last_exc = exc
+                continue
+            if isinstance(res, str) and res:
+                return res
+            for key in ("html", "content", "body", "text", "result"):
+                val = res.get(key) if isinstance(res, dict) else None
+                if isinstance(val, str) and val:
+                    return val
+        if last_exc:
+            raise last_exc
+        return None
+
+    def fetch(self, url: str, *, headers: dict | None = None) -> FetchedPage:
+        if self.url:
+            try:
+                html = self._mcp_fetch(url)
+                if html:
+                    return FetchedPage(url=url, status=200, html=html, engine=self.name)
+            except Exception:  # noqa: BLE001 — fall back to the in-process browser
+                pass
+        if self._fallback is None:
+            self._fallback = StealthyFetcher(proxy=self.proxy)
+        return self._fallback.fetch(url, headers=headers)
+
+    def close(self) -> None:  # pragma: no cover
+        if self._fallback:
+            self._fallback.close()
+
+
+_FETCHERS = {
+    "httpx": HttpxFetcher, "stealth": StealthyFetcher,
+    "playwright": PlaywrightFetcher, "scrapling-mcp": ScraplingMcpFetcher,
+}
 
 
 def get_fetcher(
     name: str | None = None, *, source: str = "scrape", min_interval: float = 1.0,
     proxy: str | None = None, requires_js: bool = False,
 ) -> Fetcher:
-    """Build the configured fetcher. ``requires_js`` forces at least Playwright;
-    an explicit ``name`` (or ``RAGLEX_SCRAPER``) overrides."""
+    """Build the configured fetcher. ``requires_js`` forces at least Playwright; an explicit
+    ``name`` (or ``RAGLEX_SCRAPER``) overrides. When ``stealth`` is requested and a
+    scrapling-MCP service is configured, that service is used (with an in-process Camoufox
+    fallback) so the image needn't ship a browser."""
     import os
 
     chosen = name or os.environ.get("RAGLEX_SCRAPER") or ("playwright" if requires_js else "httpx")
+    if chosen == "stealth" and os.environ.get("RAGLEX_SCRAPLING_MCP_URL"):
+        chosen = "scrapling-mcp"
     cls = _FETCHERS.get(chosen, HttpxFetcher)
     if cls is HttpxFetcher:
         return cls(source, min_interval=min_interval, proxy=proxy)

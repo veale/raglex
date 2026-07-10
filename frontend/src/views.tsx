@@ -1159,8 +1159,8 @@ function AutoDrain() {
     <label className="muted" style={{ flex: "0 0 auto", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}
       title="The scheduler slowly drains the worklist in the background, even if you close this tab or the app restarts">
       auto-drain
-      <select value={val || "0"} onChange={(e) => set(e.target.value)} style={{ width: 88 }}>
-        {["0", "10", "25", "50", "100"].map((n) => <option key={n} value={n}>{n === "0" ? "off" : n + "/tick"}</option>)}
+      <select value={val || "500"} onChange={(e) => set(e.target.value)} style={{ width: 88 }}>
+        {["0", "10", "25", "50", "100", "500"].map((n) => <option key={n} value={n}>{n === "0" ? "off" : n + "/tick"}</option>)}
       </select>
       {saved && <span className="ok">✓</span>}
     </label>
@@ -1430,10 +1430,16 @@ function UnfetchablePanel() {
   if (err) return null;
   return (
     <div className="panel">
-      <h3 style={{ marginTop: 0 }}>Cited but unfetchable
-        <span className="muted"> — most-cited authorities the system can’t fetch (classic reporters, cases by name). Follow the BAILII link, then upload the file to resolve every citation to it at once.</span>
-        {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
-      </h3>
+      <div className="row" style={{ alignItems: "baseline" }}>
+        <h3 style={{ marginTop: 0, flex: 1 }}>Cited but unfetchable
+          <span className="muted"> — most-cited authorities the system can’t fetch (classic reporters, cases by name). Follow the link, then upload the file to resolve every citation to it at once.</span>
+          {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
+        </h3>
+        <button className="mini" style={{ flex: "0 0 auto" }}
+          title="Scrape the House of Lords archive (1996–2009) and match reporter-only citations ('[1998] AC 1') to the harvested cases by name + year. Runs in the background — see the Jobs panel."
+          onClick={async () => { try { await api.harvestHoL(); } catch { /* surfaced in Jobs */ } }}>
+          ⚖ scrape House of Lords + match</button>
+      </div>
       {data?._warming && <p className="muted loading-pulse">⏳ ranking the unfetchable frontier…</p>}
       {!data?._warming && refs.length === 0 && <p className="muted">Nothing recognised as unfetchable. ✓</p>}
       {refs.length > 0 && (

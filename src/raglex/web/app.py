@@ -260,6 +260,19 @@ def create_app(config: Config | None = None) -> FastAPI:
         cat = (payload or {}).get("category", "")
         return _start_job("refresh-category", f"total refresh — {cat}", {"category": cat})
 
+    @app.post("/jobs/harvest-hol")
+    def job_harvest_hol_ep(payload: dict = Body(default={})) -> dict:
+        """Scrape the House of Lords archive (1996–2009) and link reporter-only citations
+        to what's harvested. Background job (the scrape is slow + bot-gated)."""
+        p = payload or {}
+        params = {k: v for k, v in p.items() if k in ("ids", "limit", "match_reports")}
+        return _start_job("harvest-hol", "scrape House of Lords + match reports", params)
+
+    @app.post("/jobs/match-reports")
+    def job_match_reports_ep() -> dict:
+        """Match reporter-only citations ("[1998] AC 1") to harvested cases by name+year."""
+        return _start_job("match-reports", "match reporter citations to harvested cases")
+
     @app.post("/jobs/pull-ag-opinions")
     def job_pull_ag_ep() -> dict:
         """Pull the AG Opinion for every held CJEU judgment that lacks one. Background job."""

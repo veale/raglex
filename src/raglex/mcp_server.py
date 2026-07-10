@@ -420,6 +420,22 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
 
     @mcp.tool()
+    def harvest_house_of_lords(ids: Optional[str] = None, limit: Optional[int] = None,
+                               match_reports: bool = True) -> dict:
+        """Scrape the House of Lords archive (publications.parliament.uk, 1996–2009) and
+        link classic-reporter citations ("[1998] AC 1") to the harvested cases by matching
+        the case name in the citing text against a judgment of the right year. Resolves
+        "[YYYY] UKHL N" citations and gives pre-2001 report-only cases a home. Slow (bot-
+        gated scrape) — prefer running it as a background job via the API."""
+        return facade.harvest_house_of_lords(ids=ids, limit=limit, match_reports=match_reports)
+
+    @mcp.tool()
+    def match_report_citations() -> dict:
+        """Match reporter-only citations to already-harvested cases by name + year + a
+        plausible reporter, minting an alias per confident match so they resolve (§5b)."""
+        return facade.match_report_citations()
+
+    @mcp.tool()
     def unfetchable_references(limit: int = 200) -> dict:
         """The most-cited references the system CANNOT fetch — classic law reports
         ("[1982] AC 1"), cases cited by name, courts with no adapter — ranked by how often

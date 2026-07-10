@@ -1259,6 +1259,26 @@ class Catalogue:
             """
         ).fetchall()
 
+    def report_citation_contexts(self, *, limit: int = 5000) -> list[sqlite3.Row]:
+        """Occurrences of law-report citations that are still unresolved — the raw string,
+        the citing document and the char span — so the report matcher can read the case
+        name the citing text puts next to each one. Report citations are candidate-less
+        (method ``law_report*``) and recorded in the ``citations`` audit table."""
+        return self.conn.execute(
+            "SELECT c.raw, c.src_id, c.char_start FROM citations c "
+            "WHERE c.method LIKE 'law_report%' AND c.candidate_id IS NULL "
+            "ORDER BY c.src_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def judgment_pool(self) -> list[sqlite3.Row]:
+        """Harvested judgments as (stable_id, title, decision_date) — the candidate pool
+        the report matcher scores a "[1998] AC 1" against by name + year."""
+        return self.conn.execute(
+            "SELECT stable_id, title, decision_date FROM documents "
+            "WHERE doc_type = 'judgment' AND title IS NOT NULL"
+        ).fetchall()
+
     def citing_documents(self, ref: str, *, limit: int = 10) -> list[str]:
         """Which documents cite one hanging reference (for the worklist row's detail)."""
         rows = self.conn.execute(

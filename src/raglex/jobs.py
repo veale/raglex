@@ -36,7 +36,7 @@ log = logging.getLogger("raglex.jobs")
 # radiate, expand-citing) is keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys",
-    "rebuild-citation-counts", "auto-drain",
+    "rebuild-citation-counts", "auto-drain", "harvest-hol", "match-reports",
 })
 MAX_CONCURRENT_JOBS = 6
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
@@ -97,6 +97,8 @@ RUNNERS: dict[str, Callable] = {
     "expand-citing": lambda f, p, cb, cancel: f.expand_citing_cases(**p, on_progress=cb, cancel_check=cancel),
     "refresh-category": lambda f, p, cb, cancel: f.refresh_category(**p, on_progress=cb, cancel_check=cancel),
     "seed-text": lambda f, p, cb, cancel: f.seed_from_text(**p, on_progress=cb, cancel_check=cancel),
+    "harvest-hol": lambda f, p, cb, cancel: f.harvest_house_of_lords(**p, on_progress=cb, cancel_check=cancel),
+    "match-reports": lambda f, p, cb, cancel: f.match_report_citations(on_progress=cb, cancel_check=cancel),
 }
 
 

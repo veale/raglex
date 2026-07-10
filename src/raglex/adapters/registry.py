@@ -15,6 +15,7 @@ from ..scraping.scrape_adapter import RecipeScrapeAdapter
 from .echr import ECHRAdapter
 from .eu_cellar import EUCellarAdapter
 from .eu_legislation import EULegislationAdapter
+from .hol import HouseOfLordsAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .uk_caselaw import UKCaseLawAdapter
@@ -36,6 +37,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "eu-cellar": EUCellarAdapter,
     # ECHR — HUDOC; resolves by ECLI (ECLI:CE:ECHR:…) OR application number (58170/13).
     "echr": ECHRAdapter,
+    # House of Lords (1996–2009) — scraped from publications.parliament.uk. Resolves
+    # "[YYYY] UKHL N" and gives pre-2001 report-only cases a home (§5a).
+    "uk-hol": HouseOfLordsAdapter,
     # Legislation (§0) — statute, not just cases. stable_ids are the resolution
     # targets so harvesting these closes the §5b loop (FOIA, DPA, GDPR, …).
     "uk-legislation": UKLegislationAdapter,
