@@ -1264,11 +1264,13 @@ class Catalogue:
         the citing document and the char span — so the report matcher can read the case
         name the citing text puts next to each one. Report citations are candidate-less
         (method ``law_report*``) and recorded in the ``citations`` audit table."""
+        # bind the LIKE pattern as a param — a literal '%' in the SQL collides with the
+        # Postgres shim's ? → %s placeholder translation (the pg-like-placeholder gotcha).
         return self.conn.execute(
             "SELECT c.raw, c.src_id, c.char_start FROM citations c "
-            "WHERE c.method LIKE 'law_report%' AND c.candidate_id IS NULL "
+            "WHERE c.method LIKE ? AND c.candidate_id IS NULL "
             "ORDER BY c.src_id LIMIT ?",
-            (limit,),
+            ("law_report%", limit),
         ).fetchall()
 
     def judgment_pool(self) -> list[sqlite3.Row]:
