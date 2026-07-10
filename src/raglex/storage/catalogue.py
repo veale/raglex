@@ -1057,6 +1057,23 @@ class Catalogue:
             """
         ).fetchall()
 
+    def held_key_set(self) -> set[str]:
+        """Every string that identifies a held document — stable_id, ECLI, and the aliases
+        pointing at one (CELEX/chamber-less/named). The snowball tests ~165k frontier
+        candidates for held-ness; doing that as a set membership after two cheap scans is
+        seconds, where 165k point lookups (or 200 batched OR-queries + recursion) was a
+        minute-plus. Alias keys are folded, matching how citations resolve."""
+        held: set[str] = set()
+        for r in self.conn.execute("SELECT stable_id, ecli FROM documents"):
+            held.add(r["stable_id"])
+            if r["ecli"]:
+                held.add(r["ecli"])
+        # an alias counts as "held" only if its target is a held document
+        for r in self.conn.execute("SELECT alias, dst_id FROM citation_aliases"):
+            if r["dst_id"] in held:
+                held.add(r["alias"])
+        return held
+
     # -- set-based resolution (§5b) -----------------------------------------
     # Each pass flips whole classes of pending edges live in ONE statement. The old
     # per-edge Python loop re-derived a candidate id for 450k edges every scheduler

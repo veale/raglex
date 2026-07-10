@@ -149,12 +149,13 @@ def snowball(catalogue: Catalogue, *, limit: int = 50, only_unresolved: bool = T
     "build-an-adapter" list."""
     buckets: dict[tuple[str, str | None, str | None], Frontier] = {}
     rows = catalogue.candidate_frequencies()
-    # Which of these candidates are already nodes? ONE batched lookup — asking per
-    # candidate was ~165k round trips, and dominated the endpoint's runtime.
-    held: dict = catalogue.find_existing([r["candidate_id"] for r in rows]) if only_unresolved else {}
+    # Which of these candidates are already nodes? Build the set of held keys once (two
+    # cheap scans) and test membership — 165k point lookups / batched OR-queries were the
+    # whole cost of this endpoint (a minute-plus over the production graph).
+    held: set = catalogue.held_key_set() if only_unresolved else set()
     for row in rows:
         candidate = row["candidate_id"]
-        if only_unresolved and candidate in held:
+        if only_unresolved and (candidate in held or candidate.casefold() in held):
             continue  # already a node — not part of the frontier
         form, juris, adapter = _classify(candidate, row["entity_kind"])
         key = (form, juris, adapter)
