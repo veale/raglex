@@ -91,7 +91,9 @@ class MCPToolClient:
     def call_tool(self, name: str, arguments: dict) -> dict:
         import httpx
 
-        with httpx.Client(timeout=self.timeout) as client:
+        # follow_redirects: some MCP servers 307 between /mcp and /mcp/ (a 307 preserves the
+        # POST method + body, so following it is correct); without this the handshake dies.
+        with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
             if self._session_id is None:
                 self._initialise(client)
             resp = client.post(self.url, headers=self._headers(), json={
