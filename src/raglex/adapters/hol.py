@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Iterator
 from urllib.parse import urljoin
 
@@ -175,11 +176,11 @@ class HouseOfLordsAdapter(BaseAdapter):
             return None
         text = "\n\n".join(all_paras)
         year = stub.hints.get("year") or ""
-        decision_date = f"{year}-01-01" if re.fullmatch(r"\d{4}", year) else None
+        fallback = date(int(year), 1, 1) if re.fullmatch(r"\d{4}", year) else None
         return Record(
             source=self.source, stable_id=stub.stable_id,
             doc_type=DocType.JUDGMENT, title=stub.title, court="ukhl",
-            decision_date=_parse_date(stub.hints.get("date")) or decision_date,
+            decision_date=_parse_date(stub.hints.get("date")) or fallback,
             language="en", source_language="en", landing_url=stub.landing_url,
             raw_bytes=text.encode("utf-8"), raw_ext="txt", text=text,
             extracted_via=ExtractedVia.SCRAPE,
@@ -193,12 +194,17 @@ _MONTHS = {m: i for i, m in enumerate(
      "september", "october", "november", "december"], start=1)}
 
 
-def _parse_date(text: str | None) -> str | None:
-    """"17 June 2009" → "2009-06-17" (the index's date format), else None."""
+def _parse_date(text: str | None) -> date | None:
+    """"17 June 2009" → ``date(2009, 6, 17)`` (the index's date format), else None."""
     if not text:
         return None
     m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", text)
     if not m:
         return None
     mon = _MONTHS.get(m.group(2).lower())
-    return f"{m.group(3)}-{mon:02d}-{int(m.group(1)):02d}" if mon else None
+    if not mon:
+        return None
+    try:
+        return date(int(m.group(3)), mon, int(m.group(1)))
+    except ValueError:
+        return None
