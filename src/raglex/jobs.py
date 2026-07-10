@@ -86,7 +86,7 @@ def fmt_progress(p: dict) -> str:
 # kind → the facade call it names. Persisting (kind, params) instead of a closure is what
 # makes a job survive the process that started it.
 RUNNERS: dict[str, Callable] = {
-    "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(on_progress=cb, cancel_check=cancel),
+    "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(source=p.get("source"), on_progress=cb, cancel_check=cancel),
     "backfill-metadata": lambda f, p, cb, cancel: f.backfill_document_metadata(on_progress=cb),
     "backfill-edge-keys": lambda f, p, cb, cancel: f.backfill_edge_keys(on_progress=cb, cancel_check=cancel),
     "rebuild-citation-counts": lambda f, p, cb, cancel: f.rebuild_citation_counts(),

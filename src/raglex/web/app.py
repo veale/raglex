@@ -201,10 +201,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.apply_rules()
 
     @app.post("/jobs/rescan-citations")
-    def job_rescan_ep() -> dict:
-        """Re-extract every document with the current grammars/rules (picks up new adapters
-        like ECHR) — as a progress-tracked background job."""
-        return _start_job("rescan-citations", "re-scan corpus for new citations")
+    def job_rescan_ep(payload: dict = Body(default={})) -> dict:
+        """Re-extract every document with the current grammars/rules (picks up new grammars
+        like the law reports) — as a progress-tracked background job. Optional ``source``
+        scopes it (e.g. just uk-caselaw), far faster since reports are cited by case law."""
+        p = payload or {}
+        label = f"re-scan {p['source']} for new citations" if p.get("source") else "re-scan corpus for new citations"
+        return _start_job("rescan-citations", label, {"source": p["source"]} if p.get("source") else {})
 
     @app.post("/jobs/backfill-edge-keys")
     def job_backfill_edge_keys_ep() -> dict:

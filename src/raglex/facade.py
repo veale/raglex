@@ -1979,16 +1979,19 @@ class Facade:
             cat.delete_alias(phrase)
             return {"phrase": phrase, "deleted": True}
 
-    def apply_rules(self, *, on_progress=None, cancel_check=None) -> dict:
-        """Re-extract EVERY document's text with the current grammars + user rules — the
-        "re-scan the whole corpus for new potential citations" action. Run this after a new
-        adapter/grammar lands (e.g. ECHR app numbers, EHRR reports) so already-stored docs
-        pick them up. Heavy (minutes over a big corpus) → always run it as a background job."""
+    def apply_rules(self, *, source: str | None = None, on_progress=None, cancel_check=None) -> dict:
+        """Re-extract document text with the current grammars + user rules — the "re-scan the
+        corpus for new potential citations" action. Run this after a new adapter/grammar
+        lands (e.g. the law-report grammars, ECHR app numbers) so already-stored docs pick
+        them up. ``source`` scopes it (e.g. just ``uk-caselaw``) — reports are cited by case
+        law, so a scoped re-scan is far faster than the whole corpus. Heavy → run as a job."""
         from .citations import extract_document
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()
-            ids = [r["stable_id"] for r in cat.list_documents(limit=200000) if r["has_text"]]
+            docs_iter = cat.list_documents(source=source, limit=200000) if source \
+                else cat.list_documents(limit=200000)
+            ids = [r["stable_id"] for r in docs_iter if r["has_text"]]
             docs = cites = 0
             cancelled = False
             for i, sid in enumerate(ids, 1):
