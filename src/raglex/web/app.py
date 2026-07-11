@@ -218,6 +218,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: v for k, v in p.items() if k in ("limit", "parallel", "coref")}
         return _start_job("rescan", "full fresh relink — re-extract + match everything", params)
 
+    @app.post("/jobs/harvest-echr")
+    def job_harvest_echr_ep(payload: dict = Body(default={})) -> dict:
+        """Queue the ECtHR cases the corpus cites by name/EHRR but doesn't hold, and fetch
+        them from HUDOC by docname search; ``limit`` bounds how many (most-cited first)."""
+        p = payload or {}
+        params = {k: v for k, v in p.items() if k in ("limit", "match_after")}
+        return _start_job("harvest-echr", "queue + harvest missing ECtHR cases from HUDOC", params)
+
     @app.post("/jobs/match-legislation")
     def job_match_legislation_ep() -> dict:
         """Resolve name-only statute references against the titles of held legislation."""

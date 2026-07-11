@@ -37,7 +37,7 @@ log = logging.getLogger("raglex.jobs")
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys",
     "rebuild-citation-counts", "auto-drain", "harvest-hol", "match-reports",
-    "rescan", "mine-parallel", "match-legislation", "match-echr",
+    "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
 })
 MAX_CONCURRENT_JOBS = 6
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
@@ -105,6 +105,7 @@ RUNNERS: dict[str, Callable] = {
     "match-legislation": lambda f, p, cb, cancel: f.match_named_legislation(**p, on_progress=cb, cancel_check=cancel),
     "match-echr": lambda f, p, cb, cancel: f.match_echr_reports(**p, on_progress=cb, cancel_check=cancel),
     "rescan": lambda f, p, cb, cancel: f.rescan(**p, on_progress=cb, cancel_check=cancel),
+    "harvest-echr": lambda f, p, cb, cancel: f.harvest_missing_echr(**p, on_progress=cb, cancel_check=cancel),
 }
 
 

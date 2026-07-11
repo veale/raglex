@@ -1368,6 +1368,18 @@ class Catalogue:
             "WHERE source = 'echr' AND title IS NOT NULL"
         ).fetchall()
 
+    def pending_echr_name_refs(self, *, limit: int = 500) -> list[str]:
+        """Distinct still-pending ``echr:<case name>`` candidates, most-cited first — the
+        ECtHR cases the corpus references (by name/EHRR) but doesn't hold, to be harvested
+        from HUDOC by docname search. LIKE pattern bound as a param (pg literal-% gotcha)."""
+        rows = self.conn.execute(
+            "SELECT candidate_id, COUNT(*) AS n FROM relations "
+            "WHERE resolution_status = 'pending' AND candidate_id LIKE ? "
+            "GROUP BY candidate_id ORDER BY n DESC LIMIT ?",
+            ("echr:%", limit),
+        ).fetchall()
+        return [r["candidate_id"] for r in rows]
+
     def echr_report_refs(self, *, limit: int = 8000) -> list[sqlite3.Row]:
         """ECtHR-by-name/EHRR citation occurrences (the grammar tags these ``echr_report``
         with a name-keyed ``echr:<name>`` candidate). The name is in the candidate and the

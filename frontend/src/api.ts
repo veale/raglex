@@ -113,7 +113,7 @@ export const api = {
     req<any>("/legislation/version", { method: "POST", body: JSON.stringify({ id, date }) }),
   detectCitations: (text: string) =>
     req<any>("/detect-citations", { method: "POST", body: JSON.stringify({ text }) }),
-  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel", body: Record<string, unknown>) =>
+  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr", body: Record<string, unknown>) =>
     req<{ job_id: string; error?: string; already_running?: boolean }>(`/jobs/${kind}`, { method: "POST", body: JSON.stringify(body) }),
   jobStatus: (id: string) => req<any>(`/jobs/${id}`),
   jobsList: () => req<any[]>("/jobs"),

@@ -2822,6 +2822,36 @@ class Facade:
         return {"held_titles": len(index), "candidates": len(refs),
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
+    def harvest_missing_echr(self, *, limit: int = 500, match_after: bool = True,
+                             on_progress=None, cancel_check=None) -> dict:
+        """Queue the ECtHR cases the corpus cites (by name/EHRR) but doesn't hold, and fetch
+        them from HUDOC by docname search (§5a). Each pending ``echr:<name>`` candidate — the
+        form the EHRR grammar leaves for a case like "Chahal v United Kingdom" — is looked up
+        on HUDOC, harvested, and (``match_after``) linked to its EHRR citations so the whole
+        family of references goes live. Most-cited missing cases first."""
+        from .adapters.registry import get_adapter
+        from .pipeline import Pipeline
+
+        with self._open() as (cat, rs, ts):
+            names = cat.pending_echr_name_refs(limit=limit)
+            if not names:
+                return {"queued": 0, "stored": 0, "resolved_edges": 0}
+            _progress(on_progress, stage="searching HUDOC by case name", done=0, total=len(names))
+            adapter = get_adapter("echr", ids=names)
+            before = cat.all_stable_ids()
+            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                adapter, record_health=True)
+            stored_ids = list(cat.all_stable_ids() - before)
+            self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
+            resolved = Resolver(cat).run()
+        matched = {}
+        if match_after and not (cancel_check and cancel_check()):
+            matched = self.match_echr_reports(on_progress=on_progress, cancel_check=cancel_check)
+        self._invalidate_caches()
+        return {"queued": len(names), "stored": stats.stored,
+                "harvested_docs": len(stored_ids), "resolved_edges": resolved.resolved,
+                "echr_match": matched}
+
     def match_echr_reports(self, *, limit: int = 8000, on_progress=None, cancel_check=None) -> dict:
         """Link an EHRR citation ("Soering v United Kingdom (1989) 11 EHRR 349") to a held
         ECtHR case by matching the applicant name + year the citing text puts beside it

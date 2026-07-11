@@ -820,6 +820,9 @@ export function Dashboard({ open }: { open: (id: string) => void }) {
           <button onClick={() => act(api.startJob("rescan", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "full relink")}
             style={{ flex: "0 0 auto" }}
             title="FULL FRESH RELINK: re-extract every document, then run the whole resolution chain — name-only legislation → held titles, classic reporters → cases, EHRR → ECtHR, and parallel/ECR mining. One background job; watch Jobs for per-stage progress.">⟳ Full relink (rescan + match all)</button>
+          <button onClick={() => act(api.startJob("harvest-echr", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "queue HUDOC cases")}
+            style={{ flex: "0 0 auto" }}
+            title="Queue the ECtHR cases the corpus cites by name/EHRR but doesn't hold, and fetch them from HUDOC by case-name search (most-cited first). Then links their EHRR citations. Runs in the background.">⇊ Queue missing ECtHR (HUDOC)</button>
           <button onClick={() => act(api.startJob("expand-citing", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "pull citing cases")}
             style={{ flex: "0 0 auto" }}
             title="Find and pull every case that CITES an EU case already in the corpus (via CELLAR's citation graph). Backward citation expansion. Runs in the background.">⇊ Pull cases citing EU cases</button>
