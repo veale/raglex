@@ -3063,8 +3063,8 @@ class Facade:
         return {"report_strings": len(by_raw), "viable": len(viable),
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
-    def rescan(self, *, limit: int | None = None, coref: bool = True,
-               parallel: bool = True, on_progress=None, cancel_check=None) -> dict:
+    def rescan(self, *, limit: int | None = None, coref: bool = True, parallel: bool = True,
+               doc_types: list[str] | None = None, on_progress=None, cancel_check=None) -> dict:
         """Full fresh relink of the corpus: re-extract every text document with the current
         grammars, then run the whole resolution chain — so every fix (statute-name grammar,
         carry-forward cue/kind, the enlarged case pool, name/EHRR/EU matchers, parallel
@@ -3084,7 +3084,7 @@ class Facade:
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()          # user shorthand rules — loaded ONCE
-            ids = cat.text_document_ids(limit=limit)
+            ids = cat.text_document_ids(limit=limit, doc_types=doc_types)
             total = len(ids)
             docs = cites = 0
             for i, sid in enumerate(ids):

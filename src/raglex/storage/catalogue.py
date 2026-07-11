@@ -1336,15 +1336,22 @@ class Catalogue:
             "WHERE doc_type = 'judgment' AND title IS NOT NULL"
         ).fetchall()
 
-    def text_document_ids(self, *, limit: int | None = None) -> list[str]:
-        """Every document id that has extractable text, in id order — the target set for a
-        full re-extraction. A single cheap single-column scan (no row bodies), so it
-        streams 200k+ ids without loading their metadata."""
-        sql = "SELECT stable_id FROM documents WHERE has_text = 1 ORDER BY stable_id"
+    def text_document_ids(self, *, limit: int | None = None,
+                          doc_types: list[str] | None = None) -> list[str]:
+        """Document ids that have extractable text, in id order — the target set for a
+        re-extraction. ``doc_types`` scopes it (e.g. ``['judgment']`` to skip the 122k
+        legislation docs, which mostly cite only other legislation). A single cheap
+        single-column scan (no row bodies), so it streams 200k+ ids without their metadata."""
+        sql = "SELECT stable_id FROM documents WHERE has_text = 1"
+        params: list = []
+        if doc_types:
+            sql += f" AND doc_type IN ({','.join('?' * len(doc_types))})"
+            params.extend(doc_types)
+        sql += " ORDER BY stable_id"
         if limit:
             sql += " LIMIT ?"
-            return [r["stable_id"] for r in self.conn.execute(sql, (limit,))]
-        return [r["stable_id"] for r in self.conn.execute(sql)]
+            params.append(limit)
+        return [r["stable_id"] for r in self.conn.execute(sql, params)]
 
     def held_legislation_titles(self) -> list[sqlite3.Row]:
         """Every held piece of legislation as (stable_id, title) — the self-maintaining
