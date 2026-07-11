@@ -209,6 +209,30 @@ def create_app(config: Config | None = None) -> FastAPI:
         label = f"re-scan {p['source']} for new citations" if p.get("source") else "re-scan corpus for new citations"
         return _start_job("rescan-citations", label, {"source": p["source"]} if p.get("source") else {})
 
+    @app.post("/jobs/rescan")
+    def job_rescan_full_ep(payload: dict = Body(default={})) -> dict:
+        """Full fresh relink: re-extract EVERY text document with the current grammars, then
+        run the whole resolution chain (legislation-name, report, EHRR and parallel/ECR
+        matchers). One progress-tracked job; ``no_parallel`` skips the heavy mining pass."""
+        p = payload or {}
+        params = {k: v for k, v in p.items() if k in ("limit", "parallel", "coref")}
+        return _start_job("rescan", "full fresh relink — re-extract + match everything", params)
+
+    @app.post("/jobs/match-legislation")
+    def job_match_legislation_ep() -> dict:
+        """Resolve name-only statute references against the titles of held legislation."""
+        return _start_job("match-legislation", "match named legislation to held titles")
+
+    @app.post("/jobs/match-echr")
+    def job_match_echr_ep() -> dict:
+        """Link EHRR citations to held ECtHR cases by applicant name + year."""
+        return _start_job("match-echr", "match EHRR citations to ECtHR cases")
+
+    @app.post("/jobs/mine-parallel")
+    def job_mine_parallel_ep() -> dict:
+        """Mine parallel citations (neutral↔report, ECR↔case number) from judgment text."""
+        return _start_job("mine-parallel", "mine parallel citations")
+
     @app.post("/jobs/backfill-edge-keys")
     def job_backfill_edge_keys_ep() -> dict:
         """One-off after upgrade: populate candidate_id/raw_fold on pre-existing edges so

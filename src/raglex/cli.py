@@ -386,6 +386,19 @@ def cmd_import_bailii(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rescan(args: argparse.Namespace) -> int:
+    """Full fresh relink: re-extract every document, then run the whole resolution chain
+    (§5). Reports each fix's contribution."""
+    import json as _json
+
+    from .facade import Facade
+
+    rep = Facade(Config.from_env()).rescan(
+        limit=args.limit, parallel=not args.no_parallel, on_progress=lambda **p: None)
+    print(_json.dumps(rep, indent=2))
+    return 0
+
+
 def cmd_match_legislation(args: argparse.Namespace) -> int:
     """Resolve name-only statute references against the titles of held legislation (§5b)."""
     from .facade import Facade
@@ -613,6 +626,11 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--match-reports", action="store_true",
                      help="after import, link classic law-report citations to the enlarged pool")
     imp.set_defaults(func=cmd_import_bailii)
+
+    rs2 = sub.add_parser("rescan", help="full fresh relink: re-extract all docs + run the whole chain (§5)")
+    rs2.add_argument("--limit", type=int, default=None, help="re-extract at most N docs (default: all)")
+    rs2.add_argument("--no-parallel", action="store_true", help="skip the heavy parallel-mining pass")
+    rs2.set_defaults(func=cmd_rescan)
 
     ml = sub.add_parser("match-legislation", help="resolve name-only statutes against held legislation titles (§5b)")
     ml.add_argument("--limit", type=int, default=20000, help="consider at most N distinct references")

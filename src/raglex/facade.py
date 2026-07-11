@@ -2726,6 +2726,59 @@ class Facade:
         return {"report_strings": len(by_raw), "viable": len(viable),
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
+    def rescan(self, *, limit: int | None = None, coref: bool = True,
+               parallel: bool = True, on_progress=None, cancel_check=None) -> dict:
+        """Full fresh relink of the corpus: re-extract every text document with the current
+        grammars, then run the whole resolution chain — so every fix (statute-name grammar,
+        carry-forward cue/kind, the enlarged case pool, name/EHRR/EU matchers, parallel
+        mining) takes effect and its contribution is visible in one report.
+
+        Efficient for the whole corpus (unlike ``extract_citations``, which caps at 100k):
+        the user-alias map is loaded once, ids stream from a single-column scan, writes are
+        per-document durable (idempotent → the run is restartable), and progress/cancel are
+        honoured. Order matters — extraction first (regenerates edges), then the matchers
+        that alias name-only references to what's held, then parallel mining last."""
+        from .citations import extract_document
+
+        report: dict = {}
+
+        def _cancelled() -> bool:
+            return bool(cancel_check and cancel_check())
+
+        with self._open() as (cat, _rs, ts):
+            aliases = cat.named_alias_map()          # user shorthand rules — loaded ONCE
+            ids = cat.text_document_ids(limit=limit)
+            total = len(ids)
+            docs = cites = 0
+            for i, sid in enumerate(ids):
+                if _cancelled():
+                    break
+                n = extract_document(cat, ts, sid, aliases=aliases)
+                if n:
+                    docs += 1
+                    cites += n
+                if on_progress and i % 500 == 0:
+                    _progress(on_progress, stage="re-extracting corpus", done=i, total=total)
+            resolved = Resolver(cat).run()
+        report["extract"] = {"docs_reextracted": docs, "citations": cites,
+                             "resolved_edges": resolved.resolved, "total": total}
+        self._invalidate_caches()
+
+        # relink chain — each pass aliases name-only references to held targets and resolves
+        if not _cancelled():
+            report["legislation"] = self.match_named_legislation(
+                on_progress=on_progress, cancel_check=cancel_check)
+        if not _cancelled():
+            report["reports"] = self.match_report_citations(
+                on_progress=on_progress, cancel_check=cancel_check)
+        if not _cancelled():
+            report["echr"] = self.match_echr_reports(
+                on_progress=on_progress, cancel_check=cancel_check)
+        if parallel and not _cancelled():
+            report["parallel"] = self.mine_parallel_citations(
+                coref=coref, on_progress=on_progress, cancel_check=cancel_check)
+        return report
+
     def match_named_legislation(self, *, limit: int = 20000, on_progress=None,
                                 cancel_check=None) -> dict:
         """Resolve name-only statute references ("the Police and Criminal Evidence Act
