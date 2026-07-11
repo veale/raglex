@@ -383,7 +383,35 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/watches/{watch_id}/run")
     def run_watch_ep(watch_id: int) -> dict:
-        return facade.run_watch(watch_id=watch_id)
+        """Run a watch as a background job so it shows up in the Jobs panel with
+        per-stage progress (harvest → discover → snowball → tag)."""
+        w = facade.get_watch(watch_id)
+        label = f"watch: {w.get('name', watch_id)}" if w else f"watch {watch_id}"
+        return _start_job("run-watch", label, {"watch_id": watch_id})
+
+    @app.post("/jobs/gap-scan")
+    def gap_scan_ep(payload: dict = Body(...)) -> dict:
+        """Fill gaps in a court's neutral-citation numbering: probe ``[year] COURT n`` for
+        n = 1…, harvest the ones that exist, record the gaps (historic = permanent). Runs
+        as a background job (each probe is one fetch)."""
+        p = payload or {}
+        court = (p.get("court") or "").strip()
+        year = p.get("year")
+        if not court or not year:
+            return {"error": "court (e.g. ewca/civ) and year required"}
+        params = {k: p[k] for k in ("court", "year", "start", "max_probes", "stop_after_misses") if p.get(k) is not None}
+        return _start_job("gap-scan", f"gap-scan {court} {year}", params)
+
+    @app.get("/gap-status")
+    def gap_status_ep(court: str, year: int) -> dict:
+        """Completeness of one court+year: held numbers, permanent gaps, pending re-probes."""
+        return facade.gap_status(court=court, year=year)
+
+    @app.post("/gap-clear")
+    def gap_clear_ep(payload: dict = Body(default={})) -> dict:
+        """Forget recorded gaps (so they're re-probed) for a court/year, or all."""
+        p = payload or {}
+        return facade.clear_gap_markers(court=p.get("court"), year=p.get("year"))
 
     @app.delete("/watches/{watch_id}")
     def delete_watch_ep(watch_id: int) -> dict:
@@ -449,6 +477,27 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.count_documents(source=source, doc_type=doc_type, tag=tag, query=query,
                                       court=court, id_prefix=id_prefix)
 
+    @app.get("/search-corpus")
+    def search_corpus_ep(
+        query: str | None = None, source: str | None = None, doc_type: str | None = None,
+        court: str | None = None, tag: str | None = None, year_from: str | None = None,
+        year_to: str | None = None, cites: str | None = None, cited_by: str | None = None,
+        cites_pinpoint: str | None = None, id_prefix: str | None = None,
+        sort: str | None = None, limit: int = 50, offset: int = 0, facets: bool = True,
+    ) -> dict:
+        """Unified metadata search: filtered + sorted results plus the facet distribution of
+        the whole match set (for the refine sidebar + histograms)."""
+        return facade.search_corpus(
+            query=query, source=source, doc_type=doc_type, court=court, tag=tag,
+            year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by,
+            cites_pinpoint=cites_pinpoint, id_prefix=id_prefix,
+            sort=sort, limit=limit, offset=offset, facets=facets)
+
+    @app.get("/facet-values")
+    def facet_values_ep() -> dict:
+        """Values (+counts) for each advanced-search facet — sources, doc types, courts, tags."""
+        return facade.corpus_facet_values()
+
     @app.get("/corpus-map")
     def corpus_map_ep() -> dict:
         """Held-vs-pending by legal category & sub-type — the dashboard coverage table."""
@@ -458,6 +507,18 @@ def create_app(config: Config | None = None) -> FastAPI:
     def corpus_map_cites_ep(category: str) -> dict:
         """Lazy: what this category's held docs cite, by target category (unique + total)."""
         return facade.corpus_map_cites(category=category)
+
+    @app.get("/mentions")
+    def mentions(id: str, anchor: str | None = None) -> dict:
+        """Who mentions this document (optionally one paragraph), grouped by citing document
+        and ranked by the citer's own authority — for the "Mentioned by …" line + tray."""
+        return facade.document_mentions(id, anchor=anchor)
+
+    @app.get("/citations-out")
+    def citations_out(id: str, family: str = "cases") -> dict:
+        """Distinct authorities this document cites (``family`` = cases | statute), OSCOLA-
+        formatted with collapsed pinpoints — for the summary-line trays."""
+        return facade.document_citations_out(id, family=family)
 
     @app.get("/document-body")
     def document_body(id: str) -> dict:

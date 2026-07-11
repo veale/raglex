@@ -97,6 +97,61 @@ def test_document_body_endpoint(client):
     body = client.get("/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()
     assert "erasure" in (body["text"] or "")
     assert "segments" in body and body["doc_type"] == "judgment"
+    assert body["oscola"]["text"]  # every body carries an OSCOLA citation
+
+
+def test_document_endpoint_carries_oscola_and_counts(client):
+    data = client.get("/documents/ECLI:EU:C:2020:1").json()
+    assert data["oscola"]["text"]
+    assert "cases_cited_count" in data and "statute_cited_count" in data
+    # the citing document's incoming row is OSCOLA-formatted too
+    assert data["cited_by_count"] == 1
+    assert data["incoming"][0]["src_oscola"]["text"]
+
+
+def test_search_corpus_tokenised_query_and_facets(client):
+    # tokenised AND: both words must hit the title/id, in any order → only …:2020:1
+    r = client.get("/search-corpus", params={"query": "2020 1"}).json()
+    ids = [it["stable_id"] for it in r["items"]]
+    assert ids == ["ECLI:EU:C:2020:1"]
+    # facets describe the WHOLE match set
+    full = client.get("/search-corpus", params={"query": "2020"}).json()
+    assert full["total"] == 2
+    assert {f["key"]: f["n"] for f in full["facets"]["source"]}["eu-cellar"] == 2
+    assert full["facets"]["year"]["2024"] == 2
+    # results carry an OSCOLA citation
+    assert full["items"][0]["oscola"]["text"]
+
+
+def test_search_corpus_graph_filters(client):
+    # cites: documents that cite …:2020:1  →  …:2020:2
+    r = client.get("/search-corpus", params={"cites": "ECLI:EU:C:2020:1"}).json()
+    assert [it["stable_id"] for it in r["items"]] == ["ECLI:EU:C:2020:2"]
+    # cited_by: documents cited BY …:2020:2  →  …:2020:1
+    r2 = client.get("/search-corpus", params={"cited_by": "ECLI:EU:C:2020:2"}).json()
+    assert [it["stable_id"] for it in r2["items"]] == ["ECLI:EU:C:2020:1"]
+
+
+def test_facet_values_endpoint(client):
+    fv = client.get("/facet-values").json()
+    assert any(s["key"] == "eu-cellar" for s in fv["sources"])
+    assert any(d["key"] == "judgment" for d in fv["doc_types"])
+
+
+def test_mentions_endpoint(client):
+    data = client.get("/mentions", params={"id": "ECLI:EU:C:2020:1"}).json()
+    assert data["target"] == "ECLI:EU:C:2020:1"
+    assert data["total"] == 1
+    assert data["groups"][0]["src_id"] == "ECLI:EU:C:2020:2"
+
+
+def test_citations_out_endpoint(client):
+    # sources the *extracted*-citation family split (populated by extraction in real flows);
+    # here we assert the endpoint's shape for both families.
+    data = client.get("/citations-out", params={"id": "ECLI:EU:C:2020:2", "family": "cases"}).json()
+    assert data["family"] == "cases" and isinstance(data["items"], list) and "total" in data
+    stat = client.get("/citations-out", params={"id": "ECLI:EU:C:2020:2", "family": "statute"}).json()
+    assert stat["family"] == "statute" and isinstance(stat["items"], list)
 
 
 def test_sources_and_alerts_endpoints(client):

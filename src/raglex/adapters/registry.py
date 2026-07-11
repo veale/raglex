@@ -140,20 +140,38 @@ SOURCE_INFO: dict[str, SourceInfo] = {
 }
 
 
+# Sources that support forward-citation discovery (find NEW documents that cite a target,
+# via the live source) — the renewing kind of watch. uk-caselaw uses Find Case Law's
+# full-text search; eu-cellar walks CELLAR's citation graph.
+DISCOVER_CITING_SOURCES = frozenset({"uk-caselaw", "uk-grc", "eu-cellar"})
+# Sources whose ids are sequential neutral citations, so a court/year can be gap-scanned.
+GAP_SCAN_SOURCES = frozenset({"uk-caselaw"})
+
+
 def source_catalog() -> list[dict]:
     """Capabilities per harvestable source — what it pulls, whether keywords are
-    searched at the API vs post-filtered, and its options. Drives the morphing UI."""
+    searched at the API vs post-filtered, whether it supports incremental "new since last
+    run" harvest, forward-citation discovery, and neutral-citation gap-scanning. Drives the
+    Maintain page's per-source capability chips + explanations."""
     from dataclasses import asdict
 
     out = []
     for key in sorted(ADAPTERS):
         info = SOURCE_INFO.get(key)
         if info is None:  # scrape recipes + anything without a descriptor
-            out.append({"key": key, "label": key, "kind": "scrape", "jurisdiction": "",
-                        "keyword_search": False, "options": [],
-                        "description": "Scraped source (regulator portal). Keywords post-filter."})
+            row = {"key": key, "label": key, "kind": "scrape", "jurisdiction": "",
+                   "keyword_search": False, "options": [], "identifiers": [],
+                   "description": "Scraped source (regulator portal). Keywords post-filter."}
         else:
-            out.append(asdict(info))
+            row = asdict(info)
+        # capability flags the UI turns into plain-language chips
+        row["can_keyword_search"] = bool(row.get("keyword_search"))
+        row["can_discover_citing"] = key in DISCOVER_CITING_SOURCES
+        row["can_gap_scan"] = key in GAP_SCAN_SOURCES
+        # incremental "check for new" makes sense for feed-like caselaw sources; the
+        # legislation/by-id sources are fetched by naming the item, not by a moving feed.
+        row["can_incremental"] = row.get("kind") == "caselaw"
+        out.append(row)
     return out
 
 

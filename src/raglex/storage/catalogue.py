@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS citation_counts (
     rebuilt_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
+CREATE INDEX IF NOT EXISTS citation_counts_cand_idx ON citation_counts (candidate_id);
 
 -- Extracted citations (§5): the raw *observations* (one per occurrence) with
 -- entity kind, candidate, pinpoint, char span (the context window for treatment
@@ -1006,6 +1007,19 @@ class Catalogue:
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved'",
             (dst_id,),
         ).fetchall()
+
+    def authority_counts(self, ids: list[str]) -> dict[str, int]:
+        """How often each id is itself cited — from the ``citation_counts`` roll-up, keyed by
+        candidate_id (a stable_id, ECLI or CELEX). Used to rank citing documents by their own
+        authority (most-cited first) for the "mentioned by" lists. Missing ids → absent."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT candidate_id, MAX(occurrences) AS occ FROM citation_counts "
+            f"WHERE candidate_id IN ({qs}) GROUP BY candidate_id", ids).fetchall()
+        return {r["candidate_id"]: r["occ"] for r in rows}
 
     # -- entity resolution (§5b) -------------------------------------------
     def find_document_id(self, candidate: str) -> str | None:
@@ -2042,11 +2056,16 @@ class Catalogue:
         return {r["tag"]: r["n"] for r in rows}
 
     @staticmethod
-    def _doc_filter_clauses(*, source, doc_type, tag, query, court=None, id_prefix=None):
-        """Shared WHERE-clause builder for list/count_documents (so the Corpus browser and
-        the Corpus Map deep-link with identical semantics). ``court`` matches the stored
-        court token; ``id_prefix`` matches one or more slug heads (comma-separated), e.g.
-        ``uksi`` → stable_ids like ``uksi/2016/413``."""
+    def _doc_filter_clauses(*, source=None, doc_type=None, tag=None, query=None, court=None,
+                            id_prefix=None, year_from=None, year_to=None, cites=None, cited_by=None,
+                            cites_pinpoint=None):
+        """Shared WHERE-clause builder for list/count/search/facets (so every surface filters
+        with identical semantics). ``court`` matches the stored court token; ``id_prefix``
+        matches one or more slug heads (comma-separated). ``query`` is tokenised — each
+        whitespace-separated word must appear (as a substring) in the title or id, so
+        *non-consecutive* words match ("erasure data" finds "…data … erasure"). ``year_from``/
+        ``year_to`` bound the decision-date year. ``cites`` keeps documents that cite the given
+        target (by id/ECLI/candidate); ``cited_by`` keeps documents cited BY the given source."""
         clauses: list[str] = []
         params: list[object] = []
         if source:
@@ -2061,9 +2080,46 @@ class Catalogue:
                 clauses.append("(" + " OR ".join("d.stable_id LIKE ?" for _ in heads) + ")")
                 params.extend(f"{h}/%" for h in heads)
         if query:
-            clauses.append("(d.title LIKE ? OR d.stable_id LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
+            # Case-insensitive (Postgres LIKE is case-sensitive; SQLite's is not) AND tokenised
+            # — every word must hit the title or id, in any order/position. No title index
+            # exists, so lower() costs nothing here.
+            for tok in str(query).split():
+                clauses.append("(lower(d.title) LIKE ? OR lower(d.stable_id) LIKE ?)")
+                like = f"%{tok.lower()}%"
+                params.extend([like, like])
+        if year_from:
+            clauses.append("substr(d.decision_date, 1, 4) >= ?"); params.append(str(year_from))
+        if year_to:
+            clauses.append("substr(d.decision_date, 1, 4) <= ?"); params.append(str(year_to))
+        if cites:
+            sub = ("EXISTS (SELECT 1 FROM relations r WHERE r.src_id = d.stable_id "
+                   "AND (r.dst_id = ? OR r.candidate_id = ?)")
+            p = [cites, cites]
+            if cites_pinpoint:  # cite a *specific* provision of the target (its dst_anchor)
+                sub += " AND r.dst_anchor = ?"
+                p.append(cites_pinpoint)
+            clauses.append(sub + ")")
+            params.extend(p)
+        if cited_by:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM relations r WHERE r.dst_id = d.stable_id AND r.src_id = ?)")
+            params.append(cited_by)
         return clauses, params
+
+    # sort key → ORDER BY. "cited" ranks by the citation-frequency roll-up (a LEFT JOIN,
+    # added by search_documents); the rest sort the documents table directly.
+    _SORT_SQL = {
+        "date": "d.decision_date DESC NULLS LAST, d.stable_id",
+        "date_asc": "d.decision_date ASC NULLS LAST, d.stable_id",
+        "title": "lower(d.title), d.stable_id",
+        "cited": "cited_by DESC, d.decision_date DESC",
+    }
+
+    def _sort_clause(self, sort: str | None) -> str:
+        key = self._SORT_SQL.get(sort or "date", self._SORT_SQL["date"])
+        if self.backend == "sqlite":  # SQLite has no NULLS LAST
+            key = key.replace(" DESC NULLS LAST", " DESC").replace(" ASC NULLS LAST", " ASC")
+        return key
 
     def list_documents(
         self,
@@ -2074,6 +2130,10 @@ class Catalogue:
         query: str | None = None,
         court: str | None = None,
         id_prefix: str | None = None,
+        year_from: str | None = None,
+        year_to: str | None = None,
+        cites: str | None = None,
+        cited_by: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[sqlite3.Row]:
@@ -2084,7 +2144,8 @@ class Catalogue:
         if tag:
             sql += " JOIN document_tags t ON t.doc_id = d.stable_id"
         clauses, fparams = self._doc_filter_clauses(
-            source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix)
+            source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
+            year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by)
         if tag:
             clauses.insert(0, "t.tag = ?"); params.append(tag)
         params.extend(fparams)
@@ -2094,9 +2155,33 @@ class Catalogue:
         params.extend([limit, offset])
         return self.conn.execute(sql, params).fetchall()
 
+    def search_documents(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
+                         **filters) -> list[sqlite3.Row]:
+        """Like :meth:`list_documents` but sortable (incl. by citation frequency) and each row
+        carries a ``cited_by`` count (occurrences from the roll-up) for display + ranking."""
+        tag = filters.pop("tag", None)
+        clauses, fparams = self._doc_filter_clauses(tag=None, **filters)
+        sql = ("SELECT d.*, COALESCE(MAX(cc.occurrences), 0) AS cited_by FROM documents d "
+               "LEFT JOIN citation_counts cc ON cc.candidate_id = d.stable_id OR cc.candidate_id = d.ecli")
+        params: list[object] = []
+        if tag:
+            # tag as an EXISTS so the citation-count LEFT JOIN stays a clean 1:1 group.
+            clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t WHERE t.doc_id = d.stable_id AND t.tag = ?)")
+            params.append(tag)
+        params.extend(fparams)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " GROUP BY d.stable_id"
+        sql += f" ORDER BY {self._sort_clause(sort)} LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        return self.conn.execute(sql, params).fetchall()
+
     def count_documents(self, *, source: str | None = None, doc_type: str | None = None,
                         tag: str | None = None, query: str | None = None,
-                        court: str | None = None, id_prefix: str | None = None) -> int:
+                        court: str | None = None, id_prefix: str | None = None,
+                        year_from: str | None = None, year_to: str | None = None,
+                        cites: str | None = None, cited_by: str | None = None,
+                        cites_pinpoint: str | None = None) -> int:
         """Total documents matching the same filters as :meth:`list_documents` — for
         the Corpus page's true count + pagination."""
         sql = "SELECT COUNT(DISTINCT d.stable_id) AS n FROM documents d"
@@ -2104,13 +2189,54 @@ class Catalogue:
         if tag:
             sql += " JOIN document_tags t ON t.doc_id = d.stable_id"
         clauses, fparams = self._doc_filter_clauses(
-            source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix)
+            source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
+            year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by, cites_pinpoint=cites_pinpoint)
         if tag:
             clauses.insert(0, "t.tag = ?"); params.append(tag)
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         return self.conn.execute(sql, params).fetchone()["n"]
+
+    def document_facets(self, *, dims=("source", "doc_type", "court", "year"), top: int = 40,
+                        **filters) -> dict:
+        """Distribution of the filtered result set across facet dimensions — counts per
+        source / doc_type / court, and a per-year histogram — so the search sidebar can show
+        refine tick-boxes with live counts and a timeline. One GROUP BY per dimension over the
+        same WHERE the results use (``tag`` becomes an EXISTS so it never fans out the count)."""
+        tag = filters.pop("tag", None)
+        clauses, fparams = self._doc_filter_clauses(tag=None, **filters)
+        if tag:
+            clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t WHERE t.doc_id = d.stable_id AND t.tag = ?)")
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        def _params():
+            p: list[object] = []
+            if tag:
+                p.append(tag)
+            p.extend(fparams)
+            return p
+
+        out: dict = {}
+        col = {"source": "d.source", "doc_type": "d.doc_type", "court": "d.court",
+               "year": "substr(d.decision_date, 1, 4)"}
+        for dim in dims:
+            expr = col[dim]
+            sql = (f"SELECT {expr} AS k, COUNT(DISTINCT d.stable_id) AS n FROM documents d"
+                   f"{where} GROUP BY {expr} ORDER BY n DESC")
+            rows = self.conn.execute(sql, _params()).fetchall()
+            if dim == "year":
+                out[dim] = {r["k"]: r["n"] for r in rows if r["k"]}
+            else:
+                out[dim] = [{"key": r["k"], "n": r["n"]} for r in rows if r["k"]][:top]
+        return out
+
+    def distinct_courts(self) -> list[sqlite3.Row]:
+        """Every court token with a document count — for the advanced-search court field's
+        autocomplete + the facet sidebar."""
+        return self.conn.execute(
+            "SELECT court AS k, COUNT(*) AS n FROM documents WHERE court IS NOT NULL AND court <> '' "
+            "GROUP BY court ORDER BY n DESC").fetchall()
 
     def echr_formation_counts(self) -> list[sqlite3.Row]:
         """Held ECtHR cases grouped by HUDOC formation (``doctypebranch`` in meta_json) — so the

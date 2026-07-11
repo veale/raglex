@@ -40,6 +40,8 @@ SINGLETON_KINDS = frozenset({
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
 })
 MAX_CONCURRENT_JOBS = 6
+# Keyed jobs deduped by (kind, params): don't start an identical one while it's in flight.
+DEDUP_KINDS = frozenset({"run-watch", "gap-scan"})
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
 # its worker thread is parked on a network socket that died when the host slept/woke. We
 # can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
@@ -106,6 +108,8 @@ RUNNERS: dict[str, Callable] = {
     "match-echr": lambda f, p, cb, cancel: f.match_echr_reports(**p, on_progress=cb, cancel_check=cancel),
     "rescan": lambda f, p, cb, cancel: f.rescan(**p, on_progress=cb, cancel_check=cancel),
     "harvest-echr": lambda f, p, cb, cancel: f.harvest_missing_echr(**p, on_progress=cb, cancel_check=cancel),
+    "run-watch": lambda f, p, cb, cancel: f.run_watch(watch_id=p["watch_id"], on_progress=cb, cancel_check=cancel),
+    "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
 }
 
 
@@ -146,6 +150,16 @@ class JobManager:
             if kind in SINGLETON_KINDS:
                 for j in running:
                     if j["kind"] == kind:
+                        return {"job_id": j["job_id"], "already_running": True}
+            # Keyed jobs (a watch, a court/year gap-scan): don't launch an identical one while
+            # one is already in flight — the scheduler ticks faster than a watch can finish, and
+            # last_run_at only updates when it ends, so without this a slow watch double-runs.
+            elif kind in DEDUP_KINDS:
+                import json as _json
+
+                want = _json.dumps(params, sort_keys=True)
+                for j in running:
+                    if j["kind"] == kind and _json.dumps(_json.loads(j["params_json"] or "{}"), sort_keys=True) == want:
                         return {"job_id": j["job_id"], "already_running": True}
             if len(running) >= MAX_CONCURRENT_JOBS:
                 return {"error": f"too many jobs running ({len(running)}); let some finish first"}

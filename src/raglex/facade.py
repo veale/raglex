@@ -36,6 +36,7 @@ def _progress(cb, **fields) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+from .citations.oscola import cite as _oscola_cite
 from .config import Config
 from .core.models import DocType, RelationshipType
 from .embeddings import EmbedStage
@@ -53,6 +54,23 @@ from .resolve import Resolver
 from .retrieval import SearchEngine, expand
 from .settings import SettingsStore
 from .storage import Catalogue, RawStore, TextStore
+
+
+def _row_meta(row) -> dict:
+    """Decode a document row's ``meta_json`` into a dict without an extra query — the row
+    (from ``get_document``) already carries the column."""
+    if row is None:
+        return {}
+    try:
+        raw = row["meta_json"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
 
 
 def _doc_type(value: str | None, default: DocType) -> DocType:
@@ -402,12 +420,32 @@ class Facade:
             incoming = []
             for sid, r in list(best.items())[:200]:
                 src = cat.get_document(sid)
+                # OSCOLA citation for the citing document, so "cited by / mentioned by"
+                # reads in proper form. meta_json is on the row → no extra query.
+                src_oscola = _oscola_cite(src, _row_meta(src)) if src else None
                 incoming.append({**r, "src_title": src["title"] if src else None,
                                  "src_court": src["court"] if src else None,
-                                 "src_date": src["decision_date"] if src else None})
+                                 "src_date": src["decision_date"] if src else None,
+                                 "src_oscola": src_oscola})
+            meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
+            # Summary line: distinct authorities this document cites, split into cases vs
+            # statutory material by the citation's entity_kind (OSCOLA's two source families).
+            _STATUTE = {"act", "regulation", "directive", "treaty", "eu_instrument"}
+            cases_cited: set = set()
+            statute_cited: set = set()
+            for c in cat.citations_for(stable_id):
+                ek = (c["entity_kind"] or "").lower()
+                key = c["candidate_id"] or c["raw"]
+                if ek in _STATUTE:
+                    statute_cited.add(key)
+                elif ek:
+                    cases_cited.add(key)
             return {
                 "document": dict(doc),
-                "meta": cat.document_meta(stable_id),  # adapter extras (celex, origin_country, …)
+                "oscola": _oscola_cite(doc, meta),  # this document's own OSCOLA citation
+                "meta": meta,
+                "cases_cited_count": len(cases_cited),
+                "statute_cited_count": len(statute_cited),
                 "tags": [dict(t) for t in cat.tags_for(stable_id)],
                 "relations": [r for r in rels if r["relationship_type"] != "suppressed"],
                 "suppressed_count": len(suppressed),
@@ -453,11 +491,175 @@ class Facade:
                 "citations": citations,
                 "doc_type": doc["doc_type"],
                 "title": doc["title"],
+                "oscola": _oscola_cite(doc, _row_meta(doc)),
             }
+
+    def document_mentions(self, stable_id: str, *, anchor: str | None = None,
+                          snippet_docs: int = 40, max_groups: int = 120) -> dict:
+        """Who mentions this document (and, optionally, one paragraph of it), grouped by the
+        citing document and ranked by that citer's own authority (most-cited first).
+
+        Powers the reader's per-paragraph "Mentioned by …" line (``by_anchor``) and the
+        "See all mentions" tray (``groups`` — each citing document with the passages, drawn
+        from the citation's context span, where it cites this one, and its OSCOLA citation).
+        Heuristic carry-forward (inferred) edges are excluded — they aren't citations.
+        """
+        with self._open() as (cat, _rs, ts):
+            rels = [r for r in cat.relations_to(stable_id) if r["extracted_via"] != "inferred"]
+            if anchor:
+                rels = [r for r in rels if (r["dst_anchor"] or "") == anchor]
+            by_src: dict[str, list] = {}
+            for r in rels:
+                by_src.setdefault(r["src_id"], []).append(r)
+            srcs = {sid: cat.get_document(sid) for sid in by_src}
+            # rank citers by their own authority (occurrences in the citation-count roll-up)
+            auth_ids: list[str] = []
+            for sid, sdoc in srcs.items():
+                auth_ids.append(sid)
+                if sdoc and sdoc["ecli"]:
+                    auth_ids.append(sdoc["ecli"])
+            auth = cat.authority_counts(auth_ids)
+
+            def _authority(sid: str, sdoc) -> int:
+                return max(auth.get(sid, 0), auth.get((sdoc["ecli"] or "") if sdoc else "", 0))
+
+            groups = []
+            for sid, rs in by_src.items():
+                sdoc = srcs[sid]
+                if not sdoc:
+                    continue
+                anchors = sorted({r["dst_anchor"] for r in rs if r["dst_anchor"]})
+                groups.append({
+                    "src_id": sid,
+                    "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)),
+                    "src_court": sdoc["court"], "src_date": sdoc["decision_date"],
+                    "authority": _authority(sid, sdoc), "count": len(rs),
+                    "anchors": anchors, "_rels": rs,
+                })
+            groups.sort(key=lambda g: (-g["authority"], -g["count"], g["src_id"]))
+
+            # snippets (the passages where the top citers cite this) — from the citation's
+            # stored context span, so we read each citer's text at most once.
+            for g in groups[:snippet_docs]:
+                sdoc = srcs[g["src_id"]]
+                text = None
+                if sdoc and sdoc["payload_hash"]:
+                    try:
+                        text = ts.get(sdoc["payload_hash"])
+                    except OSError:
+                        text = None
+                snippets = []
+                if text:
+                    for r in g["_rels"]:
+                        cs, ce = r["context_start"], r["context_end"]
+                        if cs is None:
+                            continue
+                        a = max(0, cs - 90)
+                        b = min(len(text), (ce or cs) + 200)
+                        snippets.append({"anchor": r["src_anchor"] or r["dst_anchor"],
+                                         "text": text[a:b].strip(), "start": cs})
+                g["snippets"] = snippets[:8]
+            for g in groups:
+                g.pop("_rels", None)
+                g.setdefault("snippets", [])
+
+            # per-paragraph roll-up for the reader's inline "Mentioned by …" line
+            by_anchor: dict[str, list] = {}
+            for r in rels:
+                lab = r["dst_anchor"]
+                if not lab:
+                    continue
+                seen = by_anchor.setdefault(lab, {})
+                if r["src_id"] not in seen:
+                    sdoc = srcs.get(r["src_id"])
+                    seen[r["src_id"]] = {
+                        "src_id": r["src_id"],
+                        "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)) if sdoc else None,
+                        "authority": _authority(r["src_id"], sdoc),
+                    }
+            by_anchor = {lab: sorted(v.values(), key=lambda x: -x["authority"])
+                         for lab, v in by_anchor.items()}
+            return {"target": stable_id, "anchor": anchor,
+                    "total": len(groups), "groups": groups[:max_groups],
+                    "by_anchor": by_anchor}
+
+    _STATUTE_KINDS = {"act", "regulation", "directive", "treaty", "eu_instrument"}
+
+    def document_citations_out(self, stable_id: str, *, family: str = "cases") -> dict:
+        """The distinct authorities this document cites, one OSCOLA-formatted row each, split
+        into the ``cases`` and ``statute`` families (for the summary-line trays). Each row
+        collapses that authority's pinpoints (paragraphs, articles, sections) into one list,
+        and links to the held document where we hold it."""
+        want_statute = family == "statute"
+        with self._open() as (cat, _rs, _ts):
+            seen: dict[str, dict] = {}
+            for c in cat.citations_for(stable_id):
+                ek = (c["entity_kind"] or "").lower()
+                if not ek:
+                    continue
+                if (ek in self._STATUTE_KINDS) != want_statute:
+                    continue
+                cand = c["candidate_id"]
+                key = cand or c["raw"]
+                entry = seen.get(key)
+                if entry is None:
+                    resolved = cat.find_document_id(cand) if cand else None
+                    rdoc = cat.get_document(resolved) if resolved else None
+                    entry = seen[key] = {
+                        "candidate": cand, "raw": c["raw"], "resolved_id": resolved,
+                        "oscola": _oscola_cite(rdoc, _row_meta(rdoc)) if rdoc else None,
+                        "entity_kind": ek, "occurrences": 0, "_pins": set(),
+                    }
+                entry["occurrences"] += 1
+                if c["pinpoint"]:
+                    entry["_pins"].add(c["pinpoint"])
+            items = []
+            for e in seen.values():
+                e["pinpoints"] = sorted(e.pop("_pins"))
+                items.append(e)
+            # held authorities first, then by how often this document cites them
+            items.sort(key=lambda e: (e["resolved_id"] is None, -e["occurrences"]))
+            return {"family": family, "total": len(items), "items": items}
 
     def list_documents(self, **filters) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
             return [dict(r) for r in cat.list_documents(**filters)]
+
+    # metadata filters the search accepts (everything else — sort/limit/offset/facets — is
+    # handled separately, so an unknown key can't leak into the SQL builder)
+    _SEARCH_FILTERS = ("source", "doc_type", "tag", "query", "court", "id_prefix",
+                       "year_from", "year_to", "cites", "cited_by", "cites_pinpoint")
+
+    def search_corpus(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
+                      facets: bool = True, **filters) -> dict:
+        """Unified metadata search: filtered, sortable results plus the facet distribution of
+        the whole match set (counts per source / doc_type / court and a year histogram) so the
+        sidebar can offer refine tick-boxes with live counts. Each result carries its OSCOLA
+        citation and a cited-by count for display and 'most-cited' ranking."""
+        f = {k: v for k, v in filters.items() if k in self._SEARCH_FILTERS and v not in (None, "")}
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.search_documents(sort=sort, limit=limit, offset=offset, **f)
+            items = []
+            for r in rows:
+                d = dict(r)
+                d["oscola"] = _oscola_cite(r, _row_meta(r))
+                items.append(d)
+            out = {"items": items, "total": cat.count_documents(**f),
+                   "limit": limit, "offset": offset, "sort": sort or "date"}
+            if facets:
+                out["facets"] = cat.document_facets(**f)
+            return out
+
+    def corpus_facet_values(self) -> dict:
+        """The available values for each advanced-search facet (sources, doc types, courts,
+        tags) with counts — populates the field dropdowns / autocomplete."""
+        with self._open() as (cat, _rs, _ts):
+            return {
+                "sources": [{"key": k, "n": v} for k, v in cat._count_by("source").items()],
+                "doc_types": [{"key": k, "n": v} for k, v in cat._count_by("doc_type").items()],
+                "courts": [{"key": r["k"], "n": r["n"]} for r in cat.distinct_courts()],
+                "tags": [{"key": k, "n": v} for k, v in cat.tag_counts().items()],
+            }
 
     def count_documents(self, **filters) -> dict:
         """Total documents matching the filters (for the Corpus page count/paging)."""
@@ -2119,6 +2321,137 @@ class Facade:
                 "resolved_edges": resolved.resolved,
                 "resolved": now is not None, "document": now}
 
+    # -- neutral-citation gap-fill (completeness) --------------------------
+    # Where a probed neutral citation comes back empty, we remember it so we don't re-probe
+    # forever. A completed *past* year is contiguous — a missing number was never issued (or
+    # isn't digitised) and never will be, so the miss is permanent. The current year is still
+    # being filled, so its misses are 'not yet published' and re-probed later.
+    _GAP_PERMANENT = "gap-permanent"
+    _GAP_RETRY = "gap-retry"
+
+    def gap_scan(self, *, court: str, year: int, start: int = 1, max_probes: int = 400,
+                 stop_after_misses: int = 25, on_progress=None, cancel_check=None) -> dict:
+        """Probe a UK court's neutral-citation numbering for one year and pull what's missing.
+
+        ``court`` is the slug head of the neutral citation (``ewca/civ``, ``uksc``,
+        ``ewhc/admin`` …); candidate ids are ``{court}/{year}/{n}``. Present numbers are
+        skipped; existing ones are fetched (and extracted + resolved so they integrate — a
+        new case's own citations then surface on the worklist for onward pulling); empty
+        numbers are recorded as gaps. Probing stops after ``stop_after_misses`` consecutive
+        empties (past the highest hit) — a completed year is contiguous. Idempotent: held
+        numbers and recorded permanent gaps are skipped, so a re-run only does what's left.
+        """
+        import datetime as _dt
+
+        court = (court or "").strip().strip("/").lower()
+        year = int(year)
+        historic = year < _dt.datetime.now(_dt.timezone.utc).year
+        result = {"court": court, "year": year, "historic": historic,
+                  "present": 0, "fetched": 0, "absent": 0, "highest": 0,
+                  "fetched_ids": [], "gap_numbers": []}
+        fetched_ids: list[str] = []
+        with self._open() as (cat, rs, ts):
+            permanent = {k for k in cat.enrichment_misses(self._GAP_PERMANENT, max_age_days=36500)
+                         if k.startswith(f"{court}/{year}/")}
+            new_perm: list[str] = []
+            new_retry: list[str] = []
+            consecutive = 0
+            n = start
+            probed = 0
+            while probed < max_probes:
+                if cancel_check and cancel_check():
+                    result["cancelled"] = True
+                    break
+                cand = f"{court}/{year}/{n}"
+                probed += 1
+                if cand in permanent:
+                    # an already-recorded empty — counts toward the contiguous-miss run so a
+                    # re-scan doesn't creep past the end of the year on every pass.
+                    consecutive += 1
+                    if consecutive >= stop_after_misses:
+                        result["stopped_at_run_end"] = True
+                        break
+                    n += 1
+                    continue
+                if cat.find_document_id(cand) is not None:
+                    result["present"] += 1
+                    result["highest"] = n
+                    consecutive = 0
+                    n += 1
+                    continue
+                res = self._fetch_reference(cat, rs, ts, ref=cand, candidate=cand)
+                outcome = res.get("outcome")
+                if outcome in ("stored", "present"):
+                    result["fetched"] += 1
+                    result["highest"] = n
+                    fetched_ids.append(cand)
+                    consecutive = 0
+                elif outcome in ("absent", "no_adapter"):
+                    result["absent"] += 1
+                    result["gap_numbers"].append(n)
+                    (new_perm if historic else new_retry).append(cand)
+                    consecutive += 1
+                else:  # transient / rate-limited — don't record as a gap, just stop soon
+                    result.setdefault("transient", 0)
+                    result["transient"] += 1
+                    consecutive += 1
+                _progress(on_progress, stage=f"{court} {year}", done=probed, total=max_probes,
+                          item=cand, ok=outcome in ("stored", "present"),
+                          msg=f"{result['fetched']} fetched · {result['absent']} gap")
+                if consecutive >= stop_after_misses:
+                    result["stopped_at_run_end"] = True
+                    break
+                n += 1
+            if new_perm:
+                cat.record_enrichment_misses(self._GAP_PERMANENT, new_perm)
+            if new_retry:
+                cat.record_enrichment_misses(self._GAP_RETRY, new_retry)
+            # integrate what we pulled: extract the new docs' own citations, then resolve so
+            # their edges (and any onward hanging references) enter the graph.
+            if fetched_ids:
+                self._extract_ids(cat, ts, fetched_ids)
+                resolved = Resolver(cat).run()
+                result["resolved_edges"] = resolved.resolved
+        result["fetched_ids"] = fetched_ids
+        if fetched_ids:
+            self._invalidate_caches()
+        return result
+
+    def gap_status(self, *, court: str, year: int) -> dict:
+        """Completeness of one court+year: which neutral-citation numbers are held, which are
+        recorded as permanent gaps, and which are pending a re-probe."""
+        court = (court or "").strip().strip("/").lower()
+        year = int(year)
+        prefix = f"{court}/{year}/"
+        with self._open() as (cat, _rs, _ts):
+            held = sorted(int(r["stable_id"].rsplit("/", 1)[1])
+                          for r in cat.list_documents(id_prefix=court, limit=100000)
+                          if r["stable_id"].startswith(prefix) and r["stable_id"].rsplit("/", 1)[1].isdigit())
+            perm = {k for k in cat.enrichment_misses(self._GAP_PERMANENT, max_age_days=36500) if k.startswith(prefix)}
+            retry = {k for k in cat.enrichment_misses(self._GAP_RETRY, max_age_days=36500) if k.startswith(prefix)}
+        highest = max(held) if held else 0
+        gaps = sorted(int(k.rsplit("/", 1)[1]) for k in perm if k.rsplit("/", 1)[1].isdigit())
+        return {"court": court, "year": year, "held": len(held), "highest": highest,
+                "permanent_gaps": len(gaps), "pending_reprobe": len(retry),
+                "gap_numbers": gaps[:200],
+                "complete": highest > 0 and (len(held) + len(gaps)) >= highest}
+
+    def clear_gap_markers(self, *, court: str | None = None, year: int | None = None) -> dict:
+        """Forget recorded gaps so they're re-probed (e.g. after a source backfilled old
+        judgments). Clears both permanent and retry markers for the court/year, or all."""
+        with self._open() as (cat, _rs, _ts):
+            if court is None:
+                cat.clear_enrichment_misses(self._GAP_PERMANENT)
+                cat.clear_enrichment_misses(self._GAP_RETRY)
+                return {"cleared": "all"}
+            prefix = f"{court.strip().strip('/').lower()}/{year}/" if year else f"{court.strip().strip('/').lower()}/"
+            for kind in (self._GAP_PERMANENT, self._GAP_RETRY):
+                keys = [k for k in cat.enrichment_misses(kind, max_age_days=36500) if k.startswith(prefix)]
+                for k in keys:
+                    cat.conn.execute("DELETE FROM enrichment_misses WHERE kind = ? AND key = ?", (kind, k))
+            cat.conn.commit()
+            return {"cleared": prefix}
+
     # -- write / augment (the agent surface) -------------------------------
     def import_bytes(
         self, *, data: bytes, filename: str, doc_type: str = "commentary",
@@ -2461,6 +2794,10 @@ class Facade:
     def list_watches(self) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
             return [self._watch_dict(w) for w in cat.list_watches()]
+
+    def get_watch(self, watch_id: int) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return self._watch_dict(cat.get_watch(watch_id))
 
     def update_watch(self, *, watch_id: int, name: str | None = None, spec: dict | None = None,
                      cadence_minutes: int | None = None, enabled: bool | None = None) -> dict:
@@ -3085,11 +3422,17 @@ class Facade:
         return {"via": via, "query": search, "harvested": h.get("stored", 0),
                 "discovered": discovered, "count": len(discovered)}
 
-    def run_watch(self, *, watch_id: int) -> dict:
+    def run_watch(self, *, watch_id: int, on_progress=None, cancel_check=None) -> dict:
         """Execute one watch: (1) harvest its source (keywords searched at the API
         where supported, else used to limit the seeds); (2) gather seeds (the keyword-
         matching source docs + any ``seed_rule`` set); (3) autosnowball ``degrees``
-        hops; (4) tag everything brought in. Records the result + last-run time."""
+        hops; (4) tag everything brought in. Records the result + last-run time.
+
+        Runnable as a background job (``on_progress``/``cancel_check``) so it appears in
+        the Jobs panel with per-stage progress instead of blocking a request."""
+        def _emit(stage: str, **kw):
+            _progress(on_progress, stage=stage, **kw)
+
         with self._open() as (cat, _rs, _ts):
             w = cat.get_watch(watch_id)
         if w is None:
@@ -3103,6 +3446,7 @@ class Facade:
         seed_ids: list[str] = []
 
         if source:
+            _emit(f"harvesting {source}")
             opts = dict(spec.get("source_options") or {})
             info = SOURCE_INFO.get(source)
             if keywords and info and info.keyword_search and "query" not in opts:
@@ -3116,14 +3460,17 @@ class Facade:
         # Forward-citation discovery: NEW cases citing a target (the renewing seed).
         disc = spec.get("discover")
         if disc and disc.get("citing"):
+            _emit(f"discovering cases citing {disc['citing']}")
             d = self.discover_citing(target=disc["citing"], via=disc.get("via", "auto"),
                                      query=disc.get("query"), max_pages=spec.get("max_pages", 1))
             result["discover"] = {k: d.get(k) for k in ("via", "query", "count")}
             seed_ids = list({*seed_ids, *d.get("discovered", [])})
 
         degrees = int(spec.get("degrees", 1))
+        _emit("snowballing", total=len(seed_ids))
         rad = self.radiate(seeds=seed_ids or None, seed_rule=spec.get("seed_rule"),
-                           degrees=degrees, max_per_degree=spec.get("max_per_degree", 40))
+                           degrees=degrees, max_per_degree=spec.get("max_per_degree", 40),
+                           on_progress=on_progress, cancel_check=cancel_check)
         result["radiate"] = rad
 
         # tag everything this watch brought in (seeds + snowballed) into a collection
@@ -3138,26 +3485,32 @@ class Facade:
                                         "last_result_json": json.dumps(result)})
         return result
 
-    def tick_watches(self) -> dict:
-        """Run every enabled watch whose cadence is due (the scheduler's unit of
-        work). Idempotent and safe to call on a timer."""
+    def due_watch_ids(self) -> list[int]:
+        """The enabled watches whose cadence is due now — the scheduler starts a job per id
+        (so each shows in the Jobs panel), rather than running them inline invisibly."""
         import datetime as _dt
 
         now = _dt.datetime.now(_dt.timezone.utc)
-        ran = []
+        due = []
         for w in self.list_watches():
             if not w["enabled"]:
                 continue
             last = w.get("last_run_at")
-            due = True
+            is_due = True
             if last:
                 try:
                     prev = _dt.datetime.fromisoformat(last)
-                    due = (now - prev).total_seconds() >= w["cadence_minutes"] * 60
+                    is_due = (now - prev).total_seconds() >= w["cadence_minutes"] * 60
                 except ValueError:
-                    due = True
-            if due:
-                ran.append(self.run_watch(watch_id=w["watch_id"]))
+                    is_due = True
+            if is_due:
+                due.append(w["watch_id"])
+        return due
+
+    def tick_watches(self) -> dict:
+        """Run every enabled watch whose cadence is due (the scheduler's unit of
+        work). Idempotent and safe to call on a timer."""
+        ran = [self.run_watch(watch_id=wid) for wid in self.due_watch_ids()]
         return {"ran": len(ran), "results": ran}
 
     def harvest(

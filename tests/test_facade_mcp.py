@@ -58,6 +58,36 @@ def test_facade_list_documents_for_iteration(config):
     assert len(docs) == 3
 
 
+def test_facade_document_mentions_grouped_and_ranked(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>1. The rule. 2. The exception.</p>", filename="t.html",
+                            doc_type="judgment", title="Target v Authority")["stable_id"]
+    a = f.import_bytes(data=b"<p>citing a</p>", filename="a.html", doc_type="judgment", title="A v B")["stable_id"]
+    b = f.import_bytes(data=b"<p>citing b</p>", filename="b.html", doc_type="judgment", title="C v D")["stable_id"]
+    f.link(src_id=a, dst_id=target, relationship="applies", src_anchor="12", dst_anchor="1.")
+    f.link(src_id=b, dst_id=target, relationship="considers", src_anchor="4", dst_anchor="2.")
+
+    m = f.document_mentions(target)
+    assert m["total"] == 2
+    assert {g["src_id"] for g in m["groups"]} == {a, b}
+    # the per-paragraph roll-up keys off this document's paragraph labels
+    assert set(m["by_anchor"]) == {"1.", "2."}
+    assert m["by_anchor"]["1."][0]["src_id"] == a
+    # filtering to one paragraph narrows the groups
+    only1 = f.document_mentions(target, anchor="1.")
+    assert {g["src_id"] for g in only1["groups"]} == {a}
+
+
+def test_facade_list_documents_query_is_case_insensitive(config):
+    f = Facade(config)
+    f.import_bytes(data=b"<p>right to erasure</p>", filename="e.html",
+                   doc_type="legislation", title="Data Protection Act 2018")
+    # the query filter must match regardless of case (Postgres LIKE is case-sensitive)
+    assert len(f.list_documents(query="data protection")) == 1
+    assert len(f.list_documents(query="DATA PROTECTION")) == 1
+    assert len(f.list_documents(query="Data Protection")) == 1
+
+
 def test_facade_embed_and_search(config):
     f = Facade(config)
     f.import_bytes(data=b"<p>The right to erasure of personal data under the GDPR.</p>",

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CorpusView, Dashboard, DocumentView, ImportView, JobsPanel, PeekPanel, PeekProvider, RulesView, SearchView, SettingsView, UnresolvedView, WatchesView } from "./views";
+import { Dashboard, DocumentView, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
@@ -44,7 +44,7 @@ function ThemeSwitch() {
   );
 }
 
-type Tab = "dashboard" | "search" | "corpus" | "unresolved" | "rules" | "watches" | "import" | "settings" | "document" | "graph";
+type Tab = "dashboard" | "search" | "unresolved" | "maintain" | "import" | "settings" | "document" | "graph";
 
 const slug = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
@@ -58,9 +58,9 @@ export function App() {
     if (!id) return; setDocId(id); setPinpoint(anchor || null); setTab("document");
   };
   const openGraph = (id: string) => { if (!id) return; setGraphId(id); setTab("graph"); };
-  // jump to the Corpus browser pre-filtered (Corpus Map "see this list" action)
+  // jump to Search pre-filtered (Corpus Map "see this list" action) — nonce forces re-adopt
   const [corpusFilter, setCorpusFilter] = useState<Record<string, string>>({});
-  const navigateCorpus = (f: Record<string, string>) => { setCorpusFilter(f); setTab("corpus"); };
+  const navigateCorpus = (f: Record<string, string>) => { setCorpusFilter({ ...f, _n: String(Date.now()) }); setTab("search"); };
 
   // Shareable deep links: #/article/{id}[/section/{anchor}] ↔ the open document.
   useEffect(() => {
@@ -81,11 +81,12 @@ export function App() {
   }, [tab, docId, pinpoint]);
 
   const tabs: [Tab, string][] = [
-    ["dashboard", "Dashboard"], ["search", "Search"], ["corpus", "Corpus"],
-    ["unresolved", "Unresolved"], ["rules", "Rules"], ["watches", "Watches"], ["import", "Import"], ["settings", "Settings"],
+    ["dashboard", "Dashboard"], ["search", "Search"],
+    ["unresolved", "Unresolved"], ["maintain", "Maintain"], ["import", "Import"], ["settings", "Settings"],
   ];
   return (
     <PeekProvider>
+    <TrayProvider>
     <div className="app">
       <header>
         <h1>RagLex</h1>
@@ -100,18 +101,18 @@ export function App() {
         <ThemeSwitch />
       </header>
       {tab === "dashboard" && <Dashboard open={open} />}
-      {tab === "search" && <SearchView open={open} />}
-      {tab === "corpus" && <CorpusView open={open} initialFilter={corpusFilter} />}
+      {tab === "search" && <SearchView open={open} initialFilter={corpusFilter} />}
       {tab === "unresolved" && <UnresolvedView open={open} navigate={navigateCorpus} />}
-      {tab === "rules" && <RulesView open={open} />}
-      {tab === "watches" && <WatchesView />}
+      {tab === "maintain" && <MaintainView open={open} />}
       {tab === "import" && <ImportView open={open} />}
       {tab === "settings" && <SettingsView />}
       {tab === "document" && docId && <DocumentView id={docId} open={open} openGraph={openGraph} pinpoint={pinpoint} />}
       {tab === "graph" && graphId && <GraphView focusId={graphId} open={open} />}
     </div>
     <PeekPanel open={open} />
+    <TrayStack open={open} />
     <JobsPanel />
+    </TrayProvider>
     </PeekProvider>
   );
 }

@@ -22,6 +22,170 @@ export function PeekProvider({ children }: { children: any }) {
   return <PeekCtx.Provider value={{ current, push: setCurrent, close: () => setCurrent(null) }}>{children}</PeekCtx.Provider>;
 }
 
+// --- Tray stack (stacking side "organiser") --------------------------------
+// A stack of side trays that offset like bookmarks: opening a link inside a tray pushes
+// a new one on top (you still see the ones beneath), each with its own close cross.
+type Tray =
+  | { kind: "mentions"; target: string; anchor?: string; label: any }
+  | { kind: "cites"; target: string; family: "cases" | "statute"; label: any }
+  | { kind: "doc"; id: string; highlightTarget?: string; label: any };
+const TrayCtx = createContext<{ stack: Tray[]; push: (t: Tray) => void; closeAt: (i: number) => void } | null>(null);
+export function useTray() {
+  return useContext(TrayCtx) ?? { stack: [] as Tray[], push: (_t: Tray) => {}, closeAt: (_i: number) => {} };
+}
+export function TrayProvider({ children }: { children: any }) {
+  const [stack, setStack] = useState<Tray[]>([]);
+  useEffect(() => { document.body.classList.toggle("has-tray", stack.length > 0); }, [stack.length]);
+  const push = (t: Tray) => setStack((s) => [...s, t]);
+  const closeAt = (i: number) => setStack((s) => s.filter((_, j) => j < i)); // close this + those above it
+  return <TrayCtx.Provider value={{ stack, push, closeAt }}>{children}</TrayCtx.Provider>;
+}
+
+// The stacked trays themselves — each offset from the last so the ones beneath peek out.
+export function TrayStack({ open }: { open: (id: string, a?: string) => void }) {
+  const { stack, closeAt } = useTray();
+  if (!stack.length) return null;
+  return <>{stack.map((t, i) => (
+    <aside key={i} className="tray" role="dialog"
+      style={{ top: `calc(var(--sp-5) + ${i * 16}px)`, right: `calc(var(--sp-5) + ${i * 16}px)`, zIndex: 60 + i }}>
+      <div className="tray-head">
+        <span className="tray-title">{t.label}</span>
+        <button className="tray-x" onClick={() => closeAt(i)} title="close">✕</button>
+      </div>
+      <div className="tray-body"><TrayContent t={t} open={open} /></div>
+    </aside>
+  ))}</>;
+}
+
+function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => void }) {
+  if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget} open={open} />;
+  if (t.kind === "cites") return <CitesTray target={t.target} family={t.family} open={open} />;
+  return <MentionsTray target={t.target} anchor={t.anchor} open={open} />;
+}
+
+// Grouped-by-citer mentions of a document (or one of its paragraphs), most-authoritative
+// first — with the passages where each cites it, and a jump to the full citing document.
+function MentionsTray({ target, anchor, open }: { target: string; anchor?: string; open: (id: string, a?: string) => void }) {
+  const { push } = useTray();
+  const [data] = useAsync(() => api.mentions(target, anchor), [target, anchor]);
+  if (!data) return <p className="muted loading-pulse">Loading mentions…</p>;
+  const groups: any[] = data.groups || [];
+  if (!groups.length) return <p className="muted">Nothing mentions this yet.</p>;
+  return (
+    <div>
+      {data.total > groups.length && <p className="muted" style={{ fontSize: 12 }}>{data.total} citing documents · showing {groups.length}</p>}
+      {groups.map((g, i) => (
+        <div className="mgroup" key={i}>
+          <div className="mgroup-head">
+            <a className="mgroup-title" title="Open this citing document in a new tray, with its citing passages highlighted"
+              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
+              <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
+            <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
+          </div>
+          {g.snippets.map((s: any, j: number) => (
+            <div className="msnip" key={j}>{s.anchor && <span className="msnip-anchor">{s.anchor}</span>}
+              <span className="msnip-text">…{s.text}…</span></div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The authorities a document cites (cases | statutory material), OSCOLA-formatted with
+// their pinpoints — a resolved one opens in a new tray.
+function CitesTray({ target, family, open }: { target: string; family: "cases" | "statute"; open: (id: string, a?: string) => void }) {
+  const { push } = useTray();
+  const [data] = useAsync(() => api.citationsOut(target, family), [target, family]);
+  if (!data) return <p className="muted loading-pulse">Loading…</p>;
+  const items: any[] = data.items || [];
+  if (!items.length) return <p className="muted">Nothing cited here.</p>;
+  return (
+    <div>
+      {items.map((it, i) => (
+        <div className="crow" key={i}>
+          <div className="crow-cite">
+            {it.resolved_id
+              ? <a onClick={() => push({ kind: "doc", id: it.resolved_id, label: <Oscola c={it.oscola} fallback={it.resolved_id} /> })}>
+                  <Oscola c={it.oscola} fallback={it.raw || it.candidate} /></a>
+              : <span><Oscola c={it.oscola} fallback={it.raw || it.candidate} /> <span className="muted">· not held</span></span>}
+            {it.pinpoints?.length > 0 && <span className="crow-pins"> {it.pinpoints.join(", ")}</span>}
+          </div>
+          {it.resolved_id && <button className="mini" onClick={() => open(it.resolved_id)}>open ↗</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// A read-only reader inside a tray, highlighting the paragraphs where the document cites
+// the origin document (the "bit linked from"), scrolled to the first.
+function MentionReader({ id, highlightTarget, open }: { id: string; highlightTarget?: string; open: (id: string, a?: string) => void }) {
+  const [body] = useAsync(() => api.documentBody(id), [id]);
+  const peek = usePeek();
+  const onCite = (c: any) => peek.push(citePeek(c));
+  const segs: any[] = body?.segments || [];
+  const cites: any[] = body?.citations || [];
+  const hi = new Set<number>();
+  if (highlightTarget && body) {
+    segs.forEach((s: any, i: number) => {
+      if (cites.some((c: any) => c.char_start >= s.char_start && c.char_start < s.char_end && c.resolved_id === highlightTarget))
+        hi.add(i);
+    });
+  }
+  useEffect(() => {
+    if (!body) return;
+    const first = [...hi][0];
+    if (first != null) {
+      const el = document.getElementById(`tray-${id}-seg-${first}`);
+      if (el) setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 80);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body]);
+  if (!body) return <p className="muted loading-pulse">Loading…</p>;
+  return (
+    <div>
+      <div className="tray-doc-head">
+        <b><Oscola c={body.oscola} fallback={body.title || id} /></b>
+        <button className="mini" onClick={() => open(id)}>open full ↗</button>
+      </div>
+      {!body.text && <p className="muted">No text (metadata only).</p>}
+      <div className="reader">
+        {segs.map((s: any, i: number) => {
+          const sb = segBody(body.text, s, cites, onCite);
+          return (
+            <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}${hi.has(i) ? " seg-hi" : ""}`} key={i} id={`tray-${id}-seg-${i}`}>
+              {sb.showLabel && <span className="seg-label">{s.label}</span>}
+              <span className="seg-body">{sb.body}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// The inline "Mentioned by A, B, C and n more. See all mentions." line under a paragraph.
+function MentionedBy({ list, target, anchor }: { list: any[]; target: string; anchor: string }) {
+  const { push } = useTray();
+  const top = list.slice(0, 3);
+  const more = list.length - top.length;
+  return (
+    <div className="mentioned-by">
+      <span className="mb-label">Mentioned by </span>
+      {top.map((m, i) => (
+        <Fragment key={i}>{i > 0 && ", "}
+          <a title="Open this citing document, with the citing passages highlighted"
+            onClick={() => push({ kind: "doc", id: m.src_id, highlightTarget: target, label: <Oscola c={m.src_oscola} fallback={m.src_id} /> })}>
+            <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
+        </Fragment>
+      ))}
+      {more > 0 && <span> and {more} more</span>}.{" "}
+      <a className="mb-all" onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>See all mentions</a>
+    </div>
+  );
+}
+
 const REL_TYPES = [
   "analyses", "criticises", "summarises", "annotates", "follows", "distinguishes",
   "overrules", "applies", "considers", "interprets", "mentions",
@@ -60,71 +224,271 @@ function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): [T | null, string, 
   return [data, err, () => setTick((t) => t + 1), loading];
 }
 
-// --- Search ----------------------------------------------------------------
-export function SearchView({ open }: { open: (id: string) => void }) {
-  const [q, setQ] = useState("right to erasure of personal data");
-  const [filters, setFilters] = useState<{ source?: string; doc_type?: string; year_from?: string; tag?: string }>({});
+// --- Unified search --------------------------------------------------------
+// One page: a fast metadata bar with clever (tokenised, order-free) autocomplete, an
+// advanced structured mode whose fields autocomplete, and a faceted results view with
+// sorting, grouping, refine tick-boxes and a year histogram.
+type Filters = {
+  query?: string; source?: string; doc_type?: string; court?: string; tag?: string;
+  year_from?: string; year_to?: string; cites?: string; cites_pinpoint?: string; cited_by?: string;
+  id_prefix?: string;
+};
+const PAGE = 50;
+const FACET_LABEL: Record<string, string> = { source: "Source", doc_type: "Type", court: "Court" };
+const SORTS: [string, string][] = [["date", "Newest"], ["date_asc", "Oldest"], ["title", "Title A–Z"], ["cited", "Most cited"]];
+const GROUPS: [string, string][] = [["none", "No grouping"], ["source", "Source"], ["doc_type", "Type"], ["court", "Court"], ["decade", "Decade"]];
+
+const activeFilters = (f: Filters): Record<string, string> => {
+  const o: Record<string, string> = {};
+  Object.entries(f).forEach(([k, v]) => v && !k.startsWith("_") && (o[k] = String(v)));
+  return o;
+};
+
+export function SearchView({ open, initialFilter }: { open: (id: string, a?: string) => void; initialFilter?: Record<string, string> }) {
+  const [mode, setMode] = useState<"simple" | "advanced">(
+    initialFilter && Object.keys(initialFilter).length ? "advanced" : "simple");
+  const [filters, setFilters] = useState<Filters>(initialFilter || {});
+  const [sort, setSort] = useState("date");
+  const [group, setGroup] = useState("none");
+  const [page, setPage] = useState(0);
+  const [run, setRun] = useState(0);        // bump to (re)run a search
+  const [semantic, setSemantic] = useState(false);
+
+  // a Corpus-Map deep-link adopts its filter and searches immediately
+  useEffect(() => {
+    if (initialFilter && Object.keys(initialFilter).length) {
+      setFilters(initialFilter); setMode("advanced"); setPage(0); setRun((r) => r + 1);
+    }
+  }, [JSON.stringify(initialFilter)]);
+
+  const doSearch = () => { setSemantic(false); setPage(0); setRun((r) => r + 1); };
+  const patch = (p: Partial<Filters>) => { setFilters((f) => ({ ...f, ...p })); setPage(0); setRun((r) => r + 1); };
+  const clearAll = () => { setFilters({}); setPage(0); setRun((r) => r + 1); };
+
+  // metadata results + facets (skipped while in semantic mode)
+  const [res, err, , loading] = useAsync(
+    () => semantic ? Promise.resolve(null)
+      : api.searchCorpus({ ...activeFilters(filters), sort, limit: String(PAGE), offset: String(page * PAGE) }),
+    [run, sort, page, semantic]);
+
+  // optional semantic (full-text) hits
   const [hits, setHits] = useState<Hit[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [stats] = useAsync(() => api.stats(), []);
+  useEffect(() => {
+    if (!semantic) return;
+    let live = true;
+    const f = activeFilters(filters);
+    api.search(filters.query || "", 12, { source: f.source, doc_type: f.doc_type, tag: f.tag, year_from: f.year_from })
+      .then((h) => { if (live) setHits(h); }).catch(() => {});
+    return () => { live = false; };
+  }, [run, semantic]);
 
-  async function run() {
-    setBusy(true); setErr("");
-    try {
-      const f: Record<string, string> = {};
-      Object.entries(filters).forEach(([k, v]) => v && (f[k] = v));
-      setHits(await api.search(q, 10, f));
-    } catch (e: any) { setErr(String(e)); } finally { setBusy(false); }
-  }
-  const sources = Object.keys(stats?.by_source ?? {});
-  const tags = Object.keys(stats?.by_tag ?? {});
-
+  const nActive = Object.keys(activeFilters(filters)).length;
   return (
     <div>
       <div className="panel">
-        <div className="row">
-          <input value={q} autoFocus onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && run()} placeholder="hybrid keyword + semantic search" />
-          <button className="primary" style={{ flex: "0 0 auto" }} onClick={run} disabled={busy}>
-            {busy ? "Searching…" : "Search"}
-          </button>
+        <div className="row" style={{ alignItems: "center", marginBottom: 8 }}>
+          <div className="seg-toggle" style={{ flex: "0 0 auto" }}>
+            <button className={mode === "simple" ? "on" : ""} onClick={() => setMode("simple")}>Simple</button>
+            <button className={mode === "advanced" ? "on" : ""} onClick={() => setMode("advanced")}>Advanced</button>
+          </div>
+          <span style={{ flex: 1 }} />
+          {nActive > 0 && <a className="muted" style={{ cursor: "pointer", fontSize: 12 }} onClick={clearAll}>clear all ✕</a>}
         </div>
-        <div className="row" style={{ marginTop: 8 }}>
-          <select value={filters.source ?? ""} onChange={(e) => setFilters({ ...filters, source: e.target.value })}>
-            <option value="">any source</option>
-            {sources.map((s) => <option key={s}>{s}</option>)}
-          </select>
-          <select value={filters.doc_type ?? ""} onChange={(e) => setFilters({ ...filters, doc_type: e.target.value })}>
-            <option value="">any type</option>
-            {DOC_TYPES.map((s) => <option key={s}>{s}</option>)}
-          </select>
-          <select value={filters.tag ?? ""} onChange={(e) => setFilters({ ...filters, tag: e.target.value })}>
-            <option value="">any tag</option>
-            {tags.map((s) => <option key={s}>{s}</option>)}
-          </select>
-          <input style={{ maxWidth: 110 }} value={filters.year_from ?? ""} placeholder="year from"
-            onChange={(e) => setFilters({ ...filters, year_from: e.target.value })} />
-        </div>
-        {err && <p className="err">{err}</p>}
+        {mode === "simple"
+          ? <SimpleBar filters={filters} setQuery={(q) => setFilters((f) => ({ ...f, query: q }))}
+              onSearch={doSearch} open={open} semantic={semantic} setSemantic={(v) => { setSemantic(v); if (v) setRun((r) => r + 1); }} />
+          : <AdvancedForm filters={filters} setFilters={setFilters} onSearch={doSearch} />}
+        {err && <p className="err">{String(err)}</p>}
       </div>
-      {hits !== null && (
-        <div className="panel">
-          <p className="muted">{hits.length} result{hits.length === 1 ? "" : "s"} · keyword + semantic, fused (RRF), with graph neighbours</p>
-          {hits.length === 0 && <p className="muted">No matches. Try fewer filters, or embed first (Dashboard → Embed pending).</p>}
-          {hits.map((h, i) => (
-            <div className="hit" key={i}>
-              <div>
-                <a onClick={() => open(h.doc_id)}>{h.ecli || h.title || h.doc_id}</a>{" "}
-                <span className="muted">· {h.source}/{h.court} · {h.structural_unit} · score {h.score.toFixed(4)}</span>
+
+      {semantic && hits !== null && <SemanticResults hits={hits} open={open} />}
+
+      {!semantic && res && (
+        <div className="search-layout">
+          <FacetSidebar facets={res.facets} filters={filters} patch={patch} />
+          <div className="search-main">
+            <div className="panel">
+              <div className="row" style={{ alignItems: "center", justifyContent: "space-between" }}>
+                <p className="muted" style={{ margin: 0 }}>
+                  {res.total.toLocaleString()} result{res.total === 1 ? "" : "s"}
+                  {res.total > PAGE ? ` · ${page * PAGE + 1}–${Math.min((page + 1) * PAGE, res.total)}` : ""}
+                  {loading ? " · …" : ""}
+                </p>
+                <div className="row" style={{ flex: "0 0 auto", gap: 8 }}>
+                  <label className="mini-label">sort
+                    <select value={sort} onChange={(e) => setSort(e.target.value)}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+                  <label className="mini-label">group
+                    <select value={group} onChange={(e) => setGroup(e.target.value)}>{GROUPS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+                </div>
               </div>
-              <div className="snippet">{h.chunk_text.slice(0, 300)}</div>
-              {h.neighbours.length > 0 && (
-                <div className="nbr">graph: {h.neighbours.slice(0, 3).map((n, j) =>
-                  <span key={j}>{n.direction === "out" ? "→" : "←"} {n.relationship_type} <a onClick={() => open(n.id)}>{n.id}</a>; </span>)}
+              <ActiveChips filters={filters} patch={(p) => patch(p)} />
+              <ResultsList items={res.items} group={group} open={open} />
+              {res.total > PAGE && (
+                <div className="row" style={{ justifyContent: "center", marginTop: 10 }}>
+                  <button disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>‹ prev</button>
+                  <span className="muted" style={{ flex: "0 0 auto" }}>page {page + 1} / {Math.ceil(res.total / PAGE)}</span>
+                  <button disabled={(page + 1) * PAGE >= res.total} onClick={() => setPage((p) => p + 1)}>next ›</button>
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The simple bar: metadata search with an instant, tokenised (order-free) autocomplete of
+// matching documents — pick one to open it, or press Enter to search the whole corpus.
+function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
+  { filters: Filters; setQuery: (q: string) => void; onSearch: () => void; open: (id: string) => void;
+    semantic: boolean; setSemantic: (v: boolean) => void }) {
+  const q = filters.query || "";
+  const [sugg, setSugg] = useState<any[]>([]);
+  const [hi, setHi] = useState(-1);
+  const [openList, setOpenList] = useState(false);
+  useEffect(() => {
+    let live = true;
+    if (q.trim().length < 2 || semantic) { setSugg([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.searchCorpus({ query: q.trim(), limit: "8", facets: "false" });
+        if (live) { setSugg(r.items || []); setHi(-1); setOpenList(true); }
+      } catch { /* ignore */ }
+    }, 110);
+    return () => { live = false; clearTimeout(t); };
+  }, [q, semantic]);
+  const pick = (o: any) => { if (o) { open(o.stable_id); setOpenList(false); } };
+  return (
+    <div>
+      <div className="row ac" style={{ position: "relative" }}>
+        <input autoFocus value={q} placeholder="Search cases, statutes… (any words, any order)"
+          onChange={(e) => { setQuery(e.target.value); }}
+          onFocus={() => sugg.length && setOpenList(true)}
+          onBlur={() => setTimeout(() => setOpenList(false), 150)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, sugg.length - 1)); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, -1)); }
+            else if (e.key === "Enter") { if (hi >= 0 && openList) pick(sugg[hi]); else onSearch(); }
+            else if (e.key === "Escape") setOpenList(false);
+          }} />
+        <button className="primary" style={{ flex: "0 0 auto" }} onClick={onSearch}>Search</button>
+        {openList && sugg.length > 0 && (
+          <div className="ac-list" style={{ right: 92 }}>
+            {sugg.map((o, i) => (
+              <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
+                onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
+                <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
+                <span className="muted"> · {o.source}/{o.doc_type}{o.court ? " · " + o.court : ""}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <label className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8, fontSize: 12 }}>
+        <input type="checkbox" style={{ width: "auto" }} checked={semantic} onChange={(e) => setSemantic(e.target.checked)} />
+        search full text semantically (meaning, not just the words) — for concepts rather than names
+      </label>
+    </div>
+  );
+}
+
+// Advanced mode: structured fields, each autocompleting (free text does not). Makes full
+// use of the metadata — source/type/court/year plus the graph (cites / cited by, with a
+// pinpoint autocomplete for the cited provision).
+function AdvancedForm({ filters, setFilters, onSearch }:
+  { filters: Filters; setFilters: (f: (p: Filters) => Filters) => void; onSearch: () => void }) {
+  const [fv] = useAsync(() => api.facetValues(), []);
+  const set = (k: keyof Filters, v: string) => setFilters((f) => ({ ...f, [k]: v || undefined }));
+  const opts = (rows: any[]) => (rows || []).map((r) => <option key={r.key} value={r.key}>{r.key} ({r.n.toLocaleString()})</option>);
+  return (
+    <div className="adv-form">
+      <div className="adv-row">
+        <label>Title / id contains <span className="muted">(free text — words in any order)</span></label>
+        <input value={filters.query || ""} placeholder="e.g. data protection erasure"
+          onChange={(e) => set("query", e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSearch()} />
+      </div>
+      <div className="adv-grid">
+        <div><label>Source</label>
+          <select value={filters.source || ""} onChange={(e) => set("source", e.target.value)}>
+            <option value="">any</option>{opts(fv?.sources)}</select></div>
+        <div><label>Type</label>
+          <select value={filters.doc_type || ""} onChange={(e) => set("doc_type", e.target.value)}>
+            <option value="">any</option>{opts(fv?.doc_types)}</select></div>
+        <div><label>Court</label>
+          <ComboBox value={filters.court || ""} onChange={(v) => set("court", v)}
+            options={(fv?.courts || []).map((c: any) => c.key)} placeholder="any court" /></div>
+        <div><label>Tag / collection</label>
+          <select value={filters.tag || ""} onChange={(e) => set("tag", e.target.value)}>
+            <option value="">any</option>{opts(fv?.tags)}</select></div>
+        <div><label>Year from</label>
+          <input type="number" min={1200} max={2100} value={filters.year_from || ""} placeholder="e.g. 2016"
+            onChange={(e) => set("year_from", e.target.value)} /></div>
+        <div><label>Year to</label>
+          <input type="number" min={1200} max={2100} value={filters.year_to || ""} placeholder="e.g. 2024"
+            onChange={(e) => set("year_to", e.target.value)} /></div>
+      </div>
+      <div className="adv-grid">
+        <div className="adv-cites"><label>Cites <span className="muted">— documents that cite…</span></label>
+          <CiteTargetField value={filters.cites} pinpoint={filters.cites_pinpoint}
+            onChange={(id, pin) => setFilters((f) => ({ ...f, cites: id, cites_pinpoint: pin }))} /></div>
+        <div className="adv-cites"><label>Cited by <span className="muted">— documents cited by…</span></label>
+          <CiteTargetField value={filters.cited_by} onChange={(id) => setFilters((f) => ({ ...f, cited_by: id }))} /></div>
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="primary" style={{ flex: "0 0 auto" }} onClick={onSearch}>Search</button>
+      </div>
+    </div>
+  );
+}
+
+// A pick-a-document field (name autocomplete) with an optional pinpoint (section/article of
+// the target) — reuses the reader's LinkTargetPicker autocomplete pattern.
+function CiteTargetField({ value, pinpoint, onChange }:
+  { value?: string; pinpoint?: string; onChange: (id: string | undefined, pin?: string) => void }) {
+  const [picked, setPicked] = useState<{ id: string; title: string } | null>(value ? { id: value, title: value } : null);
+  const [labels, setLabels] = useState<string[]>([]);
+  useEffect(() => {
+    if (!picked) return;
+    let live = true;
+    api.documentBody(picked.id).then((b) => { if (live) setLabels([...new Set((b.segments || []).map((s: any) => s.label).filter(Boolean))] as string[]); }).catch(() => {});
+    return () => { live = false; };
+  }, [picked?.id]);
+  if (!picked) return <DocAutocomplete onPick={(id, title) => { setPicked({ id, title }); onChange(id); }} placeholder="find a case or act…" />;
+  return (
+    <div>
+      <div className="row" style={{ gap: 6 }}>
+        <span className="tag" style={{ flex: 1 }}>{picked.title}</span>
+        <a className="muted" style={{ cursor: "pointer", flex: "0 0 auto" }} onClick={() => { setPicked(null); onChange(undefined, undefined); }}>change</a>
+      </div>
+      {pinpoint !== undefined && (
+        <div style={{ marginTop: 4 }}>
+          <input list={`pin-${picked.id}`} defaultValue={pinpoint || ""} placeholder="pinpoint — section / article (optional)"
+            onChange={(e) => onChange(picked.id, e.target.value || undefined)} />
+          <datalist id={`pin-${picked.id}`}>{labels.map((l, i) => <option key={i} value={l} />)}</datalist>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A lightweight combobox: type to filter a fixed option list, choose one (for Court).
+function ComboBox({ value, onChange, options, placeholder }:
+  { value: string; onChange: (v: string) => void; options: string[]; placeholder?: string }) {
+  const [q, setQ] = useState(value);
+  const [openL, setOpenL] = useState(false);
+  useEffect(() => { setQ(value); }, [value]);
+  const ql = q.toLowerCase();
+  const matches = q ? options.filter((o) => o.toLowerCase().includes(ql)).slice(0, 12) : options.slice(0, 12);
+  return (
+    <div className="ac" style={{ position: "relative" }}>
+      <input value={q} placeholder={placeholder}
+        onChange={(e) => { setQ(e.target.value); setOpenL(true); if (!e.target.value) onChange(""); }}
+        onFocus={() => setOpenL(true)} onBlur={() => setTimeout(() => setOpenL(false), 150)} />
+      {openL && matches.length > 0 && (
+        <div className="ac-list">
+          {matches.map((o) => (
+            <div key={o} className="ac-opt" onMouseDown={(e) => { e.preventDefault(); onChange(o); setQ(o); setOpenL(false); }}>{o}</div>
           ))}
         </div>
       )}
@@ -132,90 +496,134 @@ export function SearchView({ open }: { open: (id: string) => void }) {
   );
 }
 
-// --- Corpus browse ---------------------------------------------------------
-const PAGE = 100;
-export function CorpusView({ open, initialFilter }: { open: (id: string) => void; initialFilter?: Record<string, string> }) {
-  const [filters, setFilters] = useState<{ source?: string; doc_type?: string; tag?: string; query?: string; court?: string; id_prefix?: string }>(initialFilter ?? {});
-  // when the Corpus Map deep-links here ("see this list"), adopt its filter
-  useEffect(() => { if (initialFilter && Object.keys(initialFilter).length) setFilters(initialFilter); }, [JSON.stringify(initialFilter)]);
-  const [page, setPage] = useState(0);
-  const [stats] = useAsync(() => api.stats(), []);
-  const filt = () => { const f: Record<string, string> = {}; Object.entries(filters).forEach(([k, v]) => v && (f[k] = v)); return f; };
-  const [total] = useAsync(() => api.countDocuments(filt()).then((r) => r.total), [JSON.stringify(filters)]);
-  const [docs, err, reload, loading] = useAsync(() => {
-    return api.listDocuments({ ...filt(), limit: String(PAGE), offset: String(page * PAGE) });
-  }, [JSON.stringify(filters), page]);
-  // reset to page 0 whenever the filters change
-  useEffect(() => { setPage(0); }, [JSON.stringify(filters)]);
-  const [sel, setSel] = useState<Set<string>>(new Set());
-  const [coll, setColl] = useState("");
-  const [msg, setMsg] = useState("");
-  const sources = Object.keys(stats?.by_source ?? {});
-  const tags = Object.keys(stats?.by_tag ?? {});
-  const toggle = (id: string) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
-
-  async function addToCollection() {
-    if (!coll || sel.size === 0) return;
-    const r = await api.tagMany([...sel], coll);
-    setMsg(`Added ${r.written} to “${coll}”.`); setSel(new Set()); reload();
-  }
+// The chips summarising active filters (each removable) above the results.
+function ActiveChips({ filters, patch }: { filters: Filters; patch: (p: Partial<Filters>) => void }) {
+  const entries = Object.entries(activeFilters(filters)).filter(([k]) => k !== "query");
+  if (!entries.length) return null;
+  const label: Record<string, string> = { source: "source", doc_type: "type", court: "court", tag: "tag",
+    year_from: "from", year_to: "to", cites: "cites", cites_pinpoint: "cites ¶", cited_by: "cited by", id_prefix: "id" };
   return (
-    <div>
-      <div className="panel">
-        <div className="row">
-          <input placeholder="filter by title / id" value={filters.query ?? ""}
-            onChange={(e) => setFilters({ ...filters, query: e.target.value })} />
-          <select value={filters.source ?? ""} onChange={(e) => setFilters({ ...filters, source: e.target.value })}>
-            <option value="">any source</option>{sources.map((s) => <option key={s}>{s}</option>)}
-          </select>
-          <select value={filters.doc_type ?? ""} onChange={(e) => setFilters({ ...filters, doc_type: e.target.value })}>
-            <option value="">any type</option>{DOC_TYPES.map((s) => <option key={s}>{s}</option>)}
-          </select>
-          <select value={filters.tag ?? ""} onChange={(e) => setFilters({ ...filters, tag: e.target.value })}>
-            <option value="">any tag / collection</option>{tags.map((s) => <option key={s}>{s}</option>)}
-          </select>
-          <button onClick={reload} style={{ flex: "0 0 auto" }}>↻</button>
-        </div>
-        {(filters.court || filters.id_prefix) && (
-          <div className="row" style={{ marginTop: 8, gap: 8 }}>
-            <span className="filter-chip">
-              {filters.court ? `court: ${filters.court}` : `id: ${filters.id_prefix}*`}
-              <a onClick={() => setFilters({ ...filters, court: undefined, id_prefix: undefined })} title="clear this filter"> ✕</a>
-            </span>
-          </div>
-        )}
+    <div className="active-chips">
+      {entries.map(([k, v]) => (
+        <span className="filter-chip" key={k}>{label[k] || k}: {v}
+          <a onClick={() => patch({ [k]: undefined } as any)} title="remove"> ✕</a></span>
+      ))}
+    </div>
+  );
+}
+
+// Left refine sidebar: a year histogram + tick-box facet groups, each value with its count.
+function FacetSidebar({ facets, filters, patch }:
+  { facets: any; filters: Filters; patch: (p: Partial<Filters>) => void }) {
+  if (!facets) return null;
+  return (
+    <aside className="facets panel">
+      <YearHistogram year={facets.year || {}} from={filters.year_from} to={filters.year_to}
+        onPick={(y) => patch({ year_from: y, year_to: y })} onClear={() => patch({ year_from: undefined, year_to: undefined })} />
+      {(["source", "doc_type", "court"] as const).map((dim) => (
+        <FacetGroup key={dim} title={FACET_LABEL[dim]} values={facets[dim] || []}
+          active={(filters as any)[dim]} onPick={(k) => patch({ [dim]: (filters as any)[dim] === k ? undefined : k } as any)} />
+      ))}
+    </aside>
+  );
+}
+
+function FacetGroup({ title, values, active, onPick }:
+  { title: string; values: any[]; active?: string; onPick: (k: string) => void }) {
+  const [all, setAll] = useState(false);
+  if (!values.length) return null;
+  const shown = all ? values : values.slice(0, 8);
+  return (
+    <div className="facet-group">
+      <div className="facet-title">{title}</div>
+      {shown.map((v) => (
+        <label key={v.key} className={`facet-row${active === v.key ? " on" : ""}`}>
+          <input type="checkbox" checked={active === v.key} onChange={() => onPick(v.key)} />
+          <span className="facet-name" title={v.key}>{v.key}</span>
+          <span className="facet-count">{v.n.toLocaleString()}</span>
+        </label>
+      ))}
+      {values.length > 8 && <a className="facet-more" onClick={() => setAll((a) => !a)}>{all ? "less" : `+${values.length - 8} more`}</a>}
+    </div>
+  );
+}
+
+// A compact year-distribution histogram; click a bar to filter to that year.
+function YearHistogram({ year, from, to, onPick, onClear }:
+  { year: Record<string, number>; from?: string; to?: string; onPick: (y: string) => void; onClear: () => void }) {
+  const years = Object.keys(year).filter((y) => /^\d{4}$/.test(y)).sort();
+  if (years.length < 2) return null;
+  const max = Math.max(...years.map((y) => year[y]));
+  const lo = years[0], hi = years[years.length - 1];
+  return (
+    <div className="facet-group">
+      <div className="facet-title">Year {(from || to) && <a className="facet-more" onClick={onClear}>clear</a>}</div>
+      <div className="histo" title="click a bar to filter to that year">
+        {years.map((y) => {
+          const on = from === to && from === y;
+          return <div key={y} className={`histo-bar${on ? " on" : ""}`} style={{ height: `${Math.max(3, (year[y] / max) * 40)}px` }}
+            title={`${y}: ${year[y].toLocaleString()}`} onClick={() => onPick(y)} />;
+        })}
       </div>
-      <div className="panel">
-        {err && <p className="err">{err}</p>}
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <p className="muted" style={{ margin: 0 }}>
-            {total != null
-              ? `${total.toLocaleString()} documents${total > PAGE ? ` · showing ${page * PAGE + 1}–${Math.min((page + 1) * PAGE, total)}` : ""}`
-              : `${docs?.length ?? 0} documents`}
-            {sel.size > 0 ? ` · ${sel.size} selected` : ""}
-            {total != null && total > PAGE && <>
-              {" "}<button disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>‹ prev</button>
-              {" "}<button disabled={(page + 1) * PAGE >= total} onClick={() => setPage((p) => p + 1)}>next ›</button>
-            </>}
-          </p>
-          <div className="row" style={{ flex: "0 0 auto" }}>
-            <input value={coll} onChange={(e) => setColl(e.target.value)} placeholder="collection / tag name" style={{ maxWidth: 180 }} />
-            <button className="primary" disabled={sel.size === 0 || !coll} style={{ flex: "0 0 auto" }} onClick={addToCollection}>+ Add {sel.size || ""} to collection</button>
-          </div>
-        </div>
-        {msg && <p className="ok">{msg}</p>}
-        {loading && !docs && <p className="muted loading-pulse">⏳ Loading documents…</p>}
-        <table><thead><tr><th></th><th>id / ECLI</th><th>title</th><th>court</th><th>type</th><th>date</th></tr></thead><tbody>
-          {(docs ?? []).map((d) => (
-            <tr key={d.stable_id}>
-              <td><input type="checkbox" checked={sel.has(d.stable_id)} onChange={() => toggle(d.stable_id)} /></td>
-              <td><a onClick={() => open(d.stable_id)}>{d.ecli || d.stable_id}</a></td>
-              <td>{d.title || ""}</td><td>{d.court || ""}</td>
-              <td>{d.doc_type}{d.added_by === "user" ? " ·user" : ""}</td><td className="muted">{d.decision_date || ""}</td>
-            </tr>
-          ))}
-        </tbody></table>
+      <div className="histo-axis"><span>{lo}</span><span>{hi}</span></div>
+    </div>
+  );
+}
+
+// One results list, optionally grouped, each row an OSCOLA citation + metadata.
+function ResultsList({ items, group, open }: { items: any[]; group: string; open: (id: string, a?: string) => void }) {
+  if (!items.length) return <p className="muted" style={{ marginTop: 8 }}>No matches. Loosen a filter, or try the semantic toggle for concepts.</p>;
+  const keyFor = (d: any): string => {
+    if (group === "source") return d.source || "—";
+    if (group === "doc_type") return d.doc_type || "—";
+    if (group === "court") return d.court || "—";
+    if (group === "decade") { const y = (d.decision_date || "").slice(0, 4); return y ? y.slice(0, 3) + "0s" : "undated"; }
+    return "";
+  };
+  const row = (d: any) => (
+    <div className="result-row" key={d.stable_id}>
+      <a className="result-cite" onClick={() => open(d.stable_id)}><Oscola c={d.oscola} fallback={d.title || d.stable_id} /></a>
+      <div className="result-meta muted">
+        <span className="tag">{d.doc_type}</span>
+        {d.court && <span> · {d.court}</span>}
+        {d.decision_date && <span> · {String(d.decision_date).slice(0, 10)}</span>}
+        {d.cited_by > 0 && <span> · cited by {d.cited_by.toLocaleString()}</span>}
+        {d.source && <span> · {d.source}</span>}
       </div>
+    </div>
+  );
+  if (group === "none") return <div className="results">{items.map(row)}</div>;
+  const groups: Record<string, any[]> = {};
+  for (const d of items) (groups[keyFor(d)] ||= []).push(d);
+  return (
+    <div className="results">
+      {Object.entries(groups).map(([g, rows]) => (
+        <div key={g} className="result-group">
+          <div className="result-group-head">{g} <span className="muted">({rows.length})</span></div>
+          {rows.map(row)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Semantic (full-text) hits — meaning-based; kept from the old hybrid search.
+function SemanticResults({ hits, open }: { hits: Hit[]; open: (id: string) => void }) {
+  return (
+    <div className="panel">
+      <p className="muted">{hits.length} result{hits.length === 1 ? "" : "s"} · keyword + semantic, fused (RRF), with graph neighbours</p>
+      {hits.length === 0 && <p className="muted">No matches. Try fewer filters, or embed first (Dashboard → Embed pending).</p>}
+      {hits.map((h, i) => (
+        <div className="hit" key={i}>
+          <div><a onClick={() => open(h.doc_id)}>{h.ecli || h.title || h.doc_id}</a>{" "}
+            <span className="muted">· {h.source}/{h.court} · {h.structural_unit} · score {h.score.toFixed(4)}</span></div>
+          <div className="snippet">{h.chunk_text.slice(0, 300)}</div>
+          {h.neighbours.length > 0 && (
+            <div className="nbr">graph: {h.neighbours.slice(0, 3).map((n, j) =>
+              <span key={j}>{n.direction === "out" ? "→" : "←"} {n.relationship_type} <a onClick={() => open(n.id)}>{n.id}</a>; </span>)}</div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -283,6 +691,33 @@ function paraNumbers(segs: any[]): Set<string> {
   return s;
 }
 
+// The leading paragraph number of a segment label ("43." / "[43]" → "43"), when the label
+// is a bare number (not a named header like "Article 17" or "ruling").
+function labelNum(label: string): string | null {
+  const m = /^\[?(\d{1,4})[.\]\)]?$/.exec((label || "").trim());
+  return m ? m[1] : null;
+}
+
+// Render one segment's body, de-duplicating the paragraph number: judgments store the
+// number both as a label AND at the head of the prose ("1. This is an appeal…"). When the
+// prose already carries it, we drop the separate label and style the inline number instead
+// (greeny-blue, bold, in flow) so the text reads without a repeated, orphaned number.
+function segBody(text: string, s: { label: string; char_start: number; char_end: number },
+                 cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void) {
+  const num = labelNum(s.label);
+  const raw = text.slice(s.char_start, s.char_end);
+  const m = num ? new RegExp(`^(\\s*)(${num})([.)\\]]?)(\\s+)`).exec(raw) : null;
+  if (!m) return { showLabel: true, body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara) };
+  const numEnd = s.char_start + m[0].length;
+  return {
+    showLabel: false,
+    body: <>
+      <b className="seg-num">{m[2]}{m[3]}</b>{" "}
+      {renderCited(text, numEnd, s.char_end, cites, onCite, paraSet, onPara)}
+    </>,
+  };
+}
+
 function scrollToSeg(id: string) {
   const el = document.getElementById(id);
   if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 2000); }
@@ -346,7 +781,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
   return (
     <div>
       <div className="peek-doc-head">
-        <b>{d?.title || id}</b>
+        <b><Oscola c={(doc as any)?.oscola} fallback={d?.title || id} /></b>
         <div className="muted" style={{ fontSize: 12 }}>{d?.court}{d?.decision_date ? " · " + String(d.decision_date).slice(0, 10) : ""}
           {doc?.cited_by_count ? ` · cited by ${doc.cited_by_count}` : ""}{anchor ? ` · ${anchor}` : ""}</div>
         <button style={{ marginTop: 4 }} onClick={() => openFull(id, anchor)}>open full ↗</button>
@@ -354,12 +789,15 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
       {!body?.text && doc && <p className="muted">No text yet (metadata only).</p>}
       {body?.text && segs.length > 0 && (
         <div className="reader">
-          {segs.map((s, i) => (
+          {segs.map((s, i) => {
+            const sb = segBody(body.text, s, cites, onCite);
+            return (
             <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}`} key={i} id={"peek-seg-" + i}>
-              <span className="seg-label">{s.label}</span>
-              <span className="seg-body">{renderCited(body.text, s.char_start, s.char_end, cites, onCite)}</span>
+              {sb.showLabel && <span className="seg-label">{s.label}</span>}
+              <span className="seg-body">{sb.body}</span>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {body?.text && !segs.length && <div className="reader"><div className="seg-body">{renderCited(body.text, 0, body.text.length, cites, onCite)}</div></div>}
@@ -402,9 +840,66 @@ function FetchPrompt({ refId, raw, onDone }: { refId: string; raw?: string; onDo
   );
 }
 
+// Structural segment kinds that read as headings — the spine of the left-rail index.
+const _HEADING_KINDS = new Set(["section", "article", "chapter", "part", "title", "heading",
+  "subheading", "crossheading", "division", "schedule"]);
+function isHeading(s: { kind: string; level: number; label: string }): boolean {
+  if (_HEADING_KINDS.has(s.kind)) return true;
+  // a level-0 segment whose label isn't a bare paragraph number is a heading
+  return s.level === 0 && s.kind !== "paragraph" && !/^\[?\d/.test((s.label || "").trim());
+}
+
+// The left rail: the document's OSCOLA title (sticky), a link to the original, a
+// case-insensitive "find in document" box, and a heading index for navigation.
+function DocNav({ segs, text, oscola, title, landingUrl, id }:
+  { segs: any[]; text: string; oscola?: OscolaCite | null; title?: string; landingUrl?: string; id: string }) {
+  const [q, setQ] = useState("");
+  const [at, setAt] = useState(0);
+  const headings = segs.map((s: any, i: number) => ({ s, i })).filter(({ s }) => isHeading(s));
+  const query = q.trim().toLowerCase();
+  const matches = query
+    ? segs.map((_s: any, i: number) => i).filter((i: number) =>
+        text.slice(segs[i].char_start, segs[i].char_end).toLowerCase().includes(query))
+    : [];
+  const jump = (i: number) => scrollToSeg(segId(segs[i].label));
+  const step = (dir: number) => {
+    if (!matches.length) return;
+    const n = (at + dir + matches.length) % matches.length;
+    setAt(n); jump(matches[n]);
+  };
+  useEffect(() => { setAt(0); if (matches.length) jump(matches[0]); /* eslint-disable-next-line */ }, [query]);
+  return (
+    <nav className="doc-nav">
+      <div className="doc-nav-title" title={title}><Oscola c={oscola} fallback={title || id} /></div>
+      {landingUrl && <a className="doc-nav-orig" href={landingUrl} target="_blank" rel="noreferrer">link to original ↗</a>}
+      <div className="doc-nav-find">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find in document"
+          onKeyDown={(e) => { if (e.key === "Enter") step(e.shiftKey ? -1 : 1); }} />
+        {query && <div className="doc-nav-find-n">
+          {matches.length ? <>{at + 1}/{matches.length}
+            <a onClick={() => step(-1)} title="previous"> ‹</a><a onClick={() => step(1)} title="next"> ›</a></>
+            : "no matches"}</div>}
+      </div>
+      {headings.length > 0 && (
+        <ol className="doc-nav-index">
+          {headings.map(({ s, i }) => (
+            <li key={i} className={`nav-lvl${Math.min(s.level, 2)}`}>
+              <a onClick={() => jump(i)} title={s.label}>{s.label}</a>
+            </li>
+          ))}
+        </ol>
+      )}
+    </nav>
+  );
+}
+
 // --- Structured reader (legislation hierarchy / judgment paragraphs) -------
-function Reader({ id, incoming, pinpoint }: { id: string; incoming: any[]; pinpoint?: string | null }) {
+function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
+  { id: string; incoming: any[]; pinpoint?: string | null; oscola?: OscolaCite | null; landingUrl?: string; title?: string }) {
   const [body] = useAsync(() => api.documentBody(id), [id]);
+  // per-paragraph "mentioned by" roll-up (who cites each paragraph, most-authoritative first)
+  const [mentions] = useAsync(() => api.mentions(id), [id]);
+  const byAnchor: Record<string, any[]> = mentions?.by_anchor || {};
   const peek = usePeek();
   const onCite = (c: any) => peek.push(citePeek(c));
   const onPara = (n: string) => scrollToSeg(segId(n + "."));   // jump to paragraph n
@@ -425,21 +920,32 @@ function Reader({ id, incoming, pinpoint }: { id: string; incoming: any[]; pinpo
     ? <div className="reader"><div className="seg"><div className="seg-body">{renderCited(body.text, 0, body.text.length, cites, onCite, paraSet, onPara)}</div></div></div>
     : (
       <div className="reader">
-        {segs.map((s, i) => (
+        {segs.map((s, i) => {
+          const sb = segBody(body.text, s, cites, onCite, paraSet, onPara);
+          return (
           <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}`} key={i} id={segId(s.label)}>
-            <span className="seg-label">{s.label}
-              <a className="pin" title="Attach commentary to this part" onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}> ＋link</a>
-            </span>
-            <span className="seg-body">{renderCited(body.text, s.char_start, s.char_end, cites, onCite, paraSet, onPara)}</span>
+            <a className="seg-plus" title="Link commentary or an authority to this paragraph"
+              onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>
+            {sb.showLabel && <span className="seg-label">{s.label}</span>}
+            <span className="seg-body">{sb.body}</span>
             {pinned(s.label).map((r, j) => (
               <div className="pinned" key={j}>💬 {r.relationship_type}: <a onClick={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</a>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
             ))}
+            {byAnchor[s.label]?.length > 0 && <MentionedBy list={byAnchor[s.label]} target={id} anchor={s.label} />}
           </div>
-        ))}
+          );
+        })}
       </div>
     );
-  return <SelectionShorthand>{content}</SelectionShorthand>;
+  return (
+    <SelectionShorthand docId={id}>
+      <div className="doc-layout">
+        <DocNav segs={segs || []} text={body.text} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
+        <div className="doc-main">{content}</div>
+      </div>
+    </SelectionShorthand>
+  );
 }
 
 // --- Type-ahead that finds a case / act by name as you type ----------------
@@ -484,7 +990,39 @@ export function DocAutocomplete({ initial, onPick, placeholder }:
 }
 
 // --- Highlight a word → make it a shorthand rule for a case/act ------------
-function SelectionShorthand({ children }: { children: any }) {
+// Pick a target case/act (name autocomplete), then optionally a pinpoint WITHIN it — a
+// paragraph, article, section, schedule or recital — autocompleted from the target's own
+// structure (its segment labels). Used by the highlight-to-link popover.
+function LinkTargetPicker({ initial, onCreate }:
+  { initial: string; onCreate: (id: string, title: string, pinpoint?: string) => void }) {
+  const [target, setTarget] = useState<{ id: string; title: string } | null>(null);
+  const [pin, setPin] = useState("");
+  const [labels, setLabels] = useState<string[]>([]);
+  useEffect(() => {
+    if (!target) return;
+    let live = true;
+    api.documentBody(target.id)
+      .then((b) => { if (live) setLabels([...new Set((b.segments || []).map((s: any) => s.label).filter(Boolean))] as string[]); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [target?.id]);
+  if (!target) return <DocAutocomplete initial={initial} onPick={(id, title) => setTarget({ id, title })} />;
+  return (
+    <div style={{ minWidth: 300 }}>
+      <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>→ <b>{target.title}</b>{" "}
+        <a onClick={() => { setTarget(null); setPin(""); }} style={{ cursor: "pointer" }}>change</a></div>
+      <div className="row">
+        <input list="pinpoint-list" value={pin} onChange={(e) => setPin(e.target.value)} autoFocus
+          placeholder="pinpoint — paragraph / article / section (optional)" />
+        <datalist id="pinpoint-list">{labels.map((l, i) => <option key={i} value={l} />)}</datalist>
+        <button className="primary" style={{ flex: "0 0 auto" }}
+          onClick={() => onCreate(target.id, target.title, pin.trim() || undefined)}>Link</button>
+      </div>
+    </div>
+  );
+}
+
+function SelectionShorthand({ children, docId }: { children: any; docId?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
   const [open, setOpen] = useState(false);
@@ -504,24 +1042,32 @@ function SelectionShorthand({ children }: { children: any }) {
     document.addEventListener("mouseup", onUp);
     return () => document.removeEventListener("mouseup", onUp);
   }, []);
-  const create = async (id: string, title: string) => {
+  const create = async (id: string, title: string, pinpoint?: string) => {
     if (!sel) return;
-    try { await api.createAlias(sel.text, id); setMsg(`“${sel.text}” → ${title}`); }
-    catch (e: any) { setMsg("error: " + e.message); }
+    try {
+      // the phrase → target shorthand propagates across the corpus…
+      await api.createAlias(sel.text, id);
+      // …and when a pinpoint is chosen, record a fragment link from THIS passage to the
+      // target's paragraph/article/section as well.
+      if (pinpoint && docId) {
+        try { await api.link(docId, id, "mentions", sel.text.slice(0, 120), pinpoint); } catch { /* non-fatal */ }
+      }
+      setMsg(`“${sel.text}” → ${title}${pinpoint ? " · " + pinpoint : ""}`);
+    } catch (e: any) { setMsg("error: " + e.message); }
     setOpen(false);
-    setTimeout(() => { setSel(null); setMsg(""); window.getSelection()?.removeAllRanges(); }, 2200);
+    setTimeout(() => { setSel(null); setMsg(""); window.getSelection()?.removeAllRanges(); }, 2400);
   };
   return (
     <div ref={ref} style={{ position: "relative" }}>
       {children}
       {sel && <div className="sel-pop" style={{ position: "fixed", left: sel.x, top: sel.y + 6, transform: "translateX(-50%)" }}>
-        {msg ? <span className="ok" style={{ fontSize: 12 }}>✓ rule saved {msg}</span>
+        {msg ? <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg.startsWith("error") ? msg : "✓ linked " + msg}</span>
           : !open ? (
-            <button onClick={() => setOpen(true)}>🔖 Make “{sel.text.length > 28 ? sel.text.slice(0, 28) + "…" : sel.text}” a shorthand</button>
+            <button onClick={() => setOpen(true)}>🔖 Link “{sel.text.length > 28 ? sel.text.slice(0, 28) + "…" : sel.text}” to…</button>
           ) : (
             <div style={{ minWidth: 320 }}>
-              <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>“{sel.text}” always links to:</div>
-              <DocAutocomplete initial={sel.text} onPick={create} />
+              <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>“{sel.text}” links to a case / act (and, optionally, a part of it):</div>
+              <LinkTargetPicker initial={sel.text} onCreate={create} />
             </div>
           )}
       </div>}
@@ -529,11 +1075,23 @@ function SelectionShorthand({ children }: { children: any }) {
   );
 }
 
+// Render a structured OSCOLA citation from the backend: runs flagged `i` are italic
+// (case names), the rest plain. Falls back to a plain string when no citation is supplied.
+type OscolaCite = { parts: { t: string; i: boolean }[]; text: string };
+export function Oscola({ c, fallback }: { c?: OscolaCite | null; fallback?: string }) {
+  if (!c || !c.parts || c.parts.length === 0) return <>{fallback ?? ""}</>;
+  return <>{c.parts.map((p, i) => p.i ? <i key={i}>{p.t}</i> : <Fragment key={i}>{p.t}</Fragment>)}</>;
+}
+
 // --- Document reader + augment ---------------------------------------------
 export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
   const [doc, err, reload] = useAsync(() => api.document(id), [id]);
   const [pinAnchor, setPinAnchor] = useState("");
   const [editing, setEditing] = useState(false);
+  // Options (snowball, graph, fix-metadata) and provenance metadata are hidden by default
+  // behind a subtle toggle so the reading surface stays uncluttered.
+  const [showOpts, setShowOpts] = useState(false);
+  const tray = useTray();
   if (err) return <p className="err">{err}</p>;
   if (!doc) return <p className="muted">Loading…</p>;
   if (doc.error) return <p className="err">{doc.error}: {id}</p>;
@@ -542,30 +1100,45 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
   return (
     <div>
       <div className="panel">
-        <div className="row" style={{ alignItems: "flex-start" }}>
-          <h2 style={{ marginTop: 0, flex: 1 }}>{d.title || d.stable_id}</h2>
-          <Snowball seed={d.stable_id} onDone={reload} />
-          <button onClick={() => setEditing((e) => !e)} style={{ flex: "0 0 auto" }}>✎ {editing ? "cancel" : "fix metadata"}</button>
-          <button onClick={() => openGraph(d.stable_id)} style={{ flex: "0 0 auto" }}>◴ View citation graph</button>
+        <h2 className="doc-title" style={{ marginTop: 0 }}><Oscola c={doc.oscola} fallback={d.title || d.stable_id} /></h2>
+        <div className="doc-summary">
+          <a className="summary-stat" title="Later documents that cite this one"
+            onClick={() => tray.push({ kind: "mentions", target: d.stable_id, label: "Citations to this decision" })}>Citations to this decision <b>{doc.cited_by_count ?? 0}</b></a>
+          <span className="summary-sep">|</span>
+          <a className="summary-stat" title="Distinct cases this document cites"
+            onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "cases", label: "Cases cited" })}>Cases cited <b>{doc.cases_cited_count ?? 0}</b></a>
+          <span className="summary-sep">|</span>
+          <a className="summary-stat" title="Distinct statutory material this document cites"
+            onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "statute", label: "Statutory material cited" })}>Statutory material cited <b>{doc.statute_cited_count ?? 0}</b></a>
         </div>
-        <p className="muted">{d.ecli || d.stable_id} · {d.source}/{d.court} · {d.doc_type}
-          {" "}· added_by <b>{d.added_by}</b> · v{d.version} · {d.upstream_status}
-          {d.landing_url && <> · <a href={d.landing_url} target="_blank" rel="noreferrer">open original ↗</a></>}</p>
-        {editing && <MetadataEditor d={d} onDone={() => { setEditing(false); reload(); }} />}
-        <div>{(doc.tags || []).map((t: any, i: number) => (
-          <span className="tag" key={i}>{t.tag} · {t.method}
-            {t.method === "manual" && <a title="remove tag" style={{ cursor: "pointer", marginLeft: 4 }}
-              onClick={async () => { await api.untag(d.stable_id, t.tag); reload(); }}>✗</a>}
-          </span>
-        ))}</div>
-        {versions.length > 0 && <p className="versions">Version history: v{d.version} (latest){versions.map((v: any) =>
-          <span key={v.version}> · v{v.version} archived {String(v.archived_at).slice(0, 10)}</span>)}</p>}
+        <a className="opts-toggle muted" onClick={() => setShowOpts((v) => !v)}>
+          {showOpts ? "▾ Hide options and metadata" : "▸ Expand options and metadata"}</a>
+        {showOpts && (
+          <div className="opts-tray">
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <Snowball seed={d.stable_id} onDone={reload} />
+              <button onClick={() => setEditing((e) => !e)} style={{ flex: "0 0 auto" }}>✎ {editing ? "cancel" : "fix metadata"}</button>
+              <button onClick={() => openGraph(d.stable_id)} style={{ flex: "0 0 auto" }}>◴ View citation graph</button>
+            </div>
+            <p className="muted" style={{ marginTop: 8 }}>{d.ecli || d.stable_id} · {d.source}/{d.court} · {d.doc_type}
+              {" "}· added_by <b>{d.added_by}</b> · v{d.version} · {d.upstream_status}
+              {d.landing_url && <> · <a href={d.landing_url} target="_blank" rel="noreferrer">open original ↗</a></>}</p>
+            {editing && <MetadataEditor d={d} onDone={() => { setEditing(false); reload(); }} />}
+            <div>{(doc.tags || []).map((t: any, i: number) => (
+              <span className="tag" key={i}>{t.tag} · {t.method}
+                {t.method === "manual" && <a title="remove tag" style={{ cursor: "pointer", marginLeft: 4 }}
+                  onClick={async () => { await api.untag(d.stable_id, t.tag); reload(); }}>✗</a>}
+              </span>
+            ))}</div>
+            {versions.length > 0 && <p className="versions">Version history: v{d.version} (latest){versions.map((v: any) =>
+              <span key={v.version}> · v{v.version} archived {String(v.archived_at).slice(0, 10)}</span>)}</p>}
+          </div>
+        )}
       </div>
       {(doc.incoming || []).length > 0 && <CitedByPanel incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} />}
       <div className="panel">
-        <h3>{d.doc_type === "legislation" ? "Legislation" : "Document"} text
-          <span className="muted"> — citations & ¶-refs pop up on the side; ＋link attaches commentary</span></h3>
-        <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint} />
+        <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}
+          oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
       </div>
       {d.doc_type === "legislation" && <EffectsBanner id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <ChangesPanel id={d.stable_id} open={open} />}
@@ -603,6 +1176,8 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   for (const r of incoming) byType[r.relationship_type] = (byType[r.relationship_type] || 0) + 1;
   const order = ["overrules", "distinguishes", "applies", "follows", "considers", "mentions"];
   const colour: Record<string, string> = { overrules: "#ff6b6b", distinguishes: "#ffb454", applies: "#7ee787", follows: "#7ee787" };
+  // "mentions" is confusing from the cited-authority's side — read it as "mentioned by".
+  const treat = (t: string) => (t === "mentions" ? "mentioned by" : t);
   return (
     <div className="panel">
       <h3>Cited by <span className="muted">({count ?? incoming.length}) — later documents that cite this one, and how</span>
@@ -612,15 +1187,14 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
       <div className="row" style={{ flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
         {order.filter((t) => byType[t]).map((t) => (
           <span key={t} className="tag" style={{ borderColor: colour[t] || "var(--line)", color: colour[t] || "inherit" }}>
-            {byType[t]} {t}</span>
+            {byType[t]} {treat(t)}</span>
         ))}
       </div>
       <table><tbody>
         {incoming.slice(0, 50).map((r, i) => (
           <tr key={i}>
-            <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--muted)" }}>{r.relationship_type}</td>
-            <td><a onClick={() => open(r.src_id, r.dst_anchor)}>{r.src_title || r.src_id}</a>
-              {r.src_court && <span className="muted"> · {r.src_court}</span>}
+            <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--muted)" }}>{treat(r.relationship_type)}</td>
+            <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
               {r.dst_anchor && <span className="muted"> → {r.dst_anchor}</span>}</td>
             <td className="muted" style={{ whiteSpace: "nowrap" }}>{r.src_date ? String(r.src_date).slice(0, 4) : ""}</td>
           </tr>
@@ -1037,6 +1611,145 @@ export function SettingsView() {
 }
 
 // --- Watches (scheduled keyword harvest + autosnowball) --------------------
+// Plain-language capability chips for a source — so it's obvious what a watch on it can and
+// can't do (search at the API vs post-filter, incremental "new since last run", forward-
+// citation discovery, neutral-citation gap-scanning).
+function SourceCaps({ info }: { info: any }) {
+  const chip = (on: boolean, yes: string, no: string, title: string) => (
+    <span className="cap-chip" data-on={on ? "1" : "0"} title={title}>{on ? "✓ " + yes : "✗ " + no}</span>
+  );
+  return (
+    <div className="cap-chips">
+      {chip(!!info.can_keyword_search, "keyword search at source", "keywords post-filter only",
+        info.can_keyword_search ? "Keywords are searched in the source's own API — precise." : "The source API has no free-text search; keywords filter what's harvested (any-term match).")}
+      {chip(!!info.can_incremental, "checks for new automatically", "fetched by naming items",
+        info.can_incremental ? "A feed-like source: a watch can pull only what's new since the last run." : "This source is fetched by naming the acts/instruments; there's no moving feed to poll.")}
+      {chip(!!info.can_discover_citing, "forward-citation discovery", "no citing-case discovery",
+        info.can_discover_citing ? "Can find NEW documents that cite a target as they appear (the renewing watch)." : "This source can't search for documents citing a target.")}
+      {info.can_gap_scan && <span className="cap-chip" data-on="1" title="Neutral-citation numbering can be gap-scanned per court/year (see Backfill gaps).">✓ gap-scannable</span>}
+    </div>
+  );
+}
+
+// "Keep current" — surfaces what the background scheduler already does on its own, and gives
+// each a Run-now that fires a visible Job. So upkeep is legible, not folklore.
+function KeepCurrentPanel() {
+  const [msg, setMsg] = useState("");
+  const runNow = (kind: any, label: string) => fireJob(kind, {}, (m) => setMsg(`${label}: ${m}`));
+  const auto = [
+    ["Pull EU case names / subjects (EUR-Lex)", "daily", "Fills missing CJEU case names so their OSCOLA citations read properly."],
+    ["Re-check outstanding legislation amendments", "hourly", "Re-pulls acts whose legislation.gov.uk effects re-check is due (bounded)."],
+    ["Propagate changes an act makes", "hourly", "Flags held acts affected by a change for re-pull."],
+    ["Rebuild citation-frequency roll-up", "hourly", "Keeps the worklist ranking + snowball fresh."],
+    ["Drain the harvest worklist", "per tick", "Fetches a bounded batch of routable references each tick (set auto-drain on the Unresolved tab)."],
+    ["Run due watches", "per tick", "Every enabled watch whose cadence is due starts as a Job."],
+  ];
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Keep current <span className="muted">— automatic upkeep the scheduler already runs</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        You don't have to trigger any of this by hand — the background scheduler runs it on a cadence, and its work now
+        shows in the <b>Jobs</b> panel. The buttons just let you force one immediately.
+      </p>
+      <table className="grid"><thead><tr><th>task</th><th>runs</th><th></th></tr></thead>
+        <tbody>
+          {auto.map(([label, when, hint], i) => (
+            <tr key={i}><td>{label}<div className="muted" style={{ fontSize: 11 }}>{hint}</div></td>
+              <td className="muted" style={{ whiteSpace: "nowrap" }}>{when}</td>
+              <td style={{ whiteSpace: "nowrap" }}></td></tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
+        <button onClick={() => runNow("rebuild-citation-counts", "rebuild counts")}>↻ Rebuild citation counts</button>
+        <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
+        <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
+        <button onClick={() => runNow("rescan", "full relink")} title="Re-extract every document, then run the whole resolution chain">⟳ Full relink</button>
+      </div>
+      {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
+    </div>
+  );
+}
+
+// UK neutral-citation courts a gap-scan can enumerate (slug heads used in stable_ids).
+const GAP_COURTS = ["uksc", "ukpc", "ewca/civ", "ewca/crim", "ewhc/admin", "ewhc/ch", "ewhc/comm",
+  "ewhc/kb", "ewhc/qb", "ewhc/fam", "ewhc/tcc", "ewhc/pat", "ewhc/ipec", "eat",
+  "ukut/aac", "ukut/iac", "ukut/lc", "ukut/tcc", "ukftt/grc", "ukftt/tc"];
+
+// "Backfill gaps" — the completeness engine. Enumerate a court's neutral-citation numbering
+// for a year, pull the missing judgments, and account for the gaps (historic = permanent).
+function GapFillPanel() {
+  const thisYear = new Date().getFullYear();
+  const [court, setCourt] = useState("ewca/civ");
+  const [year, setYear] = useState(thisYear - 1);
+  const [status, setStatus] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const loadStatus = async () => { try { setStatus(await api.gapStatus(court, year)); } catch { setStatus(null); } };
+  useEffect(() => { loadStatus(); /* eslint-disable-next-line */ }, [court, year]);
+  const scan = async () => {
+    setBusy(true); setMsg("");
+    try { const r = await api.gapScan({ court, year }); setMsg(r.error ? "error: " + r.error : "✓ gap-scan queued — watch it in the Jobs panel, then Refresh status."); }
+    catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+  };
+  const clear = async () => { await api.gapClear(court, year); setMsg("gaps cleared — re-scan to re-probe"); loadStatus(); };
+  const s = status;
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Backfill gaps <span className="muted">— fill a court's neutral-citation numbering toward 100%</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Enumerates <span className="kbd">[year] COURT 1, 2, 3…</span>, fetches every judgment that isn't held, and records the gaps.
+        A <b>past year is contiguous</b>, so a missing number is marked <b>permanently unavailable</b> (never issued, or not digitised).
+        The <b>current year</b> is still filling, so its misses are re-probed later. Each pulled judgment is extracted + resolved, so its
+        own citations join the graph and feed onward pulling.
+      </p>
+      <div className="row" style={{ flexWrap: "wrap", alignItems: "center" }}>
+        <label style={{ flex: "0 0 auto" }}>court
+          <select value={court} onChange={(e) => setCourt(e.target.value)} style={{ marginLeft: 6, width: "auto" }}>
+            {GAP_COURTS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select></label>
+        <label style={{ flex: "0 0 auto" }}>year
+          <input type="number" min={1990} max={thisYear} value={year} onChange={(e) => setYear(+e.target.value || thisYear)} style={{ width: 90, marginLeft: 6 }} /></label>
+        <button className="primary" disabled={busy} style={{ flex: "0 0 auto" }} onClick={scan}>⤓ {busy ? "queuing…" : "Scan & fill"}</button>
+        <button style={{ flex: "0 0 auto" }} onClick={loadStatus}>↻ Refresh status</button>
+      </div>
+      {s && <div className="gap-status">
+        <div className="row stat-strip" style={{ gap: 20, flexWrap: "wrap", marginTop: 10 }}>
+          <div><b>{s.held}</b><div className="muted">held</div></div>
+          <div><b>{s.highest || "—"}</b><div className="muted">highest no.</div></div>
+          <div><b>{s.permanent_gaps}</b><div className="muted">permanent gaps</div></div>
+          <div><b>{s.pending_reprobe}</b><div className="muted">pending re-probe</div></div>
+          <div><b>{s.complete ? "✓" : "—"}</b><div className="muted">accounted for</div></div>
+        </div>
+        {s.gap_numbers?.length > 0 && <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+          permanent gaps (never issued / not digitised): {s.gap_numbers.slice(0, 60).join(", ")}{s.gap_numbers.length > 60 ? "…" : ""}
+          {" "}<a onClick={clear} style={{ cursor: "pointer" }}>clear &amp; re-probe</a></p>}
+      </div>}
+      {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
+    </div>
+  );
+}
+
+// The consolidated "Maintain" page: keep-current upkeep, gap backfill, watches, and rules —
+// the whole "grow + keep the corpus complete" surface in one place.
+export function MaintainView({ open }: { open: (id: string) => void }) {
+  return (
+    <div>
+      <div className="panel" style={{ background: "transparent", border: "none", padding: 0, marginBottom: 8 }}>
+        <h2 style={{ margin: 0 }}>Maintain</h2>
+        <p className="muted" style={{ marginTop: 4 }}>
+          Grow the corpus and keep it current. <b>Keep current</b> is automatic upkeep; <b>Backfill gaps</b> chases 100%
+          completeness court-by-court; <b>Watches</b> pull new material on a schedule; <b>Rules</b> are optional shorthands.
+        </p>
+      </div>
+      <KeepCurrentPanel />
+      <GapFillPanel />
+      <WatchesView />
+      <RulesView open={open} />
+    </div>
+  );
+}
+
 export function WatchesView() {
   const [cat] = useAsync(() => api.sourceCatalog(), []);
   const [watches, , reload] = useAsync(() => api.watches(), []);
@@ -1069,9 +1782,13 @@ export function WatchesView() {
     } catch (e: any) { setMsg("error: " + e); } finally { setBusy(null); }
   }
   async function run(id: number) {
-    setBusy(id); setMsg("running watch… (harvest + snowball; may take a while)");
-    try { const r = await api.runWatch(id); setMsg(`✓ watch #${id}: ` + summariseRun(r)); reload(); }
-    catch (e: any) { setMsg("error: " + e); } finally { setBusy(null); }
+    setBusy(id); setMsg("");
+    // runs as a background job now — it shows in the Jobs panel with per-stage progress
+    try {
+      const r = await api.runWatch(id);
+      setMsg(r.error ? "error: " + r.error : `✓ watch #${id} queued — watch it run in the Jobs panel (bottom-left)`);
+      reload();
+    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(null); }
   }
   return (
     <div>
@@ -1092,11 +1809,10 @@ export function WatchesView() {
             {(cat ?? []).map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
           </select>
         </div>
-        {/* morph: explain what THIS source supports */}
-        {info && <p className="muted" style={{ fontSize: 12 }}>{info.description}{" "}
-          {info.keyword_search
-            ? <b style={{ color: "#7ee787" }}>Keywords are searched in the source API.</b>
-            : <b style={{ color: "#ffb454" }}>This source has no API search — keywords filter the harvested results.</b>}</p>}
+        {/* morph: explain what THIS source supports, in plain-language capability chips */}
+        {info && <div style={{ marginTop: 4 }}>
+          <p className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{info.description}</p>
+          <SourceCaps info={info} /></div>}
         <div className="row" style={{ flexWrap: "wrap", marginTop: 4 }}>
           {source && <input value={keywords} onChange={(e) => setKeywords(e.target.value)}
             placeholder={info?.keyword_search ? "keywords (searched at source), comma-sep" : "keywords (post-filter), comma-sep"} style={{ minWidth: 220 }} />}

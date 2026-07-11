@@ -288,9 +288,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
             try:
-                res = f.tick_watches()
-                if res["ran"]:
-                    print(f"[watch] ran {res['ran']} due watch(es)")
+                # Start a background job per due watch (so each shows in the Jobs panel
+                # with progress) instead of running them inline where nothing can see them.
+                due = f.due_watch_ids()
+                for wid in due:
+                    w = f.get_watch(wid)
+                    started = jobs.start("run-watch", f"watch: {w.get('name', wid)}", {"watch_id": wid})
+                    if started.get("already_running"):
+                        print(f"[watch] watch {wid} still running; skipping")
+                if due:
+                    print(f"[watch] started {len(due)} due watch job(s)")
                 # Slow worklist drain: fetch a bounded batch of routable references
                 # each tick (survives restarts; the scheduler service is persistent).
                 Config.from_env()  # refresh settings → env (RAGLEX_AUTOHARVEST)

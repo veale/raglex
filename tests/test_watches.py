@@ -33,6 +33,15 @@ def test_source_catalog_exposes_keyword_capability():
     assert any(o["name"] == "query" for o in cat["uk-grc"]["options"])
 
 
+def test_source_catalog_exposes_capability_flags():
+    cat = {s["key"]: s for s in _facade().source_catalog()}
+    assert cat["uk-caselaw"]["can_gap_scan"] is True
+    assert cat["uk-caselaw"]["can_discover_citing"] is True
+    assert cat["uk-caselaw"]["can_incremental"] is True
+    assert cat["eu-legislation"]["can_gap_scan"] is False      # by-id, not sequential
+    assert cat["eu-legislation"]["can_incremental"] is False   # no moving feed
+
+
 def test_watch_crud_roundtrip():
     f = _facade()
     w = f.create_watch(name="DP", spec={"source": "uk-grc", "keywords": ["data"], "degrees": 1},

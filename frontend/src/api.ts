@@ -57,10 +57,17 @@ export const api = {
   },
   document: (id: string) => req<any>(`/documents/${encodeURIComponent(id)}`),
   documentBody: (id: string) => req<any>(`/document-body?id=${encodeURIComponent(id)}`),
+  mentions: (id: string, anchor?: string) =>
+    req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`),
+  citationsOut: (id: string, family: "cases" | "statute") =>
+    req<any>(`/citations-out?id=${encodeURIComponent(id)}&family=${family}`),
   countDocuments: (filters: Record<string, string> = {}) =>
     req<{ total: number }>(`/documents/count?${new URLSearchParams(filters)}`),
   listDocuments: (filters: Record<string, string> = {}) =>
     req<any[]>(`/documents?${new URLSearchParams(filters)}`),
+  searchCorpus: (params: Record<string, string> = {}) =>
+    req<any>(`/search-corpus?${new URLSearchParams(params)}`),
+  facetValues: () => req<any>("/facet-values"),
   graph: (id: string) => req<any>(`/graph/${encodeURIComponent(id)}`),
   stats: () => req<any>("/stats"),
   sources: () => req<SourceHealth[]>("/sources"),
@@ -124,6 +131,12 @@ export const api = {
   createWatch: (body: Record<string, unknown>) =>
     req<any>("/watches", { method: "POST", body: JSON.stringify(body) }),
   runWatch: (id: number) => req<any>(`/watches/${id}/run`, { method: "POST", body: "{}" }),
+  gapScan: (body: Record<string, unknown>) =>
+    req<{ job_id?: string; error?: string }>("/jobs/gap-scan", { method: "POST", body: JSON.stringify(body) }),
+  gapStatus: (court: string, year: number) =>
+    req<any>(`/gap-status?court=${encodeURIComponent(court)}&year=${year}`),
+  gapClear: (court?: string, year?: number) =>
+    req<any>("/gap-clear", { method: "POST", body: JSON.stringify({ court, year }) }),
   updateWatch: (id: number, body: Record<string, unknown>) =>
     req<any>(`/watches/${id}`, { method: "POST", body: JSON.stringify(body) }),
   deleteWatch: (id: number) => req<any>(`/watches/${id}`, { method: "DELETE" }),
