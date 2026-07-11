@@ -698,6 +698,23 @@ function labelNum(label: string): string | null {
   return m ? m[1] : null;
 }
 
+// Canonical key for a pinpoint/segment so a citation anchor ("Article 4") matches the
+// segment that carries it even when the segment label also has the heading text ("Article 4
+// Definitions"). Typed (art/rec/s/…) so "Recital 5" and "Article 5" never collide; a bare
+// number ("1." / "[12]") stays number-only so judgment paragraphs still match.
+const _ANCHOR_TYPE: Record<string, string> = {
+  article: "art", art: "art", recital: "rec", rec: "rec", section: "s", sec: "s", s: "s",
+  schedule: "sch", sch: "sch", paragraph: "para", para: "para", regulation: "reg", reg: "reg",
+  rule: "rule", point: "pt", pt: "pt", annex: "annex",
+};
+function anchorKey(text: string): string | null {
+  const t = (text || "").trim().toLowerCase().replace(/^[[(]/, "");
+  const m = /^([a-z]+)?\.?\s*(\d+[a-z]?)/.exec(t);
+  if (!m || !m[2]) return null;
+  const typ = m[1] ? _ANCHOR_TYPE[m[1]] : "";
+  return typ ? `${typ}:${m[2]}` : m[2];
+}
+
 // Render one segment's body, de-duplicating the paragraph number: judgments store the
 // number both as a label AND at the head of the prose ("1. This is an appeal…"). When the
 // prose already carries it, we drop the separate label and style the inline number instead
@@ -897,9 +914,19 @@ function DocNav({ segs, text, oscola, title, landingUrl, id }:
 function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   { id: string; incoming: any[]; pinpoint?: string | null; oscola?: OscolaCite | null; landingUrl?: string; title?: string }) {
   const [body] = useAsync(() => api.documentBody(id), [id]);
-  // per-paragraph "mentioned by" roll-up (who cites each paragraph, most-authoritative first)
+  // per-paragraph "mentioned by" roll-up (who cites each paragraph, most-authoritative first).
+  // Index it by a canonical anchor key so a citation to "Article 4" matches the segment whose
+  // label is "Article 4 Definitions"; keep the real citation anchor for the "see all" filter.
   const [mentions] = useAsync(() => api.mentions(id), [id]);
-  const byAnchor: Record<string, any[]> = mentions?.by_anchor || {};
+  const byAnchor: Record<string, { anchor: string; list: any[] }> = {};
+  for (const [k, list] of Object.entries((mentions?.by_anchor || {}) as Record<string, any[]>)) {
+    const ck = anchorKey(k);
+    if (!ck) continue;
+    const cur = byAnchor[ck] || (byAnchor[ck] = { anchor: k, list: [] });
+    const seen = new Set(cur.list.map((m: any) => m.src_id));
+    cur.list.push(...list.filter((m: any) => !seen.has(m.src_id)));
+  }
+  const mentionsFor = (label: string) => { const ck = anchorKey(label); return ck ? byAnchor[ck] : undefined; };
   const peek = usePeek();
   const onCite = (c: any) => peek.push(citePeek(c));
   const onPara = (n: string) => scrollToSeg(segId(n + "."));   // jump to paragraph n
@@ -932,7 +959,8 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
               <div className="pinned" key={j}>💬 {r.relationship_type}: <a onClick={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</a>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
             ))}
-            {byAnchor[s.label]?.length > 0 && <MentionedBy list={byAnchor[s.label]} target={id} anchor={s.label} />}
+            {(() => { const mb = mentionsFor(s.label); return mb && mb.list.length > 0
+              ? <MentionedBy list={mb.list} target={id} anchor={mb.anchor} /> : null; })()}
           </div>
           );
         })}
