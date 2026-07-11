@@ -1293,6 +1293,27 @@ class Catalogue:
             ("law_report%", limit),
         ).fetchall()
 
+    def docs_with_citations(self, *, min_count: int = 2, limit: int | None = None) -> list[str]:
+        """Documents holding at least ``min_count`` citation occurrences with char spans —
+        the candidates for parallel-citation mining (a lone citation has no neighbour to be
+        parallel to). One aggregate scan of the citations table."""
+        sql = ("SELECT src_id FROM citations WHERE char_start IS NOT NULL "
+               "GROUP BY src_id HAVING COUNT(*) >= ? ORDER BY src_id")
+        params: list = [min_count]
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [r["src_id"] for r in self.conn.execute(sql, params).fetchall()]
+
+    def citation_occurrences(self, src_id: str) -> list[sqlite3.Row]:
+        """One document's citation occurrences (raw string + char span), in reading order —
+        so the miner can see which citations sit adjacent to each other in the text."""
+        return self.conn.execute(
+            "SELECT raw, char_start, char_end, candidate_id, entity_kind FROM citations "
+            "WHERE src_id = ? AND char_start IS NOT NULL ORDER BY char_start",
+            (src_id,),
+        ).fetchall()
+
     def judgment_pool(self) -> list[sqlite3.Row]:
         """Harvested judgments as (stable_id, title, decision_date) — the candidate pool
         the report matcher scores a "[1998] AC 1" against by name + year."""

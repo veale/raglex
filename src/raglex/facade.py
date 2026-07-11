@@ -2726,6 +2726,116 @@ class Facade:
         return {"report_strings": len(by_raw), "viable": len(viable),
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
+    def mine_parallel_citations(self, *, limit_docs: int | None = None, coref: bool = True,
+                                on_progress=None, cancel_check=None) -> dict:
+        """Recover the neutral-citation ↔ law-report map from the corpus text (§5c).
+
+        Within each judgment, runs of citations separated only by ``;`` / ``,`` / pinpoints
+        are *parallel* citations of one case (``adjacency_groups``); those runs are unioned
+        into global clusters. A weaker name+year rung (``coref=True``) links citations
+        across judgments. Each cluster is anchored to the held document its (single) neutral
+        citation names, and every other member is aliased to it — so a citation in any
+        parallel form resolves to that one case. The one-neutral-per-cluster invariant
+        vetoes bad merges. Aliases are tagged ``parallel:adjacency`` / ``parallel:coref``.
+        """
+        from collections import defaultdict
+
+        from .citations.parallel import (
+            ClusterIndex, Occurrence, adjacency_groups, coref_key, occ_neutral,
+        )
+        from .citations.report_match import extract_preceding_name
+        from .topics.gate import fold
+
+        idx = ClusterIndex()
+        adjacency_keys: set[str] = set()
+        coref_buckets: dict[tuple, list[str]] = defaultdict(list)
+        st = {"docs": 0, "adjacency_groups": 0, "clusters": 0, "anchored": 0,
+              "pending_clusters": 0, "aliased": 0}
+
+        with self._open() as (cat, _rs, ts):
+            src_ids = cat.docs_with_citations(min_count=2, limit=limit_docs)
+            text_cache: dict[str, str | None] = {}
+
+            def _text(sid: str) -> str | None:
+                if sid not in text_cache:
+                    doc = cat.get_document(sid)
+                    ph = doc["payload_hash"] if doc else None
+                    try:
+                        text_cache[sid] = ts.get(ph) if ph else None
+                    except OSError:
+                        text_cache[sid] = None
+                return text_cache[sid]
+
+            for i, sid in enumerate(src_ids):
+                if cancel_check and cancel_check():
+                    break
+                text = _text(sid)
+                if not text:
+                    continue
+                occs = [Occurrence(r["raw"], r["char_start"], r["char_end"],
+                                   candidate=(r["candidate_id"] if r["entity_kind"] == "case" else None))
+                        for r in cat.citation_occurrences(sid)]
+                for o in occs:
+                    idx.add(fold(o.raw), neutral=occ_neutral(o))
+                # Stage A — adjacency runs within this judgment
+                for group in adjacency_groups(text, occs):
+                    st["adjacency_groups"] += 1
+                    keys = [fold(g) for g in group]
+                    for k in keys[1:]:
+                        idx.union(keys[0], k)
+                    adjacency_keys.update(keys)
+                # Stage C — name+year coreference key per occurrence
+                if coref:
+                    for o in occs:
+                        if o.char_start is None:
+                            continue
+                        name = extract_preceding_name(text[max(0, o.char_start - 200): o.char_start])
+                        ck = coref_key(name, o.raw)
+                        if ck:
+                            coref_buckets[ck].append(fold(o.raw))
+                st["docs"] += 1
+                text_cache.pop(sid, None)  # bounded memory: one judgment's text at a time
+                if on_progress and i % 500 == 0:
+                    _progress(on_progress, stage="mining parallel citations",
+                              done=i, total=len(src_ids))
+
+            # apply the coreference unions (the neutral-veto guards each merge)
+            if coref:
+                for keys in coref_buckets.values():
+                    uniq = list(dict.fromkeys(keys))
+                    for k in uniq[1:]:
+                        idx.union(uniq[0], k)
+
+            # anchor each cluster to its held document and alias the rest to it
+            for members in idx.clusters():
+                st["clusters"] += 1
+                canonical = idx.neutral_of(members[0])
+                if not canonical:
+                    for m in members:  # a member may already alias to a held case
+                        dst = cat.get_alias(m)
+                        if dst:
+                            canonical = dst
+                            break
+                if not canonical:
+                    continue
+                if not cat.find_document_id(canonical):
+                    st["pending_clusters"] += 1  # cluster real but its case isn't held (yet)
+                    continue
+                st["anchored"] += 1
+                canon_key = fold(canonical)
+                for m in members:
+                    if m == canon_key:
+                        continue
+                    source = "parallel:adjacency" if m in adjacency_keys else "parallel:coref"
+                    cat.put_alias(m, canonical, source=source, commit=False)
+                    st["aliased"] += 1
+            cat.commit()
+            resolved = Resolver(cat).run()
+
+        self._invalidate_caches()
+        st["resolved_edges"] = resolved.resolved
+        return st
+
     def discover_citing(self, *, target: str, via: str = "auto", query: str | None = None,
                         max_pages: int = 1, resolve: bool = True) -> dict:
         """Forward-citation discovery — find **new** cases that cite ``target``, by

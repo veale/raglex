@@ -100,6 +100,7 @@ RUNNERS: dict[str, Callable] = {
     "harvest-hol": lambda f, p, cb, cancel: f.harvest_house_of_lords(**p, on_progress=cb, cancel_check=cancel),
     "match-reports": lambda f, p, cb, cancel: f.match_report_citations(on_progress=cb, cancel_check=cancel),
     "import-bailii-corpus": lambda f, p, cb, cancel: f.import_bailii_corpus(**p, on_progress=cb, cancel_check=cancel),
+    "mine-parallel": lambda f, p, cb, cancel: f.mine_parallel_citations(**p, on_progress=cb, cancel_check=cancel),
 }
 
 

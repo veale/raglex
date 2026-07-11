@@ -386,6 +386,20 @@ def cmd_import_bailii(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mine_parallel(args: argparse.Namespace) -> int:
+    """Mine parallel (co-referent) citations from judgment text and alias each cluster to
+    its held case (§5c)."""
+    from .facade import Facade
+
+    st = Facade(Config.from_env()).mine_parallel_citations(
+        limit_docs=args.limit_docs, coref=not args.no_coref, on_progress=lambda **p: None)
+    print(f"  docs scanned={st['docs']} adjacency_groups={st['adjacency_groups']} "
+          f"clusters={st['clusters']}")
+    print(f"  anchored={st['anchored']} pending_clusters={st['pending_clusters']} "
+          f"aliases minted={st['aliased']} resolved_edges={st['resolved_edges']}")
+    return 0
+
+
 def cmd_index(_: argparse.Namespace) -> int:
     """Build the pgvector HNSW index (Postgres only; §7)."""
     from .facade import Facade
@@ -579,6 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--match-reports", action="store_true",
                      help="after import, link classic law-report citations to the enlarged pool")
     imp.set_defaults(func=cmd_import_bailii)
+
+    mp = sub.add_parser("mine-parallel", help="mine parallel citations from text, alias clusters (§5c)")
+    mp.add_argument("--limit-docs", type=int, default=None, help="scan at most N documents")
+    mp.add_argument("--no-coref", action="store_true", help="adjacency runs only; skip the name+year rung")
+    mp.set_defaults(func=cmd_mine_parallel)
 
     mig = sub.add_parser("migrate", help="one-off post-upgrade backfill: edge keys + counts (§5b)")
     mig.set_defaults(func=cmd_migrate)
