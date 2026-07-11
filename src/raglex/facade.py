@@ -1908,6 +1908,194 @@ class Facade:
                 "aliases": aliased, "resolved_edges": resolved.resolved,
                 "engine": extracted.engine}
 
+    # kinds of name variant safe to mint as a blanket alias (single-party is too ambiguous)
+    _BAILII_ALIAS_KINDS = frozenset({"exact", "role-form", "abbrev", "drop-tail"})
+
+    def import_bailii_corpus(self, *, jsonl_path: str, names_csv: str | None = None,
+                             out_jsonl: str | None = None, batch: int = 500,
+                             limit: int | None = None, match_reports: bool = False,
+                             on_progress=None, cancel_check=None) -> dict:
+        """Bulk-import the BAILII full-text corpus (``all.jsonl``: ``{id, year, text}``),
+        recovering each case's name from the BAILII index CSV and keying it by the neutral
+        citation its ``id`` path encodes.
+
+        Per record: derive the FCL slug from the path; look up the cleaned case name and
+        citations from the index; import the judgment (or, if that slug is already held,
+        attach the text as a *secondary* alt-text without disturbing the authoritative one)
+        and mint an alias for every distinctive name variant + secondary citation so any
+        cited form resolves here. A single ``Resolver`` pass at the end links the graph;
+        ``match_reports=True`` then links classic law-report citations against the enlarged
+        judgment pool. Idempotent/resumable — a slug already imported is skipped.
+        """
+        import json as _json
+        from datetime import date as _date
+
+        from .adapters.bailii_corpus import (
+            bailii_path_to_slug, citation_agrees_with_slug, load_name_index, slug_to_citation,
+        )
+        from .adapters.uk_caselaw import court_from_slug
+        from .citations import extract_document
+        from .citations.name_variants import name_variants
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+        from .pipeline.runner import _chamberless_alias
+        from .resolve.matchers import first_candidate
+        from .topics.gate import fold
+
+        names = load_name_index(names_csv) if names_csv else {}
+        st = {"total": 0, "imported": 0, "secondary": 0, "no_slug": 0, "named": 0,
+              "aliases": 0, "citation_mismatch": 0, "extracted": 0}
+        out_f = open(out_jsonl, "w", encoding="utf-8") if out_jsonl else None
+        try:
+            with self._open() as (cat, rs, ts):
+                existing = cat.all_stable_ids()
+                to_extract: list[str] = []
+                n = 0
+                with open(jsonl_path, encoding="utf-8") as fh:
+                    for line in fh:
+                        if cancel_check and cancel_check():
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if limit and st["total"] >= limit:
+                            break
+                        rec = _json.loads(line)
+                        st["total"] += 1
+                        slug = bailii_path_to_slug(rec.get("id"))
+                        if not slug:
+                            st["no_slug"] += 1
+                            continue
+                        text = rec.get("text") or ""
+                        year = rec.get("year")
+                        clean = names.get(slug)
+
+                        # -- name + citation ladder --
+                        title = clean.title if (clean and clean.title) else None
+                        idx_cites = clean.citations if clean else ()
+                        if clean and clean.title:
+                            st["named"] += 1
+                        if not title:
+                            title = _case_title_from(text)
+                        primary_cite = slug_to_citation(slug)
+                        if not title:
+                            title = primary_cite or slug
+
+                        # -- sanity check (task 3): the index's citation must agree with the
+                        #    path-derived neutral; the path is authoritative on disagreement --
+                        mismatch = None
+                        if idx_cites and not any(citation_agrees_with_slug(slug, c) for c in idx_cites):
+                            mismatch = list(idx_cites)
+                            st["citation_mismatch"] += 1
+                        secondary = [c for c in idx_cites if not citation_agrees_with_slug(slug, c)]
+
+                        # -- aliases: distinctive name variants + secondary citations + bare slug --
+                        variants = name_variants(title)
+                        alias_pairs: list[tuple[str, str]] = []
+                        for v, kind in variants:
+                            if kind not in self._BAILII_ALIAS_KINDS:
+                                continue
+                            key = fold(v)
+                            if key and key != slug:
+                                alias_pairs.append((key, f"bailii-name:{kind}"))
+                        for c in secondary:
+                            cand = first_candidate(c)
+                            key = fold(cand.value) if cand else fold(c)
+                            if key and key != slug:
+                                alias_pairs.append((key, "bailii-report-alias"))
+                        bare = _chamberless_alias(slug)
+                        if bare and bare != slug:
+                            alias_pairs.append((bare, "chamber-alias"))
+
+                        data = text.encode("utf-8")
+                        payload_hash = sha256_bytes(data)
+                        meta = {"imported": "bailii-corpus", "year": year}
+                        if clean and clean.title:
+                            meta["bailii_name"] = clean.title
+                        if idx_cites:
+                            meta["bailii_citations"] = list(idx_cites)
+                        if clean and clean.catchwords:
+                            meta["catchwords"] = clean.catchwords
+                        if mismatch:
+                            meta["citation_mismatch"] = mismatch
+
+                        if slug in existing:
+                            # already held (Find Case Law / HoL): keep the authoritative text,
+                            # attach this one as a non-default secondary, record all metadata.
+                            text_path = str(ts.put(payload_hash, text))
+                            cur = cat.document_meta(slug)
+                            alts = cur.get("alt_texts", [])
+                            if not any(a.get("payload_hash") == payload_hash for a in alts):
+                                alts.append({"source": "bailii-corpus", "payload_hash": payload_hash,
+                                             "text_path": text_path, "chars": len(text), "year": year})
+                            cur["alt_texts"] = alts
+                            for k, v in meta.items():
+                                cur[k] = v
+                            cat.set_document_meta(slug, cur, title_if_empty=title, commit=False)
+                            st["secondary"] += 1
+                            disposition = "secondary"
+                        else:
+                            record = Record(
+                                source="uk-caselaw", stable_id=slug, doc_type=DocType.JUDGMENT,
+                                title=title, court=court_from_slug(slug),
+                                decision_date=_date(int(year), 1, 1) if str(year).isdigit() else None,
+                                language="en", source_language="en",
+                                raw_bytes=data, raw_ext="txt", payload_hash=payload_hash, text=text,
+                                extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER, extra=meta,
+                            )
+                            raw_path = str(rs.path_for(rs.put(data, ext="txt"), "txt"))
+                            text_path = str(ts.put(payload_hash, text))
+                            cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+                            existing.add(slug)
+                            to_extract.append(slug)
+                            st["imported"] += 1
+                            disposition = "imported"
+
+                        for key, source in alias_pairs:
+                            cat.put_alias(key, slug, source=source, commit=False)
+                            st["aliases"] += 1
+
+                        if out_f:
+                            out_f.write(_json.dumps({
+                                "id": rec.get("id"), "year": year, "stable_id": slug,
+                                "case_name": title, "primary_citation": primary_cite,
+                                "secondary_citations": secondary,
+                                "name_variants": [v for v, _ in variants],
+                                "citation_mismatch": mismatch,
+                                "disposition": disposition,
+                            }) + "\n")
+
+                        n += 1
+                        if n % batch == 0:
+                            cat.commit()
+                            _progress(on_progress, stage="importing", done=st["total"])
+                cat.commit()
+
+                # extract each new judgment's own outgoing citations (pending edges), then
+                # one whole-graph resolve links everything the new nodes/aliases satisfy.
+                for i, sid in enumerate(to_extract):
+                    if cancel_check and cancel_check():
+                        break
+                    try:
+                        extract_document(cat, ts, sid)
+                        st["extracted"] += 1
+                    except Exception:  # noqa: BLE001 — one bad doc mustn't sink the batch
+                        pass
+                    if i % 200 == 0:
+                        cat.commit()
+                        _progress(on_progress, stage="extracting citations", done=i, total=len(to_extract))
+                cat.commit()
+                resolved = Resolver(cat).run()
+        finally:
+            if out_f:
+                out_f.close()
+
+        st["resolved_edges"] = resolved.resolved
+        if match_reports and not (cancel_check and cancel_check()):
+            st["report_matched"] = self.match_report_citations(
+                on_progress=on_progress, cancel_check=cancel_check).get("aliased", 0)
+        self._invalidate_caches()
+        return st
+
     def harvest_reference(self, *, ref: str, candidate: str | None = None) -> dict:
         """The one-click resolution for a *routable* hanging reference: fetch exactly
         that item from the adapter that holds it, then resolve. ``ref`` is a row from
@@ -2525,8 +2713,11 @@ class Facade:
                     hit = match_report(raw, name, pool, confirm_text=False)
                     if hit:
                         # key the alias on the folded raw so the resolver's raw_fold rung
-                        # links this citation and every sibling occurrence at once.
-                        cat.put_alias(fold(raw), hit[0], source="report-match", commit=False)
+                        # links this citation and every sibling occurrence at once. Tag the
+                        # source by match kind so abbrev/single-party matches stay auditable.
+                        stable, _score, kind = hit
+                        source = "report-match" if kind == "exact" else f"report-match:{kind}"
+                        cat.put_alias(fold(raw), stable, source=source, commit=False)
                         aliased += 1
                 if on_progress and i % 100 == 0:
                     _progress(on_progress, stage="matching reporter citations", done=i, total=len(viable))

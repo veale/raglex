@@ -59,9 +59,15 @@ def surnames(text: str | None) -> set[str]:
     """The distinctive lower-cased tokens of a case name/title — surnames and unusual
     words, with party roles, procedural words and common terms stripped. This is what two
     citations of the same case share even when the surrounding role text differs
-    ("Austin v Commissioner of Police" vs "Austin (FC) (Appellant) v Commissioner")."""
+    ("Austin v Commissioner of Police" vs "Austin (FC) (Appellant) v Commissioner").
+
+    Law-report abbreviations are canonicalised first (``normalise_abbrev``) so "A-G" and
+    "Attorney General", "Ltd" and "Limited" tokenise to the same token — otherwise the two
+    forms of one name share nothing distinctive."""
+    from .name_variants import normalise_abbrev
+
     out: set[str] = set()
-    for tok in re.findall(r"[A-Za-z][\w'’\-]+", text or ""):
+    for tok in re.findall(r"[A-Za-z][\w'’\-]+", normalise_abbrev(text or "")):
         low = tok.lower()
         if low in _STOPWORDS or len(low) <= 2:
             continue
@@ -111,13 +117,16 @@ def score_candidate(name_tokens: set[str], case_title: str, case_year: int | Non
 
 
 def match_report(raw: str, name: str | None, cases: list, *,
-                 min_score: float = 0.5, confirm_text: bool = True) -> tuple[str, float] | None:
+                 min_score: float = 0.5, confirm_text: bool = True,
+                 allow_single: bool = True) -> tuple[str, float, str] | None:
     """Best harvested case for a report citation, or None if none is confident/unambiguous.
 
     ``cases`` is a list of objects/dicts with ``stable_id``, ``title``, ``year`` and
     optionally ``opening`` (the judgment's first paragraphs, for the confirmation rung).
-    Returns ``(stable_id, score)``. Refuses to guess when the top two candidates are close
-    — a wrong resolution is worse than leaving it pending."""
+    Returns ``(stable_id, score, kind)`` where ``kind`` is ``"exact"`` (both parties
+    matched), ``"abbrev"`` (matched only after abbreviation normalisation), or ``"single"``
+    (one-party fallback). Refuses to guess when the top two candidates are close — a wrong
+    resolution is worse than leaving it pending."""
     series = _series_of(raw)
     if series is None or series not in HOL_PLAUSIBLE_SERIES:
         return None
@@ -125,8 +134,13 @@ def match_report(raw: str, name: str | None, cases: list, *,
         return None
     ry = _report_year(raw)
     name_tokens = surnames(name)
-    if len(name_tokens) < 2:  # need both parties to disambiguate
-        return None
+    if len(name_tokens) < 2:
+        # single-party fallback: the citing text names only one party ("Pepper [1993] AC
+        # 593"). Far riskier, so gate it hard — exactly one pool case in the year window
+        # carries the (single, distinctive) surname AND the confirmation rung passes.
+        if not (allow_single and len(name_tokens) == 1):
+            return None
+        return _match_single(name_tokens, cases, ry, confirm_text)
 
     scored: list[tuple[float, object]] = []
     for c in cases:
@@ -152,7 +166,38 @@ def match_report(raw: str, name: str | None, cases: list, *,
     if confirm_text and opening:
         if not (name_tokens & surnames(opening)):
             return None
-    return _attr(best, "stable_id"), best_score
+    # "abbrev" when the match leaned on the abbreviation table — i.e. the un-normalised
+    # tokens don't overlap enough on their own but the normalised ones do.
+    raw_shared = _raw_tokens(name) & _raw_tokens(_attr(best, "title"))
+    kind = "exact" if len(raw_shared) >= 2 else "abbrev"
+    return _attr(best, "stable_id"), best_score, kind
+
+
+def _raw_tokens(text: str | None) -> set[str]:
+    """Distinctive tokens WITHOUT abbreviation normalisation — used only to tell whether a
+    match leaned on the abbreviation table (for the ``abbrev`` annotation)."""
+    return {t.lower() for t in re.findall(r"[A-Za-z][\w'’\-]+", text or "")
+            if t.lower() not in _STOPWORDS and len(t) > 2}
+
+
+def _match_single(name_tokens: set[str], cases: list, ry: int | None,
+                  confirm_text: bool) -> tuple[str, float, str] | None:
+    """One-party report match: the single distinctive surname must land on exactly one
+    pool case in the reporting-lag year window, confirmed in that judgment's opening."""
+    hits = []
+    for c in cases:
+        year = _as_int(_attr(c, "year"))
+        if ry is not None and year is not None and not (ry - 2 <= year <= ry + 1):
+            continue
+        if name_tokens <= surnames(_attr(c, "title")):
+            hits.append(c)
+    if len(hits) != 1:
+        return None  # zero, or ambiguous → don't guess
+    best = hits[0]
+    opening = _attr(best, "opening")
+    if confirm_text and opening and not (name_tokens <= surnames(opening)):
+        return None
+    return _attr(best, "stable_id"), 0.5, "single"
 
 
 def _attr(obj, key):

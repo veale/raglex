@@ -365,6 +365,27 @@ def cmd_snowball(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_bailii(args: argparse.Namespace) -> int:
+    """Bulk-import the BAILII full-text corpus, recovering case names from the index CSV
+    and keying each judgment by the neutral citation its path encodes (§5b)."""
+    from .facade import Facade
+
+    f = Facade(Config.from_env())
+    print(f"importing {args.jsonl} (names from {args.csv or 'text headers only'})…")
+    st = f.import_bailii_corpus(
+        jsonl_path=args.jsonl, names_csv=args.csv, out_jsonl=args.out,
+        batch=args.batch, limit=args.limit, match_reports=args.match_reports,
+        on_progress=lambda **p: None,
+    )
+    print(f"  total={st['total']} imported={st['imported']} secondary={st['secondary']} "
+          f"named={st['named']} no_slug={st['no_slug']}")
+    print(f"  aliases minted={st['aliases']} citation_mismatch={st['citation_mismatch']} "
+          f"extracted={st['extracted']} resolved_edges={st['resolved_edges']}")
+    if "report_matched" in st:
+        print(f"  report citations linked={st['report_matched']}")
+    return 0
+
+
 def cmd_index(_: argparse.Namespace) -> int:
     """Build the pgvector HNSW index (Postgres only; §7)."""
     from .facade import Facade
@@ -548,6 +569,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     idx = sub.add_parser("index", help="build the pgvector HNSW index (Postgres, §7)")
     idx.set_defaults(func=cmd_index)
+
+    imp = sub.add_parser("import-bailii", help="bulk-import the BAILII full-text corpus (all.jsonl)")
+    imp.add_argument("jsonl", help="path to all.jsonl ({id, year, text} per line)")
+    imp.add_argument("--csv", default=None, help="BAILII index CSV (case names + citations)")
+    imp.add_argument("--out", default=None, help="write an augmented JSONL to this path")
+    imp.add_argument("--batch", type=int, default=500, help="commit every N records")
+    imp.add_argument("--limit", type=int, default=None, help="import at most N records")
+    imp.add_argument("--match-reports", action="store_true",
+                     help="after import, link classic law-report citations to the enlarged pool")
+    imp.set_defaults(func=cmd_import_bailii)
 
     mig = sub.add_parser("migrate", help="one-off post-upgrade backfill: edge keys + counts (§5b)")
     mig.set_defaults(func=cmd_migrate)

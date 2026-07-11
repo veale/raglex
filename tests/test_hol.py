@@ -115,3 +115,22 @@ def test_match_report_refuses(raw, name):
 def test_match_report_refuses_ambiguous_pair():
     pool = [_Case("a/1", "Brown v Smith", 1998), _Case("a/2", "Brown v Smith", 1998)]
     assert match_report("[1998] AC 1", "Brown v Smith", pool, confirm_text=False) is None
+
+
+def test_match_report_tolerates_abbreviation():
+    # the title spells it out, the citing text abbreviates — normalisation must bridge them
+    pool = [_Case("ewhc/ch/1998/1", "Attorney General v Blake", 1998)]
+    hit = match_report("[1998] AC 1", "A-G v Blake", pool, confirm_text=False)
+    assert hit and hit[0] == "ewhc/ch/1998/1" and hit[2] == "abbrev"
+
+
+def test_match_report_single_party_when_unique_in_window():
+    pool = [_Case("ukhl/1993/1", "Pepper (Inspector of Taxes) v Hart", 1992),
+            _Case("ukhl/1998/9", "Smith v Jones", 1998)]
+    hit = match_report("[1993] AC 593", "Pepper", pool, confirm_text=False)
+    assert hit and hit[0] == "ukhl/1993/1" and hit[2] == "single"
+
+
+def test_match_report_single_party_refuses_when_not_unique():
+    pool = [_Case("a/1", "Pepper v Hart", 1993), _Case("a/2", "Pepper v Salt", 1993)]
+    assert match_report("[1993] AC 593", "Pepper", pool, confirm_text=False) is None

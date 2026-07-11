@@ -474,6 +474,26 @@ class Catalogue:
         except (ValueError, TypeError):
             return {}
 
+    def set_document_meta(self, stable_id: str, meta: dict, *, title_if_empty: str | None = None,
+                          commit: bool = True) -> None:
+        """Overwrite a document's ``meta_json`` bag (and, only when the row's title is
+        empty, its title) **without touching its text, payload_hash or version**. Used to
+        attach metadata / a secondary text pointer to a document harvested another way —
+        keeping the authoritative text in place while recording all metadata in the DB."""
+        if title_if_empty:
+            self.conn.execute(
+                "UPDATE documents SET meta_json = ?, title = COALESCE(NULLIF(title, ''), ?) "
+                "WHERE stable_id = ?",
+                (json.dumps(meta) if meta else None, title_if_empty, stable_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE documents SET meta_json = ? WHERE stable_id = ?",
+                (json.dumps(meta) if meta else None, stable_id),
+            )
+        if commit:
+            self.conn.commit()
+
     # -- writes ------------------------------------------------------------
     def upsert_document(
         self, record: Record, *, raw_path: str | None = None, text_path: str | None = None
