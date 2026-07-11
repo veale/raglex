@@ -101,6 +101,23 @@ def _load_short(path: Path, idx: dict) -> None:
             idx.setdefault((abbr, None), sid)
 
 
+# A leading provision reference ("section 78 of the …", "Part II of …", "Schedule B1 to
+# …") sits in front of the Act title in a cited string; strip it so the title matches.
+_PROVISION_PREFIX = re.compile(
+    r"^(?:section|sections|s|ss|subsection|sub section|part|schedule|sch|paragraph|"
+    r"paragraphs|para|paras|article|articles|art|arts)\s+[0-9a-z()]+\s+(?:of|to)\s+(?:the\s+)?",
+)
+
+
+def reference_key(raw: str) -> str:
+    """Normalise a *cited* statute reference to the key its title is indexed by — dropping
+    any leading provision phrase ("section 78 of the Police and Criminal Evidence Act 1984"
+    → ``police and criminal evidence act 1984``). Used to match a name-only citation
+    against the titles of legislation the corpus already holds (which never goes stale, and
+    unlike the offline gazetteer covers every Act that's been harvested)."""
+    return _PROVISION_PREFIX.sub("", normalise_title(raw)).strip()
+
+
 def resolve(title: str, year: str | None = None) -> str | None:
     """Resolve a statute short title to its stable_id, or None. With a year, matches
     **exactly** (no wrong-year guess); without one, only resolves an unambiguous title.

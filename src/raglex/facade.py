@@ -2726,6 +2726,49 @@ class Facade:
         return {"report_strings": len(by_raw), "viable": len(viable),
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
+    def match_named_legislation(self, *, limit: int = 20000, on_progress=None,
+                                cancel_check=None) -> dict:
+        """Resolve name-only statute references ("the Police and Criminal Evidence Act
+        1984", "section 32 of the Limitation Act 1980") against the titles of legislation
+        the corpus **already holds** (§5b). This is the self-updating counterpart to the
+        bundled offline gazetteer: the index is rebuilt from harvested legislation each run,
+        so it never goes stale and covers every Act that's been fetched — including recent
+        ones the offline list predates. Mints an alias per confident match, then resolves."""
+        from .citations.statute_gazetteer import normalise_title, reference_key
+        from .topics.gate import fold
+
+        with self._open() as (cat, _rs, _ts):
+            # held-legislation title index, keyed by normalised title; keep only the
+            # unambiguous ones (one held id per title) so a match can't pick the wrong Act.
+            index: dict[str, str | None] = {}
+            for r in cat.held_legislation_titles():
+                key = normalise_title(r["title"])
+                if not key:
+                    continue
+                if key in index and index[key] != r["stable_id"]:
+                    index[key] = None  # ambiguous title → refuse to guess
+                else:
+                    index.setdefault(key, r["stable_id"])
+
+            refs = cat.pending_statute_refs(limit=limit)
+            aliased = 0
+            for i, row in enumerate(refs):
+                if cancel_check and cancel_check():
+                    break
+                raw = row["raw"]
+                sid = index.get(reference_key(raw))
+                if sid:
+                    cat.put_alias(fold(raw), sid, source="legislation-name", commit=False)
+                    aliased += 1
+                if on_progress and i % 500 == 0:
+                    _progress(on_progress, stage="matching named legislation", done=i, total=len(refs))
+            cat.commit()
+            resolved = Resolver(cat).run()
+
+        self._invalidate_caches()
+        return {"held_titles": len(index), "candidates": len(refs),
+                "aliased": aliased, "resolved_edges": resolved.resolved}
+
     def mine_parallel_citations(self, *, limit_docs: int | None = None, coref: bool = True,
                                 on_progress=None, cancel_check=None) -> dict:
         """Recover the neutral-citation ↔ law-report map from the corpus text (§5c).

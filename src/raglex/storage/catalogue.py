@@ -1322,6 +1322,32 @@ class Catalogue:
             "WHERE doc_type = 'judgment' AND title IS NOT NULL"
         ).fetchall()
 
+    def held_legislation_titles(self) -> list[sqlite3.Row]:
+        """Every held piece of legislation as (stable_id, title) — the self-maintaining
+        gazetteer the name-only statute matcher resolves against. Because it's derived from
+        what's actually been harvested, it never goes stale and covers every Act fetched
+        (unlike the bundled offline list)."""
+        return self.conn.execute(
+            "SELECT stable_id, title FROM documents "
+            "WHERE doc_type = 'legislation' AND title IS NOT NULL"
+        ).fetchall()
+
+    def pending_statute_refs(self, *, limit: int = 20000) -> list[sqlite3.Row]:
+        """Distinct still-pending, candidate-less citation strings that look like a named
+        statute ("… Act 1984", "… Regulations 2004", "… Order 2015"), most-cited first —
+        the references the name-only legislation matcher tries to resolve. LIKE patterns are
+        bound as params (the pg literal-% gotcha)."""
+        like = ["%Act 1%", "%Act 2%", "%Regulations 1%", "%Regulations 2%",
+                "%Order 1%", "%Order 2%", "%Rules 1%", "%Rules 2%", "%Measure 1%", "%Measure 2%"]
+        clause = " OR ".join(["raw_citation_string LIKE ?"] * len(like))
+        return self.conn.execute(
+            f"SELECT raw_citation_string AS raw, COUNT(*) AS n FROM relations "
+            f"WHERE resolution_status = 'pending' AND candidate_id IS NULL "
+            f"AND raw_citation_string IS NOT NULL AND ({clause}) "
+            f"GROUP BY raw_citation_string ORDER BY n DESC LIMIT ?",
+            (*like, limit),
+        ).fetchall()
+
     def citing_documents(self, ref: str, *, limit: int = 10) -> list[str]:
         """Which documents cite one hanging reference (for the worklist row's detail)."""
         rows = self.conn.execute(
