@@ -215,8 +215,9 @@ def create_app(config: Config | None = None) -> FastAPI:
         run the whole resolution chain (legislation-name, report, EHRR and parallel/ECR
         matchers). One progress-tracked job; ``no_parallel`` skips the heavy mining pass."""
         p = payload or {}
-        params = {k: v for k, v in p.items() if k in ("limit", "parallel", "coref")}
-        return _start_job("rescan", "full fresh relink — re-extract + match everything", params)
+        params = {k: v for k, v in p.items() if k in ("limit", "parallel", "coref", "doc_types")}
+        scope = "judgments" if params.get("doc_types") == ["judgment"] else "all docs"
+        return _start_job("rescan", f"full fresh relink ({scope}) — re-extract + match everything", params)
 
     @app.post("/jobs/harvest-echr")
     def job_harvest_echr_ep(payload: dict = Body(default={})) -> dict:

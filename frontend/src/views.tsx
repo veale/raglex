@@ -1419,9 +1419,12 @@ export function Dashboard({ open }: { open: (id: string) => void }) {
           <button onClick={() => act(api.startJob("rescan-citations", {}).then((j) => `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "re-scan citations")}
             style={{ flex: "0 0 auto" }}
             title="Re-extract EVERY document with the current grammars — run after a new adapter/grammar (e.g. ECHR) so existing docs pick up the new citations. Runs in the background.">↻ Re-scan all citations</button>
-          <button onClick={() => act(api.startJob("rescan", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "full relink")}
+          <button onClick={() => act(api.startJob("rescan", { doc_types: ["judgment"] }).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "full relink — judgments")}
             style={{ flex: "0 0 auto" }}
-            title="FULL FRESH RELINK: re-extract every document, then run the whole resolution chain — name-only legislation → held titles, classic reporters → cases, EHRR → ECtHR, and parallel/ECR mining. One background job; watch Jobs for per-stage progress.">⟳ Full relink (rescan + match all)</button>
+            title="FULL RELINK, JUDGMENTS ONLY: re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain — legislation-name → held titles, reporters → cases, EHRR → ECtHR, parallel/ECR mining. The citation fixes all live in judgments. Watch Jobs for per-stage progress.">⟳ Full relink (judgments only)</button>
+          <button onClick={() => act(api.startJob("rescan", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "full relink — all")}
+            style={{ flex: "0 0 auto" }}
+            title="FULL RELINK, ALL DOCS: re-extract every document (incl. 122k legislation), then run the whole resolution chain. Slower; use 'judgments only' unless you also want legislation→legislation citations refreshed.">⟳ Full relink (all docs)</button>
           <button onClick={() => act(api.startJob("harvest-echr", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "queue HUDOC cases")}
             style={{ flex: "0 0 auto" }}
             title="Queue the ECtHR cases the corpus cites by name/EHRR but doesn't hold, and fetch them from HUDOC by case-name search (most-cited first). Then links their EHRR citations. Runs in the background.">⇊ Queue missing ECtHR (HUDOC)</button>
@@ -1692,7 +1695,8 @@ function KeepCurrentPanel() {
         <button onClick={() => runNow("rebuild-citation-counts", "rebuild counts")}>↻ Rebuild citation counts</button>
         <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
-        <button onClick={() => runNow("rescan", "full relink")} title="Re-extract every document, then run the whole resolution chain">⟳ Full relink</button>
+        <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain">⟳ Full relink (judgments)</button>
+        <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain">⟳ Full relink (all)</button>
       </div>
       {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
     </div>
