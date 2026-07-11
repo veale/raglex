@@ -25,6 +25,12 @@ from .courts import DIVISIONS
 # Resolvable candidate, pinpoint anchor, optional entity-kind override.
 Normalised = tuple[str | None, str | None, str | None]
 
+# Sentinel kind_override: "this match is not a citation at all — drop it entirely".
+# A normaliser returns it (via the third tuple slot) so the extractor skips the match
+# instead of recording a candidate-less "maybe" (see grammar_citations). Used to suppress
+# the bracketless grammar's false positives on currency codes / ISBNs / structure words.
+DROP = "\x00drop"
+
 
 @dataclass(frozen=True, slots=True)
 class Grammar:
@@ -59,9 +65,21 @@ def _eu_celex(kind: str, a: str, b: str) -> str | None:
         year, num = a, b
     elif re.fullmatch(r"(19|20)\d{2}", b):
         year, num = b, a
-    else:  # both 2-digit: directives are year/number, regulations number/year
-        yy, num = (a, b) if kind.lower() == "directive" else (b, a)
-        if not re.fullmatch(r"\d{1,2}", yy):
+    else:
+        # Old two-digit-year form. The *year* is the two-digit group, whichever side it's
+        # on — "94/800" (Decision, year first) and "1831/81" (number first) both put the
+        # 2-digit group in the year slot. Only when BOTH groups are two digits ("95/46") is
+        # it ambiguous, and there the per-instrument convention decides: directives and
+        # decisions are numbered year/number, regulations number/year.
+        if re.fullmatch(r"\d\d", a) and not re.fullmatch(r"\d\d", b):
+            yy, num = a, b
+        elif re.fullmatch(r"\d\d", b) and not re.fullmatch(r"\d\d", a):
+            yy, num = b, a
+        elif kind.lower() in ("directive", "decision"):
+            yy, num = a, b
+        else:  # regulation
+            yy, num = b, a
+        if not re.fullmatch(r"\d\d", yy):
             return None
         year = ("19" if int(yy) >= 31 else "20") + f"{int(yy):02d}"
     if not re.fullmatch(r"(19|20)\d{2}", year):
@@ -127,6 +145,25 @@ REPORT_SERIES = {
     "BCLC", "FSR", "RPC", "FLR", "HRLR", "UKHRR", "EHRR", "LGR", "STC", "ER",
     "PIQR", "BMLR", "EMLR", "ENTLR", "INLR", "ACD", "COD", "WLUK", "NI",  # NI Law Reports
     "EHRR", "EHRLR", "EHRC", "CHRLD",  # European Human Rights Reports / Law Review etc.
+    # further report/journal series the bracketless grammar was minting as fake courts —
+    # they have no neutral-citation URI, so they stay candidate-less "maybe" citations
+    "NJ",       # Nederlandse Jurisprudentie (Dutch law reports)
+    "CLC",      # Commercial Law Cases
+    "ETMR",     # European Trade Mark Reports
+    "ILPR",     # International Litigation Procedure Reports
+    "LMCLQ",    # Lloyd's Maritime & Commercial Law Quarterly
+    "ECDR",     # European Copyright & Design Reports
+    "ECC",      # European Commercial Cases
+    "PLCR",     # Planning Law Case Reports
+    "COPLR",    # Court of Protection Law Reports
+    "EPOR",     # European Patent Office Reports
+    "LCR",      # Licensing Case Reports
+    "CLJ",      # Cambridge Law Journal
+    "EULR",     # European Law Review
+    "NE",       # North Eastern Reporter
+    "JLR",      # Jersey Law Reports
+    "BNB",      # Beslissingen Nederlandse Belastingrechtspraak (Dutch tax reports)
+    "SLT",      # Scots Law Times
 }
 
 # Statute short-title abbreviations that the *bracketless* grammar ("2009 CTA 2010")
@@ -135,14 +172,39 @@ REPORT_SERIES = {
 # candidate. (Mostly the Tax Law Rewrite abbreviations.)
 STATUTE_ABBREVS = {
     "CTA", "ITEPA", "ITTOIA", "TCGA", "TMA", "ITA", "VATA", "VERA", "TPDA", "FA",
-    "ICTA", "CAA", "IHTA", "TIOPA", "FA2", "CRCA", "TMA", "CEMA", "OTA",
+    "ICTA", "CAA", "IHTA", "TIOPA", "FA2", "CRCA", "TMA", "CEMA", "OTA", "TCTA",
 }
+
+# Tokens the *bracketless* grammar ("YEAR TOKEN NUMBER") grabs as a "court" that are not
+# citations of anything — the year/token/number shape also spells out a monetary amount
+# ("2000 NLG 25", "1987 USD 534"), an ISBN, a Westlaw locator, an EU Official Journal
+# reference, or a document-structure word ("2005 … PART 3", "2012 … FINAL 12"). Left alone
+# they mint a bogus resolvable slug (and "EUR …" is even mis-classified as UK assimilated
+# EU law), so the normaliser DROPs them: recognised as noise, recorded as nothing.
+NON_CITATION_TOKENS = {
+    # ISO-4217 currency codes (amounts of money, not courts)
+    "USD", "GBP", "EUR", "CHF", "DM", "DEM", "NLG", "HFL", "BFR", "DGB", "ITL",
+    "FRF", "ESP", "NOK", "SEK", "DKK", "JPY", "ATS", "IEP", "LUF", "PTE", "GRD", "FIM",
+    "CAD", "AUD",
+    # publication / locator references (not case reports)
+    "OJ", "OJL", "WL", "ISBN", "ISO", "SI", "SR",
+    # document-structure / OCR junk swept up by "YEAR WORD NUMBER"
+    "PART", "FINAL", "TOTAL", "FORM", "TABLE", "AND", "NO", "THE", "OF", "EN", "CY", "TO",
+}
+
+# OCR / typo court codes → the canonical Find Case Law code, so the minted slug is
+# harvestable (the corpus contains "EWCH" for "EWHC", producing 404-ing ewch/… slugs).
+_COURT_ALIASES = {"EWCH": "EWHC"}
 
 
 def _neutral(m: "re.Match[str]") -> Normalised:
     court = m.group("court")
-    if court.upper() in REPORT_SERIES or court.upper() in STATUTE_ABBREVS:
+    cu = court.upper()
+    if cu in NON_CITATION_TOKENS:
+        return None, None, DROP  # currency / ISBN / locator / structure word — not a citation
+    if cu in REPORT_SERIES or cu in STATUTE_ABBREVS:
         return None, None, "case"  # a report series / statute abbrev, not a court
+    court = _COURT_ALIASES.get(cu, court)  # normalise typo'd court codes before minting the slug
     parts = [court.lower()]
     # The division/chamber becomes a path segment in the Find Case Law URI
     # (ewca/civ/…, ukut/aac/…). It appears EITHER before the number ("EWCA Civ 1")

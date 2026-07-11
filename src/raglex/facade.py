@@ -112,6 +112,17 @@ def _neutral_citation_from_slug(stable_id: str) -> str | None:
     return None
 
 
+def _case_title_from(text: str) -> str | None:
+    """A case name from the top of a judgment — the first non-empty header line that looks
+    like a party-v-party title ("Killock v ICO"), so an imported case gets a real title
+    instead of the filename."""
+    for line in (text or "")[:600].splitlines():
+        line = line.strip()
+        if len(line) > 8 and re.search(r"\bv\.?\b", line) and not line.lower().startswith(("in the", "before")):
+            return line[:200]
+    return None
+
+
 def _is_junk_ref(ref: str) -> bool:
     """A reference string with no citation value (stray ``#`` anchors, js/mailto
     links) — kept out of the manual-resolution worklist."""
@@ -1803,6 +1814,99 @@ class Facade:
         return {"scanned": len(todo),
                 "flagged": sum(r.get("flagged_for_repull", 0) for r in results),
                 "edges": sum(r.get("edges", 0) for r in results), "results": results}
+
+    def import_case(self, *, data: bytes, filename: str, neutral_citation: str | None = None,
+                    also_cited_as: list[str] | str | None = None, ref: str | None = None,
+                    title: str | None = None) -> dict:
+        """Import a judgment file (PDF/RTF/HTML/text) as a first-class **case**, keyed by its
+        own neutral citation and linked to *every* form the corpus cites it by (§5b, §1.9).
+
+        This is the robust answer to "I have the only available copy of a case TNA doesn't
+        hold". Unlike a generic import — which drops an opaque, unlinked commentary blob — it:
+
+        1. extracts clean text (RTF is de-RTF'd, not stored as raw ``{\\rtf1 …}`` markup);
+        2. **detects the case's own neutral citation from its header** ("[2021] UKUT 299
+           (AAC)" → ``ukut/aac/2021/299``) — so it's keyed the way the corpus cites it;
+        3. stores it as a **judgment**, and mints aliases for the report citation(s) it's
+           also reported at ("[2022] 1 WLR 2241") and any chamber-less variant — so a
+           citation in ANY of those forms resolves to this one document;
+        4. extracts the body's own citations and resolves.
+        """
+        import re as _re
+
+        from .citations import extract_citations
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, Segment, sha256_bytes
+        from .extraction import extract_bytes
+        from .pipeline.runner import _chamberless_alias
+        from .resolve.matchers import first_candidate
+        from .topics.gate import fold
+
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        extracted = extract_bytes(data, ext=ext)
+        text = extracted.text or ""
+        if not text.strip():
+            return {"error": "no text could be extracted (a scanned PDF needs OCR)"}
+
+        # 2. the case's own neutral citation: explicit, else the first case-slug the header
+        #    names (the citation printed at the top of every judgment).
+        slug = None
+        if neutral_citation:
+            c = first_candidate(neutral_citation)
+            slug = c.value if c else None
+        if not slug:
+            for cit in extract_citations(text[:1800]):
+                if cit.candidate_id and "/" in cit.candidate_id and cit.entity_kind == "case":
+                    slug = cit.candidate_id
+                    break
+        # aliases: everything else this case is cited by — supplied report citations, the
+        # worklist ref the user uploaded against, and the chamber-less slug variant.
+        alias_srcs: list[str] = []
+        if isinstance(also_cited_as, str):
+            also_cited_as = [also_cited_as]
+        alias_srcs += list(also_cited_as or [])
+        if ref:
+            alias_srcs.append(ref)
+        stable_id = slug or (first_candidate(ref).value if ref and first_candidate(ref) else None) \
+            or f"user-case:{sha256_bytes(data)[:16]}"
+
+        payload_hash = sha256_bytes(data)
+        segments = [Segment(label=f"p. {n}", char_start=s, char_end=e, kind="page")
+                    for n, s, e in (extracted.page_spans or [])]
+        with self._open() as (cat, rs, ts):
+            record = Record(
+                source="uk-caselaw" if slug else "user-import",
+                stable_id=stable_id, doc_type=DocType.JUDGMENT,
+                title=title or _case_title_from(text) or filename,
+                language="en", source_language="en",
+                raw_bytes=data, raw_ext=ext or "bin", payload_hash=payload_hash,
+                text=text, segments=segments, extracted_via=ExtractedVia.MANUAL,
+                added_by=AddedBy.USER, extra={"engine": extracted.engine, "imported": True},
+            )
+            raw_path = str(rs.path_for(rs.put(data, ext=ext or "bin"), ext or "bin"))
+            text_path = str(ts.put(payload_hash, text))
+            ts.put_segments(payload_hash, segments)
+            cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+            # mint every alias → this document, so all citation forms resolve to it
+            aliased = 0
+            for a in alias_srcs:
+                cand = first_candidate(a)
+                key = fold(cand.value) if cand else fold(a)
+                if key and key != stable_id.lower():
+                    cat.put_alias(key, stable_id, source="import-case", commit=False)
+                    aliased += 1
+            bare = _chamberless_alias(stable_id)
+            if bare and bare != stable_id.lower():
+                cat.put_alias(bare, stable_id, source="chamber-alias", commit=False)
+                aliased += 1
+            cat.commit()
+            # extract the judgment's own outgoing citations, then resolve the whole graph
+            from .citations import extract_document
+            extract_document(cat, ts, stable_id)
+            resolved = Resolver(cat).run()
+        self._invalidate_caches()
+        return {"stable_id": stable_id, "detected_citation": slug, "chars": len(text),
+                "aliases": aliased, "resolved_edges": resolved.resolved,
+                "engine": extracted.engine}
 
     def harvest_reference(self, *, ref: str, candidate: str | None = None) -> dict:
         """The one-click resolution for a *routable* hanging reference: fetch exactly

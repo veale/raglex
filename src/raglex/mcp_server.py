@@ -420,6 +420,21 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
 
     @mcp.tool()
+    def import_case_base64(content_base64: str, filename: str, ref: Optional[str] = None,
+                           neutral_citation: Optional[str] = None,
+                           also_cited_as: Optional[list[str]] = None,
+                           title: Optional[str] = None) -> dict:
+        """Import a judgment file (PDF/RTF/HTML/text, base64) as a first-class case: extract
+        clean text, detect its own neutral citation from the header, key it by that, and
+        alias every other form it's cited by (report citations like "[2022] 1 WLR 2241", the
+        chamber-less variant) so all of them resolve to this one document. The robust way to
+        add a case TNA/BAILII only offers as a PDF."""
+        import base64 as _b64
+        return facade.import_case(data=_b64.b64decode(content_base64), filename=filename,
+                                  ref=ref, neutral_citation=neutral_citation,
+                                  also_cited_as=also_cited_as, title=title)
+
+    @mcp.tool()
     def harvest_house_of_lords(ids: Optional[str] = None, limit: Optional[int] = None,
                                match_reports: bool = True) -> dict:
         """Scrape the House of Lords archive (publications.parliament.uk, 1996–2009) and

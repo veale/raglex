@@ -46,6 +46,24 @@ KNOWN_COURTS: dict[str, Court] = {
         Court("UKUT", "Upper Tribunal", "GB", adapter="uk-caselaw"),
         Court("UKFTT", "First-tier Tribunal", "GB", adapter="uk-caselaw"),
         Court("UKAITUR", "Immigration & Asylum Tribunal", "GB", adapter="uk-caselaw"),
+        Court("EAT", "Employment Appeal Tribunal", "GB", adapter="uk-caselaw"),  # TNA slug 'eat'
+        # UK courts/tribunals recognised but not yet harvestable (on BAILII, not Find Case
+        # Law) — classified so they leave the "unknown court" noise and carry a jurisdiction.
+        Court("UKEAT", "Employment Appeal Tribunal (pre-2022)", "GB"),
+        Court("UKAIT", "Asylum & Immigration Tribunal", "GB"),
+        Court("UKIAT", "Immigration Appeal Tribunal", "GB"),
+        Court("CAT", "Competition Appeal Tribunal", "GB"),
+        # Northern Ireland (BAILII)
+        Court("NIQB", "NI High Court, Queen's/King's Bench", "GB"),
+        Court("NICA", "NI Court of Appeal", "GB"),
+        Court("NICh", "NI High Court, Chancery", "GB"),
+        Court("NIFam", "NI High Court, Family", "GB"),
+        Court("NIMag", "NI Magistrates' Court", "GB"),
+        # Scotland (BAILII / Scottish Courts)
+        Court("CSOH", "Court of Session, Outer House", "GB"),
+        Court("CSIH", "Court of Session, Inner House", "GB"),
+        Court("HCJAC", "High Court of Justiciary, Appeal Court", "GB"),
+        Court("SAC", "Sheriff Appeal Court", "GB"),
         # Ireland
         Court("IESC", "Supreme Court of Ireland", "IE"),
         Court("IECA", "Court of Appeal of Ireland", "IE"),
@@ -59,6 +77,15 @@ KNOWN_COURTS: dict[str, Court] = {
         Court("HCA", "High Court of Australia", "AU"),
         Court("FCA", "Federal Court of Australia", "AU"),  # note: AU FCA (collides w/ CA — jurisdiction by context)
         Court("FCAFC", "Full Federal Court of Australia", "AU"),
+        Court("NSWCA", "NSW Court of Appeal", "AU"),
+        Court("NSWSC", "NSW Supreme Court", "AU"),
+        Court("VSCA", "Victoria Court of Appeal", "AU"),
+        # Canada (bracketless)
+        Court("ONSC", "Ontario Superior Court of Justice", "CA", bracketed=False),
+        Court("BCCA", "British Columbia Court of Appeal", "CA", bracketed=False),
+        Court("BCSC", "British Columbia Supreme Court", "CA", bracketed=False),
+        Court("ABCA", "Alberta Court of Appeal", "CA", bracketed=False),
+        Court("QCCA", "Quebec Court of Appeal", "CA", bracketed=False),
         # New Zealand
         Court("NZSC", "Supreme Court of New Zealand", "NZ"),
         Court("NZCA", "Court of Appeal of New Zealand", "NZ"),

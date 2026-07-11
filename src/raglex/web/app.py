@@ -489,6 +489,22 @@ def create_app(config: Config | None = None) -> FastAPI:
     def import_zotero_ep(payload: dict = Body(...)) -> dict:
         return facade.import_zotero(**payload)
 
+    @app.post("/import/case")
+    async def import_case_ep(
+        file: UploadFile = File(...),
+        ref: str | None = Form(None),
+        neutral_citation: str | None = Form(None),
+        also_cited_as: str | None = Form(None),
+        title: str | None = Form(None),
+    ) -> dict:
+        """Import a judgment file as a first-class case: extract clean text (RTF de-RTF'd),
+        detect its own neutral citation from the header, key it by that, and alias every
+        other form it's cited by (report citations, chamber-less variant) so they resolve."""
+        data = await file.read()
+        extra = [a.strip() for a in (also_cited_as or "").split(";") if a.strip()]
+        return facade.import_case(data=data, filename=file.filename or "case.pdf", ref=ref,
+                                  neutral_citation=neutral_citation, also_cited_as=extra, title=title)
+
     @app.post("/import/bailii")
     async def import_bailii_ep(
         file: UploadFile = File(...),

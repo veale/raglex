@@ -166,6 +166,12 @@ export const api = {
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
     return postForm("/import/file", fd);
   },
+  importCase: async (file: File, opts: { ref?: string; neutral_citation?: string; also_cited_as?: string } = {}) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    Object.entries(opts).forEach(([k, v]) => v && fd.append(k, v));
+    return postForm("/import/case", fd) as Promise<{ stable_id: string; detected_citation: string | null; aliases: number; resolved_edges: number; chars: number; engine: string }>;
+  },
   importBailii: async (stable_id: string, file: File, title?: string) => {
     const fd = new FormData();
     fd.append("file", file);

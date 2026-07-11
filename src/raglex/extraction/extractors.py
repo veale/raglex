@@ -119,9 +119,30 @@ class PlainTextExtractor:
         return Extracted(text=data.decode("utf-8", errors="replace"), engine=self.name, engine_version="1")
 
 
-# Router (§5c): try providers in order; PDF/HTML/text cover manual import.
+class RtfExtractor:
+    """RTF → plain text (§5c). Without this, an uploaded ``.rtf`` fell through to the
+    plain-text provider, which stored the raw ``{\\rtf1 …}`` control-word markup *as the
+    document text* — the "why is my upload garbage" failure. striprtf strips the control
+    words to readable text."""
+
+    name = "striprtf"
+
+    def handles(self, ext: str, mime: str | None) -> bool:
+        return ext.lower().lstrip(".") == "rtf" or (mime or "") in ("application/rtf", "text/rtf")
+
+    def extract(self, data: bytes, *, ext: str, mime: str | None = None) -> Extracted:
+        try:
+            from striprtf.striprtf import rtf_to_text
+        except ImportError as exc:  # pragma: no cover — optional dep
+            raise RuntimeError("RTF import needs striprtf: pip install 'raglex[import]'") from exc
+        text = rtf_to_text(data.decode("utf-8", errors="replace")).strip()
+        return Extracted(text=text, engine=self.name, engine_version="1")
+
+
+# Router (§5c): try providers in order; PDF/RTF/HTML/text cover manual import.
 DEFAULT_PROVIDERS: tuple[ExtractionProvider, ...] = (
     PdfExtractor(),
+    RtfExtractor(),
     HtmlExtractor(),
     PlainTextExtractor(),
 )

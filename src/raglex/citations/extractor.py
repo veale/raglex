@@ -17,7 +17,7 @@ import re
 from dataclasses import replace
 from typing import Protocol
 
-from .grammars import GRAMMARS
+from .grammars import DROP, GRAMMARS
 from .models import Citation
 
 # A pinpoint into a *cited case*: the paragraph number that trails the citation —
@@ -122,6 +122,8 @@ def grammar_citations(text: str) -> list[Citation]:
     for g in GRAMMARS.values():
         for m in g.pattern.finditer(text):
             candidate, pinpoint, kind_override = g.normalize(m)
+            if kind_override is DROP:
+                continue  # normaliser rejected it as non-citation noise (currency/ISBN/…)
             found.append(
                 Citation(
                     raw=m.group(0).strip(),

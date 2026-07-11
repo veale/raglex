@@ -26,7 +26,10 @@ web = [
 ]
 # Manual PDF/HTML import (§5c extraction). pypdf is the pluggable default; heavier
 # engines (Docling/Marker/OCR, §5c) drop in behind the same interface.
-import = ["pypdf>=4"]
+import = [
+    "pypdf>=4",
+    "striprtf>=0.0.26",
+]
 scrape = [
     "beautifulsoup4>=4.15.0",
     # Anti-bot / JS scraping engines (§5a). Scrapling brings StealthyFetcher

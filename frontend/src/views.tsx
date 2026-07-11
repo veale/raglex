@@ -1482,21 +1482,23 @@ function UnfetchablePanel() {
 function UnfetchableUpload({ r, onDone }: { r: any; onDone: () => void }) {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
-  const slug = r.link?.stable_id as string | undefined;
   async function upload(file: File) {
     setBusy(true); setMsg("importing…");
     try {
-      const res = slug && file.name.toLowerCase().endsWith(".rtf")
-        ? await api.importBailii(slug, file)
-        : await api.resolveReferenceFile(r.ref, file, { title: r.raw || r.ref, doc_type: "judgment" });
-      setMsg(`✓ imported · resolved ${res.resolved_edges ?? 0} citation(s)`);
-      setTimeout(onDone, 900);
+      // import_case extracts clean text (RTF de-RTF'd, PDF via pypdf), detects the case's
+      // OWN neutral citation from the header, keys it there, and aliases the report
+      // citation the user uploaded against — so every form of the citation resolves.
+      const res = await api.importCase(file, { ref: r.raw || r.ref });
+      const cite = res.detected_citation ? ` as ${res.detected_citation}` : "";
+      setMsg(`✓ imported${cite} · ${res.aliases} alias(es) · resolved ${res.resolved_edges} citation(s)`);
+      setTimeout(onDone, 1400);
     } catch (e: any) { setMsg("error: " + e.message); } finally { setBusy(false); }
   }
   return (
     <div style={{ padding: "4px 0" }}>
       <p className="muted" style={{ margin: "0 0 4px", fontSize: 12 }}>
-        Download the judgment from the source link{slug ? " (RTF for a direct import)" : ""}, then drop it here:
+        Download the judgment (PDF preferred; RTF works), then drop it here — it's keyed by the
+        case's own neutral citation and every citation form is linked to it:
       </p>
       <input type="file" disabled={busy} accept=".rtf,.pdf,.html,.htm,.txt,.doc,.docx"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }} />
