@@ -336,3 +336,13 @@ def test_echr_convention_article_not_carried_forward_to_eu_instrument():
     # a *named* convention (Geneva) is not the ECHR
     assert not any(c.candidate_id == "echr/convention"
                    for c in extract_citations("Article 33 of the Geneva Convention"))
+
+
+def test_carry_forward_respects_cue_kind_section_not_eu_directive():
+    # A bare "section N" must attach to a UK Act, never an EU directive (which has Articles),
+    # even when the directive is the nearer antecedent — the Environmental-Information bug.
+    txt = ("The Communications Act 2003 is in point. It gave effect to Directive 2003/4. "
+           "Ofcom relied on section 66 in this appeal, and on Article 4 of the measure.")
+    cf = {c.raw.lower(): c.candidate_id for c in extract_citations(txt) if c.method == "carry_forward"}
+    assert cf.get("section 66") == "ukpga/2003/21"     # → Communications Act, not the directive
+    assert cf.get("article 4") == "32003L0004"          # → the directive, not the Act

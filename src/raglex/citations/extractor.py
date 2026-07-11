@@ -66,6 +66,24 @@ _BARE_PROVISION = re.compile(
 # bare "section 5" never means a paragraph of a cited case.
 _LEG_KINDS = {"act", "regulation", "directive", "decision", "treaty", "eu_instrument", "named"}
 
+# EU instruments are divided into *Articles*, UK Acts/SIs into *sections* and *schedules*.
+# So the cue word disambiguates the antecedent: a bare "section 66" can't belong to an EU
+# directive, and a bare "Article 6" can't belong to a UK Act. This stops a "section N" from
+# carrying forward onto a nearer-but-wrong EU instrument (e.g. Directive 2003/4 in an
+# Environmental-Information case where the Communications Act is the real host).
+_EU_KINDS = {"directive", "decision", "treaty", "eu_instrument"}
+
+
+def _cue_allows(cue: str, kind: str) -> bool:
+    """Whether a bare-provision ``cue`` ("section", "Article", …) can attach to an
+    antecedent of this ``entity_kind``."""
+    c = cue.lower().rstrip(".")
+    if c.startswith(("section", "sub", "ss", "schedule", "sch")) or c == "s":
+        return kind not in _EU_KINDS          # UK statutory provision → not an EU instrument
+    if c.startswith(("article", "art")):
+        return kind in _EU_KINDS              # Article → EU instrument / treaty, not a UK Act
+    return True                                # regulation / paragraph — leave to nearest
+
 
 def _bare_pinpoint(cue: str, num: str) -> str:
     c = cue.lower().rstrip(".")
@@ -99,10 +117,11 @@ def _attach_carry_forward(text: str, kept: list[Citation]) -> list[Citation]:
         s, e = m.start(), m.end()
         if any(os <= s and e <= oe for os, oe in occupied):
             continue  # already part of a literal citation ("s.5 of the FOIA 2000")
-        prior = [a for a in antecedents if a.char_end <= s]
+        prior = [a for a in antecedents if a.char_end <= s
+                 and _cue_allows(m.group("cue"), a.entity_kind)]
         if not prior:
             continue
-        host = prior[-1]  # nearest preceding named instrument
+        host = prior[-1]  # nearest preceding named instrument of a compatible kind
         out.append(Citation(
             raw=m.group(0), entity_kind=host.entity_kind, candidate_id=host.candidate_id,
             pinpoint=_bare_pinpoint(m.group("cue"), m.group("num")),
