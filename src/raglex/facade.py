@@ -2769,6 +2769,77 @@ class Facade:
         return {"held_titles": len(index), "candidates": len(refs),
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
+    def match_echr_reports(self, *, limit: int = 8000, on_progress=None, cancel_check=None) -> dict:
+        """Link an EHRR citation ("Soering v United Kingdom (1989) 11 EHRR 349") to a held
+        ECtHR case by matching the applicant name + year the citing text puts beside it
+        against the held-case pool — grouping the EHRR (and the case's application number)
+        as alternative reference forms (§5c). The respondent state normalises away via the
+        abbreviation table (UK ⇄ United Kingdom), leaving the applicant as the distinctive
+        token. Returns the still-unmatched names so they can be queued for the ECtHR
+        extractor's HUDOC docname search."""
+        import re as _re
+
+        from .citations.report_match import score_candidate, surnames
+        from .topics.gate import fold
+
+        def _year(d):
+            return int(d[:4]) if d and len(d) >= 4 and d[:4].isdigit() else None
+
+        def _report_year(raw):
+            m = _re.search(r"[\[(](1[6-9]\d{2}|20\d{2})[\])]", raw or "")
+            return int(m.group(1)) if m else None
+
+        def _clean_title(t):
+            return _re.sub(r"^case of\s+", "", (t or "").strip(), flags=_re.IGNORECASE)
+
+        with self._open() as (cat, _rs, _ts):
+            pool = [{"stable_id": r["stable_id"], "title": _clean_title(r["title"]),
+                     "year": _year(r["decision_date"]), "appno": r["appno"]}
+                    for r in cat.echr_pool()]
+            refs = cat.echr_report_refs(limit=limit)
+            aliased = 0
+            missing: list[dict] = []
+            for i, r in enumerate(refs):
+                if cancel_check and cancel_check():
+                    break
+                raw, cand = r["raw"], r["candidate_id"]
+                ry = _report_year(raw)
+                # the case name is carried in the "echr:<name>" candidate the grammar set
+                name = cand[5:] if cand and cand.lower().startswith("echr:") else raw
+                ntok = surnames(name)  # applicant + normalised respondent state
+                if ry is None or len(ntok) < 2:
+                    continue
+                best = second = 0.0
+                pick = None
+                for p in pool:
+                    if p["year"] is None or not (ry - 3 <= p["year"] <= ry + 1):
+                        continue
+                    s = score_candidate(ntok, p["title"], p["year"], ry)
+                    if s > best:
+                        best, second, pick = s, best, p
+                    elif s > second:
+                        second = s
+                if pick and best >= 0.5 and best - second >= 0.08:
+                    # alias the raw AND the echr:<name> candidate to the held case's ECLI,
+                    # and record the application number as another form of reference.
+                    cat.put_alias(fold(raw), pick["stable_id"], source="echr-report", commit=False)
+                    if cand:
+                        cat.put_alias(fold(cand), pick["stable_id"], source="echr-report", commit=False)
+                    if pick["appno"]:
+                        cat.put_alias(fold(pick["appno"]), pick["stable_id"],
+                                      source="echr-report", commit=False)
+                    aliased += 1
+                else:
+                    missing.append({"name": name, "year": ry, "raw": raw})
+                if on_progress and i % 200 == 0:
+                    _progress(on_progress, stage="matching EHRR citations", done=i, total=len(refs))
+            cat.commit()
+            resolved = Resolver(cat).run()
+
+        self._invalidate_caches()
+        return {"ehrr_strings": len(refs), "aliased": aliased, "missing": len(missing),
+                "resolved_edges": resolved.resolved, "missing_refs": missing[:500]}
+
     def mine_parallel_citations(self, *, limit_docs: int | None = None, coref: bool = True,
                                 on_progress=None, cancel_check=None) -> dict:
         """Recover the neutral-citation ↔ law-report map from the corpus text (§5c).
@@ -2784,7 +2855,7 @@ class Facade:
         from collections import defaultdict
 
         from .citations.parallel import (
-            ClusterIndex, Occurrence, adjacency_groups, coref_key, occ_neutral,
+            ClusterIndex, Occurrence, adjacency_groups, coref_key, link_eu_reports, occ_neutral,
         )
         from .citations.report_match import extract_preceding_name
         from .topics.gate import fold
@@ -2792,8 +2863,9 @@ class Facade:
         idx = ClusterIndex()
         adjacency_keys: set[str] = set()
         coref_buckets: dict[tuple, list[str]] = defaultdict(list)
+        eu_report_links: dict[str, str] = {}  # folded ECR string → CJEU case candidate
         st = {"docs": 0, "adjacency_groups": 0, "clusters": 0, "anchored": 0,
-              "pending_clusters": 0, "aliased": 0}
+              "pending_clusters": 0, "aliased": 0, "eu_report_links": 0}
 
         with self._open() as (cat, _rs, ts):
             src_ids = cat.docs_with_citations(min_count=2, limit=limit_docs)
@@ -2827,6 +2899,11 @@ class Facade:
                     for k in keys[1:]:
                         idx.union(keys[0], k)
                     adjacency_keys.update(keys)
+                # EU report rung — an ECR citation following a CJEU case number is that
+                # case's alternative reference form ("Case 25/62 Plaumann v Commission
+                # [1963] ECR 95").
+                for ecr_raw, case_cand in link_eu_reports(text, occs):
+                    eu_report_links[fold(ecr_raw)] = case_cand
                 # Stage C — name+year coreference key per occurrence
                 if coref:
                     for o in occs:
@@ -2872,6 +2949,13 @@ class Facade:
                     source = "parallel:adjacency" if m in adjacency_keys else "parallel:coref"
                     cat.put_alias(m, canonical, source=source, commit=False)
                     st["aliased"] += 1
+
+            # EU report links: alias each ECR string to its CJEU case, chaining one level
+            # through a CELEX→ECLI alias when the case is held under its ECLI.
+            for ecr_key, case_cand in eu_report_links.items():
+                target = cat.get_alias(fold(case_cand)) or case_cand
+                cat.put_alias(ecr_key, target, source="eu-report", commit=False)
+                st["eu_report_links"] += 1
             cat.commit()
             resolved = Resolver(cat).run()
 

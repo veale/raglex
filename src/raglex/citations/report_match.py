@@ -64,14 +64,17 @@ def surnames(text: str | None) -> set[str]:
     Law-report abbreviations are canonicalised first (``normalise_abbrev``) so "A-G" and
     "Attorney General", "Ltd" and "Limited" tokenise to the same token — otherwise the two
     forms of one name share nothing distinctive."""
+    from ..topics.gate import fold
     from .name_variants import normalise_abbrev
 
+    # accent-fold so "Confédération" matches "Confederation" and "Öztürk" matches "Ozturk"
+    # — ECtHR party names in particular carry accents inconsistently across citing texts.
+    folded = fold(normalise_abbrev(text or ""))
     out: set[str] = set()
-    for tok in re.findall(r"[A-Za-z][\w'’\-]+", normalise_abbrev(text or "")):
-        low = tok.lower()
-        if low in _STOPWORDS or len(low) <= 2:
+    for tok in re.findall(r"[a-z][\w'’\-]+", folded):
+        if tok in _STOPWORDS or len(tok) <= 2:
             continue
-        out.add(low)
+        out.add(tok)
     return out
 
 

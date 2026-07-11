@@ -396,6 +396,16 @@ def cmd_match_legislation(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_match_echr(args: argparse.Namespace) -> int:
+    """Link EHRR citations to held ECtHR cases by name+year (§5c)."""
+    from .facade import Facade
+
+    st = Facade(Config.from_env()).match_echr_reports(on_progress=lambda **p: None)
+    print(f"  ehrr_strings={st['ehrr_strings']} aliases minted={st['aliased']} "
+          f"unmatched={st['missing']} resolved_edges={st['resolved_edges']}")
+    return 0
+
+
 def cmd_mine_parallel(args: argparse.Namespace) -> int:
     """Mine parallel (co-referent) citations from judgment text and alias each cluster to
     its held case (§5c)."""
@@ -607,6 +617,9 @@ def build_parser() -> argparse.ArgumentParser:
     ml = sub.add_parser("match-legislation", help="resolve name-only statutes against held legislation titles (§5b)")
     ml.add_argument("--limit", type=int, default=20000, help="consider at most N distinct references")
     ml.set_defaults(func=cmd_match_legislation)
+
+    me = sub.add_parser("match-echr", help="link EHRR citations to held ECtHR cases by name+year (§5c)")
+    me.set_defaults(func=cmd_match_echr)
 
     mp = sub.add_parser("mine-parallel", help="mine parallel citations from text, alias clusters (§5c)")
     mp.add_argument("--limit-docs", type=int, default=None, help="scan at most N documents")

@@ -164,6 +164,73 @@ class ClusterIndex:
         return self._neutral[self._find(key)] if key in self._parent else None
 
 
+# A CJEU case-number citation resolves to a sector-6 CELEX ("61962CJ0016"). An old EU
+# case's *report* is the European Court Reports ("[1962] ECR 471", "[2002] ECR II-3305") —
+# candidate-less on its own, but in the text it follows the case number and name:
+#   "Case 25/62 Plaumann v Commission [1963] ECR 95"
+# so the ECR is an alternative reference for that case. We bind an ECR occurrence to the
+# nearest preceding case-number occurrence within a bounded gap (the case name).
+_CJEU_CELEX = re.compile(r"^6\d{4}[A-Z]{2}\d+")
+_ECR_REPORT = re.compile(r"\bECR\b")
+_EU_REPORT_MAX_GAP = 220  # chars between the case number and its ECR report (≈ the name)
+
+
+def is_cjeu_case_candidate(candidate: str | None) -> bool:
+    return bool(candidate and _CJEU_CELEX.match(candidate))
+
+
+# The gap *between* two case numbers of a joined-cases run is only connectors — "and",
+# commas, "Joined Cases" — never a case name. Used to extend an ECR link back over the
+# whole run ("Joined Cases 83/76 and 94/76, 4/77, 15/77 and 40/77 HNL v Council [1978] ECR
+# 1209" binds the ECR to all five).
+_JOINED_GAP = re.compile(r"^(?:\s|,|and|joined|cases?|&)+$", re.IGNORECASE)
+
+
+def link_eu_reports(text: str, occs: list[Occurrence]) -> list[tuple[str, str]]:
+    """``(report_raw, case_candidate)`` links where a European Court Reports citation
+    follows a CJEU case number within a bounded gap — so the ECR is recorded as an
+    alternative form of reference for that case (§5c).
+
+    Binds each ECR occurrence to the *nearest preceding* case-number occurrence (the gap
+    to it being just the case name — no sentence break), then extends back over any joined
+    -cases run ("… 83/76 and 94/76, 4/77 …") so every joined number gets the ECR as an
+    alternative form."""
+    ordered = sorted((o for o in occs if o.char_start is not None),
+                     key=lambda o: o.char_start)
+    out: list[tuple[str, str]] = []
+    for i, o in enumerate(ordered):
+        if not _ECR_REPORT.search(o.raw):
+            continue
+        anchor = None
+        for j in range(i - 1, -1, -1):
+            prev = ordered[j]
+            gap_chars = o.char_start - prev.char_end
+            if gap_chars > _EU_REPORT_MAX_GAP:
+                break
+            if gap_chars < 0:
+                continue
+            if is_cjeu_case_candidate(prev.candidate):
+                if ". " in text[prev.char_end: o.char_start] or "\n\n" in text[prev.char_end: o.char_start]:
+                    break  # a sentence boundary → not this case's report
+                anchor = j
+                break
+        if anchor is None:
+            continue
+        # collect the joined-cases run ending at the anchor (walk back while the gap
+        # between consecutive case numbers is only joined-case connectors)
+        cands = [ordered[anchor].candidate]
+        k = anchor
+        while k - 1 >= 0 and is_cjeu_case_candidate(ordered[k - 1].candidate):
+            between = text[ordered[k - 1].char_end: ordered[k].char_start].strip()
+            if between and not _JOINED_GAP.match(between):
+                break
+            cands.append(ordered[k - 1].candidate)
+            k -= 1
+        for c in dict.fromkeys(cands):
+            out.append((o.raw, c))
+    return out
+
+
 def coref_key(name: str | None, raw: str) -> tuple[frozenset[str], int] | None:
     """The ``(distinctive-surname-tokens, year)`` key that links a citation across
     judgments on the weaker name+year rung — or None when it's too thin to be safe

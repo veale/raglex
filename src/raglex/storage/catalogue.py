@@ -1348,6 +1348,26 @@ class Catalogue:
             (*like, limit),
         ).fetchall()
 
+    def echr_pool(self) -> list[sqlite3.Row]:
+        """Held ECtHR cases as (stable_id, title, decision_date, appno) — the pool the EHRR
+        matcher scores "Soering v United Kingdom (1989) 11 EHRR 349" against by name+year."""
+        appno = ("meta_json::jsonb ->> 'appno'" if self.backend == "postgres"
+                 else "json_extract(meta_json, '$.appno')")
+        return self.conn.execute(
+            f"SELECT stable_id, title, decision_date, {appno} AS appno FROM documents "
+            "WHERE source = 'echr' AND title IS NOT NULL"
+        ).fetchall()
+
+    def echr_report_refs(self, *, limit: int = 8000) -> list[sqlite3.Row]:
+        """ECtHR-by-name/EHRR citation occurrences (the grammar tags these ``echr_report``
+        with a name-keyed ``echr:<name>`` candidate). The name is in the candidate and the
+        year in the raw, so the EHRR matcher needs no text I/O."""
+        return self.conn.execute(
+            "SELECT DISTINCT raw, candidate_id FROM citations WHERE method = 'echr_report' "
+            "LIMIT ?",
+            (limit,),
+        ).fetchall()
+
     def citing_documents(self, ref: str, *, limit: int = 10) -> list[str]:
         """Which documents cite one hanging reference (for the worklist row's detail)."""
         rows = self.conn.execute(

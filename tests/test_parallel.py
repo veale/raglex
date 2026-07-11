@@ -87,3 +87,18 @@ def test_coref_key_needs_two_tokens_and_a_year():
     assert coref_key("Pepper v Hart", "[1993] AC 593") == (frozenset({"pepper", "hart"}), 1993)
     assert coref_key("Brown", "[1993] AC 593") is None       # one distinctive token
     assert coref_key("Pepper v Hart", "AC 593") is None      # no year
+
+
+def test_link_eu_reports_binds_ecr_to_case_number():
+    from raglex.citations.parallel import link_eu_reports
+    text = ("Case T-13/99 Pfizer Animal Health v Council [2002] ECR II-3305, para 84; "
+            "and Case 25/62 Plaumann v Commission [1963] ECR 95 applied.")
+    occs = [
+        Occurrence("Case T-13/99", text.index("Case T-13/99"), text.index("Case T-13/99")+12, candidate="61999TJ0013"),
+        Occurrence("[2002] ECR II-3305", text.index("[2002] ECR II-3305"), text.index("[2002] ECR II-3305")+18, candidate=None),
+        Occurrence("Case 25/62", text.index("Case 25/62"), text.index("Case 25/62")+10, candidate="61962CJ0025"),
+        Occurrence("[1963] ECR 95", text.index("[1963] ECR 95"), text.index("[1963] ECR 95")+13, candidate=None),
+    ]
+    links = dict(link_eu_reports(text, occs))
+    assert links["[2002] ECR II-3305"] == "61999TJ0013"
+    assert links["[1963] ECR 95"] == "61962CJ0025"
