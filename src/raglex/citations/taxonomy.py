@@ -138,12 +138,23 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         sub, label = _leg_subtype(prefix)
         return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"], sub, label,
                    {"source": "uk-legislation", "id_prefix": prefix})
-    if source == "uk-caselaw":
+    # The House of Lords scraper (uk-hol) shares the UK case-law taxonomy: its ukhl/YYYY/N
+    # (and pre-2001 hol/ surrogate) cases belong under the same "House of Lords" sub-type as
+    # the pending "[YYYY] UKHL N" citations, so held + pending line up in one row.
+    if source in ("uk-caselaw", "uk-hol"):
         tok = (court or prefix or "").upper()
         known = KNOWN_COURTS.get(tok)
+        # opaque Find Case Law identifiers (tna.5mz…, d-uuid) aren't a court token — they'd
+        # otherwise each show as their own junk sub-type row; bucket them as uncategorised.
+        if not known and (tok.startswith(("TNA.", "D-")) or not tok.replace("/", "").isalpha()
+                          or len(tok) > 8):
+            return Tax("uk-caselaw", CATEGORY_LABELS["uk-caselaw"], "other",
+                       "Other / uncategorised", {"source": source})
+        # a court sub-type filters by court token (not source), so the list shows the court's
+        # cases whether they came from Find Case Law or the House of Lords scrape.
         return Tax("uk-caselaw", CATEGORY_LABELS["uk-caselaw"], tok.lower() or "other",
                    known.name if known else (tok or "Other court"),
-                   {"source": "uk-caselaw", "court": (court or prefix or "")})
+                   {"court": (court or prefix or "")})
     if source == "eu-cellar":
         sub, label = _eu_case_subtype(doc_type, court, stable_id)
         filt = {"source": "eu-cellar"}
