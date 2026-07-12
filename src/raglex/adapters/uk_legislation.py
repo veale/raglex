@@ -49,19 +49,24 @@ class UKLegislationAdapter(BaseAdapter):
     requires_proxy = False
 
     def __init__(self, *, ids: str | tuple[str, ...] | None = None,
-                 version_date: str | None = None, client: RateLimitedClient | None = None) -> None:
+                 version_date: str | None = None, client: RateLimitedClient | None = None,
+                 patient: bool = False) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
         self.ids = tuple(ids) if ids else DEFAULT_IDS
         # point-in-time: fetch the law as it stood at this date (YYYY-MM-DD), so a
         # citation from an old case sees the live provisions, not today's repealed text.
         self.version_date = version_date
-        # Fail FAST: a few very large Acts (e.g. FSMA 2000) make legislation.gov.uk hang
-        # generating /data.akn. With the default 5×30s retries one such Act blocks a bulk
-        # harvest for minutes — so cap retries/timeout; a hang gives up in ~30s and the
-        # caller records it as a miss and moves on.
+        # Fail FAST by default: a few very large Acts (e.g. FSMA 2000) make
+        # legislation.gov.uk take minutes generating /data.akn. With the default 5×30s
+        # retries one such Act blocks a bulk harvest — so cap retries/timeout; a hang
+        # gives up in ~30s and the caller records it as a miss and moves on.
+        # ``patient`` (the SINGLE-item harvest path) is the opposite trade: the user
+        # asked for exactly this Act, and the biggest Acts are precisely the ones the
+        # fast path can never fetch — wait for the render instead of failing forever.
         self._client = client or RateLimitedClient(
-            self.source, min_interval=self.min_interval, max_retries=1, timeout=25)
+            self.source, min_interval=self.min_interval,
+            max_retries=2 if patient else 1, timeout=180 if patient else 25)
 
     def changes_affecting(self, stable_id: str, *, max_pages: int = 20) -> list:
         """The affecting-side "Changes to Legislation" feed for an act: every change it

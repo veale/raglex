@@ -301,3 +301,34 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 CREATE INDEX IF NOT EXISTS embeddings_family_idx ON embeddings (provider, model, model_version);
 CREATE INDEX IF NOT EXISTS embeddings_tsv_idx ON embeddings USING GIN (tsv);
+
+-- Human-confirmable resolution suggestions ("Possibly: …?" tick/cross): sub-threshold or
+-- ambiguous matches the automatic matchers refuse, surfaced for a person to decide.
+CREATE TABLE IF NOT EXISTS match_suggestions (
+    ref            TEXT NOT NULL,
+    suggested_id   TEXT NOT NULL,
+    kind           TEXT NOT NULL,
+    reason         TEXT,
+    extracted_parties TEXT,
+    context        TEXT,
+    held           INTEGER NOT NULL DEFAULT 1,
+    score          REAL,
+    status         TEXT NOT NULL DEFAULT 'pending',
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (ref, suggested_id)
+);
+CREATE INDEX IF NOT EXISTS match_suggestions_status_idx ON match_suggestions (status);
+
+-- Reader passages flagged "for improved refinement" — location, selection, what it links
+-- to now, and what the user says it should do; reviewed later to improve linking logic.
+CREATE TABLE IF NOT EXISTS refinement_flags (
+    flag_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    doc_id         TEXT NOT NULL,
+    anchor         TEXT,
+    selected_text  TEXT NOT NULL,
+    context        TEXT,
+    current_links  TEXT,
+    note           TEXT,
+    status         TEXT NOT NULL DEFAULT 'open',
+    created_at     TEXT NOT NULL
+);

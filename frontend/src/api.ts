@@ -97,6 +97,13 @@ export const api = {
   harvestAllReferences: (limit = 25, min_citing = 1) =>
     req<any>("/unresolved/harvest-all", { method: "POST", body: JSON.stringify({ limit, min_citing }) }),
   retryFailed: () => req<any>("/unresolved/retry-failed", { method: "POST" }),
+  decideSuggestion: (ref: string, suggested_id: string, accept: boolean) =>
+    req<any>("/suggestions/decide", { method: "POST", body: JSON.stringify({ ref, suggested_id, accept }) }),
+  flagRefinement: (body: Record<string, unknown>) =>
+    req<any>("/refinement-flags", { method: "POST", body: JSON.stringify(body) }),
+  refinementFlags: (status = "open") => req<any[]>(`/refinement-flags?status=${encodeURIComponent(status)}`),
+  setRefinementFlag: (id: number, status = "resolved") =>
+    req<any>(`/refinement-flags/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
   unfetchable: (limit = 200) => req<any>(`/unresolved/unfetchable?limit=${limit}`),
   harvestHoL: () => req<any>("/jobs/harvest-hol", { method: "POST", body: "{}" }),
   radiate: (body: Record<string, unknown>) =>
@@ -120,7 +127,7 @@ export const api = {
     req<any>("/legislation/version", { method: "POST", body: JSON.stringify({ id, date }) }),
   detectCitations: (text: string) =>
     req<any>("/detect-citations", { method: "POST", body: JSON.stringify({ text }) }),
-  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr", body: Record<string, unknown>) =>
+  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr" | "suggest-matches", body: Record<string, unknown>) =>
     req<{ job_id: string; error?: string; already_running?: boolean }>(`/jobs/${kind}`, { method: "POST", body: JSON.stringify(body) }),
   jobStatus: (id: string) => req<any>(`/jobs/${id}`),
   jobsList: () => req<any[]>("/jobs"),

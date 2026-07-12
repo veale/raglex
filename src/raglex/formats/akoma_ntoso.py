@@ -77,7 +77,15 @@ def _title(root: ET.Element) -> str | None:
 
 def _relations(root: ET.Element) -> list[TypedRelation]:
     """External citations only (cross-Act / EU / case refs); internal section
-    cross-references (`#section-5`) are dropped as noise. Deduped."""
+    cross-references (`#section-5`) are dropped as noise. Deduped.
+
+    An href is only worth an edge when a candidate id can be derived from it
+    (a legislation.gov.uk path, a caselaw URI, a CELEX inside an eur-lex URL).
+    Underivable footnote links — the National Archives eu-exit webarchive wrappers
+    around uriserv:OJ.… references especially — minted tens of thousands of
+    permanently-unresolvable pending edges that buried the manual worklist."""
+    from ..resolve.matchers import first_candidate
+
     seen: dict[str, None] = {}
     rels: list[TypedRelation] = []
     for e in root.iter():
@@ -90,6 +98,8 @@ def _relations(root: ET.Element) -> list[TypedRelation]:
             continue
         if href in seen:
             continue
+        if first_candidate(href) is None:
+            continue  # no derivable target — a dead footnote link, not a citation
         seen[href] = None
         rels.append(
             TypedRelation(

@@ -253,6 +253,39 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Refresh the snowball's citation-frequency roll-up."""
         return _start_job("rebuild-citation-counts", "rebuild citation frequency roll-up")
 
+    @app.post("/jobs/suggest-matches")
+    def job_suggest_matches_ep(payload: dict = Body(default={})) -> dict:
+        """Populate the human-confirmable "Possibly: …?" match suggestions (nested/year-slip
+        legislation titles, party-name report matches, sub-threshold EHRR names)."""
+        return _start_job("suggest-matches", "suggest matches for hanging references",
+                          payload or {})
+
+    @app.post("/suggestions/decide")
+    def decide_suggestion_ep(payload: dict = Body(...)) -> dict:
+        """Tick (accept) or cross (reject) a suggestion. Accept aliases + resolves, and
+        harvests the target if it isn't held yet."""
+        return facade.decide_suggestion(
+            ref=payload["ref"], suggested_id=payload["suggested_id"],
+            accept=bool(payload.get("accept", True)))
+
+    @app.post("/refinement-flags")
+    def add_refinement_flag_ep(payload: dict = Body(...)) -> dict:
+        """Record a reader passage flagged 'for improved refinement' — the selection, its
+        location, what it currently links to, and the user's note."""
+        return facade.flag_refinement(
+            doc_id=payload["doc_id"], selected_text=payload["selected_text"],
+            anchor=payload.get("anchor"), context=payload.get("context"),
+            current_links=payload.get("current_links"), note=payload.get("note"))
+
+    @app.get("/refinement-flags")
+    def list_refinement_flags_ep(status: str | None = "open", limit: int = 500) -> list[dict]:
+        return facade.list_refinement_flags(status=status or None, limit=limit)
+
+    @app.post("/refinement-flags/{flag_id}/status")
+    def set_refinement_flag_ep(flag_id: int, payload: dict = Body(default={})) -> dict:
+        return facade.resolve_refinement_flag(
+            flag_id=flag_id, status=(payload or {}).get("status", "resolved"))
+
     @app.post("/unresolved/retry-failed")
     def retry_failed_ep() -> dict:
         """Clear the harvest cool-down lists so the next drain re-attempts every reference."""

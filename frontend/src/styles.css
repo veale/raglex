@@ -433,6 +433,17 @@ tbody tr:hover { background: var(--surface-2); }
 .ac-opt:last-child { border-bottom: 0; }
 .ac-opt.hi { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 
+/* --- "Possibly: …?" match suggestions -------------------------------------- */
+.suggestion { font-size: .8125rem; padding: var(--sp-2) var(--sp-3); margin: 2px 0;
+  border-left: 2px solid var(--note); background: color-mix(in srgb, var(--note) 6%, transparent); }
+.sug-label { color: var(--note); font-weight: 600; }
+.suggestion button.sug-yes { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+.suggestion button.sug-yes:hover { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.suggestion button.sug-no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.suggestion button.sug-no:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.also-cited { font-size: .8125rem; margin: 0 0 var(--sp-2); }
+.also-cited b { font-weight: 500; color: var(--text); }
+
 /* --- Maintain: capability chips + gap status ------------------------------- */
 .cap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .cap-chip { font-size: .7rem; padding: 1px var(--sp-3); border: 1px solid var(--line);

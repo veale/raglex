@@ -147,7 +147,12 @@ def _is_junk_ref(ref: str) -> bool:
     if not ref or len(ref) < 3:
         return True
     low = ref.lower()
-    return ref.startswith("#") or low.startswith(("javascript:", "mailto:", "tel:"))
+    if ref.startswith("#") or low.startswith(("javascript:", "mailto:", "tel:")):
+        return True
+    # A candidate-less bare URL as the group key means no candidate could be derived
+    # from it (a derivable URL's group key is its candidate). Nothing a human can do
+    # with it either — legacy eu-exit webarchive footnote links alone were ~10k rows.
+    return low.startswith(("http://", "https://"))
 
 
 class _SingleStubAdapter:
@@ -169,10 +174,10 @@ class _SingleStubAdapter:
         return self._base.fetch(stub)
 
 
-def _targeted_uk_legislation(candidate: str):
+def _targeted_uk_legislation(candidate: str, patient: bool = False):
     from .adapters.registry import get_adapter
 
-    return get_adapter("uk-legislation", ids=candidate)
+    return get_adapter("uk-legislation", ids=candidate, patient=patient)
 
 
 def _targeted_eu_legislation(candidate: str):
@@ -444,9 +449,31 @@ class Facade:
                     statute_cited.add(key)
                 elif ek:
                     cases_cited.add(key)
+            # "Also cited as" — the report citations / application numbers aliased to this
+            # document (parallel mining, report matching, user confirmations). Human-citable
+            # forms only: a bracketed-year report or an ECHR appno; machine ids stay hidden.
+            import re as _recite
+            also_cited: list[str] = []
+            own = {stable_id.casefold(), (doc["ecli"] or "").casefold()}
+            for a in cat.aliases_to([stable_id, doc["ecli"]]):
+                al = a["alias"]
+                if al.casefold() in own or not _recite.search(
+                        r"[\[(](?:1[6-9]|20)\d{2}[\])]|^\d{1,5}/\d{2}$", al):
+                    continue
+                # aliases are stored folded — restore the series' canonical casing for display
+                from .citations.reporters import report_series
+                series = report_series(al)
+                disp = al
+                if series:
+                    disp = _recite.sub(_recite.escape(series), series, al, flags=_recite.IGNORECASE)
+                elif _recite.fullmatch(r"\d{1,5}/\d{2}", al):
+                    disp = f"app no {al}"
+                if disp not in also_cited:
+                    also_cited.append(disp)
             return {
                 "document": dict(doc),
                 "oscola": _oscola_cite(doc, meta),  # this document's own OSCOLA citation
+                "also_cited_as": also_cited[:10],
                 "meta": meta,
                 "cases_cited_count": len(cases_cited),
                 "statute_cited_count": len(statute_cited),
@@ -929,6 +956,9 @@ class Facade:
                 })
             rows.sort(key=lambda r: (r["citing_count"], r["confidence"] == "low"), reverse=True)
             out = rows if limit is None else rows[:limit]
+            sugg = cat.suggestions_for([r["ref"] for r in out])
+            for r in out:
+                r["suggestions"] = sugg.get(r["ref"], [])
             if with_citing:
                 citing = cat.citing_documents_for([r["ref"] for r in out])
                 for r in out:
@@ -988,8 +1018,10 @@ class Facade:
             out = rows[:limit]
             refs = [r["ref"] for r in out]
             citing = cat.citing_documents_for(refs) if refs else {}
+            sugg = cat.suggestions_for(refs) if refs else {}
         for r in out:
             r["citing_documents"] = citing.get(r["ref"], [])
+            r["suggestions"] = sugg.get(r["ref"], [])
         return {"total": len(rows), "references": out}
 
     # -- Corpus Map: held-vs-pending by category & sub-type (§8) ------------
@@ -1775,7 +1807,8 @@ class Facade:
             real = cat.find_document_id(cand) or cand
             extract_document(cat, ts, real)
 
-    def _fetch_reference(self, cat, rs, ts, *, ref: str, candidate: str | None):
+    def _fetch_reference(self, cat, rs, ts, *, ref: str, candidate: str | None,
+                         patient: bool = False):
         """Fetch one routable reference's exact item into the corpus (no resolve).
         Returns what happened; the caller resolves. Shared by the single- and
         all-reference harvest paths.
@@ -1802,7 +1835,9 @@ class Facade:
                              f"use upload / scrape / link instead",
                     "candidate": cand, "outcome": "no_adapter"}
         try:
-            adapter = builder(cand)
+            # only the uk-legislation builder understands patience (giant-Act renders)
+            adapter = builder(cand, patient=True) if patient and adapter_key == "uk-legislation" \
+                else builder(cand)
         except Exception as exc:  # noqa: BLE001 — a builder may hit the network (CELLAR probe)
             return {"error": f"could not reach {adapter_key} to build a fetch for {cand!r}: {exc}",
                     "candidate": cand, "outcome": "transient"}
@@ -2338,7 +2373,9 @@ class Facade:
         rather than making the user upload or scrape what the system already knows
         how to fetch."""
         with self._open() as (cat, rs, ts):
-            res = self._fetch_reference(cat, rs, ts, ref=ref, candidate=candidate)
+            # patient: the user asked for exactly this item — wait out a giant-Act render
+            # rather than fast-failing like the bulk drain does
+            res = self._fetch_reference(cat, rs, ts, ref=ref, candidate=candidate, patient=True)
             if "error" in res:
                 return {"ref": ref, **res}
             # extract only the newly-fetched doc (NOT the whole 20k-doc corpus), then
@@ -3298,6 +3335,270 @@ class Facade:
         self._invalidate_caches()
         return {"ehrr_strings": len(refs), "aliased": aliased, "missing": len(missing),
                 "resolved_edges": resolved.resolved, "missing_refs": missing[:500]}
+
+    def suggest_matches(self, *, report_limit: int = 8000, statute_limit: int = 20000,
+                        max_report_refs: int = 1500, on_progress=None, cancel_check=None) -> dict:
+        """Populate the human-confirmable "Possibly: …?" suggestions (§5b).
+
+        The automatic matchers act only on confident, unambiguous matches; everything
+        sub-threshold used to be silently dropped and sat in the worklist forever. This
+        pass keeps the near-misses as *suggestions* a person confirms with one click:
+
+        - **legislation-nested**: the cited title is the tail of a real act's title in the
+          same year — a judge's shorthand ("Harassment Act 1997" for the Protection from
+          Harassment Act 1997). Candidates come from held legislation AND the offline
+          gazetteer (a gazetteer hit is fetchable — accepting it harvests the act).
+        - **legislation-year**: same title, year off by one (report/assent-year slips).
+        - **case-name**: a report citation ("[1998] AC 1") whose auto-extracted party
+          names score against a held judgment in the reporting-lag year window, but not
+          confidently enough to auto-alias. The extracted parties are stored for audit;
+          the held case's id/neutral citation is shown so the human can verify.
+        - **echr-name**: the EHRR matcher's sub-threshold candidates, likewise.
+
+        Confident matches found on the way (e.g. after the duplicate-holdings tie-break)
+        are aliased directly, exactly as the automatic passes would."""
+        import re as _re
+
+        from .citations.report_match import (
+            extract_name_candidates, match_report, score_candidate, surnames,
+        )
+        from .citations.statute_gazetteer import _index as _gz_index, reference_key, normalise_title
+        from .topics.gate import fold
+
+        st = {"statute": 0, "report": 0, "echr": 0, "auto_aliased": 0}
+
+        def _cancelled() -> bool:
+            return bool(cancel_check and cancel_check())
+
+        def _year(d):
+            return int(d[:4]) if d and len(d) >= 4 and d[:4].isdigit() else None
+
+        def _report_year(raw):
+            m = _re.search(r"[\[(](1[6-9]\d{2}|20\d{2})[\])]", raw or "")
+            return int(m.group(1)) if m else None
+
+        with self._open() as (cat, _rs, ts):
+            # ---- legislation: nested titles + year slips -----------------------
+            entries: list[tuple[tuple[str, ...], str, str, bool]] = []  # (tokens, sid, title, held)
+            seen_sids: set[str] = set()
+            for r in cat.held_legislation_titles():
+                key = normalise_title(r["title"])
+                if key:
+                    entries.append((tuple(key.split()), r["stable_id"], r["title"], True))
+                    seen_sids.add(r["stable_id"])
+            for (t, y), sid in _gz_index().items():
+                if y and sid and sid not in seen_sids:
+                    entries.append((tuple(f"{t} {y}".split()), sid, f"{t.title()} {y}", False))
+            exact: dict[tuple[str, ...], list] = {}
+            by_year: dict[str, list] = {}
+            for e in entries:
+                exact.setdefault(e[0], []).append(e)
+                if e[0] and e[0][-1].isdigit():
+                    by_year.setdefault(e[0][-1], []).append(e)
+
+            refs = cat.pending_statute_refs(limit=statute_limit)
+            for i, row in enumerate(refs):
+                if _cancelled():
+                    break
+                raw = row["raw"]
+                key = tuple(reference_key(raw).split())
+                if len(key) < 3 or not key[-1].isdigit() or key in exact:
+                    continue  # too thin, or the exact matcher's territory
+                # keyed by the raw string — exactly how the worklist groups candidate-less rows
+                ref_key = raw
+                year, base = key[-1], key[:-1]
+                # year slip: identical title, ±1 year, unambiguous
+                for y2 in (str(int(year) - 1), str(int(year) + 1)):
+                    hits = exact.get(base + (y2,), [])
+                    if len(hits) == 1:
+                        _t, sid, title, held = hits[0]
+                        if cat.put_suggestion(ref_key, sid, kind="legislation-year",
+                                              reason=f"same title; the act is {y2}, cited as {year}",
+                                              context=title, held=held, score=0.6, commit=False):
+                            st["statute"] += 1
+                # nested: cited name is the TAIL of a longer real title, same year
+                if len(base) >= 2:
+                    nested = [e for e in by_year.get(year, [])
+                              if len(e[0]) > len(key) and e[0][-len(key):] == key]
+                    if len(nested) > 2:
+                        nested = []  # three+ acts end the same way — too ambiguous to ask
+                    for toks, sid, title, held in nested:
+                        score = round(len(key) / len(toks), 2)
+                        if cat.put_suggestion(ref_key, sid, kind="legislation-nested",
+                                              reason=f"cited name is the tail of “{title}”",
+                                              context=title, held=held, score=score, commit=False):
+                            st["statute"] += 1
+                if on_progress and i % 1000 == 0:
+                    _progress(on_progress, stage="suggesting legislation", done=i, total=len(refs))
+            cat.commit()
+
+            # ---- report citations: extracted parties vs held judgments --------
+            pool = [{"stable_id": r["stable_id"], "title": r["title"],
+                     "year": _year(r["decision_date"])} for r in cat.judgment_pool()]
+            pool_by_year: dict[int, list] = {}
+            for p in pool:
+                if p["year"] is not None:
+                    pool_by_year.setdefault(p["year"], []).append(p)
+
+            from collections import defaultdict
+            by_raw: dict[str, list[tuple[str, int]]] = defaultdict(list)
+            for c in cat.report_citation_contexts(limit=report_limit):
+                if c["char_start"] is not None:
+                    by_raw[c["raw"]].append((c["src_id"], c["char_start"]))
+            raws = sorted(by_raw, key=lambda r: -len(by_raw[r]))[:max_report_refs]
+
+            text_cache: dict[str, str | None] = {}
+
+            def _text(sid: str) -> str | None:
+                if sid not in text_cache:
+                    doc = cat.get_document(sid)
+                    ph = doc["payload_hash"] if doc else None
+                    try:
+                        text_cache[sid] = ts.get(ph) if ph else None
+                    except OSError:
+                        text_cache[sid] = None
+                return text_cache[sid]
+
+            for i, raw in enumerate(raws):
+                if _cancelled():
+                    break
+                if on_progress and i % 100 == 0:
+                    _progress(on_progress, stage="suggesting report matches", done=i, total=len(raws))
+                ref_key = raw  # the worklist's group key for candidate-less rows
+                if cat.get_alias(fold(raw)):
+                    continue
+                ry = _report_year(raw)
+                if ry is None:
+                    continue
+                names: list[str] = []
+                for src_id, start in by_raw[raw][:4]:
+                    txt = _text(src_id)
+                    if txt:
+                        for nm in extract_name_candidates(txt[max(0, start - 220): start]):
+                            if nm not in names:
+                                names.append(nm)
+                if not names:
+                    continue
+                window = [p for y in (ry - 2, ry - 1, ry, ry + 1) for p in pool_by_year.get(y, [])]
+                # a confident, unambiguous match found here is acted on, not just suggested
+                hit = match_report(raw, names[0], window, confirm_text=False)
+                if hit:
+                    stable, _score, kind = hit
+                    cat.put_alias(ref_key, stable,
+                                  source="report-match" if kind == "exact" else f"report-match:{kind}",
+                                  commit=False)
+                    st["auto_aliased"] += 1
+                    continue
+                # sub-threshold: score full names AND each side's tokens alone
+                variants: list[set] = []
+                for nm in names[:3]:
+                    full = surnames(nm)
+                    if full and full not in variants:
+                        variants.append(full)
+                    parts = _re.split(r"\s+v\.?\s+", nm, maxsplit=1)
+                    if len(parts) == 2:
+                        for side in parts:
+                            s = surnames(side)
+                            if s and s not in variants:
+                                variants.append(s)
+                scored: list[tuple[float, dict]] = []
+                for p in window:
+                    s = max((score_candidate(v, p["title"] or "", p["year"], ry)
+                             for v in variants), default=0.0)
+                    if s >= 0.3:
+                        scored.append((s, p))
+                scored.sort(key=lambda t: -t[0])
+                parties = "; ".join(names[:3])
+                for s, p in scored[:2]:
+                    if cat.put_suggestion(ref_key, p["stable_id"], kind="case-name",
+                                          reason=f"party match “{names[0]}” near {raw}",
+                                          extracted_parties=parties,
+                                          context=f"{p['title']} · {p['stable_id']}",
+                                          held=True, score=s, commit=False):
+                        st["report"] += 1
+            cat.commit()
+
+            # ---- EHRR / ECtHR names: the matcher's sub-threshold band ---------
+            epool = [{"stable_id": r["stable_id"],
+                      "title": _re.sub(r"^case of\s+", "", (r["title"] or "").strip(), flags=_re.IGNORECASE),
+                      "year": _year(r["decision_date"]), "appno": r["appno"]}
+                     for r in cat.echr_pool()]
+            for i, r in enumerate(cat.echr_report_refs(limit=report_limit)):
+                if _cancelled():
+                    break
+                raw, cand = r["raw"], r["candidate_id"]
+                # keyed exactly as the worklist keys the row (candidate_id, unfolded),
+                # so the suggestion attaches to the row the user is looking at
+                ref_key = cand if cand else fold(raw)
+                if cat.get_alias(fold(ref_key)):
+                    continue
+                ry = _report_year(raw)
+                name = cand[5:] if cand and cand.lower().startswith("echr:") else raw
+                ntok = surnames(name)
+                if ry is None or not ntok:
+                    continue
+                scored = []
+                for p in epool:
+                    if p["year"] is None or not (ry - 3 <= p["year"] <= ry + 1):
+                        continue
+                    s = score_candidate(ntok, p["title"], p["year"], ry)
+                    if s >= 0.3:
+                        scored.append((s, p))
+                scored.sort(key=lambda t: -t[0])
+                # the confident unambiguous ones are match_echr_reports' job — suggest the rest
+                if scored and not (scored[0][0] >= 0.5 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.08)):
+                    for s, p in scored[:2]:
+                        ctx = f"{p['title']}" + (f" · app no {p['appno']}" if p["appno"] else "")
+                        if cat.put_suggestion(ref_key, p["stable_id"], kind="echr-name",
+                                              reason=f"name match “{name}” · EHRR {ry}",
+                                              extracted_parties=name, context=ctx,
+                                              held=True, score=s, commit=False):
+                            st["echr"] += 1
+                if on_progress and i % 500 == 0:
+                    _progress(on_progress, stage="suggesting ECHR matches", done=i)
+            cat.commit()
+            resolved = Resolver(cat).run()
+            pending = cat.count_pending_suggestions()
+
+        self._invalidate_caches()
+        return {**st, "resolved_edges": resolved.resolved, "pending_suggestions": pending}
+
+    def decide_suggestion(self, *, ref: str, suggested_id: str, accept: bool) -> dict:
+        """Apply a human's tick/cross on a suggestion. Accept mints the alias (so every
+        sibling citation resolves), harvests the target if it isn't held yet (a gazetteer
+        suggestion), and resolves. Reject just records the decision so the suggester
+        never re-asks."""
+        from .topics.gate import fold
+
+        with self._open() as (cat, rs, ts):
+            n = cat.set_suggestion_status(ref, suggested_id, "accepted" if accept else "rejected")
+            out: dict = {"updated": n, "accepted": accept}
+            if accept:
+                cat.put_alias(fold(ref), suggested_id, source="user-confirm")
+                if cat.find_document_id(suggested_id) is None:
+                    out["harvest"] = self._fetch_reference(
+                        cat, rs, ts, ref=suggested_id, candidate=suggested_id, patient=True)
+                resolved = Resolver(cat).run()
+                out["resolved_edges"] = resolved.resolved
+        self._invalidate_caches()
+        return out
+
+    # -- refinement flags (reader passages flagged for linking-logic review) --
+    def flag_refinement(self, *, doc_id: str, selected_text: str, anchor: str | None = None,
+                        context: str | None = None, current_links: str | None = None,
+                        note: str | None = None) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            cat.add_refinement_flag(doc_id=doc_id, selected_text=selected_text, anchor=anchor,
+                                    context=context, current_links=current_links, note=note)
+        return {"flagged": True}
+
+    def list_refinement_flags(self, *, status: str | None = "open", limit: int = 500) -> list[dict]:
+        with self._open() as (cat, _rs, _ts):
+            return [dict(r) for r in cat.refinement_flags(status=status, limit=limit)]
+
+    def resolve_refinement_flag(self, *, flag_id: int, status: str = "resolved") -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return {"updated": cat.set_refinement_flag(flag_id, status)}
 
     def mine_parallel_citations(self, *, limit_docs: int | None = None, coref: bool = True,
                                 on_progress=None, cancel_check=None) -> dict:

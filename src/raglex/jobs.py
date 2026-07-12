@@ -38,6 +38,7 @@ SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys",
     "rebuild-citation-counts", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
+    "suggest-matches",
 })
 MAX_CONCURRENT_JOBS = 6
 # Keyed jobs deduped by (kind, params): don't start an identical one while it's in flight.
@@ -107,6 +108,7 @@ RUNNERS: dict[str, Callable] = {
     "match-legislation": lambda f, p, cb, cancel: f.match_named_legislation(**p, on_progress=cb, cancel_check=cancel),
     "match-echr": lambda f, p, cb, cancel: f.match_echr_reports(**p, on_progress=cb, cancel_check=cancel),
     "rescan": lambda f, p, cb, cancel: f.rescan(**p, on_progress=cb, cancel_check=cancel),
+    "suggest-matches": lambda f, p, cb, cancel: f.suggest_matches(**p, on_progress=cb, cancel_check=cancel),
     "harvest-echr": lambda f, p, cb, cancel: f.harvest_missing_echr(**p, on_progress=cb, cancel_check=cancel),
     "run-watch": lambda f, p, cb, cancel: f.run_watch(watch_id=p["watch_id"], on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),

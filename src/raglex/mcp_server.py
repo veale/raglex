@@ -85,6 +85,24 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.worklist(limit=limit)
 
     @mcp.tool()
+    def refinement_flags(status: str = "open", limit: int = 200) -> list[dict]:
+        """Reader passages the user flagged "for improved refinement" — each with the
+        document, anchor, selected text, what it currently links to, and the user's note.
+        The review queue for improving the linking/refinement logic."""
+        return facade.list_refinement_flags(status=status or None, limit=limit)
+
+    @mcp.tool()
+    def resolve_refinement_flag(flag_id: int, status: str = "resolved") -> dict:
+        """Mark a refinement flag handled after the underlying logic has been improved."""
+        return facade.resolve_refinement_flag(flag_id=flag_id, status=status)
+
+    @mcp.tool()
+    def decide_match_suggestion(ref: str, suggested_id: str, accept: bool = True) -> dict:
+        """Accept (alias + resolve, fetching the target if not held) or reject a
+        'Possibly: …?' match suggestion attached to a hanging reference."""
+        return facade.decide_suggestion(ref=ref, suggested_id=suggested_id, accept=accept)
+
+    @mcp.tool()
     def list_sources() -> list[str]:
         """The registered source adapters that can be harvested."""
         return facade.list_sources()

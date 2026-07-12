@@ -113,8 +113,25 @@ def test_match_report_refuses(raw, name):
 
 
 def test_match_report_refuses_ambiguous_pair():
-    pool = [_Case("a/1", "Brown v Smith", 1998), _Case("a/2", "Brown v Smith", 1998)]
+    # two DIFFERENT cases whose distinctive tokens coincide — a "(No 2)" sequel is not a
+    # duplicate holding, so this stays genuinely ambiguous → refuse
+    pool = [_Case("a/1", "Brown v Smith", 1998), _Case("a/2", "Brown v Smith (No 2)", 1998)]
     assert match_report("[1998] AC 1", "Brown v Smith", pool, confirm_text=False) is None
+
+
+def test_match_report_duplicate_holdings_prefer_neutral_slug():
+    # the SAME case held twice (a HoL scrape + the Find Case Law copy) used to tie every
+    # match to it into ambiguity; now it matches, preferring the neutral-citation id.
+    pool = [
+        _Case("hol/ld199798/invest01",
+              "Investors Compensation Scheme Ltd. v. West Bromwich Building Society and others", 1997),
+        _Case("ukhl/1997/28",
+              "Investors Compensation Scheme v. West Bromwich Building Society and others", 1997),
+    ]
+    hit = match_report("[1998] 1 WLR 896",
+                       "Investors Compensation Scheme Ltd v West Bromwich Building Society",
+                       pool, confirm_text=False)
+    assert hit and hit[0] == "ukhl/1997/28"
 
 
 def test_match_report_tolerates_abbreviation():

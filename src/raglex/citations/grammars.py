@@ -268,6 +268,23 @@ register(Grammar(
 # ``/\d\d`` (not more) cleanly excludes EU instruments cited "No 1/2003" / "No 17/62"; the
 # negative look-behinds drop "Regulation/Directive/Decision No …". Captures the FIRST number
 # of a joined set — enough to resolve the case via HUDOC. → echr adapter.
+# An EU instrument reference immediately before "No <n>/<yy>" — the lookbehinds above
+# can't see past the parenthetical treaty tag ("Regulation (EEC) No 1408/71",
+# "Directive (EU) 2016/680 …"), which minted famous regulations as bogus ECHR appnos
+# (1408/71 was one of the most-cited "applications" in the corpus).
+_EU_INSTRUMENT_BEFORE = re.compile(
+    r"(?:regulation|directive|decision|protocol)s?\s*(?:\([A-Za-z]{2,8}(?:,?\s*[A-Za-z]+)?\)\s*)?$",
+    re.IGNORECASE,
+)
+
+
+def _echr_appno(m: "re.Match[str]") -> Normalised:
+    before = m.string[max(0, m.start() - 40): m.start()]
+    if _EU_INSTRUMENT_BEFORE.search(before):
+        return None, None, DROP  # "…Regulation (EEC) No 1408/71" — an EU instrument, not an appno
+    return m.group("appno"), None, "case"
+
+
 register(Grammar(
     "echr_appno", "case",
     re.compile(
@@ -275,7 +292,7 @@ register(Grammar(
         r"(?:App(?:lication)?s?\.?\s+)?nos?\.?\s*(?P<appno>\d{1,5}/\d{2})(?!\d)",
         re.IGNORECASE,
     ),
-    lambda m: (m.group("appno"), None, "case"),
+    _echr_appno,
 ))
 
 # Bracketless form (Canada / India): "2024 SCC 1", "2023 INSC 456". Tighter to

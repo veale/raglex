@@ -290,6 +290,39 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, started_at);
 
+-- Human-confirmable resolution suggestions ("Possibly: …?" with tick/cross): sub-threshold
+-- or ambiguous matches the automatic matchers refuse, surfaced for a person to decide.
+-- ref is the worklist group key (candidate_id or raw_fold); rejected rows persist so a
+-- re-run never re-suggests what a human already dismissed.
+CREATE TABLE IF NOT EXISTS match_suggestions (
+    ref            TEXT NOT NULL,
+    suggested_id   TEXT NOT NULL,
+    kind           TEXT NOT NULL,          -- case-name | legislation-nested | legislation-year | echr-name
+    reason         TEXT,
+    extracted_parties TEXT,                -- the auto-extracted case-name string(s), for audit
+    context        TEXT,                   -- held title / neutral citation shown beside the tick
+    held           INTEGER NOT NULL DEFAULT 1,  -- 0: gazetteer id not yet harvested
+    score          REAL,
+    status         TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | rejected
+    created_at     TEXT NOT NULL,
+    PRIMARY KEY (ref, suggested_id)
+);
+CREATE INDEX IF NOT EXISTS match_suggestions_status_idx ON match_suggestions (status);
+
+-- Reader passages the user flagged as badly linked/refined ("flag for improved
+-- refinement") — the raw material for a later LLM/engineering pass over linking logic.
+CREATE TABLE IF NOT EXISTS refinement_flags (
+    flag_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id         TEXT NOT NULL,
+    anchor         TEXT,                   -- segment label the selection sits in
+    selected_text  TEXT NOT NULL,
+    context        TEXT,                   -- surrounding sentence(s)
+    current_links  TEXT,                   -- JSON: citations/links overlapping the selection now
+    note           TEXT,                   -- what the user says it SHOULD do
+    status         TEXT NOT NULL DEFAULT 'open',   -- open | resolved
+    created_at     TEXT NOT NULL
+);
+
 -- FTS5 keyword index over chunk text — the lexical half of hybrid search (§6c).
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     chunk_text, doc_id UNINDEXED, chunk_id UNINDEXED, family UNINDEXED
@@ -1483,11 +1516,99 @@ class Catalogue:
         if commit:
             self.conn.commit()
 
+    def aliases_to(self, targets: list[str]) -> list[sqlite3.Row]:
+        """Every alias string pointing at any of ``targets`` (a doc's stable_id/ECLI) —
+        the document's alternative citation forms (report cites, appnos, shorthands)."""
+        targets = [t for t in targets if t]
+        if not targets:
+            return []
+        qs = ",".join("?" * len(targets))
+        return self.conn.execute(
+            f"SELECT alias, source FROM citation_aliases WHERE dst_id IN ({qs}) ORDER BY alias",
+            targets).fetchall()
+
     def get_alias(self, alias: str) -> str | None:
         row = self.conn.execute(
             "SELECT dst_id FROM citation_aliases WHERE alias = ?", (alias,)
         ).fetchone()
         return row["dst_id"] if row else None
+
+    # -- match suggestions (human-confirmable resolution, §5b) ----------------
+    def put_suggestion(self, ref: str, suggested_id: str, *, kind: str, reason: str | None = None,
+                       extracted_parties: str | None = None, context: str | None = None,
+                       held: bool = True, score: float | None = None, commit: bool = True) -> bool:
+        """Upsert a pending suggestion. Never resurrects one a human already accepted or
+        rejected — a re-run of the suggester must not re-ask answered questions."""
+        row = self.conn.execute(
+            "SELECT status FROM match_suggestions WHERE ref = ? AND suggested_id = ?",
+            (ref, suggested_id)).fetchone()
+        if row and row["status"] != "pending":
+            return False
+        self.conn.execute(
+            """
+            INSERT INTO match_suggestions
+                (ref, suggested_id, kind, reason, extracted_parties, context, held, score, status, created_at)
+            VALUES (?,?,?,?,?,?,?,?,'pending',?)
+            ON CONFLICT(ref, suggested_id) DO UPDATE SET
+                kind = excluded.kind, reason = excluded.reason,
+                extracted_parties = excluded.extracted_parties, context = excluded.context,
+                held = excluded.held, score = excluded.score
+            """,
+            (ref, suggested_id, kind, reason, extracted_parties, context,
+             1 if held else 0, score, _now()))
+        if commit:
+            self.conn.commit()
+        return True
+
+    def suggestions_for(self, refs: list[str]) -> dict[str, list[dict]]:
+        """Pending suggestions for a set of worklist refs, best score first."""
+        out: dict[str, list[dict]] = {}
+        if not refs:
+            return out
+        order = "ORDER BY score DESC NULLS LAST" if self.backend == "postgres" else "ORDER BY score DESC"
+        for i in range(0, len(refs), 200):
+            chunk = refs[i: i + 200]
+            qs = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                    f"SELECT * FROM match_suggestions WHERE status = 'pending' AND ref IN ({qs}) {order}",
+                    chunk):
+                out.setdefault(r["ref"], []).append(dict(r))
+        return out
+
+    def set_suggestion_status(self, ref: str, suggested_id: str, status: str) -> int:
+        cur = self.conn.execute(
+            "UPDATE match_suggestions SET status = ? WHERE ref = ? AND suggested_id = ?",
+            (status, ref, suggested_id))
+        self.conn.commit()
+        return cur.rowcount
+
+    def count_pending_suggestions(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM match_suggestions WHERE status = 'pending'").fetchone()["n"]
+
+    # -- refinement flags (reader passages flagged for linking-logic review) --
+    def add_refinement_flag(self, *, doc_id: str, selected_text: str, anchor: str | None = None,
+                            context: str | None = None, current_links: str | None = None,
+                            note: str | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO refinement_flags (doc_id, anchor, selected_text, context, current_links, note, status, created_at) "
+            "VALUES (?,?,?,?,?,?,'open',?)",
+            (doc_id, anchor, selected_text, context, current_links, note, _now()))
+        self.conn.commit()
+
+    def refinement_flags(self, *, status: str | None = "open", limit: int = 500) -> list[sqlite3.Row]:
+        if status:
+            return self.conn.execute(
+                "SELECT * FROM refinement_flags WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (status, limit)).fetchall()
+        return self.conn.execute(
+            "SELECT * FROM refinement_flags ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+
+    def set_refinement_flag(self, flag_id: int, status: str) -> int:
+        cur = self.conn.execute(
+            "UPDATE refinement_flags SET status = ? WHERE flag_id = ?", (status, flag_id))
+        self.conn.commit()
+        return cur.rowcount
 
     def delete_aliases_by_source(self, sources: tuple[str, ...], *, commit: bool = True) -> int:
         """Drop every alias a given minting pass wrote — used by passes that regenerate

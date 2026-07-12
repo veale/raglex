@@ -1083,10 +1083,18 @@ function LinkTargetPicker({ initial, onCreate }:
   );
 }
 
+type SelInfo = {
+  text: string; x: number; y: number;
+  anchor: string | null;           // enclosing segment's label, when the selection is in one
+  context: string;                 // the enclosing segment's text (truncated)
+  links: { text: string; state: string; title: string | null }[];  // citations linked in that segment NOW
+};
+
 function SelectionShorthand({ children, docId }: { children: any; docId?: string }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
-  const [open, setOpen] = useState(false);
+  const [sel, setSel] = useState<SelInfo | null>(null);
+  const [mode, setMode] = useState<"menu" | "link" | "flag">("menu");
+  const [note, setNote] = useState("");
   const [msg, setMsg] = useState("");
   useEffect(() => {
     function onUp(e: MouseEvent) {
@@ -1094,15 +1102,29 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
       const s = window.getSelection();
       const text = s?.toString().trim() || "";
       if (!text || text.length > 140 || !ref.current || !s?.anchorNode || !ref.current.contains(s.anchorNode)) {
-        setSel(null); setOpen(false); return;
+        setSel(null); setMode("menu"); return;
       }
       const rect = s.getRangeAt(0).getBoundingClientRect();
-      setSel({ text, x: rect.left + rect.width / 2, y: rect.bottom });
-      setOpen(false); setMsg("");
+      // capture where the selection sits and what its segment links to right now —
+      // the evidence a "flag for improved refinement" needs to be reviewable later.
+      const node = s.anchorNode instanceof Element ? s.anchorNode : s.anchorNode.parentElement;
+      const seg = node?.closest?.(".seg") as HTMLElement | null;
+      const links = seg ? Array.from(seg.querySelectorAll("a.cite")).map((a) => ({
+        text: a.textContent || "",
+        state: (a.className.match(/cite-(\w+)/) || [])[1] || "",
+        title: a.getAttribute("title"),
+      })) : [];
+      const anchor = seg?.querySelector(".seg-label")?.textContent
+        || seg?.querySelector(".seg-num")?.textContent || null;
+      setSel({ text, x: rect.left + rect.width / 2, y: rect.bottom, anchor,
+               context: (seg?.textContent || "").slice(0, 600), links });
+      setMode("menu"); setMsg(""); setNote("");
     }
     document.addEventListener("mouseup", onUp);
     return () => document.removeEventListener("mouseup", onUp);
   }, []);
+  const dismiss = (delay = 2400) =>
+    setTimeout(() => { setSel(null); setMsg(""); setMode("menu"); window.getSelection()?.removeAllRanges(); }, delay);
   const create = async (id: string, title: string, pinpoint?: string) => {
     if (!sel) return;
     try {
@@ -1113,25 +1135,55 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
       if (pinpoint && docId) {
         try { await api.link(docId, id, "mentions", sel.text.slice(0, 120), pinpoint); } catch { /* non-fatal */ }
       }
-      setMsg(`“${sel.text}” → ${title}${pinpoint ? " · " + pinpoint : ""}`);
+      setMsg(`✓ linked “${sel.text}” → ${title}${pinpoint ? " · " + pinpoint : ""}`);
     } catch (e: any) { setMsg("error: " + e.message); }
-    setOpen(false);
-    setTimeout(() => { setSel(null); setMsg(""); window.getSelection()?.removeAllRanges(); }, 2400);
+    setMode("menu");
+    dismiss();
+  };
+  const flag = async () => {
+    if (!sel || !docId) return;
+    try {
+      await api.flagRefinement({
+        doc_id: docId, selected_text: sel.text, anchor: sel.anchor, context: sel.context,
+        current_links: JSON.stringify(sel.links), note: note.trim() || undefined,
+      });
+      setMsg("✓ flagged for refinement — see Maintain");
+    } catch (e: any) { setMsg("error: " + e.message); }
+    setMode("menu");
+    dismiss();
   };
   return (
     <div ref={ref} style={{ position: "relative" }}>
       {children}
       {sel && <div className="sel-pop" style={{ position: "fixed",
         left: Math.min(Math.max(sel.x, 180), window.innerWidth - 180),
-        top: Math.min(sel.y + 6, window.innerHeight - 150),
+        top: Math.min(sel.y + 6, window.innerHeight - 170),
         transform: "translateX(-50%)" }}>
-        {msg ? <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg.startsWith("error") ? msg : "✓ linked " + msg}</span>
-          : !open ? (
-            <button onClick={() => setOpen(true)}>🔖 Link “{sel.text.length > 28 ? sel.text.slice(0, 28) + "…" : sel.text}” to…</button>
-          ) : (
+        {msg ? <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</span>
+          : mode === "menu" ? (
+            <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+              <button style={{ flex: "0 0 auto" }} onClick={() => setMode("link")}>
+                🔖 Link “{sel.text.length > 24 ? sel.text.slice(0, 24) + "…" : sel.text}” to…</button>
+              <button style={{ flex: "0 0 auto" }} title="Record this passage as badly linked/refined — with its location and what it links to now — for a later pass over the linking logic"
+                onClick={() => setMode("flag")}>⚑ Flag for improved refinement</button>
+            </div>
+          ) : mode === "link" ? (
             <div style={{ minWidth: 320 }}>
               <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>“{sel.text}” links to a case / act (and, optionally, a part of it):</div>
               <LinkTargetPicker initial={sel.text} onCreate={create} />
+            </div>
+          ) : (
+            <div style={{ minWidth: 340 }}>
+              <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
+                Flag “{sel.text.length > 40 ? sel.text.slice(0, 40) + "…" : sel.text}”
+                {sel.anchor ? ` (at ${sel.anchor})` : ""} · {sel.links.length} link(s) in this passage recorded
+              </div>
+              <div className="row" style={{ gap: 6 }}>
+                <input autoFocus value={note} onChange={(e) => setNote(e.target.value)}
+                  placeholder="what should it do instead? (optional)"
+                  onKeyDown={(e) => e.key === "Enter" && flag()} />
+                <button className="primary" style={{ flex: "0 0 auto" }} onClick={flag}>⚑ Flag</button>
+              </div>
             </div>
           )}
       </div>}
@@ -1175,6 +1227,12 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           <a className="summary-stat" title="Distinct statutory material this document cites"
             onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "statute", label: "Statutory material cited" })}>Statutory material cited <b>{doc.statute_cited_count ?? 0}</b></a>
         </div>
+        {(doc.also_cited_as || []).length > 0 && (
+          <p className="also-cited muted" title="Alternative citation forms linked to this document (parallel-citation mining, report matching, your confirmations)">
+            Also cited as {doc.also_cited_as.map((a: string, i: number) =>
+              <Fragment key={i}>{i > 0 && <span className="summary-sep"> · </span>}<b>{a}</b></Fragment>)}
+          </p>
+        )}
         <a className="opts-toggle muted" onClick={() => setShowOpts((v) => !v)}>
           {showOpts ? "▾ Hide options and metadata" : "▸ Expand options and metadata"}</a>
         {showOpts && (
@@ -1814,8 +1872,46 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
       </div>
       <KeepCurrentPanel />
       <GapFillPanel />
+      <RefinementFlagsPanel open={open} />
       <WatchesView />
       <RulesView open={open} />
+    </div>
+  );
+}
+
+// Reader passages flagged "for improved refinement" — the queue of linking mistakes a
+// human noticed, with everything an LLM/engineer needs to reproduce each one: the doc,
+// the passage, what it links to now, and what the user says it should do.
+function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void }) {
+  const [flags, , reload] = useAsync(() => api.refinementFlags("open"), []);
+  if (!flags || flags.length === 0) return null;
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Flagged for refinement <span className="muted">
+        — passages you marked as badly linked, for the next pass over the linking logic</span>
+        <span className="tag" style={{ marginLeft: 8 }}>{flags.length}</span></h3>
+      <table className="grid"><thead><tr><th>where</th><th>passage</th><th>links now</th><th>should</th><th /></tr></thead>
+        <tbody>{flags.map((f: any) => {
+          let links: any[] = [];
+          try { links = JSON.parse(f.current_links || "[]"); } catch { /* legacy */ }
+          return (
+            <tr key={f.flag_id}>
+              <td style={{ whiteSpace: "nowrap" }}>
+                <a onClick={() => open(f.doc_id, f.anchor || undefined)} style={{ cursor: "pointer" }}>{f.doc_id}</a>
+                {f.anchor && <span className="muted"> · {f.anchor}</span>}</td>
+              <td style={{ maxWidth: 320 }}><b>“{f.selected_text}”</b></td>
+              <td className="muted" style={{ fontSize: 12 }}>
+                {links.length === 0 ? "nothing" : links.slice(0, 4).map((l: any, i: number) => (
+                  <span key={i} title={l.title || ""}>{i > 0 && ", "}{l.text} <span className="muted">({l.state})</span></span>
+                ))}{links.length > 4 && ` +${links.length - 4}`}</td>
+              <td className="muted" style={{ fontSize: 12 }}>{f.note || "—"}</td>
+              <td style={{ whiteSpace: "nowrap" }}>
+                <button className="mini" title="mark handled"
+                  onClick={async () => { await api.setRefinementFlag(f.flag_id); reload(); }}>✓ resolve</button></td>
+            </tr>
+          );
+        })}</tbody>
+      </table>
     </div>
   );
 }
@@ -2175,6 +2271,9 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
           </select>}
           <AutoDrain />
           <MissTTL />
+          <button className="mini" style={{ flex: "0 0 auto" }}
+            title="Scan the hanging references for near-misses — truncated act names ('Harassment Act 1997'), year slips, party-name matches against held judgments — and surface each as a 'Possibly: …?' you confirm with one click. Runs in the background."
+            onClick={() => fireJob("suggest-matches", {}, setBulk)}>💡 suggest matches</button>
           {cooling > 0 && <button className="mini" style={{ flex: "0 0 auto" }} onClick={retryFailed}
             title={`${cooling} routable references are cooling off after an earlier failure (${cov?.cooling_off_absent ?? 0} the source said don't exist, ${cov?.cooling_off_retry ?? 0} merely unreachable). Clear the cool-down to retry them all now — do this if a source was simply down.`}>
             ↻ retry {cooling} failed</button>}
@@ -2218,6 +2317,7 @@ function UnfetchablePanel() {
     return () => clearInterval(iv);
   }, [data?._warming]);
   const [upRef, setUpRef] = useState<string | null>(null);
+  const [linkRef, setLinkRef] = useState<string | null>(null);
   const [holMsg, setHolMsg] = useState("");
   const refs: any[] = data?.references || [];
   if (err) return null;
@@ -2257,11 +2357,24 @@ function UnfetchablePanel() {
                   <td style={{ whiteSpace: "nowrap" }}>
                     {r.link?.can_upload && <a style={{ cursor: "pointer" }}
                       onClick={() => setUpRef(upRef === r.ref ? null : r.ref)}>{upRef === r.ref ? "cancel" : "⬆ upload"}</a>}
+                    {" "}
+                    <a style={{ cursor: "pointer" }} title="Link this reference to a document already in the corpus (name autocomplete)"
+                      onClick={() => setLinkRef(linkRef === r.ref ? null : r.ref)}>{linkRef === r.ref ? "cancel" : "⚲ link"}</a>
                   </td>
                 </tr>
+                {(r.suggestions || []).length > 0 && (
+                  <tr><td /><td colSpan={4} style={{ borderBottom: "none", paddingTop: 0 }}>
+                    {r.suggestions.slice(0, 2).map((s: any, i: number) => <SuggestionRow key={i} s={s} onDone={reload} />)}
+                  </td></tr>
+                )}
                 {upRef === r.ref && (
                   <tr><td colSpan={5}>
                     <UnfetchableUpload r={r} onDone={() => { setUpRef(null); reload(); }} />
+                  </td></tr>
+                )}
+                {linkRef === r.ref && (
+                  <tr><td colSpan={5}>
+                    <LinkExisting refKey={r.ref} onDone={() => { setLinkRef(null); reload(); }} />
                   </td></tr>
                 )}
               </Fragment>
@@ -2307,6 +2420,61 @@ function UnfetchableUpload({ r, onDone }: { r: any; onDone: () => void }) {
 // A quiet info glyph carrying a tooltip (Swiss restraint — explanation on demand, no chrome).
 function Info({ t }: { t: string }) {
   return <span className="info" title={t} role="img" aria-label="info">ⓘ</span>;
+}
+
+// One "Possibly: …?" match suggestion with tick/cross. Accepting links every citation of
+// the reference to the suggested document (and fetches it first if it isn't held yet);
+// rejecting records the decision so it's never suggested again.
+function SuggestionRow({ s, onDone }: { s: any; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const decide = async (accept: boolean) => {
+    setBusy(true); setMsg(accept ? "linking…" : "");
+    try {
+      const r = await api.decideSuggestion(s.ref, s.suggested_id, accept);
+      if (accept) {
+        setMsg(`✓ linked${r.resolved_edges ? ` · resolved ${r.resolved_edges} edge(s)` : ""}` +
+          (r.harvest ? (r.harvest.stored ? " · fetched" : r.harvest.error ? ` · fetch failed: ${r.harvest.error}` : "") : ""));
+      }
+      setTimeout(onDone, accept ? 1100 : 150);
+    } catch (e: any) { setMsg("error: " + e); setBusy(false); }
+  };
+  return (
+    <div className="suggestion">
+      <span className="sug-label">Possibly:</span>{" "}
+      <b>{s.context || s.suggested_id}</b>
+      {!s.held && <span className="muted"> · not held yet — accepting fetches it</span>}
+      <span className="muted"> — {s.reason}</span>
+      {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}
+      {" "}
+      <button className="mini sug-yes" disabled={busy} title="yes — link every citation of this reference to it"
+        onClick={() => decide(true)}>✓</button>{" "}
+      <button className="mini sug-no" disabled={busy} title="no — never suggest this again"
+        onClick={() => decide(false)}>✗</button>
+      {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {msg}</span>}
+    </div>
+  );
+}
+
+// Link a hanging reference to a held document by name (the human override beside the
+// automatic suggestions) — an autocomplete over the corpus, then one click to resolve.
+function LinkExisting({ refKey, onDone }: { refKey: string; onDone: () => void }) {
+  const [msg, setMsg] = useState("");
+  return (
+    <div className="row" style={{ alignItems: "center", marginTop: 4 }}>
+      <span className="muted" style={{ flex: "0 0 auto", fontSize: 12 }}>link to:</span>
+      <DocAutocomplete placeholder="find the real case or act by name…"
+        onPick={async (id, title) => {
+          setMsg("linking…");
+          try {
+            const r = await api.resolveReference({ ref: refKey, existing_id: id });
+            setMsg(r.resolved ? `✓ linked to ${title} · resolved ${r.resolved_edges} edge(s)` : `✓ linked to ${title}`);
+            setTimeout(onDone, 1100);
+          } catch (e: any) { setMsg("error: " + e); }
+        }} />
+      {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ flex: "0 0 auto", fontSize: 12 }}>{msg}</span>}
+    </div>
+  );
 }
 
 // Fire a background job and report tersely; the global Jobs dock shows live progress.
@@ -2498,6 +2666,11 @@ function ResolveRow({ r, open, active, toggle, onDone }:
           : <span className="err">no adapter</span>}</td>
         <td><button onClick={toggle}>{active ? "close" : "other…"}</button></td>
       </tr>
+      {(r.suggestions || []).length > 0 && (
+        <tr><td /><td colSpan={4} style={{ borderBottom: "none", paddingTop: 0 }}>
+          {r.suggestions.slice(0, 2).map((s: any, i: number) => <SuggestionRow key={i} s={s} onDone={onDone} />)}
+        </td></tr>
+      )}
       {active && (
         <tr><td colSpan={5}>
           <div className="row" style={{ flexWrap: "wrap" }}>
@@ -2512,7 +2685,12 @@ function ResolveRow({ r, open, active, toggle, onDone }:
               <input value={identifier} onChange={(e) => setIdentifier(e.target.value)} placeholder="e.g. [2016] EWHC 2768 / ECLI:EU:C:2020:559" />
               <input value={jurisdiction} onChange={(e) => setJurisdiction(e.target.value)} placeholder="jurisdiction" style={{ maxWidth: 130 }} />
             </>}
-            {mode === "existing" && <input value={existing} onChange={(e) => setExisting(e.target.value)} placeholder="existing stable_id in the corpus" />}
+            {mode === "existing" && (existing
+              ? <span className="tag" style={{ flex: 1 }}>{existing}{" "}
+                  <a style={{ cursor: "pointer" }} onClick={() => setExisting("")}>change</a></span>
+              : <div style={{ flex: 1, minWidth: 240 }}>
+                  <DocAutocomplete placeholder="find the case or act by name…"
+                    onPick={(id) => setExisting(id)} /></div>)}
             {mode === "url" && <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…  (fetched via the scraping engine)" />}
             {mode === "file" && <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />}
             {mode === "bailii" && r.bailii_url && (
