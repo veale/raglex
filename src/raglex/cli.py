@@ -284,6 +284,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_backfill = 0.0
         last_effects = 0.0
         last_counts = 0.0
+        last_gazetteer = 0.0
         eurlex_broken_until = 0.0
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
@@ -344,6 +345,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     last_counts = time.time()
                     cc = f.rebuild_citation_counts()
                     print(f"[watch] citation counts: {cc['candidates']} distinct candidates")
+                # Weekly: top up the statute gazetteer from legislation.gov.uk, so acts
+                # passed after the vendored lists were cut still confirm by name.
+                if time.time() - last_gazetteer >= 7 * 86400:
+                    last_gazetteer = time.time()
+                    gz = f.refresh_statute_gazetteer()
+                    if gz.get("added"):
+                        print(f"[watch] statute gazetteer: +{gz['added']} new act(s)")
                 # Push the alerts a solo operator can't get by watching a dashboard —
                 # to RAGLEX_ALERT_WEBHOOK if set, otherwise the log. Deduped by (code,
                 # subject) so a standing condition isn't re-pushed every 15 minutes.

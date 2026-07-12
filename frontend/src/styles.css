@@ -108,11 +108,15 @@ p { margin: 0 0 var(--sp-3); }
 hr { border: none; border-top: 1px solid var(--line); margin: var(--sp-6) 0; }
 
 .app { max-width: 1180px; margin: 0 auto; padding: var(--sp-6) var(--sp-6) var(--sp-9); }
+/* overlay margins: peek (400) and tray stack (456) reserve space; with both open the
+   trays sit left of the peek, and the content keeps at least ~420px of width */
 body.has-peek .app { margin-right: 400px; transition: margin-right .15s; }
+body.has-tray .app { margin-right: 456px; transition: margin-right .15s; }
+body.has-peek.has-tray .app { margin-right: min(856px, calc(100vw - 420px)); }
 
 /* --- masthead (Swiss grid header) ----------------------------------------- */
 header {
-  display: flex; align-items: baseline; gap: var(--sp-6);
+  display: flex; align-items: baseline; gap: var(--sp-4) var(--sp-6); flex-wrap: wrap;
   border-bottom: 2px solid var(--text); padding-bottom: var(--sp-3); margin-bottom: var(--sp-7);
 }
 header h1 {
@@ -123,7 +127,7 @@ header h1::after { content: ""; }
 nav { display: flex; gap: 0; flex-wrap: wrap; margin-left: auto; }
 nav button {
   background: transparent; color: var(--subtext); border: none; border-bottom: 2px solid transparent;
-  margin-bottom: -2px; padding: var(--sp-2) var(--sp-4); cursor: pointer;
+  margin-bottom: -2px; padding: var(--sp-2) var(--sp-4); cursor: pointer; white-space: nowrap;
   font-family: var(--serif); font-size: .95rem; font-weight: 500; letter-spacing: .005em;
 }
 nav button:hover { color: var(--text); }
@@ -145,6 +149,13 @@ label {
   letter-spacing: .09em; text-transform: uppercase; color: var(--subtext);
   margin: var(--sp-4) 0 var(--sp-2);
 }
+/* a label that WRAPS its control is an inline caption ("backfill ☐", "pages [2]"),
+   not a form-field heading — keep it quiet, lowercase, and on one line */
+label:has(> input), label:has(> select), label:has(> textarea) {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0;
+  font-size: .8125rem; font-weight: 500; letter-spacing: 0; text-transform: none;
+}
+label:has(> input[type="checkbox"]) input { width: auto; }
 .kbd, .job-log { font-family: var(--mono); }
 .kbd { font-size: .75rem; color: var(--subtext); }
 
@@ -167,16 +178,18 @@ button {
 }
 button:hover { background: var(--surface-2); }
 button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button.primary {
   background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600;
 }
 button.primary:hover { background: color-mix(in srgb, var(--accent) 86%, var(--text)); }
-button.mini { padding: var(--sp-1) var(--sp-3); font-size: .75rem; color: var(--subtext); flex: 0 0 auto; }
+button.mini { padding: var(--sp-1) var(--sp-3); font-size: .75rem; color: var(--subtext); flex: 0 0 auto; min-width: 0; white-space: nowrap; }
 button.mini:hover { color: var(--text); }
 
 .row { display: flex; gap: var(--sp-4); flex-wrap: wrap; align-items: center; }
 .row > * { flex: 1; min-width: 140px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-5); }
+@media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
 
 /* --- chips / tags ---------------------------------------------------------- */
 .tag {
@@ -188,6 +201,8 @@ button.mini:hover { color: var(--text); }
 /* --- tables (Swiss data) --------------------------------------------------- */
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--line); font-size: .875rem; }
+/* long unbroken strings (stable_ids, URLs) must never force a column wider than the panel */
+td { overflow-wrap: anywhere; }
 th {
   font-size: .6875rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
   color: var(--subtext); border-bottom: 1px solid var(--text);
@@ -251,19 +266,24 @@ tbody tr:hover { background: var(--surface-2); }
 .peek {
   position: fixed; top: 0; right: 0; width: 384px; height: 100vh; overflow-y: auto;
   background: var(--surface); border-left: 1px solid var(--line); box-shadow: var(--shadow-lg);
-  z-index: 50; display: flex; flex-direction: column;
+  /* above the tray stack (60–68): a citation clicked INSIDE a tray peeks on top of it */
+  z-index: 70; display: flex; flex-direction: column;
 }
 .peek-head {
   position: sticky; top: 0; background: var(--surface); display: flex; align-items: center; gap: var(--sp-3);
   padding: var(--sp-3) var(--sp-5); border-bottom: 1px solid var(--line);
+}
+@keyframes overlay-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: no-preference) {
+  .peek, .tray { animation: overlay-in .16s ease-out; }
 }
 .peek-head button { background: transparent; color: var(--subtext); border: 1px solid var(--line); padding: 2px var(--sp-3); }
 .peek-body { padding: var(--sp-5); }
 .peek-doc-head { border-bottom: 1px solid var(--line); padding-bottom: var(--sp-3); margin-bottom: var(--sp-2); }
 .peek-doc-head button { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: 3px var(--sp-4); }
 .peek .reader { max-height: none; overflow: visible; padding-right: 0; }
-@media (max-width: 860px) {
-  body.has-peek .app { margin-right: 0; }
+@media (max-width: 900px) {
+  body.has-peek .app, body.has-peek.has-tray .app { margin-right: 0; }
   .peek { top: auto; bottom: 0; right: 0; left: 0; width: auto; height: 64vh;
     border-left: none; border-top: 2px solid var(--accent); box-shadow: var(--shadow-lg); }
 }
@@ -279,7 +299,6 @@ tbody tr:hover { background: var(--surface-2); }
 .doc-summary .summary-sep { color: var(--line); }
 
 /* --- stacking trays (side "organiser") ------------------------------------- */
-body.has-tray .app { margin-right: 440px; transition: margin-right .15s; }
 .tray { position: fixed; width: 420px; max-width: calc(100vw - 24px);
   max-height: calc(100vh - 24px); display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-lg); }
@@ -291,6 +310,8 @@ body.has-tray .app { margin-right: 440px; transition: margin-right .15s; }
   padding: 1px var(--sp-3); line-height: 1.3; }
 .tray-x:hover { color: var(--bad); border-color: var(--bad); background: transparent; }
 .tray-body { padding: var(--sp-4); overflow-y: auto; }
+/* the tray body already scrolls — don't nest a second scrollbar inside its reader */
+.tray .reader { max-height: none; overflow: visible; padding-right: 0; }
 .tray-doc-head { display: flex; align-items: baseline; gap: var(--sp-3); margin-bottom: var(--sp-3);
   padding-bottom: var(--sp-3); border-bottom: 1px solid var(--line); }
 .tray-doc-head b { flex: 1; }
@@ -313,9 +334,11 @@ body.has-tray .app { margin-right: 440px; transition: margin-right .15s; }
 .crow-cite i { font-style: italic; }
 .crow-pins { color: var(--info); font-size: .8125rem; }
 @media (max-width: 900px) {
-  body.has-tray .app { margin-right: 0; }
+  body.has-tray .app, body.has-peek.has-tray .app { margin-right: 0; }
   .tray { left: 0; right: 0 !important; top: auto !important; bottom: 0; width: auto; max-height: 72vh;
     border-top: 2px solid var(--accent); }
+  /* bottom sheets cover the dock — hide it rather than fight for the corner */
+  body.has-tray .jobs-dock { display: none; }
 }
 
 /* --- document layout: left index rail + reading column --------------------- */
@@ -399,8 +422,8 @@ body.has-tray .app { margin-right: 440px; transition: margin-right .15s; }
 .seg-body::selection, .seg-body *::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
 
 /* --- highlight-to-shorthand popover + type-ahead --------------------------- */
-.sel-pop { z-index: 60; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: var(--sp-3); box-shadow: var(--shadow-lg); }
+.sel-pop { z-index: 75; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: var(--sp-3); box-shadow: var(--shadow-lg); max-width: calc(100vw - 16px); }
 .sel-pop button { background: var(--accent); color: var(--on-accent); border: 0; padding: var(--sp-2) var(--sp-4); font-weight: 600; }
 .ac { position: relative; }
 .ac input { width: 100%; }
@@ -463,7 +486,7 @@ body.has-tray .app { margin-right: 440px; transition: margin-right .15s; }
 .refresh-menu > summary:hover { color: var(--text); }
 .refresh-menu[open] > summary { color: var(--accent); }
 .refresh-pop { position: absolute; right: 0; top: 100%; z-index: 30; background: var(--surface);
-  border: 1px solid var(--line); min-width: 180px; display: flex; flex-direction: column; box-shadow: var(--shadow, 0 4px 16px rgba(0,0,0,.18)); }
+  border: 1px solid var(--line); min-width: 180px; display: flex; flex-direction: column; box-shadow: var(--shadow-lg); }
 .refresh-pop button { text-align: left; background: none; border: none; color: var(--text);
   padding: var(--sp-2) var(--sp-4); font-size: .8125rem; cursor: pointer; }
 .refresh-pop button:hover { background: var(--surface-2); color: var(--accent); }
@@ -482,7 +505,7 @@ body.has-tray .app { margin-right: 440px; transition: margin-right .15s; }
   margin: var(--sp-3) 0 0; max-height: 200px; overflow-y: auto; font-size: .6875rem; line-height: 1.5;
   color: var(--subtext); white-space: pre-wrap; }
 .job-done { font-size: .8125rem; padding: 2px 0; }
-@media (max-width: 860px) { body.has-peek .jobs-dock { display: none; } }
+@media (max-width: 900px) { body.has-peek .jobs-dock { display: none; } }
 
 /* --- header status + theme switch ------------------------------------------ */
 .api-status { font-size: .75rem; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }

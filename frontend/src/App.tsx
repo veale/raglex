@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Dashboard, DocumentView, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
+import { Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
@@ -77,6 +77,9 @@ export function App() {
     if (tab === "document" && docId) {
       const want = `#/article/${encodeURIComponent(docId)}` + (pinpoint ? `/section/${slug(pinpoint)}` : "");
       if (location.hash !== want) history.replaceState(null, "", want);
+    } else if (location.hash.startsWith("#/article")) {
+      // leaving the document: drop the stale deep link so a reload lands where you are
+      history.replaceState(null, "", location.pathname + location.search);
     }
   }, [tab, docId, pinpoint]);
 
@@ -95,12 +98,14 @@ export function App() {
           {tabs.map(([t, label]) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{label}</button>
           ))}
-          {tab === "document" && <button className="active">Document</button>}
-          {tab === "graph" && <button className="active">Graph</button>}
+          {docId && (tab === "document" || tab === "graph") &&
+            <button className={tab === "document" ? "active" : ""} onClick={() => setTab("document")}>Document</button>}
+          {graphId && (tab === "document" || tab === "graph") &&
+            <button className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>Graph</button>}
         </nav>
         <ThemeSwitch />
       </header>
-      {tab === "dashboard" && <Dashboard open={open} />}
+      {tab === "dashboard" && <Dashboard open={open} navigate={navigateCorpus} />}
       {tab === "search" && <SearchView open={open} initialFilter={corpusFilter} />}
       {tab === "unresolved" && <UnresolvedView open={open} navigate={navigateCorpus} />}
       {tab === "maintain" && <MaintainView open={open} />}
@@ -111,6 +116,7 @@ export function App() {
     </div>
     <PeekPanel open={open} />
     <TrayStack open={open} />
+    <EscapeCloser />
     <JobsPanel />
     </TrayProvider>
     </PeekProvider>

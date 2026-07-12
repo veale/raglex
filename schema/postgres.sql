@@ -129,6 +129,9 @@ CREATE TABLE IF NOT EXISTS citation_counts (
     rebuilt_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
+-- point lookups by target id (search results' cited_by column) — without this the
+-- per-row probe degrades to a filter scan of the whole roll-up
+CREATE INDEX IF NOT EXISTS citation_counts_cand_idx ON citation_counts (candidate_id);
 
 -- Version history (§1.4): a document is a series of versions. The `documents` row is
 -- "latest"; prior versions are archived here before it advances. Raw + text are

@@ -1489,6 +1489,17 @@ class Catalogue:
         ).fetchone()
         return row["dst_id"] if row else None
 
+    def delete_aliases_by_source(self, sources: tuple[str, ...], *, commit: bool = True) -> int:
+        """Drop every alias a given minting pass wrote — used by passes that regenerate
+        their aliases from scratch each run (parallel mining), so a bad alias from an
+        earlier run self-heals instead of persisting forever."""
+        qs = ",".join("?" * len(sources))
+        cur = self.conn.execute(
+            f"DELETE FROM citation_aliases WHERE source IN ({qs})", list(sources))
+        if commit:
+            self.conn.commit()
+        return cur.rowcount
+
     def put_alias(self, alias: str, dst_id: str, source: str | None = None, *, commit: bool = True) -> None:
         self.conn.execute(
             """
@@ -2168,17 +2179,19 @@ class Catalogue:
         carries a ``cited_by`` count (occurrences from the roll-up) for display + ranking."""
         tag = filters.pop("tag", None)
         clauses, fparams = self._doc_filter_clauses(tag=None, **filters)
-        sql = ("SELECT d.*, COALESCE(MAX(cc.occurrences), 0) AS cited_by FROM documents d "
-               "LEFT JOIN citation_counts cc ON cc.candidate_id = d.stable_id OR cc.candidate_id = d.ecli")
+        # cited_by as a correlated scalar subquery: `candidate_id IN (stable_id, ecli)` is two
+        # index probes per row. The old formulation — a LEFT JOIN with an OR join predicate +
+        # GROUP BY — defeated the candidate_id index on Postgres and ran for minutes, piling up
+        # on every autocomplete keystroke until the connection pool starved.
+        sql = ("SELECT d.*, COALESCE((SELECT MAX(cc.occurrences) FROM citation_counts cc "
+               "WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by FROM documents d")
         params: list[object] = []
         if tag:
-            # tag as an EXISTS so the citation-count LEFT JOIN stays a clean 1:1 group.
             clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t WHERE t.doc_id = d.stable_id AND t.tag = ?)")
             params.append(tag)
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " GROUP BY d.stable_id"
         sql += f" ORDER BY {self._sort_clause(sort)} LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         return self.conn.execute(sql, params).fetchall()
@@ -2227,6 +2240,28 @@ class Catalogue:
         out: dict = {}
         col = {"source": "d.source", "doc_type": "d.doc_type", "court": "d.court",
                "year": "substr(d.decision_date, 1, 4)"}
+        if self.backend == "postgres":
+            # ONE pass over the filtered set instead of one per dimension: with a free-text
+            # filter (an unindexable LIKE scan) each pass costs seconds, so 4 passes made
+            # the search page ~4× slower than the results query itself.
+            exprs = [col[d] for d in dims]
+            sets = ", ".join(f"({e})" for e in exprs)
+            sql = (f"SELECT {', '.join(f'{e} AS k{i}' for i, e in enumerate(exprs))}, "
+                   f"COUNT(DISTINCT d.stable_id) AS n FROM documents d{where} "
+                   f"GROUP BY GROUPING SETS ({sets})")
+            buckets: dict[str, list] = {d: [] for d in dims}
+            for r in self.conn.execute(sql, _params()).fetchall():
+                for i, dim in enumerate(dims):
+                    if r[f"k{i}"] is not None:
+                        buckets[dim].append((r[f"k{i}"], r["n"]))
+                        break
+            for dim in dims:
+                rows = sorted(buckets[dim], key=lambda kv: -kv[1])
+                if dim == "year":
+                    out[dim] = {k: n for k, n in rows if k}
+                else:
+                    out[dim] = [{"key": k, "n": n} for k, n in rows if k][:top]
+            return out
         for dim in dims:
             expr = col[dim]
             sql = (f"SELECT {expr} AS k, COUNT(DISTINCT d.stable_id) AS n FROM documents d"

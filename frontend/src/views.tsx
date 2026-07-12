@@ -42,12 +42,16 @@ export function TrayProvider({ children }: { children: any }) {
 }
 
 // The stacked trays themselves — each offset from the last so the ones beneath peek out.
+// When the peek column is open the whole stack shifts left of it, so neither hides the other.
 export function TrayStack({ open }: { open: (id: string, a?: string) => void }) {
   const { stack, closeAt } = useTray();
+  const peek = usePeek();
   if (!stack.length) return null;
+  const peekOffset = peek.current ? "400px + " : "";
   return <>{stack.map((t, i) => (
     <aside key={i} className="tray" role="dialog"
-      style={{ top: `calc(var(--sp-5) + ${i * 16}px)`, right: `calc(var(--sp-5) + ${i * 16}px)`, zIndex: 60 + i }}>
+      style={{ top: `calc(var(--sp-5) + ${i * 16}px)`, right: `calc(${peekOffset}var(--sp-5) + ${i * 16}px)`,
+        zIndex: Math.min(60 + i, 68) }}>
       <div className="tray-head">
         <span className="tray-title">{t.label}</span>
         <button className="tray-x" onClick={() => closeAt(i)} title="close">✕</button>
@@ -55,6 +59,28 @@ export function TrayStack({ open }: { open: (id: string, a?: string) => void }) 
       <div className="tray-body"><TrayContent t={t} open={open} /></div>
     </aside>
   ))}</>;
+}
+
+// Escape closes the topmost overlay: the peek first (it renders on top), then the top tray.
+export function EscapeCloser() {
+  const peek = usePeek();
+  const { stack, closeAt } = useTray();
+  const ref = useRef({ peek, stack, closeAt });
+  ref.current = { peek, stack, closeAt };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const tgt = e.target as HTMLElement | null;
+      // don't steal Escape from inputs (autocomplete lists close on it)
+      if (tgt && /^(INPUT|TEXTAREA|SELECT)$/.test(tgt.tagName)) return;
+      const { peek: p, stack: s, closeAt: c } = ref.current;
+      if (p.current) p.close();
+      else if (s.length) c(s.length - 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  return null;
 }
 
 function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => void }) {
@@ -261,7 +287,8 @@ export function SearchView({ open, initialFilter }: { open: (id: string, a?: str
     }
   }, [JSON.stringify(initialFilter)]);
 
-  const doSearch = () => { setSemantic(false); setPage(0); setRun((r) => r + 1); };
+  // NB: doesn't touch the semantic toggle — pressing Search re-runs whichever mode is on
+  const doSearch = () => { setPage(0); setRun((r) => r + 1); };
   const patch = (p: Partial<Filters>) => { setFilters((f) => ({ ...f, ...p })); setPage(0); setRun((r) => r + 1); };
   const clearAll = () => { setFilters({}); setPage(0); setRun((r) => r + 1); };
 
@@ -273,12 +300,16 @@ export function SearchView({ open, initialFilter }: { open: (id: string, a?: str
 
   // optional semantic (full-text) hits
   const [hits, setHits] = useState<Hit[] | null>(null);
+  const [semErr, setSemErr] = useState("");
   useEffect(() => {
     if (!semantic) return;
+    if (!(filters.query || "").trim()) { setHits([]); setSemErr(""); return; }
     let live = true;
+    setSemErr("");
     const f = activeFilters(filters);
     api.search(filters.query || "", 12, { source: f.source, doc_type: f.doc_type, tag: f.tag, year_from: f.year_from })
-      .then((h) => { if (live) setHits(h); }).catch(() => {});
+      .then((h) => { if (live) setHits(h); })
+      .catch((e) => { if (live) { setHits([]); setSemErr(String(e)); } });
     return () => { live = false; };
   }, [run, semantic]);
 
@@ -299,6 +330,7 @@ export function SearchView({ open, initialFilter }: { open: (id: string, a?: str
               onSearch={doSearch} open={open} semantic={semantic} setSemantic={(v) => { setSemantic(v); if (v) setRun((r) => r + 1); }} />
           : <AdvancedForm filters={filters} setFilters={setFilters} onSearch={doSearch} />}
         {err && <p className="err">{String(err)}</p>}
+        {semantic && semErr && <p className="err">{semErr}</p>}
       </div>
 
       {semantic && hits !== null && <SemanticResults hits={hits} open={open} />}
@@ -316,7 +348,7 @@ export function SearchView({ open, initialFilter }: { open: (id: string, a?: str
                 </p>
                 <div className="row" style={{ flex: "0 0 auto", gap: 8 }}>
                   <label className="mini-label">sort
-                    <select value={sort} onChange={(e) => setSort(e.target.value)}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+                    <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(0); }}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
                   <label className="mini-label">group
                     <select value={group} onChange={(e) => setGroup(e.target.value)}>{GROUPS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
                 </div>
@@ -359,6 +391,7 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
     return () => { live = false; clearTimeout(t); };
   }, [q, semantic]);
   const pick = (o: any) => { if (o) { open(o.stable_id); setOpenList(false); } };
+  const search = () => { setOpenList(false); onSearch(); };   // running a search dismisses the dropdown
   return (
     <div>
       <div className="row ac" style={{ position: "relative" }}>
@@ -369,12 +402,12 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, sugg.length - 1)); }
             else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, -1)); }
-            else if (e.key === "Enter") { if (hi >= 0 && openList) pick(sugg[hi]); else onSearch(); }
+            else if (e.key === "Enter") { if (hi >= 0 && openList) pick(sugg[hi]); else search(); }
             else if (e.key === "Escape") setOpenList(false);
           }} />
-        <button className="primary" style={{ flex: "0 0 auto" }} onClick={onSearch}>Search</button>
+        <button className="primary" style={{ flex: "0 0 auto" }} onClick={search}>Search</button>
         {openList && sugg.length > 0 && (
-          <div className="ac-list" style={{ right: 92 }}>
+          <div className="ac-list">
             {sugg.map((o, i) => (
               <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
                 onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
@@ -1088,7 +1121,10 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
   return (
     <div ref={ref} style={{ position: "relative" }}>
       {children}
-      {sel && <div className="sel-pop" style={{ position: "fixed", left: sel.x, top: sel.y + 6, transform: "translateX(-50%)" }}>
+      {sel && <div className="sel-pop" style={{ position: "fixed",
+        left: Math.min(Math.max(sel.x, 180), window.innerWidth - 180),
+        top: Math.min(sel.y + 6, window.innerHeight - 150),
+        transform: "translateX(-50%)" }}>
         {msg ? <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg.startsWith("error") ? msg : "✓ linked " + msg}</span>
           : !open ? (
             <button onClick={() => setOpen(true)}>🔖 Link “{sel.text.length > 28 ? sel.text.slice(0, 28) + "…" : sel.text}” to…</button>
@@ -1121,7 +1157,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
   const [showOpts, setShowOpts] = useState(false);
   const tray = useTray();
   if (err) return <p className="err">{err}</p>;
-  if (!doc) return <p className="muted">Loading…</p>;
+  if (!doc) return <p className="muted loading-pulse">Loading…</p>;
   if (doc.error) return <p className="err">{doc.error}: {id}</p>;
   const d = doc.document;
   const versions = doc.versions || [];
@@ -1203,7 +1239,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   const byType: Record<string, number> = {};
   for (const r of incoming) byType[r.relationship_type] = (byType[r.relationship_type] || 0) + 1;
   const order = ["overrules", "distinguishes", "applies", "follows", "considers", "mentions"];
-  const colour: Record<string, string> = { overrules: "#ff6b6b", distinguishes: "#ffb454", applies: "#7ee787", follows: "#7ee787" };
+  const colour: Record<string, string> = { overrules: "var(--bad)", distinguishes: "var(--warn)", applies: "var(--ok)", follows: "var(--ok)" };
   // "mentions" is confusing from the cited-authority's side — read it as "mentioned by".
   const treat = (t: string) => (t === "mentions" ? "mentioned by" : t);
   return (
@@ -1212,7 +1248,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
         {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" "}
           <Info t={`Plus ${inferred} inferred link${inferred === 1 ? "" : "s"} — heuristic carry-forwards (a bare "Section 12" pinned to the last-named Act), not citations anyone made. Excluded from the count above so they don't inflate it.`} />
           {" +"}{inferred} inferred</span> : null}</h3>
-      <div className="row" style={{ flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+      <div className="active-chips" style={{ marginBottom: 6 }}>
         {order.filter((t) => byType[t]).map((t) => (
           <span key={t} className="tag" style={{ borderColor: colour[t] || "var(--line)", color: colour[t] || "inherit" }}>
             {byType[t]} {treat(t)}</span>
@@ -1221,7 +1257,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
       <table><tbody>
         {incoming.slice(0, 50).map((r, i) => (
           <tr key={i}>
-            <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--muted)" }}>{treat(r.relationship_type)}</td>
+            <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
             <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
               {r.dst_anchor && <span className="muted"> → {r.dst_anchor}</span>}</td>
             <td className="muted" style={{ whiteSpace: "nowrap" }}>{r.src_date ? String(r.src_date).slice(0, 4) : ""}</td>
@@ -1387,7 +1423,7 @@ function RelationRow({ r, open, onDone }: { r: any; open: (id: string) => void; 
 }
 
 // --- Dashboard -------------------------------------------------------------
-export function Dashboard({ open }: { open: (id: string) => void }) {
+export function Dashboard({ open: _open, navigate }: { open: (id: string) => void; navigate?: (f: Record<string, string>) => void }) {
   const [sources, , reloadSources] = useAsync(() => api.sources(), []);
   const [queues, , reloadQueues] = useAsync(() => api.queues(), []);
   const [alerts, , reloadAlerts] = useAsync(() => api.alerts(), []);
@@ -1490,10 +1526,12 @@ export function Dashboard({ open }: { open: (id: string) => void }) {
       {stats && (
         <div className="panel">
           <h3>Corpus · {stats.total} documents · resolution {Math.round((stats.resolution?.coverage || 0) * 100)}%</h3>
-          <div>{Object.entries(stats.by_doc_type || {}).map(([k, v]: any) => <span className="tag" key={k}>{k}: {v}</span>)}</div>
-          <div>{Object.entries(stats.by_source || {}).map(([k, v]: any) => <span className="tag" key={k}>{k}: {v}</span>)}</div>
+          <div>{Object.entries(stats.by_doc_type || {}).map(([k, v]: any) =>
+            <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ doc_type: k })} title="browse in Search">{k}: {v}</a> : <>{k}: {v}</>}</span>)}</div>
+          <div>{Object.entries(stats.by_source || {}).map(([k, v]: any) =>
+            <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ source: k })} title="browse in Search">{k}: {v}</a> : <>{k}: {v}</>}</span>)}</div>
           <div>{Object.entries(stats.by_tag || {}).map(([k, v]: any) =>
-            <span className="tag" key={k}><a onClick={() => open("")} title="filter in Corpus tab">#{k}: {v}</a></span>)}</div>
+            <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ tag: k })} title="browse in Search">#{k}: {v}</a> : <>#{k}: {v}</>}</span>)}</div>
         </div>
       )}
     </div>
@@ -1672,6 +1710,7 @@ function KeepCurrentPanel() {
     ["Re-check outstanding legislation amendments", "hourly", "Re-pulls acts whose legislation.gov.uk effects re-check is due (bounded)."],
     ["Propagate changes an act makes", "hourly", "Flags held acts affected by a change for re-pull."],
     ["Rebuild citation-frequency roll-up", "hourly", "Keeps the worklist ranking + snowball fresh."],
+    ["Top up the statute gazetteer", "weekly", "Pulls newly passed acts from legislation.gov.uk so name citations keep confirming."],
     ["Drain the harvest worklist", "per tick", "Fetches a bounded batch of routable references each tick (set auto-drain on the Unresolved tab)."],
     ["Run due watches", "per tick", "Every enabled watch whose cadence is due starts as a Job."],
   ];
@@ -1682,12 +1721,11 @@ function KeepCurrentPanel() {
         You don't have to trigger any of this by hand — the background scheduler runs it on a cadence, and its work now
         shows in the <b>Jobs</b> panel. The buttons just let you force one immediately.
       </p>
-      <table className="grid"><thead><tr><th>task</th><th>runs</th><th></th></tr></thead>
+      <table className="grid"><thead><tr><th>task</th><th>runs</th></tr></thead>
         <tbody>
           {auto.map(([label, when, hint], i) => (
             <tr key={i}><td>{label}<div className="muted" style={{ fontSize: 11 }}>{hint}</div></td>
-              <td className="muted" style={{ whiteSpace: "nowrap" }}>{when}</td>
-              <td style={{ whiteSpace: "nowrap" }}></td></tr>
+              <td className="muted" style={{ whiteSpace: "nowrap" }}>{when}</td></tr>
           ))}
         </tbody>
       </table>
@@ -1827,7 +1865,7 @@ export function WatchesView() {
       <div className="panel">
         <h3>New watch <span className="muted">— a saved harvest plan: keyword-limit a source, then enrich each new case with its citations.</span></h3>
         <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-          Scheduling pays off when new material keeps arriving. The two <b style={{ color: "#7ee787" }}>growing</b> watch
+          Scheduling pays off when new material keeps arriving. The two <b style={{ color: "var(--ok)" }}>growing</b> watch
           types: a <b>source/keyword</b> harvest (new decisions are handed down), and <b>🔎 discover cases citing X</b> —
           forward-citation discovery via Find Case Law / CELLAR, which finds <i>new</i> judgments that cite a landmark
           as they appear. The snowball then back-fills each new case’s authorities. A pure <b>graph rule</b> (no source/
@@ -1850,7 +1888,7 @@ export function WatchesView() {
             placeholder={info?.keyword_search ? "keywords (searched at source), comma-sep" : "keywords (post-filter), comma-sep"} style={{ minWidth: 220 }} />}
           <input value={citing} onChange={(e) => setCiting(e.target.value)}
             title="Find NEW cases that cite this, via Find Case Law search (UK) or CELLAR (EU CELEX). This grows over time."
-            placeholder="🔎 discover NEW cases citing… e.g. 32016R0679 (GDPR) or [2014] UKSC 38" style={{ minWidth: 280, color: "#7ee787" }} />
+            placeholder="🔎 discover NEW cases citing… e.g. 32016R0679 (GDPR) or [2014] UKSC 38" style={{ minWidth: 280, color: "var(--ok)" }} />
           <input value={cites} onChange={(e) => setCites(e.target.value)}
             placeholder="…or graph rule: corpus docs citing id" style={{ minWidth: 200 }} />
         </div>
@@ -1858,7 +1896,7 @@ export function WatchesView() {
           <label style={{ flex: "0 0 auto" }} title="Enrich each newly-found case by fetching what it cites, N hops out">enrich each case <select value={degrees} onChange={(e) => setDegrees(+e.target.value)}>{[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n} degree{n !== 1 ? "s" : ""}</option>)}</select></label>
           {source && <label style={{ flex: "0 0 auto" }}>pages <input type="number" min={1} max={20} value={maxPages} onChange={(e) => setMaxPages(+e.target.value || 1)} style={{ width: 50 }} /></label>}
           <input value={tag} onChange={(e) => setTag(e.target.value)} placeholder="tag results into collection (optional)" style={{ maxWidth: 220 }} />
-          <label style={{ flex: "0 0 auto" }}>every <input type="number" min={5} value={cadence} onChange={(e) => setCadence(+e.target.value || 1440)} style={{ width: 70 }} /> min</label>
+          <label style={{ flex: "0 0 auto" }}>every <input type="number" min={5} value={cadence} onChange={(e) => setCadence(+e.target.value || 1440)} style={{ width: 84 }} /> min</label>
           <button className="primary" disabled={busy === "new"} style={{ flex: "0 0 auto" }} onClick={create}>{busy === "new" ? "saving…" : "+ Create watch"}</button>
         </div>
         {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ wordBreak: "break-word" }}>{msg}</p>}
@@ -1874,10 +1912,10 @@ export function WatchesView() {
               <td>{w.name}</td>
               <td className="muted" style={{ fontSize: 12 }}>
                 {w.spec.source ? <>harvest <b>{w.spec.source}</b>{w.spec.keywords ? ` · “${w.spec.keywords.join(", ")}”` : ""}</> : null}
-                {w.spec.discover ? <span style={{ color: "#7ee787" }}>🔎 cases citing <b>{w.spec.discover.citing}</b></span> : null}
+                {w.spec.discover ? <span style={{ color: "var(--ok)" }}>🔎 cases citing <b>{w.spec.discover.citing}</b></span> : null}
                 {w.spec.seed_rule ? <> seed: cites <b>{w.spec.seed_rule.cites}</b></> : null}
                 {` · ❅ ${w.spec.degrees ?? 1}°`}{w.spec.tag ? ` · →#${w.spec.tag}` : ""}
-                {!(w.spec.source || w.spec.discover) && <span title="No renewing source — a backward snowball converges, so scheduling adds little" style={{ color: "#ffb454" }}> · one-shot</span>}
+                {!(w.spec.source || w.spec.discover) && <span title="No renewing source — a backward snowball converges, so scheduling adds little" style={{ color: "var(--warn)" }}> · one-shot</span>}
                 {w.last_result && <span> · <i>{summariseRun(w.last_result)}</i></span>}
               </td>
               <td className="muted">{w.spec.source || w.spec.discover ? `${w.cadence_minutes}m` : "—"}</td>
@@ -1913,7 +1951,7 @@ function AutoDrain() {
     <label className="muted" style={{ flex: "0 0 auto", fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}
       title="The scheduler slowly drains the worklist in the background, even if you close this tab or the app restarts">
       auto-drain
-      <select value={val || "500"} onChange={(e) => set(e.target.value)} style={{ width: 88 }}>
+      <select value={val || "0"} onChange={(e) => set(e.target.value)} style={{ width: 88 }}>
         {["0", "10", "25", "50", "100", "500"].map((n) => <option key={n} value={n}>{n === "0" ? "off" : n + "/tick"}</option>)}
       </select>
       {saved && <span className="ok">✓</span>}
@@ -2180,6 +2218,7 @@ function UnfetchablePanel() {
     return () => clearInterval(iv);
   }, [data?._warming]);
   const [upRef, setUpRef] = useState<string | null>(null);
+  const [holMsg, setHolMsg] = useState("");
   const refs: any[] = data?.references || [];
   if (err) return null;
   return (
@@ -2191,9 +2230,13 @@ function UnfetchablePanel() {
         </h3>
         <button className="mini" style={{ flex: "0 0 auto" }}
           title="Scrape the House of Lords archive (1996–2009) and match reporter-only citations ('[1998] AC 1') to the harvested cases by name + year. Runs in the background — see the Jobs panel."
-          onClick={async () => { try { await api.harvestHoL(); } catch { /* surfaced in Jobs */ } }}>
+          onClick={async () => {
+            try { await api.harvestHoL(); setHolMsg("✓ queued — watch the Jobs panel"); }
+            catch (e: any) { setHolMsg("✗ " + e); }
+          }}>
           ⚖ scrape House of Lords + match</button>
       </div>
+      {holMsg && <p className={holMsg.startsWith("✗") ? "err" : "ok"} style={{ fontSize: 12 }}>{holMsg}</p>}
       {data?._warming && <p className="muted loading-pulse">⏳ ranking the unfetchable frontier…</p>}
       {!data?._warming && refs.length === 0 && <p className="muted">Nothing recognised as unfetchable. ✓</p>}
       {refs.length > 0 && (
@@ -2474,7 +2517,7 @@ function ResolveRow({ r, open, active, toggle, onDone }:
             {mode === "file" && <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />}
             {mode === "bailii" && r.bailii_url && (
               <div
-                style={{ flex: 1, border: "1px dashed #555", borderRadius: 4, padding: "8px 12px", background: "rgba(255,255,255,0.03)" }}
+                style={{ flex: 1, border: "1px dashed var(--line)", padding: "8px 12px", background: "var(--inset)" }}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={async (e) => {
                   e.preventDefault();
@@ -2564,7 +2607,7 @@ export function RulesView({ open }: { open: (id: string) => void }) {
       </div>
       <div className="panel">
         <div className="row"><h3 style={{ flex: 1 }}>Rules ({(rules || []).length})</h3>
-          <button onClick={apply} title="Re-extract the corpus so rules link everywhere">↻ apply to corpus</button></div>
+          <button onClick={apply} style={{ flex: "0 0 auto" }} title="Re-extract the corpus so rules link everywhere">↻ apply to corpus</button></div>
         {(rules || []).length === 0 && <p className="muted">No rules yet.</p>}
         <table><tbody>
           {(rules || []).map((r: any) => (

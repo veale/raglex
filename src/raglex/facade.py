@@ -272,6 +272,10 @@ class Facade:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or Config.from_env()
         self.settings = SettingsStore(self.config.settings_path)
+        # runtime statute-gazetteer top-up (acts newer than the vendored lists) lives in
+        # the data dir; register it so extraction confirms recent acts by name
+        from .citations.statute_gazetteer import register_extra_list
+        register_extra_list(self.config.data_dir / "statutes_extra.lst")
         # short-TTL cache for the expensive dashboard aggregates (full scans over the
         # ~1.5M-row relations table). Stale-while-revalidate: once warm, every request is
         # instant — a stale entry is served immediately and refreshed in the background, so
@@ -763,6 +767,16 @@ class Facade:
                 return {"rows": snowball(cat, limit=limit, only_unharvestable=only_unharvestable)}
         # The frontier is a corpus-wide roll-up; it doesn't move between page loads.
         return self._cached(f"snowball:{limit}:{only_unharvestable}", 300, _compute)["rows"]
+
+    def refresh_statute_gazetteer(self) -> dict:
+        """Top up the statute gazetteer from the legislation.gov.uk feeds (current +
+        previous year) into the data-dir extra list — so newly passed acts confirm by
+        name without a package release. Run weekly by the scheduler; cheap and no-op
+        when nothing new has been enacted."""
+        from .citations.statute_gazetteer import refresh_from_feeds
+
+        n = refresh_from_feeds(self.config.data_dir / "statutes_extra.lst")
+        return {"added": n}
 
     def rebuild_citation_counts(self) -> dict:
         """Refresh the snowball's frequency roll-up (scheduler; ~13s over 10M citations)."""
@@ -3332,9 +3346,16 @@ class Facade:
                 text = _text(sid)
                 if not text:
                     continue
+                # Only case-like citation strings may join a cluster. Act/instrument rows
+                # include carry-forward pinpoints whose raw is a bare "para 8" / "s.689" —
+                # the SAME folded key across the whole corpus. Fed to the union-find they
+                # weld unrelated cases into one mega-cluster: its first neutral then vetoes
+                # every later (correct) merge, and the anchoring step mints nonsense aliases
+                # ("para 98" → a random judgment) that misdirect resolution corpus-wide.
                 occs = [Occurrence(r["raw"], r["char_start"], r["char_end"],
                                    candidate=(r["candidate_id"] if r["entity_kind"] == "case" else None))
-                        for r in cat.citation_occurrences(sid)]
+                        for r in cat.citation_occurrences(sid)
+                        if r["entity_kind"] in ("case", "echr_case")]
                 for o in occs:
                     idx.add(fold(o.raw), neutral=occ_neutral(o))
                 # Stage A — adjacency runs within this judgment
@@ -3370,6 +3391,12 @@ class Facade:
                     uniq = list(dict.fromkeys(keys))
                     for k in uniq[1:]:
                         idx.union(uniq[0], k)
+
+            # clusters are rebuilt from scratch each run, so previous parallel-mined
+            # aliases are stale output, not state — drop them (in the same transaction
+            # as the re-mint) so a bad alias from an earlier run self-heals
+            st["cleared"] = cat.delete_aliases_by_source(
+                ("parallel:adjacency", "parallel:coref", "eu-report"), commit=False)
 
             # anchor each cluster to its held document and alias the rest to it
             for members in idx.clusters():

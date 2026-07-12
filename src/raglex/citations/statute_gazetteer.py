@@ -27,6 +27,18 @@ _SHORT_LISTS = ("ukpga_short",)
 
 _URI_RE = re.compile(r"legislation\.gov\.uk/(?:id/)?(?P<path>[a-z]{2,6}/[A-Za-z0-9]+/[A-Za-z0-9/-]+)", re.I)
 
+# Runtime top-up: an extra list (same format) living in the *data dir*, appended to by
+# refresh_from_feeds() on a schedule — so acts passed after the vendored lists were cut
+# still confirm, without waiting for a package release. Registered by the facade at init.
+_EXTRA_PATHS: list[Path] = []
+
+
+def register_extra_list(path: Path) -> None:
+    p = Path(path)
+    if p not in _EXTRA_PATHS:
+        _EXTRA_PATHS.append(p)
+        _index.cache_clear()
+
 
 def _stable_id(uri: str) -> str | None:
     """A gazetteer ``context`` URI → the stable_id (type/year/number or regnal form)."""
@@ -61,6 +73,8 @@ def _index() -> dict[tuple[str, str | None], str]:
     titles: dict[str, dict[str, str]] = {}  # title → {year: stable_id}
     for name in _FULL_LISTS:
         _load_full(_DATA / f"{name}.lst", titles)
+    for extra in _EXTRA_PATHS:
+        _load_full(extra, titles)
     idx: dict[tuple[str, str | None], str] = {}
     for title, years in titles.items():
         for year, sid in years.items():
@@ -116,6 +130,58 @@ def reference_key(raw: str) -> str:
     against the titles of legislation the corpus already holds (which never goes stale, and
     unlike the offline gazetteer covers every Act that's been harvested)."""
     return _PROVISION_PREFIX.sub("", normalise_title(raw)).strip()
+
+
+_FEED_ENTRY = re.compile(r"<entry>.*?</entry>", re.S)
+_FEED_ID = re.compile(r"<id>https?://www\.legislation\.gov\.uk/id/([a-z]+/\d{4}/\d+)</id>")
+_FEED_TITLE = re.compile(r"<title>([^<]+)</title>")
+_FEED_NEXT = re.compile(r'<link rel="next"[^>]*href="([^"]+)"')
+
+
+def refresh_from_feeds(dest: Path, *, types: tuple[str, ...] = ("ukpga", "asp", "anaw", "nia", "ukcm"),
+                       years: tuple[int, ...] | None = None) -> int:
+    """Top up the gazetteer from the legislation.gov.uk Atom feeds — append any act the
+    index doesn't already know to ``dest`` (an extra list registered via
+    :func:`register_extra_list`), and reload. Defaults to the current and previous year,
+    which is enough when run on a cadence (the scheduler runs it weekly). Returns the
+    number of entries added. Network errors skip the year — never raises."""
+    import time as _time
+    import urllib.request
+    from datetime import date
+
+    register_extra_list(dest)
+    seen = set(_index())  # (normalised title, year) keys already known
+    yrs = years or (date.today().year - 1, date.today().year)
+    added: list[str] = []
+    for typ in types:
+        for year in yrs:
+            url: str | None = f"https://www.legislation.gov.uk/{typ}/{year}/data.feed"
+            while url:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "raglex-gazetteer"})
+                    with urllib.request.urlopen(req, timeout=60) as r:
+                        xml = r.read().decode("utf-8", "replace")
+                except Exception:
+                    break  # feed unavailable — try again next cadence
+                for entry in _FEED_ENTRY.findall(xml):
+                    mid, mtitle = _FEED_ID.search(entry), _FEED_TITLE.search(entry)
+                    if not (mid and mtitle):
+                        continue
+                    title = re.sub(rf"\s+{year}$", "", mtitle.group(1).strip()).replace("&amp;", "&")
+                    key = (normalise_title(title), str(year))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    added.append(f"{title};year={year};context=http://www.legislation.gov.uk/id/{mid.group(1)}")
+                m = _FEED_NEXT.search(xml.split("<entry>")[0])
+                url = m.group(1).replace("http://", "https://") if m else None
+                _time.sleep(0.2)
+    if added:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(added) + "\n")
+        _index.cache_clear()
+    return len(added)
 
 
 def resolve(title: str, year: str | None = None) -> str | None:
