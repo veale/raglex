@@ -456,6 +456,23 @@ class Facade:
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
             }
 
+    def _resolved_target(self, cat, cand: str | None, raw: str | None) -> str | None:
+        """The held document a citation points to — by its candidate id, else by the alias
+        its folded raw string maps to. The alias rung is where the report/parallel/
+        legislation/EHRR matches live, so without it the reader shows every alias-resolved
+        citation (a WLR linked to its neutral cite, a statute name → the Act) as unlinked."""
+        if cand:
+            hit = cat.find_document_id(cand)
+            if hit:
+                return hit
+        if raw:
+            from .topics.gate import fold
+
+            dst = cat.get_alias(fold(raw))
+            if dst:
+                return cat.find_document_id(dst)
+        return None
+
     def document_body(self, stable_id: str) -> dict:
         """The document's extracted text + structural segments (§6b) for the reader.
         Segments carry kind/level so legislation renders as a hierarchy."""
@@ -475,7 +492,7 @@ class Facade:
             citations = []
             for c in cat.citations_for(stable_id):
                 cand = c["candidate_id"]
-                resolved = cat.find_document_id(cand) if cand else None
+                resolved = self._resolved_target(cat, cand, c["raw"])
                 citations.append({
                     "char_start": c["char_start"], "char_end": c["char_end"],
                     "raw": c["raw"], "candidate_id": cand, "pinpoint": c["pinpoint"],
@@ -603,7 +620,7 @@ class Facade:
                 key = cand or c["raw"]
                 entry = seen.get(key)
                 if entry is None:
-                    resolved = cat.find_document_id(cand) if cand else None
+                    resolved = self._resolved_target(cat, cand, c["raw"])
                     rdoc = cat.get_document(resolved) if resolved else None
                     entry = seen[key] = {
                         "candidate": cand, "raw": c["raw"], "resolved_id": resolved,
@@ -3169,15 +3186,23 @@ class Facade:
         from .adapters.registry import get_adapter
         from .pipeline import Pipeline
 
+        chunk = 20  # harvest in small batches so progress ticks (a single Pipeline.run over
+        # 500 rate-limited HUDOC lookups reports nothing for minutes → the stall detector
+        # wrongly flags the job frozen).
         with self._open() as (cat, rs, ts):
             names = cat.pending_echr_name_refs(limit=limit)
             if not names:
-                return {"queued": 0, "stored": 0, "resolved_edges": 0}
-            _progress(on_progress, stage="searching HUDOC by case name", done=0, total=len(names))
-            adapter = get_adapter("echr", ids=names)
+                return {"queued": 0, "stored": 0, "harvested_docs": 0, "resolved_edges": 0}
             before = cat.all_stable_ids()
-            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
-                adapter, record_health=True)
+            total = len(names)
+            stored = 0
+            for i in range(0, total, chunk):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="harvesting ECtHR from HUDOC", done=i, total=total)
+                adapter = get_adapter("echr", ids=names[i: i + chunk])
+                stored += Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                    adapter, record_health=False).stored
             stored_ids = list(cat.all_stable_ids() - before)
             self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
             resolved = Resolver(cat).run()
@@ -3185,7 +3210,7 @@ class Facade:
         if match_after and not (cancel_check and cancel_check()):
             matched = self.match_echr_reports(on_progress=on_progress, cancel_check=cancel_check)
         self._invalidate_caches()
-        return {"queued": len(names), "stored": stats.stored,
+        return {"queued": len(names), "stored": stored,
                 "harvested_docs": len(stored_ids), "resolved_edges": resolved.resolved,
                 "echr_match": matched}
 
