@@ -2416,7 +2416,7 @@ class Facade:
 
         from .adapters.bailii_html import parse_bailii_html
         from .adapters.uk_caselaw import court_from_slug
-        from .citations import extract_document
+        from .citations import extract_citations, extract_document
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
@@ -2473,6 +2473,26 @@ class Facade:
                     bare = _chamberless_alias(slug)
                     if bare and bare != slug:
                         alias_pairs.append((bare, "chamber-alias"))
+                    # ICLR-sourced pages open with the report citation the case was
+                    # published at — usually bare ("12 QBD 271", no year) and often
+                    # missing from "Cite as:". It names THIS case, so it's an alias,
+                    # not an outgoing reference (extraction's self-citation guard
+                    # drops the phantom edge). The report grammar needs a year, so
+                    # qualify the bare first line with the decision year and mint
+                    # every form a citer might use: "(1884) …", "[1884] …", bare.
+                    self_reports = [c.raw for c in extract_citations(parsed.text[:400])
+                                    if c.entity_kind == "case" and not c.candidate_id]
+                    year = parsed.decision_date.year if parsed.decision_date else None
+                    first = parsed.text.split("\n", 1)[0].strip()
+                    if year and first and not any(first in r for r in self_reports):
+                        probe = f"({year}) {first}"
+                        got = [c for c in extract_citations(probe) if c.method == "law_report"]
+                        if len(got) == 1 and got[0].raw == probe:
+                            self_reports += [probe, f"[{year}] {first}", first]
+                    for r in self_reports:
+                        key = fold(r)
+                        if key and key != slug and not cat.get_alias(key):
+                            alias_pairs.append((key, "bailii-self-report"))
 
                     payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
                     new_meta = {"imported": "bailii-html", "bailii_url": parsed.bailii_url,

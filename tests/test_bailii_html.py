@@ -146,3 +146,27 @@ def test_zip_import_attaches_secondary_to_authoritative_copy(facade, tmp_path):
         assert meta["alt_texts"][0]["source"] == "bailii-html"
         # but the report-citation aliases are still minted
         assert cat.find_document_id("[2001] 2 ac 277") == "ukhl/2000/57"
+
+
+def test_zip_import_aliases_bare_header_report_citation(facade, tmp_path):
+    """An ICLR-sourced page (pre-neutral-citation) opens with the bare report citation
+    the case was published at ('12 QBD 271'). It names THIS case: every year-form must
+    alias to the imported slug, and the header mention must NOT become an outgoing edge."""
+    page = _page(
+        url="https://www.bailii.org/ew/cases/EWHC/QB/1884/1.html",
+        title="Bradlaugh v Gossett [1884] EWHC 1 (QB) (9 February 1884)",
+        cites="[1884] EWHC 1 (QB)",
+        body="<DIV class=topline_right>12 QBD 271</DIV>"
+             "<P>BRADLAUGH v. GOSSETT.</P>"
+             "<P>The court gave judgment for the defendant.</P>"
+             "<BR><BR><DIV class=topline_right><P>The permission for BAILII to publish "
+             "the text of this judgment was granted by: ICLR</P></DIV>")
+    res = facade.import_bailii_zip(zip_path=_zip(tmp_path, {"a.html": page}))
+    assert res["imported"] == 1
+    with facade._open() as (cat, _rs, ts):
+        # the citation heads the text (the ICLR permission block does not survive)
+        assert ts.get(cat.get_document("ewhc/qb/1884/1")["payload_hash"]).startswith("12 QBD 271")
+        for form in ("12 qbd 271", "(1884) 12 qbd 271", "[1884] 12 qbd 271"):
+            assert cat.find_document_id(form) == "ewhc/qb/1884/1"
+        assert not [e for e in cat.relations_for("ewhc/qb/1884/1")
+                    if "qbd" in (e["raw_citation_string"] or "").lower()]

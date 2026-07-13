@@ -119,6 +119,34 @@ def test_carry_forward_needs_a_legislation_antecedent():
     assert not [c for c in cites if c.method == "carry_forward"]
 
 
+def test_self_citation_in_header_never_becomes_an_edge(catalogue, tmp_path):
+    # a judgment's header prints its OWN neutral citation — that must not become
+    # an outgoing edge (it used to resolve into a silent self-loop)
+    ts = TextStore(tmp_path / "text")
+    t = ("Neutral Citation Number: [2024] UKSC 12\n\nThe court considered "
+         "Case C-311/18 and section 5 of the Data Protection Act 2018.")
+    _doc(catalogue, ts, "uksc/2024/12", t, source="uk-caselaw")
+    extract_document(catalogue, ts, "uksc/2024/12")
+    edges = catalogue.relations_for("uksc/2024/12")
+    assert not [e for e in edges if e["dst_id"] == "uksc/2024/12"]  # no self-loop
+    assert {e["dst_id"] for e in edges} >= {"62018CJ0311", "ukpga/2018/12"}  # real cites kept
+    # the observation row survives for the reader; only the edge is dropped
+    assert any(c["candidate_id"] == "uksc/2024/12"
+               for c in catalogue.citations_for("uksc/2024/12"))
+
+
+def test_self_citation_via_alias_also_dropped(catalogue, tmp_path):
+    # the report citation a case was published at aliases to the case itself —
+    # the case's own header mention of it must not become an edge either
+    ts = TextStore(tmp_path / "text")
+    catalogue.put_alias("(1884) 12 qbd 271", "ewhc/qb/1884/1", source="bailii-self-report")
+    _doc(catalogue, ts, "ewhc/qb/1884/1", "(1884) 12 QBD 271\n\nBRADLAUGH v. GOSSETT.",
+         source="uk-caselaw")
+    extract_document(catalogue, ts, "ewhc/qb/1884/1")
+    assert not [e for e in catalogue.relations_for("ewhc/qb/1884/1")
+                if (e["raw_citation_string"] or "").lower().find("qbd") >= 0]
+
+
 def test_carry_forward_suppressed_inside_legislation(catalogue, tmp_path):
     # Inside an act/directive, a bare "Article 3" is the instrument referring to
     # ITSELF — it must NOT be carried forward onto the directive named earlier

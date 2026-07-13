@@ -152,8 +152,28 @@ def extract_document(
                 context_start=c.char_start,  # representative span for §1.3a
                 context_end=c.char_end,
             )
+    edges = _drop_self_citations(catalogue, stable_id, edges)
     catalogue.add_relations(stable_id, list(edges.values()))
     return len(cites)
+
+
+def _drop_self_citations(catalogue: Catalogue, stable_id: str, edges: dict) -> dict:
+    """A judgment's header prints the document's OWN identity — its neutral citation
+    ("Neutral Citation Number: [2000] EWCA Civ 18") or, for a law-report-sourced text,
+    the report citation it was published at ("12 QBD 271" opening an ICLR page).
+    Extracted naively those become outgoing edges: a self-loop once the alias exists,
+    or a phantom "cited but unfetchable" entry until then. Drop every edge whose target
+    resolves to the citing document itself (one batched lookup; the citation
+    *observations* stay, so the reader can still see the span — it just isn't an edge)."""
+    from ..resolve.matchers import normalise_candidate
+    from ..topics.gate import fold
+
+    keys = {ek: (normalise_candidate(rel.dst_id, rel.raw_citation_string)
+                 or fold(rel.raw_citation_string or ""))
+            for ek, rel in edges.items()}
+    hits = catalogue.find_existing([k for k in keys.values() if k])
+    return {ek: rel for ek, rel in edges.items()
+            if not keys[ek] or hits.get(keys[ek]) != stable_id}
 
 
 def extract_corpus(

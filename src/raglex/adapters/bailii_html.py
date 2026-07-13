@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from html import unescape as _unescape
 
 from ..core.models import Segment
 from .bailii_corpus import CleanName, bailii_path_to_slug, clean_case_name
@@ -118,6 +119,15 @@ def _body_text(fragment: str) -> str:
     soup = BeautifulSoup(re.sub(r"[\r\n]+", " ", fragment), "html.parser")
     for junk in soup(["script", "style"]):
         junk.decompose()
+    # ICLR permission boilerplate (law-report-sourced pages) — but ONLY the
+    # permission block: the page's running head shares the class and carries the
+    # report citation ("12 QBD 271") the importer aliases the case by.
+    for junk in soup.find_all("div", class_="topline_right"):
+        if "permission for BAILII" in junk.get_text():
+            junk.decompose()
+    # white-on-white machine tags (ICLR_VOTE_BATCH_1 and kin)
+    for junk in soup.find_all("font", color=re.compile(r"^white$", re.IGNORECASE)):
+        junk.decompose()
     for li in soup.find_all("li"):
         v = li.get("value")
         if v is not None:
@@ -186,7 +196,7 @@ def parse_bailii_html(data: bytes, *, filename: str | None = None) -> ParsedBail
         slug = slug_from_filename(filename)
 
     tm = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-    raw_title = re.sub(r"\s+", " ", tm.group(1)).strip() if tm else ""
+    raw_title = _unescape(re.sub(r"\s+", " ", tm.group(1)).strip()) if tm else ""
     clean: CleanName = clean_case_name(raw_title)
 
     if slug is None and not clean.title:
@@ -195,14 +205,14 @@ def parse_bailii_html(data: bytes, *, filename: str | None = None) -> ParsedBail
     citations: list[str] = []
     cm = _CITE_AS.search(html)
     if cm:
-        flat = re.sub(r"<[^>]+>", " ", cm.group(1))
+        flat = _unescape(re.sub(r"<[^>]+>", " ", cm.group(1)))
         for part in flat.split(","):
             part = re.sub(r"\s+", " ", part).strip()
             if part and re.search(r"\d", part):
                 citations.append(part)
 
     hm = re.search(r"<h1>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
-    court_label = re.sub(r"\s+|<[^>]+>", " ", hm.group(1)).strip() if hm else None
+    court_label = _unescape(re.sub(r"\s+|<[^>]+>", " ", hm.group(1)).strip()) if hm else None
 
     text = _body_text(_body_slice(html))
     return ParsedBailii(
