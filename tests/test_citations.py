@@ -119,6 +119,24 @@ def test_carry_forward_needs_a_legislation_antecedent():
     assert not [c for c in cites if c.method == "carry_forward"]
 
 
+def test_carry_forward_suppressed_inside_legislation(catalogue, tmp_path):
+    # Inside an act/directive, a bare "Article 3" is the instrument referring to
+    # ITSELF — it must NOT be carried forward onto the directive named earlier
+    # (it used to link to whatever the recitals mentioned last).
+    ts = TextStore(tmp_path / "text")
+    t = ("This Directive complements Directive 2011/83/EU. "
+         "Article 3 shall apply to any contract.")
+    _doc(catalogue, ts, "32019L0770", t, doc_type=DocType.LEGISLATION)
+    extract_document(catalogue, ts, "32019L0770")
+    assert not [c for c in catalogue.citations_for("32019L0770")
+                if c["method"] == "carry_forward"]
+    # the same text in a JUDGMENT keeps the heuristic (it's built for judgments)
+    _doc(catalogue, ts, "uksc/2024/9", t)
+    extract_document(catalogue, ts, "uksc/2024/9")
+    assert [c for c in catalogue.citations_for("uksc/2024/9")
+            if c["method"] == "carry_forward"]
+
+
 def test_named_alias_rule_links_phrase_to_target():
     # a user shorthand rule ("UK GDPR" → a document) links every occurrence
     aliases = {"UK GDPR": "european/regulation/2016/0679"}

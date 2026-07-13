@@ -170,3 +170,28 @@ def test_retry_failed_clears_the_cooldown(monkeypatch):
     assert f._coverage_uncached()["ready_references"] == 0
     f.retry_failed_references()
     assert f._coverage_uncached()["ready_references"] == 1
+
+
+def test_joined_case_already_held_mints_alias_without_refetch(monkeypatch):
+    """A citation of a joined case (C-48/93) whose LEAD judgment (61993CJ0046) is
+    already in the corpus: the targeted fetch must alias the joined CELEX to the held
+    document and report 'present' — never refetch, never record an absence."""
+    f = _facade()
+    _doc(f, "ECLI:EU:C:1996:79", "Brasserie du Pecheur / Factortame judgment text")
+    with f._open() as (cat, _rs, _ts):
+        cat.put_alias("61993cj0046", "ECLI:EU:C:1996:79", source="celex-ecli")
+
+    import raglex.facade as fmod
+    from raglex.adapters.eu_cellar import CJEUCaseAdapter
+
+    # the builder resolves the guess to the lead CELEX (mocked: no network)
+    monkeypatch.setitem(
+        fmod._TARGETED_HARVEST, "eu-cellar",
+        lambda cand: CJEUCaseAdapter("61993CJ0046", celex_aliases=(cand,)))
+
+    with f._open() as (cat, rs, ts):
+        res = f._fetch_reference(cat, rs, ts, ref="C-48/93", candidate="61993CJ0048")
+        assert res["outcome"] == "present"
+        assert res["aliased_to"] == "ECLI:EU:C:1996:79"
+        # the joined number now resolves to the held judgment
+        assert cat.find_document_id("61993cj0048") == "ECLI:EU:C:1996:79"

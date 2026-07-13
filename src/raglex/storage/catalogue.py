@@ -1586,6 +1586,16 @@ class Catalogue:
         return self.conn.execute(
             "SELECT COUNT(*) AS n FROM match_suggestions WHERE status = 'pending'").fetchone()["n"]
 
+    def pending_suggestions(self, *, limit: int = 500) -> list[dict]:
+        """Every pending suggestion, best score first — the bulk-confirmation list the
+        UI shows below the unfetchable frontier, so a human can sweep through all the
+        naming candidates in one sitting instead of chasing them per-reference."""
+        order = "ORDER BY score DESC NULLS LAST, ref" if self.backend == "postgres" \
+            else "ORDER BY score DESC, ref"
+        return [dict(r) for r in self.conn.execute(
+            f"SELECT * FROM match_suggestions WHERE status = 'pending' {order} LIMIT ?",
+            (limit,))]
+
     # -- refinement flags (reader passages flagged for linking-logic review) --
     def add_refinement_flag(self, *, doc_id: str, selected_text: str, anchor: str | None = None,
                             context: str | None = None, current_links: str | None = None,

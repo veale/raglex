@@ -830,8 +830,6 @@ def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -
         found = {r["celex"].upper() for r in cellar._sparql(q) if r.get("celex")}
     except Exception:  # noqa: BLE001 — best-effort; caller treats None as "couldn't resolve"
         return None
-    if not found:
-        return None
     # ranked preference: this family's decisions (best type first), then the other
     # families' decisions (a "C-" citation that only exists as a "T-" case = a citation
     # error we still want to resolve).
@@ -845,7 +843,38 @@ def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -
     for cand in sorted(found):
         if cand[5:7] in _ALL_DECISION_DESCRIPTORS:
             return cand
-    return None
+    # Joined cases: the decision is published only under the LEAD case number
+    # (Joined Cases C-46/93 and C-48/93 → 61993CJ0046; no CELEX exists under 0048
+    # at all). The lead work links every joined number via
+    # cdm:case-law_joins_case_court, whose object URI embeds the joined CELEX
+    # (…/resource/case/celex%3A61993CJ0048) — so one reverse hop finds the lead.
+    return _resolve_joined_case(cellar, year=year, num=num, family=family)
+
+
+def _resolve_joined_case(cellar: "EUCellarAdapter", *, year: str, num: str,
+                         family: str) -> str | None:
+    q = (
+        f"PREFIX cdm: <{CDM}>\n"
+        "SELECT DISTINCT ?celex WHERE { ?w cdm:case-law_joins_case_court ?j . "
+        f'FILTER(REGEX(STR(?j), "celex(%3A|:){year}[A-Z][A-Z]{num}$", "i")) '
+        "?w cdm:resource_legal_id_celex ?celex . }"
+    )
+    try:
+        leads = {r["celex"].upper() for r in cellar._sparql(q) if r.get("celex")}
+    except Exception:  # noqa: BLE001 — best-effort, like the primary hop
+        return None
+    leads = {c for c in leads if len(c) >= 9 and c[5:7] in _ALL_DECISION_DESCRIPTORS}
+    if not leads:
+        return None
+    # The lead has a different case NUMBER, so rank by descriptor alone: the cited
+    # family's decisions first (judgment > order > opinion), then the rest.
+    ranked = list(_DECISION_DESCRIPTORS.get(family, ()))
+    ranked += [d for fam, ds in _DECISION_DESCRIPTORS.items() if fam != family for d in ds]
+    for desc in ranked:
+        for cand in sorted(leads):
+            if cand[5:7] == desc:
+                return cand
+    return sorted(leads)[0]
 
 
 class CJEUCaseAdapter(BaseAdapter):

@@ -97,8 +97,8 @@ export const api = {
   harvestAllReferences: (limit = 25, min_citing = 1) =>
     req<any>("/unresolved/harvest-all", { method: "POST", body: JSON.stringify({ limit, min_citing }) }),
   retryFailed: () => req<any>("/unresolved/retry-failed", { method: "POST" }),
-  decideSuggestion: (ref: string, suggested_id: string, accept: boolean) =>
-    req<any>("/suggestions/decide", { method: "POST", body: JSON.stringify({ ref, suggested_id, accept }) }),
+  decideSuggestion: (ref: string, suggested_id: string, accept: boolean, resolve = true) =>
+    req<any>("/suggestions/decide", { method: "POST", body: JSON.stringify({ ref, suggested_id, accept, resolve }) }),
   flagRefinement: (body: Record<string, unknown>) =>
     req<any>("/refinement-flags", { method: "POST", body: JSON.stringify(body) }),
   refinementFlags: (status = "open") => req<any[]>(`/refinement-flags?status=${encodeURIComponent(status)}`),
@@ -199,5 +199,11 @@ export const api = {
     if (title) fd.append("title", title);
     return postForm("/import/bailii", fd) as Promise<{ stable_id: string; chars: number; resolved_edges: number }>;
   },
+  importBailiiZip: async (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return postForm("/import/bailii-zip", fd) as Promise<{ job_id?: string; error?: string }>;
+  },
+  pendingSuggestions: (limit = 500) => req<any>(`/suggestions/pending?limit=${limit}`),
   embed: () => req<any>("/embed", { method: "POST", body: "{}" }),
 };

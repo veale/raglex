@@ -1683,12 +1683,43 @@ export function ImportView({ open }: { open?: (id: string) => void }) {
           try { show(await api.importFile(file, { doc_type: docType, link_to: linkTo })); } catch (e: any) { show("error: " + e); }
         }}>Import file</button></p>
       </div>
+      <BailiiZipPanel />
       <div className="panel">
         <h3>Zotero library</h3>
         <p className="muted">Uses the credentials saved in Settings.</p>
         <button className="primary" onClick={async () => { try { show(await api.importZotero({ limit: 50 })); } catch (e: any) { show("error: " + e); } }}>Import from Zotero</button>
       </div>
       {msg && <div className="panel"><pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{msg}</pre></div>}
+    </div>
+  );
+}
+
+// Upload a zip of saved BAILII judgment .html pages — processed as a background job:
+// each page's URL line keys it by its neutral-citation slug, the "Cite as:" list becomes
+// resolution aliases, and the styled text supersedes any lower-fidelity copy already held.
+function BailiiZipPanel() {
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="panel">
+      <h3>BAILII judgments (zip of .html pages)</h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Drop a zip of BAILII case pages saved from bailii.org. Each page is parsed for its neutral
+        citation, case name, decision date, court and the full “Cite as:” list; new cases are imported
+        with the styled text, plain-text copies already in the corpus are superseded, and every report
+        citation is aliased so it resolves. Runs in the background — watch the Jobs panel.
+      </p>
+      <input type="file" accept=".zip" disabled={busy} onChange={async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        setBusy(true); setMsg("uploading…");
+        try {
+          const r = await api.importBailiiZip(f);
+          setMsg(r.error ? "error: " + r.error : `✓ queued as job ${r.job_id} — watch the Jobs panel`);
+        } catch (err: any) { setMsg("error: " + (err.message || err)); }
+        finally { setBusy(false); e.target.value = ""; }
+      }} />
+      {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
     </div>
   );
 }
@@ -2301,6 +2332,7 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
       </table>
     </div>
     <UnfetchablePanel />
+    <AllSuggestionsPanel />
     </div>
   );
 }
@@ -2424,34 +2456,133 @@ function Info({ t }: { t: string }) {
 
 // One "Possibly: …?" match suggestion with tick/cross. Accepting links every citation of
 // the reference to the suggested document (and fetches it first if it isn't held yet);
-// rejecting records the decision so it's never suggested again.
-function SuggestionRow({ s, onDone }: { s: any; onDone: () => void }) {
+// rejecting records the decision so it's never suggested again. Decisions apply IN PLACE —
+// no list reload, so you can sweep down the page confirming one after another without the
+// rows re-ranking under your cursor.
+function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [decided, setDecided] = useState<null | "accepted" | "rejected">(null);
   const [msg, setMsg] = useState("");
   const decide = async (accept: boolean) => {
     setBusy(true); setMsg(accept ? "linking…" : "");
     try {
       const r = await api.decideSuggestion(s.ref, s.suggested_id, accept);
+      setDecided(accept ? "accepted" : "rejected");
       if (accept) {
         setMsg(`✓ linked${r.resolved_edges ? ` · resolved ${r.resolved_edges} edge(s)` : ""}` +
           (r.harvest ? (r.harvest.stored ? " · fetched" : r.harvest.error ? ` · fetch failed: ${r.harvest.error}` : "") : ""));
+      } else {
+        setMsg("✗ dismissed");
       }
-      setTimeout(onDone, accept ? 1100 : 150);
-    } catch (e: any) { setMsg("error: " + e); setBusy(false); }
+    } catch (e: any) { setMsg("error: " + e); }
+    setBusy(false);
   };
   return (
-    <div className="suggestion">
+    <div className="suggestion" style={decided === "rejected" ? { opacity: 0.55 } : undefined}>
       <span className="sug-label">Possibly:</span>{" "}
       <b>{s.context || s.suggested_id}</b>
       {!s.held && <span className="muted"> · not held yet — accepting fetches it</span>}
       <span className="muted"> — {s.reason}</span>
       {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}
       {" "}
-      <button className="mini sug-yes" disabled={busy} title="yes — link every citation of this reference to it"
-        onClick={() => decide(true)}>✓</button>{" "}
-      <button className="mini sug-no" disabled={busy} title="no — never suggest this again"
-        onClick={() => decide(false)}>✗</button>
+      {!decided && <>
+        <button className="mini sug-yes" disabled={busy} title="yes — link every citation of this reference to it"
+          onClick={() => decide(true)}>✓</button>{" "}
+        <button className="mini sug-no" disabled={busy} title="no — never suggest this again"
+          onClick={() => decide(false)}>✗</button>
+      </>}
       {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {msg}</span>}
+    </div>
+  );
+}
+
+// The full sweep-through list of every pending naming candidate, at the bottom of the
+// page: tick/cross applies in place (no reload, no re-ranking), and "accept all" walks
+// the whole list — deferring the resolver to ONE pass at the end.
+function AllSuggestionsPanel() {
+  const [data, err] = useAsync(() => api.pendingSuggestions(500), []);
+  // decision state lives HERE, keyed per suggestion, so deciding never re-fetches the list
+  const [state, setState] = useState<Record<string, { s: string; note?: string }>>({});
+  const [sweeping, setSweeping] = useState(false);
+  const stopRef = useRef(false);
+  const rows: any[] = data?.suggestions || [];
+  const key = (s: any) => `${s.ref} ${s.suggested_id}`;
+  const pendingRows = rows.filter((s) => !state[key(s)] || state[key(s)].s === "pending");
+
+  async function decideOne(s: any, accept: boolean, resolve = true) {
+    const k = key(s);
+    setState((st) => ({ ...st, [k]: { s: "busy" } }));
+    try {
+      const r = await api.decideSuggestion(s.ref, s.suggested_id, accept, resolve);
+      const note = accept
+        ? `✓${r.resolved_edges ? ` resolved ${r.resolved_edges}` : " linked"}` +
+          (r.harvest ? (r.harvest.stored ? " · fetched" : r.harvest.error ? ` · fetch failed` : "") : "")
+        : "✗ dismissed";
+      setState((st) => ({ ...st, [k]: { s: accept ? "accepted" : "rejected", note } }));
+    } catch (e: any) {
+      setState((st) => ({ ...st, [k]: { s: "pending", note: "error: " + (e.message || e) } }));
+    }
+  }
+
+  async function acceptAll() {
+    setSweeping(true); stopRef.current = false;
+    for (const s of rows) {
+      if (stopRef.current) break;
+      const k = key(s);
+      // eslint-disable-next-line no-await-in-loop
+      if (!stateRef.current[k] || stateRef.current[k].s === "pending") await decideOne(s, true, false);
+    }
+    try { await api.resolve(); } catch { /* the sweep already linked; resolve is a top-up */ }
+    setSweeping(false);
+  }
+  // acceptAll reads decision state across awaits — a ref tracks the latest without re-renders
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
+  if (err || !rows.length) return null;
+  return (
+    <div className="panel">
+      <div className="row" style={{ alignItems: "baseline" }}>
+        <h3 style={{ marginTop: 0, flex: 1 }}>Naming candidates
+          <span className="muted"> — every pending “Possibly: …?” suggestion. Ticks apply in place (nothing reloads); sweep the list, then the graph resolves.</span>
+          {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
+        </h3>
+        {!sweeping
+          ? <button className="mini" style={{ flex: "0 0 auto" }} disabled={pendingRows.length === 0}
+              title="Accept every remaining suggestion below, then run one resolve pass"
+              onClick={acceptAll}>✓ accept all ({pendingRows.length})</button>
+          : <button className="mini" style={{ flex: "0 0 auto" }} onClick={() => { stopRef.current = true; }}>■ stop</button>}
+      </div>
+      <table className="grid">
+        <thead><tr><th>reference</th><th>suggested match</th><th>why</th><th style={{ whiteSpace: "nowrap" }}>decide</th></tr></thead>
+        <tbody>
+          {rows.map((s) => {
+            const st = state[key(s)];
+            const done = st && (st.s === "accepted" || st.s === "rejected");
+            return (
+              <tr key={key(s)} style={st?.s === "rejected" ? { opacity: 0.5 } : undefined}>
+                <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }}>{s.ref}</td>
+                <td><b>{s.context || s.suggested_id}</b>
+                  {!s.held && <span className="muted"> · not held — accepting fetches it</span>}
+                  {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}</td>
+                <td className="muted" style={{ fontSize: 12 }}>{s.reason}{s.score != null && ` · ${Number(s.score).toFixed(2)}`}</td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  {!done && <>
+                    <button className="mini sug-yes" disabled={st?.s === "busy" || sweeping}
+                      title="yes — link every citation of this reference to it"
+                      onClick={() => decideOne(s, true)}>✓</button>{" "}
+                    <button className="mini sug-no" disabled={st?.s === "busy" || sweeping}
+                      title="no — never suggest this again"
+                      onClick={() => decideOne(s, false)}>✗</button>
+                  </>}
+                  {st?.s === "busy" && <span className="muted" style={{ fontSize: 12 }}> …</span>}
+                  {st?.note && <span className={st.note.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {st.note}</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

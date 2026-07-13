@@ -263,10 +263,17 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/suggestions/decide")
     def decide_suggestion_ep(payload: dict = Body(...)) -> dict:
         """Tick (accept) or cross (reject) a suggestion. Accept aliases + resolves, and
-        harvests the target if it isn't held yet."""
+        harvests the target if it isn't held yet. ``resolve: false`` defers the resolver
+        pass (the bulk sweep resolves once at the end via POST /resolve)."""
         return facade.decide_suggestion(
             ref=payload["ref"], suggested_id=payload["suggested_id"],
-            accept=bool(payload.get("accept", True)))
+            accept=bool(payload.get("accept", True)),
+            resolve=bool(payload.get("resolve", True)))
+
+    @app.get("/suggestions/pending")
+    def pending_suggestions_ep(limit: int = 500) -> dict:
+        """All pending naming-candidate suggestions, best score first — the bulk list."""
+        return facade.list_pending_suggestions(limit=limit)
 
     @app.post("/refinement-flags")
     def add_refinement_flag_ep(payload: dict = Body(...)) -> dict:
@@ -647,6 +654,24 @@ def create_app(config: Config | None = None) -> FastAPI:
         """
         data = await file.read()
         return facade.import_bailii_file(stable_id=stable_id, data=data, title=title or None)
+
+    @app.post("/import/bailii-zip")
+    async def import_bailii_zip_ep(file: UploadFile = File(...)) -> dict:
+        """Accept a zip of saved BAILII judgment HTML pages and process it as a
+        background job: each page is parsed (slug, case name, date, "Cite as:" list,
+        numbered paragraphs) and synthesised with the corpus — new cases imported,
+        lower-fidelity copies superseded, authoritative ones enriched with aliases.
+        The zip is spooled to disk so the job survives a restart."""
+        import uuid as _uuid
+
+        data = await file.read()
+        spool = facade.config.data_dir / "uploads"
+        spool.mkdir(parents=True, exist_ok=True)
+        path = spool / f"bailii-{_uuid.uuid4().hex[:12]}.zip"
+        path.write_bytes(data)
+        return jobs.start("import-bailii-zip",
+                          f"Import BAILII zip ({file.filename or 'upload.zip'})",
+                          {"zip_path": str(path)})
 
     @app.post("/documents/{doc_id:path}/attach")
     async def attach_ep(doc_id: str, file: UploadFile = File(...), kind: str = Form("exhibit")) -> dict:

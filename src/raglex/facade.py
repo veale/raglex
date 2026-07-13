@@ -1846,6 +1846,17 @@ class Facade:
             # CELLAR under every case-CELEX descriptor) — a genuine absence.
             return {"error": f"could not build a {adapter_key} fetch for {cand!r}",
                     "candidate": cand, "outcome": "absent"}
+        # The builder may have resolved the citation to a DIFFERENT real id (a guessed
+        # …CJ… descriptor, or a joined case published under its lead number). If we
+        # already hold that real document, just mint the alias so the citing edges
+        # resolve — no refetch (the pipeline's stub dedup would skip alias minting).
+        real = getattr(adapter, "celex", None)
+        if real and real.upper() != cand.upper():
+            held = cat.find_document_id(real)
+            if held is not None:
+                cat.put_alias(cand.casefold(), held, source="celex-ecli")
+                return {"candidate": cand, "present": True, "stored": 0,
+                        "outcome": "present", "aliased_to": held}
         # backfill=False so this one-item fetch never rewrites the source's real
         # watermark; the targeted adapters ignore `since` and yield just our id.
         # record_health=False: a 404 for a single item means "this item isn't available"
@@ -2363,6 +2374,209 @@ class Facade:
                 on_progress=on_progress, cancel_check=cancel_check).get("aliased", 0)
         self._invalidate_caches()
         return st
+
+    @staticmethod
+    def _bailii_html_supersedes(existing, existing_meta: dict, new_len: int, old_len: int) -> bool:
+        """Should a parsed BAILII page REPLACE the held text for its slug? Yes when the
+        held copy is a lower-fidelity import (the plain-text bailii-corpus dump, a manual
+        RTF upload, a generic user import, or textless); a HoL scrape is replaced only by
+        a copy at least comparably long (a truncated save must not beat a full scrape).
+        Anything else — above all a Find Case Law XML — stays authoritative."""
+        if not existing["has_text"]:
+            return True
+        if existing_meta.get("imported") in ("bailii-corpus", "bailii-html"):
+            return True
+        if existing_meta.get("via") == "bailii-upload":
+            return True
+        if existing["source"] == "user-import":
+            return True
+        if existing["source"] == "uk-hol":
+            return new_len >= 0.8 * old_len
+        return False
+
+    def import_bailii_zip(self, *, zip_path: str, limit: int | None = None,
+                          on_progress=None, cancel_check=None) -> dict:
+        """Import a zip of saved BAILII judgment pages (``.html``) — each parsed for its
+        neutral-citation slug (the URL line), case name, decision date, court, numbered
+        paragraphs, and the full "Cite as:" list, then **synthesised** with what the
+        corpus already holds (§5b):
+
+        * a slug we don't hold → imported as a first-class ``uk-caselaw`` judgment
+          (styled HTML kept as the raw, paragraph segments for pinpoints);
+        * a slug held as a lower-fidelity copy (the plain-text bailii-corpus dump, a
+          manual RTF upload) → **superseded**: the richer page becomes the document's
+          text (old version archived, prior text kept as a secondary ``alt_text``);
+        * a slug held authoritatively (Find Case Law XML) → the page attaches as a
+          secondary ``alt_text`` and only the metadata is merged.
+
+        In every case the name variants, every "Cite as:" report citation, and the
+        chamber-less slug are minted as aliases — so report-only citations resolve —
+        the case name fills an empty title, and one resolve pass links the graph."""
+        import zipfile
+
+        from .adapters.bailii_html import parse_bailii_html
+        from .adapters.uk_caselaw import court_from_slug
+        from .citations import extract_document
+        from .citations.name_variants import name_variants
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+        from .pipeline.runner import _chamberless_alias
+        from .resolve.matchers import first_candidate
+        from .topics.gate import fold
+
+        st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0,
+              "unparseable": 0, "aliases": 0, "extracted": 0}
+        files: list[dict] = []  # per-file dispositions for the UI
+        with zipfile.ZipFile(zip_path) as zf:
+            entries = [i for i in zf.infolist()
+                       if not i.is_dir()
+                       and i.filename.lower().endswith((".html", ".htm"))
+                       and not i.filename.startswith("__MACOSX")
+                       and "/." not in "/" + i.filename]
+            if limit:
+                entries = entries[:limit]
+            with self._open() as (cat, rs, ts):
+                to_extract: list[str] = []
+                for n, info in enumerate(entries, 1):
+                    if cancel_check and cancel_check():
+                        break
+                    st["total"] += 1
+                    _progress(on_progress, stage="importing", done=n, total=len(entries),
+                              item=info.filename)
+                    data = zf.read(info)
+                    try:
+                        parsed = parse_bailii_html(data, filename=info.filename)
+                    except Exception as exc:  # noqa: BLE001 — one bad page mustn't sink the zip
+                        parsed = None
+                        files.append({"file": info.filename, "disposition": "error", "error": str(exc)})
+                    if parsed is None or not parsed.slug or not parsed.text.strip():
+                        st["unparseable"] += 1
+                        if parsed is not None:
+                            files.append({"file": info.filename, "disposition": "unparseable",
+                                          "title": parsed.title})
+                        continue
+                    slug, title = parsed.slug, parsed.title
+
+                    # aliases: distinctive name variants + every "Cite as:" citation +
+                    # the chamber-less slug — the same ladder as the corpus import.
+                    alias_pairs: list[tuple[str, str]] = []
+                    for v, kind in name_variants(title or ""):
+                        if kind not in self._BAILII_ALIAS_KINDS:
+                            continue
+                        key = fold(v)
+                        if key and key != slug:
+                            alias_pairs.append((key, f"bailii-name:{kind}"))
+                    for c in parsed.citations:
+                        cand = first_candidate(c)
+                        key = fold(cand.value) if cand else fold(c)
+                        if key and key != slug:
+                            alias_pairs.append((key, "bailii-report-alias"))
+                    bare = _chamberless_alias(slug)
+                    if bare and bare != slug:
+                        alias_pairs.append((bare, "chamber-alias"))
+
+                    payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
+                    new_meta = {"imported": "bailii-html", "bailii_url": parsed.bailii_url,
+                                "bailii_citations": list(parsed.citations),
+                                "bailii_court": parsed.court_label}
+                    existing = cat.get_document(slug)
+                    old_meta = cat.document_meta(slug) if existing is not None else {}
+
+                    if existing is not None and existing["payload_hash"] == payload_hash:
+                        # the identical text is already the document — just top up aliases
+                        for key, source in alias_pairs:
+                            cat.put_alias(key, slug, source=source, commit=False)
+                            st["aliases"] += 1
+                        st["unchanged"] = st.get("unchanged", 0) + 1
+                        if len(files) < 1000:
+                            files.append({"file": info.filename, "stable_id": slug,
+                                          "title": title, "disposition": "unchanged"})
+                        continue
+
+                    if existing is None or self._bailii_html_supersedes(
+                            existing, old_meta,
+                            len(parsed.text), self._text_len(ts, existing) if existing is not None else 0):
+                        meta = {**old_meta, **new_meta}
+                        if existing is not None and existing["has_text"] and \
+                                existing["payload_hash"] != payload_hash:
+                            # keep the replaced text reachable as a secondary rendition
+                            alts = meta.get("alt_texts", [])
+                            if not any(a.get("payload_hash") == existing["payload_hash"] for a in alts):
+                                alts.append({"source": existing["source"],
+                                             "payload_hash": existing["payload_hash"],
+                                             "text_path": existing["text_path"]})
+                            meta["alt_texts"] = alts
+                        record = Record(
+                            source="uk-caselaw", stable_id=slug, doc_type=DocType.JUDGMENT,
+                            title=title or (existing["title"] if existing is not None else None) or slug,
+                            court=court_from_slug(slug),
+                            decision_date=parsed.decision_date,
+                            language="en", source_language="en",
+                            landing_url=parsed.bailii_url,
+                            raw_bytes=data, raw_ext="html", payload_hash=payload_hash,
+                            text=parsed.text, segments=parsed.segments,
+                            extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER,
+                            extra=meta,
+                        )
+                        raw_path = str(rs.path_for(rs.put(data, ext="html"), "html"))
+                        text_path = str(ts.put(payload_hash, parsed.text))
+                        ts.put_segments(payload_hash, parsed.segments)
+                        cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+                        to_extract.append(slug)
+                        disposition = "imported" if existing is None else "superseded"
+                        st["imported" if existing is None else "superseded"] += 1
+                    else:
+                        # held authoritatively — attach as a secondary text, merge metadata
+                        text_path = str(ts.put(payload_hash, parsed.text))
+                        alts = old_meta.get("alt_texts", [])
+                        if not any(a.get("payload_hash") == payload_hash for a in alts):
+                            alts.append({"source": "bailii-html", "payload_hash": payload_hash,
+                                         "text_path": text_path, "chars": len(parsed.text)})
+                        old_meta["alt_texts"] = alts
+                        for k, v in new_meta.items():
+                            old_meta.setdefault(k, v)
+                        cat.set_document_meta(slug, old_meta, title_if_empty=title, commit=False)
+                        disposition = "secondary"
+                        st["secondary"] += 1
+
+                    for key, source in alias_pairs:
+                        cat.put_alias(key, slug, source=source, commit=False)
+                        st["aliases"] += 1
+                    if len(files) < 1000:
+                        files.append({"file": info.filename, "stable_id": slug, "title": title,
+                                      "citations": list(parsed.citations),
+                                      "disposition": disposition})
+                    if n % 100 == 0:
+                        cat.commit()
+                cat.commit()
+                for i, sid in enumerate(to_extract):
+                    if cancel_check and cancel_check():
+                        break
+                    _progress(on_progress, stage="extracting citations",
+                              done=i + 1, total=len(to_extract), item=sid)
+                    try:
+                        extract_document(cat, ts, sid)
+                        st["extracted"] += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if i % 100 == 0:
+                        cat.commit()
+                cat.commit()
+                _progress(on_progress, stage="resolving citations", done=0, total=0)
+                resolved = Resolver(cat).run()
+        st["resolved_edges"] = resolved.resolved
+        st["files"] = files
+        self._invalidate_caches()
+        return st
+
+    @staticmethod
+    def _text_len(ts, doc) -> int:
+        """Character length of a held document's primary text (0 if unreadable)."""
+        if not doc["payload_hash"]:
+            return 0
+        try:
+            return len(ts.get(doc["payload_hash"]))
+        except OSError:
+            return 0
 
     def harvest_reference(self, *, ref: str, candidate: str | None = None) -> dict:
         """The one-click resolution for a *routable* hanging reference: fetch exactly
@@ -3563,11 +3777,13 @@ class Facade:
         self._invalidate_caches()
         return {**st, "resolved_edges": resolved.resolved, "pending_suggestions": pending}
 
-    def decide_suggestion(self, *, ref: str, suggested_id: str, accept: bool) -> dict:
+    def decide_suggestion(self, *, ref: str, suggested_id: str, accept: bool,
+                          resolve: bool = True) -> dict:
         """Apply a human's tick/cross on a suggestion. Accept mints the alias (so every
         sibling citation resolves), harvests the target if it isn't held yet (a gazetteer
         suggestion), and resolves. Reject just records the decision so the suggester
-        never re-asks."""
+        never re-asks. ``resolve=False`` defers the resolver pass — the bulk accept-all
+        sweep decides many rows then runs :meth:`resolve` once at the end."""
         from .topics.gate import fold
 
         with self._open() as (cat, rs, ts):
@@ -3578,10 +3794,19 @@ class Facade:
                 if cat.find_document_id(suggested_id) is None:
                     out["harvest"] = self._fetch_reference(
                         cat, rs, ts, ref=suggested_id, candidate=suggested_id, patient=True)
-                resolved = Resolver(cat).run()
-                out["resolved_edges"] = resolved.resolved
+                if resolve:
+                    resolved = Resolver(cat).run()
+                    out["resolved_edges"] = resolved.resolved
         self._invalidate_caches()
         return out
+
+    def list_pending_suggestions(self, *, limit: int = 500) -> dict:
+        """Every pending "Possibly: …?" naming candidate, best score first — the
+        bulk-confirmation list (with accept-all) shown at the bottom of the
+        unfetchable page."""
+        with self._open() as (cat, _rs, _ts):
+            return {"total": cat.count_pending_suggestions(),
+                    "suggestions": cat.pending_suggestions(limit=limit)}
 
     # -- refinement flags (reader passages flagged for linking-logic review) --
     def flag_refinement(self, *, doc_id: str, selected_text: str, anchor: str | None = None,

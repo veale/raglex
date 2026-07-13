@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
-from ..core.models import ExtractedVia, RelationshipType, ResolutionStatus, TypedRelation
+from ..core.models import DocType, ExtractedVia, RelationshipType, ResolutionStatus, TypedRelation
 from ..storage.catalogue import Catalogue
 from ..storage.textstore import TextStore
 from .extractor import CitationExtractor, extract_citations
@@ -94,6 +94,14 @@ def extract_document(
     if aliases is None:
         aliases = catalogue.named_alias_map()  # user shorthand rules (propagate)
     cites = extract_citations(text, llm=llm, aliases=aliases)
+
+    # Inside LEGISLATION, a bare "Article 3" / "paragraph 2" is almost always the
+    # instrument referring to ITSELF, not to the directive it last named — the
+    # carry-forward heuristic was built for judgments citing statutes, and applied
+    # to an act's own text it mislinks self-references to whatever instrument the
+    # recitals mentioned last. Drop the guesses; literal citations are unaffected.
+    if doc["doc_type"] == str(DocType.LEGISLATION):
+        cites = [c for c in cites if c.method != "carry_forward"]
 
     # CJEU precision guard: a UK statute *name* ("<Title> Act <year>", "DPA 1998 s.5")
     # only resolves to UK legislation inside a CJEU judgment that was a UK-referred

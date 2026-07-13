@@ -234,3 +234,51 @@ def test_formex_falls_back_to_grseq_grounds_not_ruling_only():
 def test_formex_case_title_from_parties_and_number():
     from raglex.adapters.eu_cellar import formex_case_title
     assert formex_case_title(_OLD_FORMEX) == "ZZ v Secretary of State for the Home Department (C-300/11)"
+
+
+# -- joined cases: the judgment lives only under the LEAD case number (§5b) --
+
+def test_resolve_case_celex_joined_case_falls_back_to_lead(monkeypatch):
+    """C-48/93 (Factortame) has NO CELEX of its own — the judgment is published under
+    the lead case C-46/93. The resolver's second hop follows the lead work's
+    cdm:case-law_joins_case_court link back to it."""
+    from raglex.adapters import eu_cellar
+
+    def fake_sparql(self, q):
+        if "case-law_joins_case_court" in q:
+            assert "61993[A-Z][A-Z]0048" in q
+            return [{"celex": "61993CJ0046"}]
+        return []  # no descriptor exists under the joined number itself
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", fake_sparql)
+    assert eu_cellar.resolve_case_celex("61993CJ0048") == "61993CJ0046"
+
+
+def test_resolve_case_celex_direct_hit_never_hops_to_joined(monkeypatch):
+    from raglex.adapters import eu_cellar
+
+    def fake_sparql(self, q):
+        assert "case-law_joins_case_court" not in q, "direct hit must not hop"
+        return [{"celex": "62016CO0113"}]
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", fake_sparql)
+    assert eu_cellar.resolve_case_celex("62016CJ0113") == "62016CO0113"
+
+
+def test_resolve_case_celex_joined_ranks_judgment_over_order(monkeypatch):
+    from raglex.adapters import eu_cellar
+
+    def fake_sparql(self, q):
+        if "case-law_joins_case_court" in q:
+            return [{"celex": "61993CO0046"}, {"celex": "61993CJ0046"}]
+        return []
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", fake_sparql)
+    assert eu_cellar.resolve_case_celex("61993CJ0048") == "61993CJ0046"
+
+
+def test_resolve_case_celex_absent_everywhere_is_none(monkeypatch):
+    from raglex.adapters import eu_cellar
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", lambda self, q: [])
+    assert eu_cellar.resolve_case_celex("61993CJ9999") is None
