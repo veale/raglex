@@ -504,6 +504,38 @@ class Facade:
                 return cat.find_document_id(dst)
         return None
 
+    def document_raw(self, stable_id: str) -> dict | None:
+        """Path + extension of the stored ORIGINAL file (the raw bytes the document
+        was ingested from — a guidance PDF, a styled BAILII page, Formex XML), for
+        the reader's original-document pane. None when nothing is stored."""
+        with self._open() as (cat, _rs, _ts):
+            real = cat.find_document_id(stable_id) or stable_id
+            doc = cat.get_document(real)
+            if doc is None or not doc["raw_path"]:
+                return None
+            path = doc["raw_path"]
+            ext = path.rsplit(".", 1)[-1].lower() if "." in path else "bin"
+            return {"path": path, "ext": ext, "title": doc["title"], "stable_id": real}
+
+    def scan_citations(self, *, text: str, limit: int = 400) -> list[dict]:
+        """Grammar-recognise citations in ARBITRARY text and resolve each against the
+        corpus — the backend of the PDF viewer's text-layer linkification (the viewer
+        sends each rendered page's text; matched spans become live links, exactly like
+        the extracted-text reader), and a handy grammar testbed. Read-only."""
+        from .citations import extract_citations
+
+        out: list[dict] = []
+        with self._open() as (cat, _rs, _ts):
+            for c in extract_citations(text or "")[:limit]:
+                resolved = self._resolved_target(cat, c.candidate_id, c.raw)
+                out.append({
+                    "char_start": c.char_start, "char_end": c.char_end, "raw": c.raw,
+                    "candidate_id": c.candidate_id, "pinpoint": c.pinpoint,
+                    "entity_kind": c.entity_kind, "resolved_id": resolved,
+                    "state": "resolved" if resolved else ("pending" if c.candidate_id else "maybe"),
+                })
+        return out
+
     def document_body(self, stable_id: str) -> dict:
         """The document's extracted text + structural segments (§6b) for the reader.
         Segments carry kind/level so legislation renders as a hierarchy."""
@@ -533,6 +565,7 @@ class Facade:
                     # reference with no resolvable id, e.g. a law-report citation)
                     "state": "resolved" if resolved else ("pending" if cand else "maybe"),
                 })
+            raw_path = doc["raw_path"]
             return {
                 "text": text,
                 "segments": [asdict(s) for s in ts.get_segments(ph)],
@@ -540,6 +573,9 @@ class Facade:
                 "doc_type": doc["doc_type"],
                 "title": doc["title"],
                 "oscola": _oscola_cite(doc, _row_meta(doc)),
+                # the reader offers an "original" pane when the ingested file is stored
+                "raw_ext": (raw_path.rsplit(".", 1)[-1].lower()
+                            if raw_path and "." in raw_path else None),
             }
 
     def document_mentions(self, stable_id: str, *, anchor: str | None = None,
@@ -2151,9 +2187,13 @@ class Facade:
         payload_hash = sha256_bytes(data)
         segments = [Segment(label=f"p. {n}", char_start=s, char_end=e, kind="page")
                     for n, s, e in (extracted.page_spans or [])]
+        from .citations.courts import IRISH_COURTS
+
+        head = stable_id.split("/", 1)[0].lower()
         with self._open() as (cat, rs, ts):
             record = Record(
-                source="uk-caselaw" if slug else "user-import",
+                source=("ie-caselaw" if head in IRISH_COURTS else "uk-caselaw")
+                if slug else "user-import",
                 stable_id=stable_id, doc_type=DocType.JUDGMENT,
                 title=title or _case_title_from(text) or filename,
                 language="en", source_language="en",
@@ -2417,6 +2457,7 @@ class Facade:
         from .adapters.bailii_html import parse_bailii_html
         from .adapters.uk_caselaw import court_from_slug
         from .citations import extract_citations, extract_document
+        from .citations.courts import IRISH_COURTS
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
@@ -2526,7 +2567,9 @@ class Facade:
                                              "text_path": existing["text_path"]})
                             meta["alt_texts"] = alts
                         record = Record(
-                            source="uk-caselaw", stable_id=slug, doc_type=DocType.JUDGMENT,
+                            source="ie-caselaw" if slug.split("/", 1)[0] in IRISH_COURTS
+                            else "uk-caselaw",
+                            stable_id=slug, doc_type=DocType.JUDGMENT,
                             title=title or (existing["title"] if existing is not None else None) or slug,
                             court=court_from_slug(slug),
                             decision_date=parsed.decision_date,
@@ -2829,17 +2872,23 @@ class Facade:
             "ukut": "Upper Tribunal",
             "csoh": "Court of Session (Outer House)",
             "csih": "Court of Session (Inner House)",
+            "iesc": "Supreme Court of Ireland",
+            "ieca": "Court of Appeal of Ireland",
+            "iehc": "High Court of Ireland",
+            "iecca": "Court of Criminal Appeal of Ireland",
         }
         court = _COURT_LABELS.get(court_slug, court_slug.upper())
+        from .citations.courts import IRISH_COURTS
 
         record = _Rec(
-            source="uk-caselaw",
+            source="ie-caselaw" if court_slug in IRISH_COURTS else "uk-caselaw",
             stable_id=stable_id,
             doc_type=_DT.JUDGMENT,
             title=title or stable_id,
             language="en",
             source_language="en",
-            landing_url=f"https://caselaw.nationalarchives.gov.uk/{stable_id}",
+            landing_url=None if court_slug in IRISH_COURTS
+            else f"https://caselaw.nationalarchives.gov.uk/{stable_id}",
             raw_bytes=data,
             raw_ext="rtf",
             text=parsed or None,
@@ -4177,20 +4226,255 @@ class Facade:
             created = cat.create_vector_index(dims)
             return {"backend": cat.backend, "dimensions": dims, "created": created}
 
-    def import_zotero(
-        self, *, library_id: str | None = None, api_key: str | None = None,
-        library_type: str | None = None, limit: int = 50, fetch_pdfs: bool = False, http=None,
-    ) -> dict:
+    # -- guidance classification (§1.9/§4a): rules are DATA, fields carry EVIDENCE --
+
+    def _guidance_rules_file(self):
+        from pathlib import Path
+
+        return Path(self.config.data_dir) / "guidance_rules.json"
+
+    def guidance_rules(self) -> dict:
+        """The effective classification rules: built-in defaults merged with the
+        user's overlay file. What the rules UI renders and edits."""
+        from .citations.guidance_class import merge_rules
+
+        overlay = None
+        try:
+            overlay = json.loads(self._guidance_rules_file().read_text())
+        except (OSError, ValueError):
+            pass
+        merged = merge_rules(overlay)
+        merged["path"] = str(self._guidance_rules_file())
+        return merged
+
+    def update_guidance_rules(self, payload: dict) -> dict:
+        """Persist the user's rules overlay (issuers merge by code over the defaults;
+        collection mappings are overlay-only), then return the new effective rules —
+        edit → save → re-classify is the improvement loop."""
+        issuers = [i for i in (payload.get("issuers") or []) if i.get("code")]
+        collections = {k: v for k, v in (payload.get("collections") or {}).items() if k}
+        f = self._guidance_rules_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"issuers": issuers, "collections": collections}, indent=1))
+        return self.guidance_rules()
+
+    def classify_guidance_preview(self, *, stable_id: str | None = None,
+                                  title: str | None = None, url: str | None = None,
+                                  text: str | None = None) -> dict:
+        """Dry-run the classifier and SHOW THE WORKING — per field: value, the rule
+        that fired, and the text it matched. With a ``stable_id`` the held document
+        supplies title/url/text and its citations supply the dominant-regime signal;
+        with pasted title/url/text this is the rules test-bench (edit a rule, paste
+        a cover page, see what would happen — no writes either way)."""
+        from .citations.guidance_class import classify_guidance, dominant_regime
+
+        rules = self.guidance_rules()
+        regime = None
+        current = None
+        with self._open() as (cat, _rs, ts):
+            if stable_id:
+                doc = cat.get_document(stable_id)
+                if doc is None:
+                    return {"error": f"unknown document {stable_id!r}"}
+                title = title or doc["title"]
+                meta = cat.document_meta(stable_id)
+                url = url or meta.get("url") or meta.get("bailii_url") or doc["landing_url"]
+                if text is None and doc["payload_hash"]:
+                    try:
+                        text = ts.get(doc["payload_hash"])[:3000]
+                    except OSError:
+                        text = None
+                regime = dominant_regime(cat.citations_for(stable_id))
+                current = meta.get("guidance")
+        fields = classify_guidance(title=title, text=text, url=url, rules=rules)
+        aliases = fields.pop("aliases", [])
+        if regime:
+            fields["regime"] = regime
+        elif "regime_default" in fields:
+            fields["regime"] = fields.pop("regime_default")
+        fields.pop("regime_default", None)
+        return {"fields": fields, "aliases": aliases,
+                **({"current": current} if current else {}),
+                **({"stable_id": stable_id} if stable_id else {})}
+
+    def _classify_guidance_into(self, cat, ts, stable_id: str, *,
+                                issuer_default: str | None = None) -> dict:
+        """Classify one held guidance document and persist the result: evidence-carrying
+        fields into ``meta.guidance`` (a field a human set — method 'manual' — is never
+        overwritten), the citation-form aliases, and one ``interprets`` edge to the
+        regime when the document's own citations settle it."""
+        from .citations import extract_document
+        from .citations.guidance_class import classify_guidance, dominant_regime
+        from .core.models import (ExtractedVia, RelationshipType, ResolutionStatus,
+                                  TypedRelation)
+
+        doc = cat.get_document(stable_id)
+        if doc is None:
+            return {"error": "unknown document"}
+        meta = cat.document_meta(stable_id)
+        text = None
+        if doc["payload_hash"]:
+            try:
+                text = ts.get(doc["payload_hash"])
+            except OSError:
+                text = None
+        # the dominant-regime signal needs the document's citations — extract if new
+        if text and not cat.citations_for(stable_id):
+            extract_document(cat, ts, stable_id)
+        fields = classify_guidance(
+            title=doc["title"], text=(text or "")[:3000],
+            url=meta.get("url") or meta.get("bailii_url") or doc["landing_url"],
+            rules=self.guidance_rules())
+        aliases = fields.pop("aliases", [])
+        regime = dominant_regime(cat.citations_for(stable_id))
+        if regime:
+            fields["regime"] = regime
+        elif "regime_default" in fields:
+            fields["regime"] = fields.pop("regime_default")
+        fields.pop("regime_default", None)
+        if issuer_default and "issuer" not in fields:
+            fields["issuer"] = {"value": issuer_default, "method": "rule",
+                                "rule": "collection-mapping",
+                                "evidence": "the Zotero intake collection's saved issuer"}
+
+        cur = meta.get("guidance") or {}
+        for k, v in fields.items():
+            if cur.get(k, {}).get("method") != "manual":  # human corrections always win
+                cur[k] = v
+        meta["guidance"] = cur
+        cat.set_document_meta(stable_id, meta, commit=False)
+        for a in aliases:
+            if a and not cat.get_alias(a):
+                cat.put_alias(a, stable_id, source="guidance-alias", commit=False)
+        # one interprets edge to the regime (idempotent; survives re-extraction —
+        # extract_document only clears regex/inferred edges)
+        reg = cur.get("regime", {}).get("value")
+        if reg and not any(r["relationship_type"] == str(RelationshipType.INTERPRETS)
+                           and (r["dst_id"] == reg or r["raw_citation_string"] == reg)
+                           for r in cat.relations_for(stable_id)):
+            cat.add_relations(stable_id, [TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string=reg, dst_id=reg,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING)])
+        cat.commit()
+        return {"fields": cur, "aliases": aliases}
+
+    def set_guidance_field(self, *, stable_id: str, field: str, value: str | None) -> dict:
+        """A human's correction of one classification field — recorded as method
+        'manual' so no re-classify pass ever overwrites it. Empty value clears the
+        field (back to eligible-for-rules)."""
+        with self._open() as (cat, _rs, _ts):
+            meta = cat.document_meta(stable_id)
+            g = meta.get("guidance") or {}
+            if value:
+                g[field] = {"value": value, "method": "manual", "rule": "user-edit",
+                            "evidence": ""}
+            else:
+                g.pop(field, None)
+            meta["guidance"] = g
+            cat.set_document_meta(stable_id, meta)
+        self._invalidate_caches()
+        return {"stable_id": stable_id, "guidance": g}
+
+    def reclassify_guidance(self, *, limit: int | None = None,
+                            on_progress=None, cancel_check=None) -> dict:
+        """Re-run classification over every guidance document with the CURRENT rules —
+        the second half of the improvement loop (edit a rule, re-classify, see what
+        changed). Manual fields are untouched; a resolve pass links the new edges."""
+        st = {"documents": 0, "classified": 0}
+        with self._open() as (cat, _rs, ts):
+            rows = cat.list_documents(doc_type="guidance", limit=limit or 100000)
+            for i, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="classifying", done=i, total=len(rows),
+                          item=r["stable_id"])
+                st["documents"] += 1
+                res = self._classify_guidance_into(cat, ts, r["stable_id"])
+                if res.get("fields"):
+                    st["classified"] += 1
+            resolved = Resolver(cat).run()
+        st["resolved_edges"] = resolved.resolved
+        self._invalidate_caches()
+        return st
+
+    def _zotero_importer(self, *, library_id=None, api_key=None, library_type=None, http=None):
+        """Build a ZoteroImporter from stored credentials. ONE field is enough: with
+        just the API key, the numeric library id is derived from ``/keys/current``
+        and persisted — nobody should have to find their userID by hand."""
         from .core.http import build_client
 
-        # Fall back to stored credentials so the UI button needs no re-entry.
-        library_id = library_id or self.settings.resolve("ZOTERO_LIBRARY_ID")
         api_key = api_key or self.settings.resolve("ZOTERO_API_KEY")
+        if not api_key:
+            return None, {"connected": False, "reason": "no_api_key",
+                          "hint": "Create a key at zotero.org/settings/keys/new "
+                                  "(read access is enough) and paste it here."}
+        library_id = library_id or self.settings.resolve("ZOTERO_LIBRARY_ID")
         library_type = library_type or self.settings.resolve("ZOTERO_LIBRARY_TYPE") or "users"
-        if not library_id or not api_key:
-            return {"error": "Zotero library_id and api_key required (set them in Settings)"}
         client = http or build_client(timeout=60)  # proxy-aware (§5a)
+        importer = ZoteroImporter(client, library_id or "", api_key, library_type)
+        if not library_id:
+            info = importer.key_info()
+            if not info:
+                return None, {"connected": False, "reason": "bad_key",
+                              "hint": "Zotero rejected the API key — re-check it."}
+            importer.library_id = str(info["userID"])
+            self.settings.update({"ZOTERO_LIBRARY_ID": importer.library_id})
+        return importer, None
+
+    def zotero_status(self, *, http=None) -> dict:
+        """Is Zotero connected, as whom, and what collections exist — everything the
+        intake UI needs to render a picker instead of asking for pasted keys."""
+        importer, err = self._zotero_importer(http=http)
+        if err:
+            return err
+        info = importer.key_info()
+        if not info:
+            return {"connected": False, "reason": "bad_key",
+                    "hint": "Zotero rejected the API key — re-check it in Settings."}
+        return {"connected": True, "username": info.get("username"),
+                "library_id": importer.library_id, "library_type": importer.library_type,
+                "collections": importer.list_collections()}
+
+    def import_zotero(
+        self, *, library_id: str | None = None, api_key: str | None = None,
+        library_type: str | None = None, limit: int = 50, fetch_pdfs: bool = False,
+        collection: str | None = None, doc_type: str | None = None, http=None,
+    ) -> dict:
+        """``collection`` + ``doc_type`` make Zotero the guidance-intake channel: the
+        Zotero browser connector clips an EDPB/Ofcom page (with its PDF) into a
+        designated collection from the user's real browser session — no bot-blocking
+        to fight — and this pulls that collection in as ``guidance`` documents. A
+        collection with a saved intake mapping (guidance rules) supplies doc_type and
+        issuer defaults; imported guidance is auto-classified (with evidence) on the
+        way in."""
+        from .core.models import DocType as _DT
+
+        importer, err = self._zotero_importer(library_id=library_id, api_key=api_key,
+                                              library_type=library_type, http=http)
+        if err:
+            return {"error": err["hint"], **err}
+        # a saved intake mapping for this collection supplies the defaults
+        mapping = (self.guidance_rules().get("collections") or {}).get(collection or "", {})
+        doc_type = doc_type or mapping.get("doc_type")
+        dt = None
+        if doc_type:
+            try:
+                dt = _DT(doc_type)
+            except ValueError:
+                return {"error": f"unknown doc_type {doc_type!r}"}
         with self._open() as (cat, rs, ts):
-            importer = ZoteroImporter(client, library_id, api_key, library_type)
-            ids = importer.import_into(cat, rs, ts, limit=limit, fetch_pdfs=fetch_pdfs)
-            return {"imported": len(ids), "stable_ids": ids}
+            ids = importer.import_into(cat, rs, ts, limit=limit, fetch_pdfs=fetch_pdfs,
+                                       collection=collection or None, doc_type=dt)
+            classified = 0
+            for sid in ids:
+                doc = cat.get_document(sid)
+                if doc is not None and doc["doc_type"] == str(_DT.GUIDANCE):
+                    res = self._classify_guidance_into(cat, ts, sid,
+                                                       issuer_default=mapping.get("issuer"))
+                    classified += 1 if res.get("fields") else 0
+            if classified:
+                Resolver(cat).run()  # the new interprets edges / aliases may resolve
+        self._invalidate_caches()
+        return {"imported": len(ids), "stable_ids": ids, "classified": classified}

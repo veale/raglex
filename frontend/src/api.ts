@@ -56,6 +56,26 @@ export const api = {
     return req<Hit[]>(`/search?${p}`);
   },
   document: (id: string) => req<any>(`/documents/${encodeURIComponent(id)}`),
+  // the stored ORIGINAL file (guidance PDF, styled BAILII page) as a Blob — fetched
+  // with auth headers (an <iframe src> can't send them), then shown via an object URL
+  fetchRaw: async (id: string) => {
+    const res = await fetch(`${BASE}/documents/${encodeURIComponent(id)}/raw`, { headers: authHeaders() });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.blob();
+  },
+  // grammar-recognise + resolve citations in arbitrary text (the PDF text layer)
+  scanCitations: (text: string) =>
+    req<{ citations: any[] }>("/citations/scan", { method: "POST", body: JSON.stringify({ text }) }),
+  // Zotero connection + guidance classification
+  zoteroStatus: () => req<any>("/zotero/status"),
+  guidanceRules: () => req<any>("/guidance/rules"),
+  saveGuidanceRules: (rules: any) =>
+    req<any>("/guidance/rules", { method: "POST", body: JSON.stringify(rules) }),
+  classifyGuidance: (body: Record<string, unknown>) =>
+    req<any>("/guidance/classify", { method: "POST", body: JSON.stringify(body) }),
+  setGuidanceField: (stable_id: string, field: string, value: string | null) =>
+    req<any>("/guidance/field", { method: "POST", body: JSON.stringify({ stable_id, field, value }) }),
+  classifyGuidanceJob: () => req<any>("/jobs/classify-guidance", { method: "POST", body: "{}" }),
   documentBody: (id: string) => req<any>(`/document-body?id=${encodeURIComponent(id)}`),
   mentions: (id: string, anchor?: string) =>
     req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`),

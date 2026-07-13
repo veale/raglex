@@ -22,13 +22,17 @@ from __future__ import annotations
 
 import re
 
-# Reporters in which a House of Lords / senior-court decision actually appears. A citation
-# in a tribunal- or county-court-only series is not a HoL case, so it can't match one.
+# Reporters in which a senior-court decision actually appears. A citation in a
+# tribunal- or county-court-only series is not a senior-court case, so it can't match
+# one. (Named for its original House of Lords use; it now also gates the Irish series —
+# the candidate pool is ALL held judgments, so imported Irish cases match too.)
 HOL_PLAUSIBLE_SERIES = frozenset({
     "AC", "App Cas", "WLR", "All ER", "All ER (Comm)", "AC ", "HL Cas",
     "Cr App R", "Cr App R (S)", "Lloyd's Rep", "ICR", "IRLR", "STC", "TC",
     "P & CR", "FLR", "FCR", "BCLC", "BCC", "Fam", "QB", "KB", "Ch", "SC", "SC (HL)",
     "ER", "LR",  # nominate / English Reports reprints of very old HL cases
+    # Irish senior courts publish in these (imported via the BAILII zip/file paths)
+    "IR", "ILRM", "ILTR", "Ir Jur Rep", "Ir Jur", "LR Ir", "Frewen",
 })
 
 # Party-role and procedural noise that isn't part of a case's distinctive name.

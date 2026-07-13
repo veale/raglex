@@ -567,6 +567,36 @@ def create_app(config: Config | None = None) -> FastAPI:
         # /documents/{id}/body suffix would be ambiguous.
         return facade.document_body(id)
 
+    # NB: registered BEFORE the /documents/{stable_id:path} catch-all so the
+    # trailing /raw wins the route match (slugs themselves contain slashes).
+    @app.get("/documents/{stable_id:path}/raw")
+    def document_raw_ep(stable_id: str):
+        """Stream the document's ORIGINAL stored file (guidance PDF, styled BAILII
+        page, Formex XML) for the reader's original-document pane. HTML is served
+        under a sandboxing CSP: a stored page's scripts must never run against the
+        app's origin (they could read the API token)."""
+        from fastapi.responses import FileResponse, JSONResponse as _JR
+
+        info = facade.document_raw(stable_id)
+        if info is None:
+            return _JR({"error": "no stored original for this document"}, status_code=404)
+        media = {
+            "pdf": "application/pdf", "html": "text/html; charset=utf-8",
+            "htm": "text/html; charset=utf-8", "xml": "application/xml",
+            "txt": "text/plain; charset=utf-8", "rtf": "application/rtf",
+            "json": "application/json",
+        }.get(info["ext"], "application/octet-stream")
+        headers = {"Content-Disposition": f'inline; filename="{info["stable_id"].replace("/", "_")}.{info["ext"]}"'}
+        if info["ext"] in ("html", "htm"):
+            headers["Content-Security-Policy"] = "sandbox; script-src 'none'"
+        return FileResponse(info["path"], media_type=media, headers=headers)
+
+    @app.post("/citations/scan")
+    def scan_citations_ep(payload: dict = Body(...)) -> dict:
+        """Recognise + resolve citations in arbitrary text — the PDF viewer sends each
+        rendered page's text layer through this to linkify it like the text reader."""
+        return {"citations": facade.scan_citations(text=payload.get("text") or "")}
+
     @app.get("/documents/{stable_id:path}")
     def document(stable_id: str) -> dict:
         return facade.get_document(stable_id)
@@ -622,6 +652,43 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/import/zotero")
     def import_zotero_ep(payload: dict = Body(...)) -> dict:
         return facade.import_zotero(**payload)
+
+    @app.get("/zotero/status")
+    def zotero_status_ep() -> dict:
+        """Connection state + collections — one API key is all setup takes (the
+        library id is derived from the key and persisted)."""
+        return facade.zotero_status()
+
+    # -- guidance classification: inspectable rules + evidence-carrying fields --
+    @app.get("/guidance/rules")
+    def guidance_rules_ep() -> dict:
+        return facade.guidance_rules()
+
+    @app.post("/guidance/rules")
+    def update_guidance_rules_ep(payload: dict = Body(...)) -> dict:
+        return facade.update_guidance_rules(payload)
+
+    @app.post("/guidance/classify")
+    def classify_guidance_ep(payload: dict = Body(...)) -> dict:
+        """Dry-run the classifier (a held doc via stable_id, or pasted title/url/text
+        as the rules test-bench) — returns each field with the rule that fired and
+        the text it matched. Never writes."""
+        return facade.classify_guidance_preview(
+            stable_id=payload.get("stable_id"), title=payload.get("title"),
+            url=payload.get("url"), text=payload.get("text"))
+
+    @app.post("/guidance/field")
+    def set_guidance_field_ep(payload: dict = Body(...)) -> dict:
+        """A human's correction of one field (method 'manual' — re-classify never
+        overwrites it). Empty value clears the field."""
+        return facade.set_guidance_field(
+            stable_id=payload["stable_id"], field=payload["field"],
+            value=payload.get("value"))
+
+    @app.post("/jobs/classify-guidance")
+    def job_classify_guidance_ep() -> dict:
+        """Re-classify all guidance with the current rules (the improvement loop)."""
+        return _start_job("classify-guidance", "re-classify guidance documents")
 
     @app.post("/import/case")
     async def import_case_ep(

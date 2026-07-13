@@ -42,6 +42,59 @@ class ExtractionProvider(Protocol):
     def extract(self, data: bytes, *, ext: str, mime: str | None = None) -> Extracted: ...
 
 
+class StructuredPdfExtractor:
+    """Layout-aware PDF text via PyMuPDF (§5c) — the preferred engine when installed
+    (``pip install 'raglex[import]'``). Unlike pypdf's flat stream it walks each
+    page's text *blocks* in reading order, so paragraphs survive as paragraphs —
+    which is what lets numbered-paragraph guidance (EDPB/A29WP/Ofcom) gain citable
+    ``para N`` segments downstream. Optional: ``handles`` says no when PyMuPDF is
+    missing and the router falls through to pypdf."""
+
+    name = "pymupdf"
+
+    def handles(self, ext: str, mime: str | None) -> bool:
+        if not (ext.lower().lstrip(".") == "pdf" or (mime or "") == "application/pdf"):
+            return False
+        try:
+            import fitz  # noqa: F401 — PyMuPDF
+        except ImportError:
+            return False
+        return True
+
+    def extract(self, data: bytes, *, ext: str, mime: str | None = None) -> Extracted:
+        import fitz
+
+        doc = fitz.open(stream=data, filetype="pdf")
+        confidences: list[float] = []
+        page_spans: list[tuple[int, int, int]] = []
+        parts: list[str] = []
+        cursor = 0
+        sep = "\n\n"
+        for i, page in enumerate(doc):
+            blocks = [b for b in page.get_text("blocks") if b[6] == 0 and (b[4] or "").strip()]
+            blocks.sort(key=lambda b: (round(b[1]), b[0]))  # reading order: top-down, then left
+            # inside a block, hard newlines are line-wrapping; between blocks, paragraphs
+            page_text = sep.join(
+                re.sub(r"\s*\n\s*", " ", b[4].strip()) for b in blocks)
+            confidences.append(1.0 if page_text else 0.0)
+            if not page_text:
+                continue
+            if parts:
+                cursor += len(sep)
+            page_spans.append((i + 1, cursor, cursor + len(page_text)))
+            parts.append(page_text)
+            cursor += len(page_text)
+        text = sep.join(parts)
+        return Extracted(
+            text=text,
+            engine=self.name,
+            engine_version=getattr(fitz, "__doc__", "") .split()[1] if fitz.__doc__ else "?",
+            needs_ocr=not text.strip(),  # no text layer → scanned (§5c silent-empty)
+            per_page_confidence=confidences,
+            page_spans=page_spans,
+        )
+
+
 class PdfExtractor:
     """Born-digital PDF text via pypdf (the fast path, §5c). Empty output flags
     ``needs_ocr`` so a scanned PDF routes to OCR rather than silently vanishing."""
@@ -139,8 +192,10 @@ class RtfExtractor:
         return Extracted(text=text, engine=self.name, engine_version="1")
 
 
-# Router (§5c): try providers in order; PDF/RTF/HTML/text cover manual import.
+# Router (§5c): try providers in order — the structured PDF engine outranks pypdf
+# when PyMuPDF is installed (its handles() declines otherwise, so the fallback holds).
 DEFAULT_PROVIDERS: tuple[ExtractionProvider, ...] = (
+    StructuredPdfExtractor(),
     PdfExtractor(),
     RtfExtractor(),
     HtmlExtractor(),

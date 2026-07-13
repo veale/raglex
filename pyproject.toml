@@ -24,10 +24,13 @@ web = [
     "python-multipart>=0.0.9",
     "mcp>=1.2",
 ]
-# Manual PDF/HTML import (§5c extraction). pypdf is the pluggable default; heavier
-# engines (Docling/Marker/OCR, §5c) drop in behind the same interface.
+# Manual PDF/HTML import (§5c extraction). pypdf is the zero-friction fallback;
+# PyMuPDF is the preferred layout-aware engine (AGPL — fine for this self-hosted
+# deployment); heavier ones (Docling/Marker/OCR, §5c) drop in behind the same
+# interface.
 import = [
     "pypdf>=4",
+    "pymupdf>=1.24",
     "striprtf>=0.0.26",
 ]
 scrape = [

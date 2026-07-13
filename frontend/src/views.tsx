@@ -1,5 +1,9 @@
-import { createContext, Fragment, useContext, useEffect, useRef, useState } from "react";
+import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useRef, useState } from "react";
 import { api, Hit, Setting } from "./api";
+
+// pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
+const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
+const HtmlPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.HtmlPane })));
 
 // --- Peek (margin-note / bottom-sheet) overlay -----------------------------
 // You should never have to leave the page to glance at a cited authority, a
@@ -947,6 +951,12 @@ function DocNav({ segs, text, oscola, title, landingUrl, id }:
 function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   { id: string; incoming: any[]; pinpoint?: string | null; oscola?: OscolaCite | null; landingUrl?: string; title?: string }) {
   const [body] = useAsync(() => api.documentBody(id), [id]);
+  // "original" pane: the stored source file (guidance PDF via the linkified pdf.js
+  // viewer, styled BAILII HTML in a sandboxed frame) alongside the extracted text
+  const rawKind = body?.raw_ext === "pdf" ? "pdf"
+    : body?.raw_ext === "html" || body?.raw_ext === "htm" ? "html" : null;
+  const [view, setView] = useState<"text" | "orig">("text");
+  useEffect(() => { setView(body && !body.text && rawKind ? "orig" : "text"); }, [id, !body]);
   // per-paragraph "mentioned by" roll-up (who cites each paragraph, most-authoritative first).
   // Index it by a canonical anchor key so a citation to "Article 4" matches the segment whose
   // label is "Article 4 Definitions"; keep the real citation anchor for the "see all" filter.
@@ -972,11 +982,11 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     if (idx >= 0) setTimeout(() => scrollToSeg(segId(body.segments[idx].label)), 80);
   }, [body, pinpoint]);
   if (!body) return <p className="muted">Loading text…</p>;
-  if (!body.text) return <p className="muted">No extracted text (metadata-only, or not yet extracted).</p>;
+  if (!body.text && !rawKind) return <p className="muted">No extracted text (metadata-only, or not yet extracted).</p>;
   const segs = body.segments as { label: string; kind: string; level: number; char_start: number; char_end: number }[];
   const cites = body.citations || [];
   const pinned = (label: string) => (incoming || []).filter((r) => r.dst_anchor === label);
-  const content = (!segs || segs.length === 0)
+  const content = !body.text ? null : (!segs || segs.length === 0)
     ? <div className="reader"><div className="seg"><div className="seg-body">{renderCited(body.text, 0, body.text.length, cites, onCite, paraSet, onPara)}</div></div></div>
     : (
       <div className="reader">
@@ -999,13 +1009,75 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
         })}
       </div>
     );
+  const chips = body.doc_type === "guidance" && <GuidanceChips id={id} />;
+  const tabs = rawKind && (
+    <div className="viewtabs">
+      <button className={`mini${view === "text" ? " on" : ""}`} disabled={!body.text}
+        onClick={() => setView("text")}>text</button>
+      <button className={`mini${view === "orig" ? " on" : ""}`}
+        title={rawKind === "pdf" ? "the original PDF, with citations linked on the page" : "the original page as saved"}
+        onClick={() => setView("orig")}>original ({rawKind})</button>
+    </div>
+  );
+  const main = view === "orig" && rawKind
+    ? <Suspense fallback={<p className="muted loading-pulse">loading viewer…</p>}>
+        {rawKind === "pdf" ? <PdfPane id={id} onCite={onCite} /> : <HtmlPane id={id} />}
+      </Suspense>
+    : content;
   return (
     <SelectionShorthand docId={id}>
       <div className="doc-layout">
-        <DocNav segs={segs || []} text={body.text} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
-        <div className="doc-main">{content}</div>
+        <DocNav segs={segs || []} text={body.text || ""} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
+        <div className="doc-main">{chips}{tabs}{main}</div>
       </div>
     </SelectionShorthand>
+  );
+}
+
+// Classification chips on a guidance document: each field shows its value with the
+// rule that set it (hover = the matched text); click to correct — corrections are
+// `manual` and survive every re-classify. The inspectable face of guidance sorting.
+function GuidanceChips({ id }: { id: string }) {
+  const [g, setG] = useState<any>(null);
+  const [edit, setEdit] = useState<string | null>(null);
+  const [val, setVal] = useState("");
+  useEffect(() => {
+    let live = true;
+    api.document(id).then((d) => { if (live) setG((d.meta || {}).guidance || {}); }).catch(() => {});
+    return () => { live = false; };
+  }, [id]);
+  if (!g) return null;
+  const FIELDS = ["issuer", "number", "version", "status", "adopted_date", "regime"];
+  const save = async (field: string) => {
+    try {
+      const r = await api.setGuidanceField(id, field, val.trim() || null);
+      setG(r.guidance); setEdit(null);
+    } catch { /* leave the editor open */ }
+  };
+  return (
+    <div className="gchips">
+      {FIELDS.map((f) => {
+        const v = g[f];
+        if (edit === f) {
+          return (
+            <span className="gchip editing" key={f}>
+              {f}: <input autoFocus value={val} onChange={(e) => setVal(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") save(f); if (e.key === "Escape") setEdit(null); }}
+                style={{ width: 130 }} />
+              <a onClick={() => save(f)} title="save">✓</a>
+            </span>
+          );
+        }
+        return (
+          <span key={f} className={`gchip${v ? ` m-${v.method}` : " empty"}`}
+            title={v ? `${v.method === "manual" ? "set by you" : `rule: ${v.rule}`}${v.evidence ? `\nmatched: ${v.evidence}` : ""}\nclick to edit` : `${f} not classified — click to set`}
+            onClick={() => { setEdit(f); setVal(v?.value || ""); }}>
+            <span className="muted">{f}</span> {v?.value || "—"}
+            {v?.method === "manual" && <span title="set manually — re-classify never overwrites"> ✎</span>}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1684,12 +1756,241 @@ export function ImportView({ open }: { open?: (id: string) => void }) {
         }}>Import file</button></p>
       </div>
       <BailiiZipPanel />
-      <div className="panel">
-        <h3>Zotero library</h3>
-        <p className="muted">Uses the credentials saved in Settings.</p>
-        <button className="primary" onClick={async () => { try { show(await api.importZotero({ limit: 50 })); } catch (e: any) { show("error: " + e); } }}>Import from Zotero</button>
-      </div>
+      <ZoteroPanel show={show} />
+      <GuidanceRulesPanel />
       {msg && <div className="panel"><pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{msg}</pre></div>}
+    </div>
+  );
+}
+
+// Zotero import — also the guidance-intake channel: clip an EDPB/Ofcom page (with its
+// PDF) into a dedicated collection using the Zotero browser connector (your real
+// browser session, so no bot-blocking), then pull that collection in as `guidance`.
+// Connection is ONE field: the API key — the library id is derived from the key.
+function ZoteroPanel({ show }: { show: (r: any) => void }) {
+  const [status, setStatus] = useState<any>(null);
+  const [rules, setRules] = useState<any>(null);
+  const [key, setKey] = useState("");
+  const [collection, setCollection] = useState("");
+  const [docType, setDocType] = useState("");
+  const [fetchPdfs, setFetchPdfs] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const refresh = () => {
+    api.zoteroStatus().then(setStatus).catch(() => setStatus({ connected: false, reason: "unreachable" }));
+    api.guidanceRules().then(setRules).catch(() => {});
+  };
+  useEffect(refresh, []);
+  // picking a collection with a saved intake mapping pre-fills the type
+  useEffect(() => {
+    const m = rules?.collections?.[collection];
+    if (m?.doc_type) setDocType(m.doc_type);
+  }, [collection, rules]);
+
+  // parents first, children indented beneath them
+  const cols: any[] = status?.collections || [];
+  const roots = cols.filter((c) => !c.parent).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const ordered: { key: string; label: string }[] = [];
+  for (const r of roots) {
+    ordered.push({ key: r.key, label: r.name });
+    for (const ch of cols.filter((c) => c.parent === r.key).sort((a, b) => (a.name || "").localeCompare(b.name || "")))
+      ordered.push({ key: ch.key, label: "· " + ch.name });
+  }
+
+  return (
+    <div className="panel">
+      <h3>Zotero library</h3>
+      {!status && <p className="muted loading-pulse">checking connection…</p>}
+      {status && !status.connected && (
+        <div>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Not connected. Create a key at{" "}
+            <a href="https://www.zotero.org/settings/keys/new" target="_blank" rel="noopener noreferrer">
+              zotero.org/settings/keys/new</a> (read access is enough), paste it here — that's the
+            whole setup; your library id is derived from the key.
+            {status.reason === "bad_key" && <span className="err"> The saved key was rejected — paste a fresh one.</span>}
+          </p>
+          <div className="row" style={{ alignItems: "center" }}>
+            <input type="password" value={key} onChange={(e) => setKey(e.target.value)}
+              placeholder="Zotero API key" style={{ maxWidth: 320 }} />
+            <button className="primary" disabled={!key.trim() || busy} onClick={async () => {
+              setBusy(true); setMsg("connecting…");
+              try {
+                await api.saveSettings({ ZOTERO_API_KEY: key.trim() });
+                setKey(""); setMsg(""); refresh();
+              } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+            }}>Connect</button>
+          </div>
+        </div>
+      )}
+      {status?.connected && (
+        <div>
+          <p className="ok" style={{ fontSize: 13, marginTop: 0 }}>
+            ✓ connected{status.username ? <> as <b>{status.username}</b></> : null} · library {status.library_id}
+            {" "}<a style={{ cursor: "pointer" }} className="muted" title="re-check" onClick={refresh}>↻</a>
+          </p>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Clip pages with the Zotero connector into an intake collection, pick it below, and import.
+            Guidance PDFs are text-extracted with numbered-paragraph pinpoints and auto-classified
+            (issuer · number · version · regime) — see the classification panel below for the rules.
+          </p>
+          <div className="row" style={{ flexWrap: "wrap", alignItems: "center" }}>
+            <select value={collection} onChange={(e) => setCollection(e.target.value)} style={{ maxWidth: 280 }}>
+              <option value="">whole library</option>
+              {ordered.map((c) => <option key={c.key} value={c.key}>
+                {c.label}{rules?.collections?.[c.key] ? " ✓" : ""}</option>)}
+            </select>
+            <select value={docType} onChange={(e) => setDocType(e.target.value)} style={{ flex: "0 0 auto" }}>
+              <option value="">type: from Zotero itemType</option>
+              {DOC_TYPES.map((t) => <option key={t} value={t}>type: {t}</option>)}
+            </select>
+            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}>
+              <input type="checkbox" checked={fetchPdfs} onChange={(e) => setFetchPdfs(e.target.checked)} />
+              fetch PDFs
+            </label>
+            <button className="primary" disabled={busy} onClick={async () => {
+              setBusy(true); setMsg("importing…");
+              try {
+                const r = await api.importZotero({
+                  limit: 50, fetch_pdfs: fetchPdfs,
+                  ...(collection ? { collection } : {}),
+                  ...(docType ? { doc_type: docType } : {}),
+                });
+                setMsg(""); show(r);
+              } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+            }}>Import</button>
+            {collection && docType && (
+              <button className="mini" title="Remember this collection → type mapping, so future imports (and anyone clipping into it) need no re-selection"
+                onClick={async () => {
+                  try {
+                    const next = { issuers: rules?.issuers || [], collections: { ...(rules?.collections || {}), [collection]: { doc_type: docType } } };
+                    setRules(await api.saveGuidanceRules(next)); setMsg("✓ mapping saved");
+                  } catch (e: any) { setMsg("error: " + e); }
+                }}>save as intake mapping</button>
+            )}
+          </div>
+          {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// How guidance classification works, laid open: the rules (data, editable here), a
+// test-bench that shows per-field WHICH rule fired and WHAT it matched, and the
+// re-classify job that applies rule edits to everything already imported.
+function GuidanceRulesPanel() {
+  const [rules, setRules] = useState<any>(null);
+  const [rows, setRows] = useState<any[]>([]);
+  const [maps, setMaps] = useState<[string, any][]>([]);
+  const [msg, setMsg] = useState("");
+  const [tryIn, setTryIn] = useState({ title: "", url: "", text: "" });
+  const [preview, setPreview] = useState<any>(null);
+  useEffect(() => {
+    api.guidanceRules().then((r) => {
+      setRules(r);
+      setRows((r.issuers || []).map((i: any) => ({
+        ...i, domains_text: (i.domains || []).join(", "),
+        boilerplate_text: (i.boilerplate || []).join(", "),
+      })));
+      setMaps(Object.entries(r.collections || {}));
+    }).catch(() => {});
+  }, []);
+  if (!rules) return null;
+  const upd = (i: number, k: string, v: string) =>
+    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
+  const save = async () => {
+    try {
+      const payload = {
+        issuers: rows.filter((r) => r.code?.trim()).map((r) => ({
+          code: r.code.trim().toLowerCase(), label: r.label || r.code,
+          domains: (r.domains_text || "").split(",").map((s: string) => s.trim()).filter(Boolean),
+          boilerplate: (r.boilerplate_text || "").split(",").map((s: string) => s.trim()).filter(Boolean),
+          default_regime: (r.default_regime || "").trim() || null,
+        })),
+        collections: Object.fromEntries(maps.filter(([k]) => k.trim())),
+      };
+      const r = await api.saveGuidanceRules(payload);
+      setMsg(`✓ saved (${r.issuers.length} issuer rules) — run re-classify to apply to held guidance`);
+    } catch (e: any) { setMsg("error: " + e); }
+  };
+  return (
+    <div className="panel">
+      <h3>Guidance classification <span className="muted">— how sorting works, and the rules that drive it</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Four deterministic stages, no LLMs: <b>1</b> the intake collection's saved mapping sets the
+        document type (and default issuer); <b>2</b> issuer rules below match the source domain and
+        first-page boilerplate (two independent witnesses — disagreement is flagged, not guessed);{" "}
+        <b>3</b> identity grammars read the series number ("Guidelines 05/2020", "WP248 rev.01"),
+        version and adopted/consultation status, minting the citation aliases; <b>4</b> the regime
+        (what it's guidance <i>under</i>) comes from the document's own dominant legislation citation,
+        falling back to the issuer default only when unrivalled. Every field stores the rule that fired
+        and the matched text — visible as chips on the document and in the test-bench below. Human
+        edits are marked <span className="kbd">manual</span> and never overwritten by a re-classify.
+      </p>
+      <h4 style={{ marginBottom: 4 }}>Issuer rules</h4>
+      <table className="grid">
+        <thead><tr><th>code</th><th>label</th><th>domains (comma-sep)</th><th>first-page boilerplate</th><th>default regime</th><th /></tr></thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i}>
+              <td><input value={r.code || ""} onChange={(e) => upd(i, "code", e.target.value)} style={{ width: 70 }} /></td>
+              <td><input value={r.label || ""} onChange={(e) => upd(i, "label", e.target.value)} /></td>
+              <td><input value={r.domains_text || ""} onChange={(e) => upd(i, "domains_text", e.target.value)} /></td>
+              <td><input value={r.boilerplate_text || ""} onChange={(e) => upd(i, "boilerplate_text", e.target.value)} /></td>
+              <td><input value={r.default_regime || ""} onChange={(e) => upd(i, "default_regime", e.target.value)}
+                placeholder="e.g. 32016R0679" style={{ width: 120 }} /></td>
+              <td><button className="mini" title="remove" onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}>✕</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p>
+        <button className="mini" onClick={() => setRows((rs) => [...rs, { code: "", label: "", domains_text: "", boilerplate_text: "", default_regime: "" }])}>+ add issuer</button>{" "}
+        <button className="primary" onClick={save}>Save rules</button>{" "}
+        <button className="mini" title="Apply the current rules to every held guidance document (manual fields untouched) — runs as a job"
+          onClick={async () => { try { const j = await api.classifyGuidanceJob(); setMsg(j.error || `✓ re-classify started (job ${j.job_id}) — watch the Jobs panel`); } catch (e: any) { setMsg("error: " + e); } }}>
+          ↻ re-classify all guidance</button>
+        {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {msg}</span>}
+      </p>
+      {maps.length > 0 && <>
+        <h4 style={{ marginBottom: 4 }}>Intake collection mappings</h4>
+        <table className="grid"><tbody>
+          {maps.map(([k, v], i) => (
+            <tr key={k}>
+              <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }}>{k}</td>
+              <td>{v.doc_type || "—"}{v.issuer ? ` · issuer: ${v.issuer}` : ""}</td>
+              <td><button className="mini" onClick={() => setMaps((m) => m.filter((_, j) => j !== i))}>✕</button></td>
+            </tr>
+          ))}
+        </tbody></table>
+      </>}
+      <h4 style={{ marginBottom: 4 }}>Test-bench <span className="muted">— paste a cover page, see which rules fire</span></h4>
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        <input value={tryIn.title} onChange={(e) => setTryIn({ ...tryIn, title: e.target.value })} placeholder="title" />
+        <input value={tryIn.url} onChange={(e) => setTryIn({ ...tryIn, url: e.target.value })} placeholder="source URL" />
+      </div>
+      <textarea value={tryIn.text} onChange={(e) => setTryIn({ ...tryIn, text: e.target.value })}
+        placeholder="first-page text (optional)" rows={3} style={{ width: "100%" }} />
+      <p><button className="mini" onClick={async () => {
+        try { setPreview(await api.classifyGuidance(tryIn)); } catch (e: any) { setMsg("error: " + e); }
+      }}>classify (dry run)</button></p>
+      {preview?.fields && (
+        <table className="grid">
+          <thead><tr><th>field</th><th>value</th><th>rule that fired</th><th>matched</th></tr></thead>
+          <tbody>
+            {Object.entries(preview.fields).map(([k, v]: [string, any]) => (
+              <tr key={k}><td>{k}</td><td><b>{v.value}</b></td>
+                <td className="muted" style={{ fontSize: 12 }}>{v.rule}</td>
+                <td className="muted" style={{ fontSize: 12 }}>{v.evidence}</td></tr>
+            ))}
+            {(preview.aliases || []).length > 0 && (
+              <tr><td>aliases</td><td colSpan={3}>{preview.aliases.join(" · ")}</td></tr>
+            )}
+          </tbody>
+        </table>
+      )}
+      {preview && !Object.keys(preview.fields || {}).length && <p className="muted">no rule matched — add a domain/boilerplate rule above and retry</p>}
     </div>
   );
 }

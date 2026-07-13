@@ -59,6 +59,20 @@ _UK_REFERRAL_RE = re.compile(
 _UK_NAME_HEURISTICS = {"uk_statute_named", "uk_act_section"}
 
 
+def _is_irish_case(doc) -> bool:
+    """Is this document a judgment of an Irish court? Inside one, an "<X> Act 1963"
+    name is almost always an Act of the Oireachtas, so the UK statute-name heuristics
+    must not link it to UK legislation (EU instruments and case citations of any
+    jurisdiction are unaffected — those are fine cross-border). Symmetrically, an
+    Irish-statute name grammar (once Irish legislation is populated) must be gated
+    to Irish hosts, so a UK judgment never links Irish acts by name."""
+    from .courts import IRISH_COURTS
+
+    court = (doc["court"] or "").lower()
+    prefix = (doc["stable_id"] or "").split("/", 1)[0].lower()
+    return doc["source"] == "ie-caselaw" or court in IRISH_COURTS or prefix in IRISH_COURTS
+
+
 _UK_COUNTRY_RE = re.compile(r"united\s+kingdom|\bgreat\s+britain\b|\bGB\b|\bUK\b", re.IGNORECASE)
 
 
@@ -110,6 +124,15 @@ def extract_document(
     # (→ name-only). Explicit legislation.gov.uk URLs/CELEX are unaffected — they're
     # unambiguous, not a heuristic.
     if _is_cjeu(doc) and not _uk_referred_preliminary(catalogue, stable_id):
+        cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
+                 for c in cites]
+
+    # Irish precision guard: inside an Irish judgment, "<Title> Act 1963" names an Act
+    # of the Oireachtas, not the UK statute of the same shape — keep the mention, drop
+    # the UK candidate (→ name-only). EU instruments and case citations (UK or Irish)
+    # resolve normally. The bare "section N" carry-forward follows automatically: with
+    # no UK candidate there is no legislation antecedent to attach to.
+    if _is_irish_case(doc):
         cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
                  for c in cites]
 

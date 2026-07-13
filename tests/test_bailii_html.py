@@ -170,3 +170,35 @@ def test_zip_import_aliases_bare_header_report_citation(facade, tmp_path):
             assert cat.find_document_id(form) == "ewhc/qb/1884/1"
         assert not [e for e in cat.relations_for("ewhc/qb/1884/1")
                     if "qbd" in (e["raw_citation_string"] or "").lower()]
+
+
+# -- Irish senior courts (BAILII /ie/ paths) ----------------------------------
+
+def test_irish_composite_paths_and_filenames_reduce_to_citation_slug():
+    from raglex.adapters.bailii_corpus import bailii_path_to_slug
+
+    assert bailii_path_to_slug("/ie/cases/IEHC/2008/2008_IEHC_56.html") == "iehc/2008/56"
+    assert bailii_path_to_slug("/ie/cases/IESC/2004/2004_IESC_1.html") == "iesc/2004/1"
+    assert bailii_path_to_slug("/ie/cases/IEHC/1974/1.html") == "iehc/1974/1"
+    assert slug_from_filename("ie_cases_IEHC_2008_2008_IEHC_56.html") == "iehc/2008/56"
+    assert slug_from_filename("ie_cases_IEHC_1974_1.html") == "iehc/1974/1"
+    # a saved year-INDEX page has no judgment slug
+    assert slug_from_filename("ie_cases_IEHC_1974.html") is None
+
+
+def test_zip_import_keys_irish_case_as_ie_caselaw(facade, tmp_path):
+    page = _page(
+        url="https://www.bailii.org/ie/cases/IEHC/2008/2008_IEHC_56.html",
+        title="D. (E.) v. Refugee Appeals Tribunal & Anor [2008] IEHC 56 (22 February 2008)",
+        cites="[2008] IEHC 56",
+        body="<P>JUDGMENT of Mr. Justice Hedigan delivered on the 22nd day of February 2008.</P>"
+             "<P>The applicant relied on the Refugee Act 1996 and Article 3 of the "
+             "European Convention on Human Rights; see also A v B [2005] IEHC 182.</P>")
+    res = facade.import_bailii_zip(zip_path=_zip(tmp_path, {"ie_cases_IEHC_2008_2008_IEHC_56.html": page}))
+    assert res["imported"] == 1
+    with facade._open() as (cat, _rs, _ts):
+        doc = cat.get_document("iehc/2008/56")
+        assert doc["source"] == "ie-caselaw" and doc["court"] == "iehc"
+        assert doc["decision_date"] == "2008-02-22"
+        # cited Irish case hangs as a resolvable iehc candidate (same keying scheme)
+        assert any(e["dst_id"] == "iehc/2005/182" for e in cat.relations_for("iehc/2008/56"))

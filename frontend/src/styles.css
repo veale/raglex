@@ -526,3 +526,35 @@ tbody tr:hover { background: var(--surface-2); }
 .theme-select { width: auto; flex: 0 0 auto; padding: var(--sp-2) var(--sp-3); font-size: .8125rem;
   color: var(--subtext); background: transparent; }
 .theme-select:focus { outline-offset: -2px; }
+
+/* --- original-document pane (pdf.js viewer + sandboxed HTML frame) ---------- */
+.viewtabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.viewtabs .mini.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.pdfpane { display: flex; flex-direction: column; }
+.pdfbar { display: flex; align-items: center; gap: 6px; position: sticky; top: 0; z-index: 4;
+  background: var(--bg); padding: 6px 0; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.pdfpage { margin: 0 auto 14px; width: fit-content; box-shadow: 0 1px 8px rgba(0,0,0,.22); }
+.pdfph { background: var(--inset); border: 1px solid var(--line); }
+.pdfoutline { padding: 8px 14px; border: 1px solid var(--line); background: var(--inset);
+  margin: 0 auto 12px; font-size: 13px; max-width: 1000px; }
+.pdfoutline ul { margin: 2px 0 2px 14px; padding: 0; list-style: none; }
+.pdfoutline a { cursor: pointer; display: inline-block; padding: 1px 0; }
+/* citation highlights over the page image — the text layer's glyphs stay transparent,
+   so the mark paints a tint + underline exactly under the printed citation */
+mark.pdfcite { background: transparent; color: transparent; cursor: pointer; }
+mark.pdfcite.cite-resolved { background: color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: 0 1.5px 0 var(--accent); }
+mark.pdfcite.cite-pending { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+mark.pdfcite.cite-maybe { background: color-mix(in srgb, var(--note) 20%, transparent); }
+mark.pdfcite:hover { filter: brightness(1.25); }
+.origframe { width: 100%; height: 80vh; border: 1px solid var(--line); background: #fff; }
+
+/* --- guidance classification chips ------------------------------------------ */
+.gchips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.gchip { border: 1px solid var(--line); padding: 2px 8px; font-size: 12px; cursor: pointer;
+  background: var(--inset); white-space: nowrap; }
+.gchip.m-manual { border-style: solid; border-color: var(--accent); }
+.gchip.m-rule { border-style: dashed; }
+.gchip.empty { opacity: .55; }
+.gchip.editing { display: inline-flex; align-items: center; gap: 4px; }
+.gchip a { cursor: pointer; }

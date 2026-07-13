@@ -54,10 +54,19 @@ REPORT_SERIES: tuple[str, ...] = (
     "Sh Ct Rep", "GWD",
     # -- Northern Ireland --
     "NI", "NIJB", "NILR", "BNIL",
-    # -- Ireland --
-    "IR", "ILRM", "IESC", "IEHC", "IECA", "ILTR", "Ir Jur Rep",
+    # -- Ireland (the neutral-citation courts IESC/IEHC/IECA are deliberately NOT
+    # here: they're real courts in citations.courts, and listing them would
+    # suppress the iehc/2008/56 candidate their citations must mint) --
+    "IR", "ILRM", "ILTR", "Ir Jur Rep", "Ir Jur", "LR Ir", "Frewen",
     # -- EU (parallel to CELEX) & frequently-cited Commonwealth --
     "CMLR", "CEC", "DLR", "CLR", "SCR", "NZLR", "HKLRD", "HKC", "SGCA", "SLR",
+    # -- Canada (ordinal series print as "(1990) 70 DLR (4th) 385") --
+    "DLR (2d)", "DLR (3d)", "DLR (4th)", "CCC", "CCC (2d)", "CCC (3d)", "WWR",
+    "OR (2d)", "OR (3d)", "CRR", "CPR (3d)",
+    # -- Australia --
+    "ALR", "ALJR", "NSWLR", "VR", "WAR", "SASR", "Qd R", "A Crim R", "ACSR", "FamLR",
+    # -- New Zealand --
+    "NZAR", "NZFLR",
     # -- nominate / very old (year-bracketed usage) --
     "ER", "Term Rep", "East", "B & C", "B & Ald", "M & W", "Bing", "Taunt", "Camp",
     "Esp", "Stark", "H & N", "H Bl", "Wils KB", "Barn KB", "Burr", "Cowp", "Doug KB",

@@ -85,8 +85,42 @@ class ZoteroImporter:
     def _headers(self) -> dict:
         return {"Zotero-API-Key": self.api_key, "Zotero-API-Version": "3"}
 
-    def fetch_items(self, *, limit: int = 50, start: int = 0) -> list[ZoteroItem]:
-        url = f"{API_BASE}/{self.library_type}/{self.library_id}/items"
+    def key_info(self) -> dict | None:
+        """Who this API key belongs to and what it can do (``GET /keys/current``) —
+        the one-call connection test, and the reason setup needs ONE field: the
+        key's response carries the numeric userID, so the library id is derived,
+        never typed."""
+        try:
+            resp = self.http.get(f"{API_BASE}/keys/current", headers=self._headers())
+            info = resp.json()
+        except Exception:  # noqa: BLE001 — bad key / network → not connected
+            return None
+        return info if isinstance(info, dict) and info.get("userID") else None
+
+    def list_collections(self, *, limit: int = 200) -> list[dict]:
+        """The library's collections (key, name, parent) — so the intake UI offers a
+        picker instead of asking anyone to paste an opaque collection key."""
+        url = f"{API_BASE}/{self.library_type}/{self.library_id}/collections"
+        try:
+            resp = self.http.get(url, headers=self._headers(),
+                                 params={"format": "json", "limit": limit})
+            rows = resp.json()
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for r in rows if isinstance(rows, list) else []:
+            d = r.get("data", r)
+            out.append({"key": d.get("key"), "name": d.get("name"),
+                        "parent": d.get("parentCollection") or None})
+        return out
+
+    def fetch_items(self, *, limit: int = 50, start: int = 0,
+                    collection: str | None = None) -> list[ZoteroItem]:
+        """Library items, optionally scoped to one collection — the intake pattern:
+        the Zotero browser connector saves a page/PDF into a designated collection
+        (e.g. "RAGlex intake"), and this pulls just that collection."""
+        base = f"{API_BASE}/{self.library_type}/{self.library_id}"
+        url = f"{base}/collections/{collection}/items" if collection else f"{base}/items"
         resp = self.http.get(
             url, headers=self._headers(), params={"format": "json", "limit": limit, "start": start}
         )
@@ -108,17 +142,23 @@ class ZoteroImporter:
         *,
         limit: int = 50,
         fetch_pdfs: bool = False,
+        collection: str | None = None,
+        doc_type: DocType | None = None,
     ) -> list[str]:
-        """Import items as secondary documents; returns the stable_ids created."""
+        """Import items as secondary documents; returns the stable_ids created.
+        ``doc_type`` overrides the itemType mapping for the whole batch — a
+        guidance-intake collection imports as ``guidance``, not ``article``."""
         created: list[str] = []
-        for item in self.fetch_items(limit=limit):
+        for item in self.fetch_items(limit=limit, collection=collection):
             if item.item_type in {"attachment"}:
                 continue  # handled as a PDF of its parent, not its own document
-            created.append(self._import_one(item, catalogue, rawstore, textstore, fetch_pdfs))
+            created.append(self._import_one(item, catalogue, rawstore, textstore,
+                                            fetch_pdfs, doc_type_override=doc_type))
         return created
 
-    def _import_one(self, item, catalogue, rawstore, textstore, fetch_pdfs) -> str:
-        doc_type = _ITEM_TYPE_DOCTYPE.get(item.item_type, DocType.ARTICLE)
+    def _import_one(self, item, catalogue, rawstore, textstore, fetch_pdfs,
+                    doc_type_override: DocType | None = None) -> str:
+        doc_type = doc_type_override or _ITEM_TYPE_DOCTYPE.get(item.item_type, DocType.ARTICLE)
         stable_id = f"zotero:{item.key}"
 
         text = "\n\n".join(p for p in (item.title, item.abstract) if p)

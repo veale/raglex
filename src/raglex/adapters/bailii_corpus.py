@@ -38,6 +38,15 @@ def bailii_path_to_slug(path: str | None) -> str | None:
     >>> bailii_path_to_slug("/ew/cases/EWCA/Civ/2006/717.html")
     'ewca/civ/2006/717'
 
+    Irish (and some other) judgment paths repeat the citation in the final segment
+    (``/ie/cases/IEHC/2008/2008_IEHC_56.html``) — that collapses to the same
+    ``court/year/num`` slug the "[2008] IEHC 56" citation candidate mints:
+
+    >>> bailii_path_to_slug("/ie/cases/IEHC/2008/2008_IEHC_56.html")
+    'iehc/2008/56'
+    >>> bailii_path_to_slug("/ie/cases/IEHC/1974/1.html")
+    'iehc/1974/1'
+
     Returns None for tribunal paths whose final segment isn't a bare number
     (``/ew/cases/EWLVT/2007/LON_00AY_OCE_2007_0100.html``) — those aren't in the
     full-text corpus and have no clean neutral-citation slug.
@@ -58,6 +67,12 @@ def bailii_path_to_slug(path: str | None) -> str | None:
     # last segment: strip the .html (or .rtf) extension
     num = rest[-1].rsplit(".", 1)[0]
     year = rest[-2]
+    # composite final segment restating the citation ("2008_IEHC_56" under
+    # .../IEHC/2008/) → just the number, so the slug matches the citation candidate
+    comp = re.fullmatch(r"(\d{4})_([A-Za-z]+)_(\d+[A-Za-z]?)", num)
+    if comp and comp.group(1) == year and comp.group(2).lower() == rest[0].lower():
+        num = comp.group(3)
+        rest = [*rest[:-1], num]
     # case numbers are usually bare integers but also "B17", "68_2", "J1" — allow any
     # alphanumeric-with-underscore run that carries at least one digit. The long
     # constructed tribunal ids ("LON_LV_NFE_00AY_0100") also pass, which is fine: those

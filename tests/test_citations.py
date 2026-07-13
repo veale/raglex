@@ -392,3 +392,63 @@ def test_carry_forward_respects_cue_kind_section_not_eu_directive():
     cf = {c.raw.lower(): c.candidate_id for c in extract_citations(txt) if c.method == "carry_forward"}
     assert cf.get("section 66") == "ukpga/2003/21"     # → Communications Act, not the directive
     assert cf.get("article 4") == "32003L0004"          # → the directive, not the Act
+
+
+def test_uk_statute_names_stay_name_only_inside_irish_judgments(catalogue, tmp_path):
+    # "<X> Act 2018" inside an IRISH judgment is an Act of the Oireachtas — the UK
+    # candidate must be dropped (name-only), while EU instruments and case citations
+    # of any jurisdiction resolve normally.
+    ts = TextStore(tmp_path / "text")
+    t = ("Section 5 of the Data Protection Act 2018 applies; see Article 17 of "
+         "Regulation (EU) 2016/679, Smith v Jones [2020] EWCA Civ 99 and [2019] IESC 4.")
+    _doc(catalogue, ts, "iehc/2024/1", t, source="ie-caselaw")
+    extract_document(catalogue, ts, "iehc/2024/1")
+    by_method = {}
+    for c in catalogue.citations_for("iehc/2024/1"):
+        by_method.setdefault(c["method"], []).append(c["candidate_id"])
+    assert by_method["uk_act_section"] == [None]          # UK statute name suppressed
+    dsts = {e["dst_id"] for e in catalogue.relations_for("iehc/2024/1") if e["dst_id"]}
+    assert {"32016R0679", "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
+
+
+def test_irish_neutral_citations_mint_candidates_and_reporters_stay_maybe():
+    by = {c.raw: c for c in extract_citations(
+        "see [2008] IEHC 56, [2004] IESC 1, [1999] 1 IR 12 and [2001] 1 ILRM 22")}
+    assert by["[2008] IEHC 56"].candidate_id == "iehc/2008/56"
+    assert by["[2004] IESC 1"].candidate_id == "iesc/2004/1"
+    assert by["[1999] 1 IR 12"].candidate_id is None      # Irish Reports: lookup-only
+    assert by["[2001] 1 ILRM 22"].candidate_id is None    # ILRM: lookup-only
+
+
+def test_commonwealth_neutral_citations_classified_by_jurisdiction():
+    # CA/AU/NZ (and NI/Scotland) citations are understood BEFORE any import route
+    # exists: candidates mint, and they bucket as pending case-law from their place.
+    from raglex.adapters.bailii import external_link
+    from raglex.citations.taxonomy import classify_candidate
+
+    by = {c.raw: c for c in extract_citations(
+        "see [2020] NZSC 12, 2019 SCC 65, [2020] HCA 5, [2020] NICA 5 and [2021] CSOH 100")}
+    assert by["[2020] NZSC 12"].candidate_id == "nzsc/2020/12"
+    assert by["2019 SCC 65"].candidate_id == "scc/2019/65"      # Canada is bracketless
+    assert by["[2020] HCA 5"].candidate_id == "hca/2020/5"
+    assert classify_candidate("nzsc/2020/12").category == "nz-caselaw"
+    assert classify_candidate("scc/2019/65").category == "ca-caselaw"
+    assert classify_candidate("hca/2020/5").category == "au-caselaw"
+    # NI + Scotland are UK case-law with their court sub-type, never "other"
+    assert classify_candidate("nica/2020/5").category == "uk-caselaw"
+    assert classify_candidate("csoh/2021/100").subtype_label.startswith("Court of Session")
+    # and each jurisdiction links to ITS institute, not a BAILII search that can't hit
+    assert "canlii" in external_link("scc/2019/65", None)["url"]
+    assert "austlii" in external_link("hca/2020/5", None)["url"]
+    assert "nzlii" in external_link("nzsc/2020/12", None)["url"]
+
+
+def test_commonwealth_and_scots_reporters_stay_candidate_less():
+    # ordinal Canadian series, Australian reports, and Scots bare-year reports are
+    # recognised as report citations (lookup-only) — never fake court slugs
+    for t in ["(1990) 70 DLR (4th) 385", "(1976) 60 CCC (2d) 30", "[1992] 175 CLR 1",
+              "[1990] 2 SCR 217", "(1985) 17 A Crim R 1", "[1971] NZLR 1041",
+              "2012 SC 1", "2011 SLT 651"]:
+        cs = extract_citations(t)
+        assert cs and all(c.candidate_id is None for c in cs), t
+        assert all(c.entity_kind == "case" for c in cs), t

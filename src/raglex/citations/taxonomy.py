@@ -30,12 +30,29 @@ from .snowball import (
 CATEGORY_LABELS: dict[str, str] = {
     "uk-caselaw": "UK case-law",
     "uk-legislation": "UK legislation",
+    "ie-caselaw": "Irish case-law",
+    "ie-legislation": "Irish legislation",
     "eu-cellar": "EU case-law",
     "eu-legislation": "EU legislation",
     "echr": "ECHR",
+    "ca-caselaw": "Canadian case-law",
+    "au-caselaw": "Australian case-law",
+    "nz-caselaw": "New Zealand case-law",
+    "in-caselaw": "Indian case-law",
     "other": "Other / unrouted",
 }
-CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "eu-cellar", "eu-legislation", "echr", "other"]
+CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
+                  "eu-cellar", "eu-legislation", "echr",
+                  "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw", "other"]
+
+# Neutral-citation jurisdictions with no adapter (cases arrive by upload, if at all):
+# the KNOWN_COURTS jurisdiction → the Corpus Map bucket. A "[2020] NZSC 12" pending
+# citation should read as New Zealand case-law, not "Other / unrouted" — the corpus
+# understanding these places precedes any import route existing.
+JURISDICTION_CATEGORY: dict[str, str] = {
+    "IE": "ie-caselaw", "CA": "ca-caselaw", "AU": "au-caselaw",
+    "NZ": "nz-caselaw", "IN": "in-caselaw",
+}
 
 # Which UK nation a legislation type-code belongs to (for the SI/Act-by-country split).
 UK_LEG_COUNTRY: dict[str, str] = {
@@ -54,6 +71,15 @@ UK_LEG_COUNTRY: dict[str, str] = {
 _LEG_KIND_LABEL = {"primary": "Primary", "secondary": "Secondary", "assimilated": "Assimilated"}
 _CELEX_LEG_DESC = {"R": ("reg", "Regulation"), "L": ("dir", "Directive"),
                    "D": ("dec", "Decision")}
+
+# Irish legislation sub-types (irishstatutebook.ie eli shapes: eli/YYYY/act/N,
+# eli/YYYY/si/N, plus the Constitution). The category exists ahead of any harvest
+# adapter — nothing populates it yet; it's the bucket Irish acts will land in.
+IE_LEG_TYPES: dict[str, tuple[str, str]] = {
+    "act": ("act", "Act of the Oireachtas"),
+    "si": ("si", "Statutory Instrument (IE)"),
+    "const": ("const", "Constitution of Ireland"),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +181,16 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         return Tax("uk-caselaw", CATEGORY_LABELS["uk-caselaw"], tok.lower() or "other",
                    known.name if known else (tok or "Other court"),
                    {"court": (court or prefix or "")})
+    if source in ("ie-caselaw", "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw"):
+        tok = (court or prefix or "").upper()
+        known = KNOWN_COURTS.get(tok)
+        return Tax(source, CATEGORY_LABELS[source], tok.lower() or "other",
+                   known.name if known else (tok or "Other court"),
+                   {"court": (court or prefix or "")})
+    if source == "ie-legislation":
+        sub, label = IE_LEG_TYPES.get(prefix, ("other", "Other"))
+        return Tax("ie-legislation", CATEGORY_LABELS["ie-legislation"], sub, label,
+                   {"source": "ie-legislation", "id_prefix": prefix})
     if source == "eu-cellar":
         sub, label = _eu_case_subtype(doc_type, court, stable_id)
         filt = {"source": "eu-cellar"}
@@ -205,4 +241,18 @@ def classify_candidate(candidate: str, kind: str = "") -> Tax:
         if cand.lower() == "echr/convention":
             return Tax("echr", CATEGORY_LABELS["echr"], "convention", "Convention (treaty)", {})
         return Tax("echr", CATEGORY_LABELS["echr"], "case", "ECHR case", {"source": "echr"})
+    # Adapter-less neutral-citation courts: a recognised court token still buckets the
+    # candidate by its jurisdiction — Irish/Commonwealth citations are first-class
+    # pending case-law (upload/link resolves them), and NI/Scottish courts belong
+    # under UK case-law with their court sub-type, never "other".
+    head = cand.split("/", 1)[0].lower() if "/" in cand else ""
+    known = KNOWN_COURTS.get(head.upper()) if head else None
+    if known:
+        catkey = JURISDICTION_CATEGORY.get(known.jurisdiction)
+        if catkey:
+            return Tax(catkey, CATEGORY_LABELS[catkey], head, known.name,
+                       {"source": catkey})
+        if known.jurisdiction == "GB":
+            return Tax("uk-caselaw", CATEGORY_LABELS["uk-caselaw"], head, known.name,
+                       {"court": head})
     return Tax("other", CATEGORY_LABELS["other"], "other", _form or "Other", {})

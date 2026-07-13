@@ -72,7 +72,9 @@ def _decode(data: bytes) -> str:
 def slug_from_filename(filename: str | None) -> str | None:
     """Recover the slug from a saved file's name when the page lacks a URL line —
     BAILII "save as" names flatten the path with underscores:
-    ``ew_cases_EWCA_Civ_2000_18.html`` → ``ewca/civ/2000/18``."""
+    ``ew_cases_EWCA_Civ_2000_18.html`` → ``ewca/civ/2000/18``. Irish paths repeat
+    the citation as a composite final segment, so the last three parts may really
+    be ONE segment: ``ie_cases_IEHC_2008_2008_IEHC_56.html`` → ``iehc/2008/56``."""
     if not filename:
         return None
     stem = filename.rsplit("/", 1)[-1]
@@ -80,7 +82,11 @@ def slug_from_filename(filename: str | None) -> str | None:
     parts = stem.split("_")
     if "cases" not in [p.lower() for p in parts]:
         return None
-    return bailii_path_to_slug("/" + "/".join(parts) + ".html")
+    slug = bailii_path_to_slug("/" + "/".join(parts) + ".html")
+    if slug is None and len(parts) >= 3:
+        merged = [*parts[:-3], "_".join(parts[-3:])]
+        slug = bailii_path_to_slug("/" + "/".join(merged) + ".html")
+    return slug
 
 
 def _body_slice(html: str) -> str:

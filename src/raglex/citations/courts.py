@@ -54,20 +54,27 @@ KNOWN_COURTS: dict[str, Court] = {
         Court("UKIAT", "Immigration Appeal Tribunal", "GB"),
         Court("CAT", "Competition Appeal Tribunal", "GB"),
         # Northern Ireland (BAILII)
-        Court("NIQB", "NI High Court, Queen's/King's Bench", "GB"),
+        Court("NIQB", "NI High Court, Queen's Bench", "GB"),
+        Court("NIKB", "NI High Court, King's Bench", "GB"),
         Court("NICA", "NI Court of Appeal", "GB"),
         Court("NICh", "NI High Court, Chancery", "GB"),
         Court("NIFam", "NI High Court, Family", "GB"),
         Court("NIMag", "NI Magistrates' Court", "GB"),
+        Court("NICC", "NI Crown Court", "GB"),
         # Scotland (BAILII / Scottish Courts)
         Court("CSOH", "Court of Session, Outer House", "GB"),
         Court("CSIH", "Court of Session, Inner House", "GB"),
         Court("HCJAC", "High Court of Justiciary, Appeal Court", "GB"),
+        Court("HCJ", "High Court of Justiciary", "GB"),
         Court("SAC", "Sheriff Appeal Court", "GB"),
-        # Ireland
+        Court("ScotCS", "Court of Session (BAILII legacy code)", "GB"),
+        Court("ScotHC", "High Court of Justiciary (BAILII legacy code)", "GB"),
+        # Ireland — the senior courts (BAILII holds them; imported via the BAILII
+        # zip/file paths, keyed iehc/2008/56 exactly like the citation candidate)
         Court("IESC", "Supreme Court of Ireland", "IE"),
         Court("IECA", "Court of Appeal of Ireland", "IE"),
         Court("IEHC", "High Court of Ireland", "IE"),
+        Court("IECCA", "Court of Criminal Appeal of Ireland", "IE"),
         # Canada (bracketless: 2024 SCC 1)
         Court("SCC", "Supreme Court of Canada", "CA", bracketed=False),
         Court("FCA", "Federal Court of Appeal (Canada)", "CA", bracketed=False),
@@ -78,18 +85,36 @@ KNOWN_COURTS: dict[str, Court] = {
         Court("FCA", "Federal Court of Australia", "AU"),  # note: AU FCA (collides w/ CA — jurisdiction by context)
         Court("FCAFC", "Full Federal Court of Australia", "AU"),
         Court("NSWCA", "NSW Court of Appeal", "AU"),
+        Court("NSWCCA", "NSW Court of Criminal Appeal", "AU"),
         Court("NSWSC", "NSW Supreme Court", "AU"),
         Court("VSCA", "Victoria Court of Appeal", "AU"),
+        Court("VSC", "Supreme Court of Victoria", "AU"),
+        Court("QCA", "Queensland Court of Appeal", "AU"),
+        Court("QSC", "Supreme Court of Queensland", "AU"),
+        Court("WASCA", "WA Court of Appeal", "AU"),
+        Court("WASC", "Supreme Court of Western Australia", "AU"),
+        Court("SASCA", "SA Court of Appeal", "AU"),
+        Court("SASC", "Supreme Court of South Australia", "AU"),
+        Court("TASSC", "Supreme Court of Tasmania", "AU"),
+        Court("ACTSC", "Supreme Court of the ACT", "AU"),
+        Court("NTSC", "Supreme Court of the Northern Territory", "AU"),
         # Canada (bracketless)
         Court("ONSC", "Ontario Superior Court of Justice", "CA", bracketed=False),
         Court("BCCA", "British Columbia Court of Appeal", "CA", bracketed=False),
         Court("BCSC", "British Columbia Supreme Court", "CA", bracketed=False),
         Court("ABCA", "Alberta Court of Appeal", "CA", bracketed=False),
+        Court("ABQB", "Alberta Court of Queen's Bench", "CA", bracketed=False),
+        Court("ABKB", "Alberta Court of King's Bench", "CA", bracketed=False),
         Court("QCCA", "Quebec Court of Appeal", "CA", bracketed=False),
+        Court("SKCA", "Saskatchewan Court of Appeal", "CA", bracketed=False),
+        Court("MBCA", "Manitoba Court of Appeal", "CA", bracketed=False),
+        Court("NSCA", "Nova Scotia Court of Appeal", "CA", bracketed=False),
+        Court("NBCA", "New Brunswick Court of Appeal", "CA", bracketed=False),
         # New Zealand
         Court("NZSC", "Supreme Court of New Zealand", "NZ"),
         Court("NZCA", "Court of Appeal of New Zealand", "NZ"),
         Court("NZHC", "High Court of New Zealand", "NZ"),
+        Court("NZEmpC", "Employment Court of New Zealand", "NZ"),
         # India (bracketless: 2024 INSC 1)
         Court("INSC", "Supreme Court of India", "IN", bracketed=False),
     )
@@ -105,3 +130,10 @@ DIVISIONS = {
 
 def lookup(code: str) -> Court | None:
     return KNOWN_COURTS.get(code.upper())
+
+
+# The Irish senior courts' slug heads (lowercase) — the set the importers use to key a
+# case as Irish (``source="ie-caselaw"``) and the extraction stage uses to gate UK
+# statute-name heuristics ("Companies Act 1963" in an IEHC judgment is Irish law).
+IRISH_COURTS: frozenset[str] = frozenset(
+    c.code.lower() for c in KNOWN_COURTS.values() if c.jurisdiction == "IE")

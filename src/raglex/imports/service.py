@@ -14,6 +14,7 @@ authoritative primary law (§10) — an LLM summary is never mistaken for a hold
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..core.models import (
@@ -38,6 +39,37 @@ _DEFAULT_RELATIONSHIP = {
     DocType.NOTE: RelationshipType.SUMMARISES,
     DocType.ARTICLE: RelationshipType.CRITICISES,
 }
+
+
+# A numbered paragraph heading a line: "42. Where a controller …" — regulatory
+# guidance (EDPB/A29WP/Ofcom) numbers its paragraphs, and the paragraph, not the
+# page, is the citable unit ("Guidelines 05/2020, para 42").
+_PARA_LINE = re.compile(r"^(\d{1,3})\.\s+\S")
+
+
+def _numbered_para_segments(text: str) -> list[Segment]:
+    """Paragraph segments from an ascending "N. " numbering in extracted text (the
+    same seam-detection the BAILII HTML importer uses for judgments). Only trusted
+    when the numbering behaves like numbering — several paragraphs, strictly
+    ascending against both neighbours — so stray "3." prose can't fake structure."""
+    marks: list[tuple[int, int]] = []
+    offset = 0
+    for block in text.split("\n\n"):
+        m = _PARA_LINE.match(block)
+        if m:
+            marks.append((int(m.group(1)), offset))
+        offset += len(block) + 2
+    ascending = [
+        (n, at) for i, (n, at) in enumerate(marks)
+        if (i == 0 or n > marks[i - 1][0]) and (i + 1 == len(marks) or n < marks[i + 1][0])
+    ]
+    if len(ascending) < 5:
+        return []
+    segs: list[Segment] = []
+    for i, (n, at) in enumerate(ascending):
+        end = ascending[i + 1][1] if i + 1 < len(ascending) else len(text)
+        segs.append(Segment(label=f"para {n}", char_start=at, char_end=end, kind="paragraph"))
+    return segs
 
 
 @dataclass(slots=True)
@@ -76,10 +108,15 @@ def import_file(
     stable_id = _surrogate_id(doc_type, payload_hash)
 
     # Make pages addressable (a typeset handbook) so "pp. 45-47" fragment links
-    # are meaningful — each page becomes a Segment (§1.9, §6b).
+    # are meaningful — each page becomes a Segment (§1.9, §6b). GUIDANCE prefers
+    # its numbered paragraphs when they're detectable: "Guidelines 05/2020,
+    # para 42" is how these documents are actually pinpoint-cited.
     segments: list[Segment] = []
-    for page_no, start, end in (extracted.page_spans or []):
-        segments.append(Segment(label=f"p. {page_no}", char_start=start, char_end=end, kind="page"))
+    if doc_type == DocType.GUIDANCE and extracted.text:
+        segments = _numbered_para_segments(extracted.text)
+    if not segments:
+        for page_no, start, end in (extracted.page_spans or []):
+            segments.append(Segment(label=f"p. {page_no}", char_start=start, char_end=end, kind="page"))
 
     relations: list[TypedRelation] = []
     rel_type = None
