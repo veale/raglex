@@ -2693,7 +2693,82 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
       </table>
     </div>
     <UnfetchablePanel />
+    <RetrievalExportPanel />
     <AllSuggestionsPanel />
+    </div>
+  );
+}
+
+// Export the unfetchable frontier as mention-ranked, ≤100-per-batch citation lists to
+// paste into Westlaw UK "Find & Print" or Lexis+ UK "Get & Print" — the report-only
+// authorities BAILII + Find Case Law don't hold, which those subscriptions usually do.
+function RetrievalExportPanel() {
+  const [minCiting, setMinCiting] = useState(3);
+  const [batchSize, setBatchSize] = useState(100);
+  const [sep, setSep] = useState("newline");
+  const [names, setNames] = useState(false);
+  const [data, setData] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [copied, setCopied] = useState<number | null>(null);
+  const run = async () => {
+    setBusy(true); setMsg("");
+    try {
+      setData(await api.exportRetrievalCitations({
+        min_citing: minCiting, batch_size: batchSize, separator: sep, include_names: names }));
+    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+  };
+  const qs = new URLSearchParams({ min_citing: String(minCiting), batch_size: String(batchSize),
+    separator: sep, include_names: String(names) });
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Export for Westlaw / Lexis batch retrieval
+        <span className="muted"> — the report-only authorities BAILII &amp; Find Case Law don't hold, ranked by how often your corpus cites them</span>
+      </h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Paste each block into Westlaw UK <b>Find &amp; Print</b> or Lexis+ UK <b>Get &amp; Print</b> (both take
+        newline- or semicolon-separated lists and cap a run at 100 documents). Coverage caveats: the
+        official ICLR Law Reports (AC/QB/Ch) may fail on Westlaw; Lexis rejects a citation that maps to
+        more than one document. ECR &amp; EHRR are excluded (harvested from CELLAR / HUDOC already). Run
+        the same list through both and merge if a batch retrieves poorly on one.
+      </p>
+      <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+        <label style={{ fontSize: 13 }}>min mentions <input type="number" min={1} value={minCiting}
+          onChange={(e) => setMinCiting(+e.target.value || 1)} style={{ width: 60 }} /></label>
+        <label style={{ fontSize: 13 }}>per batch <input type="number" min={1} max={100} value={batchSize}
+          onChange={(e) => setBatchSize(Math.min(100, +e.target.value || 100))} style={{ width: 60 }} /></label>
+        <select value={sep} onChange={(e) => setSep(e.target.value)}>
+          <option value="newline">newline-separated</option>
+          <option value="semicolon">semicolon-separated</option>
+        </select>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}>
+          <input type="checkbox" checked={names} onChange={(e) => setNames(e.target.checked)} />
+          include cases cited by name (won't retrieve without a citation)
+        </label>
+        <button className="primary" disabled={busy} onClick={run}>{busy ? "building…" : "Build citation batches"}</button>
+        {data && <a className="mini" href={`/api/export/retrieval-citations.txt?${qs}`} target="_blank" rel="noopener noreferrer">⬇ download all as .txt</a>}
+      </div>
+      {msg && <p className="err" style={{ fontSize: 12 }}>{msg}</p>}
+      {data && (
+        <div style={{ marginTop: 10 }}>
+          <p className="ok" style={{ fontSize: 13 }}>
+            {data.total_citations.toLocaleString()} citations · {data.total_mentions.toLocaleString()} mentions ·
+            {" "}{data.batch_count} batch{data.batch_count === 1 ? "" : "es"} of ≤{data.batch_size}
+          </p>
+          {data.batches.map((b: any) => (
+            <div key={b.index} style={{ marginBottom: 12 }}>
+              <div className="row" style={{ alignItems: "baseline" }}>
+                <b style={{ flex: 1 }}>Batch {b.index} <span className="muted">— {b.count} citations, {b.mentions.toLocaleString()} mentions</span></b>
+                <button className="mini" onClick={() => { navigator.clipboard?.writeText(b.text); setCopied(b.index); setTimeout(() => setCopied(null), 1200); }}>
+                  {copied === b.index ? "✓ copied" : "copy"}</button>
+              </div>
+              <textarea readOnly value={b.text} rows={Math.min(12, b.count + 1)}
+                style={{ width: "100%", fontFamily: "var(--mono, monospace)", fontSize: 12 }}
+                onFocus={(e) => e.currentTarget.select()} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

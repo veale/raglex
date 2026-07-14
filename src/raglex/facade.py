@@ -1065,6 +1065,74 @@ class Facade:
             r["suggestions"] = sugg.get(r["ref"], [])
         return {"total": len(rows), "references": out}
 
+    # -- export the unfetchable frontier for Westlaw / Lexis batch retrieval ----
+    def export_retrieval_citations(self, *, min_citing: int = 2, batch_size: int = 100,
+                                   scan_limit: int = 20000, include_names: bool = False,
+                                   separator: str = "newline",
+                                   include_series: tuple[str, ...] | None = None) -> dict:
+        """Mention-ranked citation batches to paste into Westlaw UK **Find & Print** or
+        Lexis+ UK **Get & Print** — the pre-neutral / report-only authorities BAILII and
+        Find Case Law don't hold, which those subscription databases usually do.
+
+        Only *pasteable* references are exported: a report citation ("[1987] AC 460") or a
+        neutral citation the corpus can't route — never a bare case name (Find & Print
+        needs a citation) unless ``include_names``. ECR / EHRR are dropped (their sources —
+        CELLAR / HUDOC — are already wired). Each batch holds at most ``batch_size``
+        citations (both tools cap a run at 100); ``separator`` is ``newline`` or
+        ``semicolon`` (both platforms accept either). ``include_series`` restricts to
+        named report series (e.g. only WLR + Cr App R that Westlaw actually holds)."""
+        import re as _re
+
+        from .citations.reporters import is_report_citation, report_series
+
+        sep = ";\n" if separator == "semicolon" else "\n"
+        want_series = {s.upper() for s in include_series} if include_series else None
+        # a bracketed/parenthesised year is the pasteable signal (report or neutral cite)
+        cite_shape = _re.compile(r"[\[(](?:1[6-9]|20)\d{2}[\])]")
+        seen: set[str] = set()
+        items: list[dict] = []
+        # reuse the frontier computation (uncapped), then filter to pasteable cites
+        frontier = self._unfetchable_uncached(scan_limit)
+        for r in frontier["references"]:
+            if r["citing_count"] < min_citing:
+                continue
+            raw = (r["raw"] or r["ref"] or "").strip()
+            series = report_series(raw)
+            if series and series.upper() in ("ECR", "EHRR"):
+                continue  # own sources (CELLAR / HUDOC), not a Westlaw/Lexis target
+            is_cite = bool(r["is_report"]) or is_report_citation(raw) or bool(cite_shape.search(raw))
+            if not is_cite:
+                if not (include_names and r["form"] == "case (by name)"):
+                    continue
+            if want_series and (not series or series.upper() not in want_series):
+                continue
+            key = _re.sub(r"[\s.'’\[\]()]+", "", raw).upper()  # fold for dedup
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append({"citation": raw, "citing_count": r["citing_count"],
+                          "series": series, "form": r["form"]})
+
+        items.sort(key=lambda x: x["citing_count"], reverse=True)
+        batches = []
+        for i in range(0, len(items), batch_size):
+            chunk = items[i: i + batch_size]
+            batches.append({
+                "index": i // batch_size + 1, "count": len(chunk),
+                "mentions": sum(c["citing_count"] for c in chunk),
+                "text": sep.join(c["citation"] for c in chunk),
+                "items": chunk,
+            })
+        # one combined text for a single download, batches delimited by a header comment
+        combined = "\n\n".join(
+            f"### Batch {b['index']} — {b['count']} citations, {b['mentions']} mentions "
+            f"(paste into one Find & Print / Get & Print run)\n{b['text']}"
+            for b in batches)
+        return {"total_citations": len(items),
+                "total_mentions": sum(c["citing_count"] for c in items),
+                "batch_size": batch_size, "batch_count": len(batches),
+                "separator": separator, "batches": batches, "combined_text": combined}
+
     # -- Corpus Map: held-vs-pending by category & sub-type (§8) ------------
     def corpus_map(self) -> dict:
         """The dashboard's coverage table: every legal category and sub-type with how much we

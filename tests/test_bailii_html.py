@@ -277,3 +277,35 @@ def test_zip_import_keys_irish_case_as_ie_caselaw(facade, tmp_path):
         assert doc["decision_date"] == "2008-02-22"
         # cited Irish case hangs as a resolvable iehc candidate (same keying scheme)
         assert any(e["dst_id"] == "iehc/2005/182" for e in cat.relations_for("iehc/2008/56"))
+
+
+def test_export_retrieval_citations_batches_and_filters(facade):
+    # seed pending report citations at varying mention frequencies
+    from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
+                                    ResolutionStatus, TypedRelation)
+    from datetime import date
+    with facade._open() as (cat, rs, ts):
+        reports = {"[1987] AC 460": 5, "[2020] 1 WLR 100": 8, "[1974] ECR 837": 9,
+                   "[2016] EHRR 12": 4, "Smith v Jones": 7, "[1999] Cr App R 1": 2}
+        di = 0
+        for raw, cnt in reports.items():
+            for _ in range(cnt):
+                sid = f"c/{di}"; di += 1
+                rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                             decision_date=date(2024, 1, 1), text="t", raw_bytes=b"t",
+                             extracted_via=ExtractedVia.STRUCTURED,
+                             relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                        raw_citation_string=raw, dst_id=None,
+                                        resolution_status=ResolutionStatus.PENDING)])
+                rec.ensure_payload_hash()
+                cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash + sid, "t")))
+
+    res = facade.export_retrieval_citations(min_citing=2, batch_size=2)
+    flat = [i["citation"] for b in res["batches"] for i in b["items"]]
+    # ranked by mentions; ECR/EHRR (own sources) and bare names excluded
+    assert flat == ["[2020] 1 WLR 100", "[1987] AC 460", "[1999] Cr App R 1"]
+    assert all(b["count"] <= 2 for b in res["batches"]) and res["batch_count"] == 2
+    assert res["batches"][0]["text"] == "[2020] 1 WLR 100\n[1987] AC 460"  # newline-joined
+    # names included on request
+    withn = facade.export_retrieval_citations(min_citing=2, include_names=True)
+    assert "Smith v Jones" in [i["citation"] for b in withn["batches"] for i in b["items"]]
