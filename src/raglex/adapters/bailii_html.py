@@ -54,6 +54,13 @@ class ParsedBailii:
     decision_date: date | None = None
     text: str = ""
     segments: list[Segment] = field(default_factory=list)
+    # Some (mostly older Irish) BAILII pages carry NO judgment text — the body is just
+    # a link to the original PDF ("We are providing this link to the original pdf
+    # version"). ``pdf_only`` flags those; ``pdf_url`` is that link. The importer keeps
+    # the good metadata (title/date/court/citations) as a stub rather than storing the
+    # boilerplate as if it were the judgment.
+    pdf_only: bool = False
+    pdf_url: str | None = None
 
 
 def _decode(data: bytes) -> str:
@@ -221,11 +228,34 @@ def parse_bailii_html(data: bytes, *, filename: str | None = None) -> ParsedBail
     court_label = _unescape(re.sub(r"\s+|<[^>]+>", " ", hm.group(1)).strip()) if hm else None
 
     text = _body_text(_body_slice(html))
+    pdf_only, pdf_url = _pdf_only_stub(html, text)
     return ParsedBailii(
         slug=slug, bailii_url=bailii_url,
         title=clean.title or None,
         citations=tuple(dict.fromkeys(citations)),
         court_label=court_label or None,
         decision_date=_title_date(raw_title),
-        text=text, segments=_para_segments(text),
+        text="" if pdf_only else text,
+        segments=[] if pdf_only else _para_segments(text),
+        pdf_only=pdf_only, pdf_url=pdf_url,
     )
+
+
+# The tell-tale of a PDF-only stub page: BAILII's standard sentence offering the
+# original PDF instead of a text transcript.
+_PDF_NOTICE = re.compile(r"providing this link to the original pdf", re.IGNORECASE)
+
+
+def _pdf_only_stub(html: str, body_text: str) -> tuple[bool, str | None]:
+    """Is this a stub page whose body is only a link to the original PDF (no judgment
+    transcript)? Returns ``(is_stub, pdf_url)``. Detected by BAILII's standard notice
+    OR by a body that is essentially just the ``…/YEAR/….pdf`` link with no prose."""
+    m = re.search(r'href=["\'](/[^"\']+?\.pdf)["\']', html, re.IGNORECASE)
+    pdf_path = m.group(1) if m else None
+    pdf_url = f"https://www.bailii.org{pdf_path}" if pdf_path else None
+    notice = bool(_PDF_NOTICE.search(html))
+    # a genuine transcript is long; a stub's "body" is the couple of boilerplate lines
+    # around the PDF link. Treat as a stub when the notice is present, or when a PDF link
+    # exists and the stripped body is too short to be a judgment.
+    stub = notice or (pdf_path is not None and len(body_text) < 400)
+    return stub, pdf_url

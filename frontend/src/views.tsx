@@ -982,7 +982,17 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     if (idx >= 0) setTimeout(() => scrollToSeg(segId(body.segments[idx].label)), 80);
   }, [body, pinpoint]);
   if (!body) return <p className="muted">Loading text…</p>;
-  if (!body.text && !rawKind) return <p className="muted">No extracted text (metadata-only, or not yet extracted).</p>;
+  if (!body.text && !rawKind) return (
+    <div>
+      {body.external_pdf && (
+        <div className="pdf-stub-banner">
+          📄 No text transcript — the original judgment is a PDF on BAILII.{" "}
+          <a href={body.external_pdf} target="_blank" rel="noopener noreferrer">Open the PDF on BAILII ↗</a>
+        </div>
+      )}
+      <p className="muted">No extracted text (metadata-only, or not yet extracted).</p>
+    </div>
+  );
   const segs = body.segments as { label: string; kind: string; level: number; char_start: number; char_end: number }[];
   const cites = body.citations || [];
   const pinned = (label: string) => (incoming || []).filter((r) => r.dst_anchor === label);
@@ -1010,6 +1020,15 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
       </div>
     );
   const chips = body.doc_type === "guidance" && <GuidanceChips id={id} />;
+  // BAILII PDF-only stub: no transcript here, but the original PDF lives on bailii.org.
+  // Surface it as a real clickable link (the sandboxed original pane can't open links).
+  const pdfBanner = body.external_pdf && (
+    <div className="pdf-stub-banner">
+      📄 This judgment has no text transcript on BAILII — only the original PDF.{" "}
+      <a href={body.external_pdf} target="_blank" rel="noopener noreferrer">Open the PDF on BAILII ↗</a>
+      {body.source_url && <> · <a href={body.source_url} target="_blank" rel="noopener noreferrer" className="muted">source page</a></>}
+    </div>
+  );
   const tabs = rawKind && (
     <div className="viewtabs">
       <button className={`mini${view === "text" ? " on" : ""}`} disabled={!body.text}
@@ -1028,7 +1047,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     <SelectionShorthand docId={id}>
       <div className="doc-layout">
         <DocNav segs={segs || []} text={body.text || ""} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
-        <div className="doc-main">{chips}{tabs}{main}</div>
+        <div className="doc-main">{chips}{pdfBanner}{tabs}{main}</div>
       </div>
     </SelectionShorthand>
   );

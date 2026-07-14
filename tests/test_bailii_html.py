@@ -86,6 +86,15 @@ def _zip(tmp_path, pages: dict[str, bytes]) -> str:
     return str(zp)
 
 
+def _folder(dir_path, pages: dict[str, bytes]):
+    from pathlib import Path
+    d = Path(dir_path)
+    d.mkdir(parents=True, exist_ok=True)
+    for name, data in pages.items():
+        (d / name).write_bytes(data)
+    return d
+
+
 def test_dir_import_walks_folder_recursively_ignores_non_html(facade, tmp_path):
     # the no-zip path: a Finder folder streamed up as loose files, nested, with cruft
     d = tmp_path / "bailii-folder"
@@ -101,6 +110,55 @@ def test_dir_import_walks_folder_recursively_ignores_non_html(facade, tmp_path):
     with facade._open() as (cat, _rs, _ts):
         assert cat.get_document("ukhl/2000/57") is not None
         assert cat.get_document("ewca/civ/2000/18") is not None
+
+
+def _pdf_stub_page(*, url="https://www.bailii.org/ie/cases/IEHC/1984/1984_IEHC_87.html",
+                   title="Pfizer Chemical Corporation v. The Commissioner of Valuation [1984] IEHC 87 (31 July 1984)",
+                   pdf="/ie/cases/IEHC/1984/1984_IEHC_87.pdf") -> bytes:
+    html = f"""<html><head><title>{title}</title></head><BODY>
+<TABLE><TR><TD><H1>High Court of Ireland Decisions</H1></TD></TR>
+<TR><TD><SMALL><B>You are here:</B> BAILII &gt;&gt; {title}
+<BR>URL: <I>{url}</I>
+<BR>Cite as: [1984] IEHC 87
+</SMALL><HR></TD></TR></TABLE>
+<p>[<a href="/form/search_cases.html">New search</a>] [<a href="{pdf}">Printable PDF version</a>]</p>
+<hr>
+<center><a href="http://www.bailii.org{pdf}">{title}</a>
+<P>We are providing this link to the original pdf version of this report.</P></center>
+<P><HR><SMALL><B>BAILII:</B> <A HREF="/bailii/copyright.html">Copyright Policy</A></SMALL></P>
+</BODY></html>"""
+    return html.encode("iso-8859-1")
+
+
+def test_pdf_only_stub_imported_as_metadata_not_junk_text(facade, tmp_path):
+    res = facade.import_bailii_dir(dir_path=str(_folder(tmp_path, {"a.html": _pdf_stub_page()})))
+    assert res.get("pdf_stub") == 1 and res["imported"] == 0 and res["unparseable"] == 0
+    with facade._open() as (cat, _rs, _ts):
+        doc = cat.get_document("iehc/1984/87")
+        assert doc is not None and doc["has_text"] == 0          # text-less stub, not junk
+        assert doc["title"].startswith("Pfizer") and doc["decision_date"] == "1984-07-31"
+        assert cat.document_meta("iehc/1984/87")["bailii_pdf_url"].endswith("1984_IEHC_87.pdf")
+        # the case is resolvable by name even with no transcript
+        assert cat.find_document_id("pfizer chemical corporation v the commissioner of valuation") == "iehc/1984/87"
+    # the reader gets a clickable PDF link
+    body = facade.document_body("iehc/1984/87")
+    assert body["text"] is None and body["external_pdf"].endswith("1984_IEHC_87.pdf")
+
+
+def test_pdf_stub_is_superseded_by_a_later_full_transcript(facade, tmp_path):
+    facade.import_bailii_dir(dir_path=str(_folder(tmp_path / "a", {"a.html": _pdf_stub_page()})))
+    # a later real transcript for the same slug replaces the stub
+    full = _page(url="https://www.bailii.org/ie/cases/IEHC/1984/1984_IEHC_87.html",
+                 title="Pfizer Chemical Corporation v Commissioner of Valuation [1984] IEHC 87 (31 July 1984)",
+                 cites="[1984] IEHC 87",
+                 body="<P>1. The plaintiff is a company. Judgment follows.</P>"
+                      "<P>2. The valuation was excessive.</P><P>3. Appeal allowed.</P>")
+    res = facade.import_bailii_dir(dir_path=str(_folder(tmp_path / "b", {"a.html": full})))
+    assert res["superseded"] == 1
+    with facade._open() as (cat, _rs, ts):
+        doc = cat.get_document("iehc/1984/87")
+        assert doc["has_text"] == 1
+        assert "plaintiff is a company" in ts.get(doc["payload_hash"])
 
 
 def test_zip_import_creates_judgment_with_report_aliases(facade, tmp_path):

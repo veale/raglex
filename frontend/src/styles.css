@@ -558,3 +558,8 @@ mark.pdfcite:hover { filter: brightness(1.25); }
 .gchip.empty { opacity: .55; }
 .gchip.editing { display: inline-flex; align-items: center; gap: 4px; }
 .gchip a { cursor: pointer; }
+
+/* --- BAILII PDF-only stub banner (no transcript, link to the original PDF) --- */
+.pdf-stub-banner { border: 1px solid var(--line); background: var(--inset);
+  padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
+.pdf-stub-banner a { font-weight: 600; }

@@ -566,16 +566,21 @@ class Facade:
                     "state": "resolved" if resolved else ("pending" if cand else "maybe"),
                 })
             raw_path = doc["raw_path"]
+            meta = _row_meta(doc)
             return {
                 "text": text,
                 "segments": [asdict(s) for s in ts.get_segments(ph)],
                 "citations": citations,
                 "doc_type": doc["doc_type"],
                 "title": doc["title"],
-                "oscola": _oscola_cite(doc, _row_meta(doc)),
+                "oscola": _oscola_cite(doc, meta),
                 # the reader offers an "original" pane when the ingested file is stored
                 "raw_ext": (raw_path.rsplit(".", 1)[-1].lower()
                             if raw_path and "." in raw_path else None),
+                # a BAILII PDF-only stub: no transcript here, but a link to the original
+                # PDF on bailii.org the reader can offer (source_url is the landing page)
+                "external_pdf": meta.get("bailii_pdf_url"),
+                "source_url": doc["landing_url"] or meta.get("bailii_url"),
             }
 
     def document_mentions(self, stable_id: str, *, anchor: str | None = None,
@@ -2526,7 +2531,7 @@ class Facade:
                     parsed = None
                     if len(files) < 1000:
                         files.append({"file": filename, "disposition": "error", "error": str(exc)})
-                if parsed is None or not parsed.slug or not parsed.text.strip():
+                if parsed is None or not parsed.slug:
                     st["unparseable"] += 1
                     if parsed is not None and len(files) < 1000:
                         files.append({"file": filename, "disposition": "unparseable",
@@ -2551,6 +2556,24 @@ class Facade:
                 bare = _chamberless_alias(slug)
                 if bare and bare != slug:
                     alias_pairs.append((bare, "chamber-alias"))
+
+                # No transcript on the page — either a PDF-only stub (keep its good
+                # metadata as a placeholder) or a genuinely empty/unreadable page.
+                if not parsed.text.strip():
+                    if not parsed.pdf_only:
+                        st["unparseable"] += 1
+                        if len(files) < 1000:
+                            files.append({"file": filename, "disposition": "unparseable",
+                                          "title": title})
+                        continue
+                    disposition = self._import_bailii_pdf_stub(
+                        cat, rs, ts, parsed=parsed, data=data, alias_pairs=alias_pairs, st=st)
+                    if len(files) < 1000:
+                        files.append({"file": filename, "stable_id": slug, "title": title,
+                                      "pdf_url": parsed.pdf_url, "disposition": disposition})
+                    if n % 100 == 0:
+                        cat.commit()
+                    continue
                 # ICLR-sourced pages open with the report citation the case was
                 # published at — usually bare ("12 QBD 271", no year) and often
                 # missing from "Cite as:". It names THIS case, so it's an alias,
@@ -2667,6 +2690,54 @@ class Facade:
         st["files"] = files
         self._invalidate_caches()
         return st
+
+    def _import_bailii_pdf_stub(self, cat, rs, ts, *, parsed, data,
+                                alias_pairs: list, st: dict) -> str:
+        """A BAILII page with no transcript — the body is only a link to the original
+        PDF. Keep the good metadata (title, date, court, "Cite as" citations) as a
+        **text-less stub** keyed by the slug, plus the PDF url in meta, so name/report
+        citations resolve and the case is visibly held-but-unfetched. Never overwrites
+        a real transcript, and being ``has_text=0`` it is superseded the moment the
+        full page (or a converted PDF) is imported. Returns the disposition."""
+        from .adapters.uk_caselaw import court_from_slug
+        from .citations.courts import IRISH_COURTS
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+
+        slug, title = parsed.slug, parsed.title
+        stub_meta = {"imported": "bailii-pdf-stub", "bailii_url": parsed.bailii_url,
+                     "bailii_pdf_url": parsed.pdf_url, "needs_pdf": True,
+                     "bailii_citations": list(parsed.citations),
+                     "bailii_court": parsed.court_label}
+        existing = cat.get_document(slug)
+        if existing is not None and existing["has_text"]:
+            # we already hold the real judgment — the stub only adds the PDF link + aliases
+            meta = cat.document_meta(slug)
+            meta.setdefault("bailii_pdf_url", parsed.pdf_url)
+            cat.set_document_meta(slug, meta, commit=False)
+            disposition = "pdf-stub-skipped"
+        else:
+            # (re)write the metadata stub — raw HTML kept so /raw serves the "download
+            # the PDF" page, but no text/segments (has_text=0 → later import supersedes)
+            payload_hash = sha256_bytes(data)
+            merged = {**(cat.document_meta(slug) if existing is not None else {}), **stub_meta}
+            record = Record(
+                source="ie-caselaw" if slug.split("/", 1)[0] in IRISH_COURTS else "uk-caselaw",
+                stable_id=slug, doc_type=DocType.JUDGMENT,
+                title=title or (existing["title"] if existing is not None else None) or slug,
+                court=court_from_slug(slug), decision_date=parsed.decision_date,
+                language="en", source_language="en", landing_url=parsed.bailii_url,
+                raw_bytes=data, raw_ext="html", payload_hash=payload_hash,
+                text=None, segments=[], extracted_via=ExtractedVia.SCRAPE,
+                added_by=AddedBy.USER, extra=merged,
+            )
+            raw_path = str(rs.path_for(rs.put(data, ext="html"), "html"))
+            cat.upsert_document(record, raw_path=raw_path, text_path=None)
+            disposition = "pdf-stub"
+        st["pdf_stub"] = st.get("pdf_stub", 0) + 1
+        for key, source in alias_pairs:
+            cat.put_alias(key, slug, source=source, commit=False)
+            st["aliases"] += 1
+        return disposition
 
     @staticmethod
     def _text_len(ts, doc) -> int:
