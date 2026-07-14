@@ -806,9 +806,22 @@ _DECISION_DESCRIPTORS = {
 _ALL_DECISION_DESCRIPTORS = frozenset(d for ds in _DECISION_DESCRIPTORS.values() for d in ds)
 
 
+class CellarUnavailable(Exception):
+    """A CELLAR SPARQL lookup failed to complete (timeout, 5xx, rate-limit exhaustion).
+
+    Distinct from an *empty* result: an empty result means the case is genuinely not in
+    CELLAR (a real absence → 90-day cooldown), but a failed lookup tells us **nothing**
+    about the case's existence. Collapsing the two — returning ``None`` on both — is what
+    let a flaky CELLAR moment brand tens of thousands of held CJEU cases "absent" for 90
+    days, so the drain never retried them. This exception propagates out of the targeted
+    builder, and :meth:`Facade._fetch_reference` classifies it as *transient* (retry in
+    hours), not absent."""
+
+
 def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -> str | None:
     """The CELEX that actually exists in CELLAR for a guessed case CELEX, or None if the
-    case is genuinely absent (§5b).
+    case is genuinely absent (§5b). Raises :class:`CellarUnavailable` if the lookup can't
+    be completed (so the caller retries later rather than writing the case off).
 
     One SPARQL hop finds every descriptor CELLAR holds for the case *number*
     (``62016CJ0113`` guessed → CELLAR has ``62016CC0113`` + ``62016TJ0113``); we then pick
@@ -828,8 +841,8 @@ def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -
     )
     try:
         found = {r["celex"].upper() for r in cellar._sparql(q) if r.get("celex")}
-    except Exception:  # noqa: BLE001 — best-effort; caller treats None as "couldn't resolve"
-        return None
+    except Exception as exc:  # noqa: BLE001 — transport/CELLAR failure, NOT an absence
+        raise CellarUnavailable(f"CELLAR lookup failed for {cu}: {exc}") from exc
     # ranked preference: this family's decisions (best type first), then the other
     # families' decisions (a "C-" citation that only exists as a "T-" case = a citation
     # error we still want to resolve).
@@ -861,8 +874,8 @@ def _resolve_joined_case(cellar: "EUCellarAdapter", *, year: str, num: str,
     )
     try:
         leads = {r["celex"].upper() for r in cellar._sparql(q) if r.get("celex")}
-    except Exception:  # noqa: BLE001 — best-effort, like the primary hop
-        return None
+    except Exception as exc:  # noqa: BLE001 — a failed lookup is transient, not an absence
+        raise CellarUnavailable(f"CELLAR joined-case lookup failed for {year}/{num}: {exc}") from exc
     leads = {c for c in leads if len(c) >= 9 and c[5:7] in _ALL_DECISION_DESCRIPTORS}
     if not leads:
         return None

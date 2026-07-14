@@ -282,3 +282,39 @@ def test_resolve_case_celex_absent_everywhere_is_none(monkeypatch):
 
     monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", lambda self, q: [])
     assert eu_cellar.resolve_case_celex("61993CJ9999") is None
+
+
+def test_resolve_case_celex_transient_failure_raises_not_absent(monkeypatch):
+    # A SPARQL transport failure must NOT be read as "case absent" — it raises, so the
+    # drain classifies it transient (retry in hours) instead of a 90-day cooldown.
+    import pytest
+
+    from raglex.adapters import eu_cellar
+
+    def boom(self, q):
+        raise TimeoutError("CELLAR timed out")
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", boom)
+    with pytest.raises(eu_cellar.CellarUnavailable):
+        eu_cellar.resolve_case_celex("62018CJ0511")
+
+
+def test_fetch_reference_marks_cellar_outage_transient_not_absent(monkeypatch, tmp_path):
+    # end-to-end: a CELLAR outage during a targeted EU fetch → outcome "transient"
+    # (hours), never "absent" (90 days) — the poisoning this whole fix prevents.
+    import raglex.facade as fmod
+    from raglex.adapters.eu_cellar import CellarUnavailable
+    from raglex.config import Config
+
+    def raising_builder(cand, **kw):
+        raise CellarUnavailable("CELLAR down")
+
+    monkeypatch.setitem(fmod._TARGETED_HARVEST, "eu-cellar", raising_builder)
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "cat.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "settings.json", topic_threshold=3.0,
+                 embed_provider="local-hashing", embed_model=None)
+    f = fmod.Facade(cfg)
+    with f._open() as (cat, rs, ts):
+        res = f._fetch_reference(cat, rs, ts, ref="C-511/18", candidate="62018CJ0511")
+    assert res["outcome"] == "transient"
