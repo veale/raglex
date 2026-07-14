@@ -224,6 +224,15 @@ export const api = {
     fd.append("file", file);
     return postForm("/import/bailii-zip", fd) as Promise<{ job_id?: string; error?: string }>;
   },
+  // no-zip folder upload: stage a batch of .html files under an upload id
+  importBailiiFilesBatch: async (upload_id: string, files: File[]) => {
+    const fd = new FormData();
+    fd.append("upload_id", upload_id);
+    for (const f of files) fd.append("files", f, f.name);
+    return postForm("/import/bailii-files", fd) as Promise<{ received: number; staged: number; error?: string }>;
+  },
+  importBailiiFilesStart: (upload_id: string) =>
+    req<{ job_id?: string; error?: string }>("/import/bailii-files/start", { method: "POST", body: JSON.stringify({ upload_id }) }),
   pendingSuggestions: (limit = 500) => req<any>(`/suggestions/pending?limit=${limit}`),
   embed: () => req<any>("/embed", { method: "POST", body: "{}" }),
 };

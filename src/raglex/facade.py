@@ -2454,6 +2454,52 @@ class Facade:
         the case name fills an empty title, and one resolve pass links the graph."""
         import zipfile
 
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = [i for i in zf.infolist()
+                     if not i.is_dir()
+                     and i.filename.lower().endswith((".html", ".htm"))
+                     and not i.filename.startswith("__MACOSX")
+                     and "/." not in "/" + i.filename]
+            if limit:
+                infos = infos[:limit]
+
+            def _entries():
+                for info in infos:
+                    yield info.filename, zf.read(info)
+
+            return self._import_bailii_pages(_entries(), total=len(infos),
+                                             on_progress=on_progress, cancel_check=cancel_check)
+
+    def import_bailii_dir(self, *, dir_path: str, limit: int | None = None,
+                          on_progress=None, cancel_check=None) -> dict:
+        """Same synthesis as :meth:`import_bailii_zip`, but over a **directory** of saved
+        ``.html`` pages (recursively) — the no-zip path for a big Finder folder the web UI
+        streamed up in batches. The directory is the spool the batched upload wrote to."""
+        import os
+
+        paths: list[str] = []
+        for root, _dirs, names in os.walk(dir_path):
+            for nm in names:
+                if nm.lower().endswith((".html", ".htm")) and not nm.startswith("."):
+                    paths.append(os.path.join(root, nm))
+        paths.sort()
+        if limit:
+            paths = paths[:limit]
+
+        def _entries():
+            for p in paths:
+                with open(p, "rb") as fh:
+                    yield os.path.basename(p), fh.read()
+
+        return self._import_bailii_pages(_entries(), total=len(paths),
+                                         on_progress=on_progress, cancel_check=cancel_check)
+
+    def _import_bailii_pages(self, entries, *, total: int,
+                             on_progress=None, cancel_check=None) -> dict:
+        """The shared BAILII-page importer: consume ``entries`` (an iterable of
+        ``(filename, html_bytes)``), synthesising each against the corpus (import /
+        supersede / secondary), then extract + resolve once at the end. Both the zip
+        and the directory paths feed it the same stream."""
         from .adapters.bailii_html import parse_bailii_html
         from .adapters.uk_caselaw import court_from_slug
         from .citations import extract_citations, extract_document
@@ -2467,165 +2513,156 @@ class Facade:
         st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0,
               "unparseable": 0, "aliases": 0, "extracted": 0}
         files: list[dict] = []  # per-file dispositions for the UI
-        with zipfile.ZipFile(zip_path) as zf:
-            entries = [i for i in zf.infolist()
-                       if not i.is_dir()
-                       and i.filename.lower().endswith((".html", ".htm"))
-                       and not i.filename.startswith("__MACOSX")
-                       and "/." not in "/" + i.filename]
-            if limit:
-                entries = entries[:limit]
-            with self._open() as (cat, rs, ts):
-                to_extract: list[str] = []
-                for n, info in enumerate(entries, 1):
-                    if cancel_check and cancel_check():
-                        break
-                    st["total"] += 1
-                    _progress(on_progress, stage="importing", done=n, total=len(entries),
-                              item=info.filename)
-                    data = zf.read(info)
-                    try:
-                        parsed = parse_bailii_html(data, filename=info.filename)
-                    except Exception as exc:  # noqa: BLE001 — one bad page mustn't sink the zip
-                        parsed = None
-                        files.append({"file": info.filename, "disposition": "error", "error": str(exc)})
-                    if parsed is None or not parsed.slug or not parsed.text.strip():
-                        st["unparseable"] += 1
-                        if parsed is not None:
-                            files.append({"file": info.filename, "disposition": "unparseable",
-                                          "title": parsed.title})
+        with self._open() as (cat, rs, ts):
+            to_extract: list[str] = []
+            for n, (filename, data) in enumerate(entries, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["total"] += 1
+                _progress(on_progress, stage="importing", done=n, total=total, item=filename)
+                try:
+                    parsed = parse_bailii_html(data, filename=filename)
+                except Exception as exc:  # noqa: BLE001 — one bad page mustn't sink the batch
+                    parsed = None
+                    if len(files) < 1000:
+                        files.append({"file": filename, "disposition": "error", "error": str(exc)})
+                if parsed is None or not parsed.slug or not parsed.text.strip():
+                    st["unparseable"] += 1
+                    if parsed is not None and len(files) < 1000:
+                        files.append({"file": filename, "disposition": "unparseable",
+                                      "title": parsed.title})
+                    continue
+                slug, title = parsed.slug, parsed.title
+
+                # aliases: distinctive name variants + every "Cite as:" citation +
+                # the chamber-less slug — the same ladder as the corpus import.
+                alias_pairs: list[tuple[str, str]] = []
+                for v, kind in name_variants(title or ""):
+                    if kind not in self._BAILII_ALIAS_KINDS:
                         continue
-                    slug, title = parsed.slug, parsed.title
+                    key = fold(v)
+                    if key and key != slug:
+                        alias_pairs.append((key, f"bailii-name:{kind}"))
+                for c in parsed.citations:
+                    cand = first_candidate(c)
+                    key = fold(cand.value) if cand else fold(c)
+                    if key and key != slug:
+                        alias_pairs.append((key, "bailii-report-alias"))
+                bare = _chamberless_alias(slug)
+                if bare and bare != slug:
+                    alias_pairs.append((bare, "chamber-alias"))
+                # ICLR-sourced pages open with the report citation the case was
+                # published at — usually bare ("12 QBD 271", no year) and often
+                # missing from "Cite as:". It names THIS case, so it's an alias,
+                # not an outgoing reference (extraction's self-citation guard
+                # drops the phantom edge). The report grammar needs a year, so
+                # qualify the bare first line with the decision year and mint
+                # every form a citer might use: "(1884) …", "[1884] …", bare.
+                self_reports = [c.raw for c in extract_citations(parsed.text[:400])
+                                if c.entity_kind == "case" and not c.candidate_id]
+                year = parsed.decision_date.year if parsed.decision_date else None
+                first = parsed.text.split("\n", 1)[0].strip()
+                if year and first and not any(first in r for r in self_reports):
+                    probe = f"({year}) {first}"
+                    got = [c for c in extract_citations(probe) if c.method == "law_report"]
+                    if len(got) == 1 and got[0].raw == probe:
+                        self_reports += [probe, f"[{year}] {first}", first]
+                for r in self_reports:
+                    key = fold(r)
+                    if key and key != slug and not cat.get_alias(key):
+                        alias_pairs.append((key, "bailii-self-report"))
 
-                    # aliases: distinctive name variants + every "Cite as:" citation +
-                    # the chamber-less slug — the same ladder as the corpus import.
-                    alias_pairs: list[tuple[str, str]] = []
-                    for v, kind in name_variants(title or ""):
-                        if kind not in self._BAILII_ALIAS_KINDS:
-                            continue
-                        key = fold(v)
-                        if key and key != slug:
-                            alias_pairs.append((key, f"bailii-name:{kind}"))
-                    for c in parsed.citations:
-                        cand = first_candidate(c)
-                        key = fold(cand.value) if cand else fold(c)
-                        if key and key != slug:
-                            alias_pairs.append((key, "bailii-report-alias"))
-                    bare = _chamberless_alias(slug)
-                    if bare and bare != slug:
-                        alias_pairs.append((bare, "chamber-alias"))
-                    # ICLR-sourced pages open with the report citation the case was
-                    # published at — usually bare ("12 QBD 271", no year) and often
-                    # missing from "Cite as:". It names THIS case, so it's an alias,
-                    # not an outgoing reference (extraction's self-citation guard
-                    # drops the phantom edge). The report grammar needs a year, so
-                    # qualify the bare first line with the decision year and mint
-                    # every form a citer might use: "(1884) …", "[1884] …", bare.
-                    self_reports = [c.raw for c in extract_citations(parsed.text[:400])
-                                    if c.entity_kind == "case" and not c.candidate_id]
-                    year = parsed.decision_date.year if parsed.decision_date else None
-                    first = parsed.text.split("\n", 1)[0].strip()
-                    if year and first and not any(first in r for r in self_reports):
-                        probe = f"({year}) {first}"
-                        got = [c for c in extract_citations(probe) if c.method == "law_report"]
-                        if len(got) == 1 and got[0].raw == probe:
-                            self_reports += [probe, f"[{year}] {first}", first]
-                    for r in self_reports:
-                        key = fold(r)
-                        if key and key != slug and not cat.get_alias(key):
-                            alias_pairs.append((key, "bailii-self-report"))
+                payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
+                new_meta = {"imported": "bailii-html", "bailii_url": parsed.bailii_url,
+                            "bailii_citations": list(parsed.citations),
+                            "bailii_court": parsed.court_label}
+                existing = cat.get_document(slug)
+                old_meta = cat.document_meta(slug) if existing is not None else {}
 
-                    payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
-                    new_meta = {"imported": "bailii-html", "bailii_url": parsed.bailii_url,
-                                "bailii_citations": list(parsed.citations),
-                                "bailii_court": parsed.court_label}
-                    existing = cat.get_document(slug)
-                    old_meta = cat.document_meta(slug) if existing is not None else {}
-
-                    if existing is not None and existing["payload_hash"] == payload_hash:
-                        # the identical text is already the document — just top up aliases
-                        for key, source in alias_pairs:
-                            cat.put_alias(key, slug, source=source, commit=False)
-                            st["aliases"] += 1
-                        st["unchanged"] = st.get("unchanged", 0) + 1
-                        if len(files) < 1000:
-                            files.append({"file": info.filename, "stable_id": slug,
-                                          "title": title, "disposition": "unchanged"})
-                        continue
-
-                    if existing is None or self._bailii_html_supersedes(
-                            existing, old_meta,
-                            len(parsed.text), self._text_len(ts, existing) if existing is not None else 0):
-                        meta = {**old_meta, **new_meta}
-                        if existing is not None and existing["has_text"] and \
-                                existing["payload_hash"] != payload_hash:
-                            # keep the replaced text reachable as a secondary rendition
-                            alts = meta.get("alt_texts", [])
-                            if not any(a.get("payload_hash") == existing["payload_hash"] for a in alts):
-                                alts.append({"source": existing["source"],
-                                             "payload_hash": existing["payload_hash"],
-                                             "text_path": existing["text_path"]})
-                            meta["alt_texts"] = alts
-                        record = Record(
-                            source="ie-caselaw" if slug.split("/", 1)[0] in IRISH_COURTS
-                            else "uk-caselaw",
-                            stable_id=slug, doc_type=DocType.JUDGMENT,
-                            title=title or (existing["title"] if existing is not None else None) or slug,
-                            court=court_from_slug(slug),
-                            decision_date=parsed.decision_date,
-                            language="en", source_language="en",
-                            landing_url=parsed.bailii_url,
-                            raw_bytes=data, raw_ext="html", payload_hash=payload_hash,
-                            text=parsed.text, segments=parsed.segments,
-                            extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER,
-                            extra=meta,
-                        )
-                        raw_path = str(rs.path_for(rs.put(data, ext="html"), "html"))
-                        text_path = str(ts.put(payload_hash, parsed.text))
-                        ts.put_segments(payload_hash, parsed.segments)
-                        cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
-                        to_extract.append(slug)
-                        disposition = "imported" if existing is None else "superseded"
-                        st["imported" if existing is None else "superseded"] += 1
-                    else:
-                        # held authoritatively — attach as a secondary text, merge metadata
-                        text_path = str(ts.put(payload_hash, parsed.text))
-                        alts = old_meta.get("alt_texts", [])
-                        if not any(a.get("payload_hash") == payload_hash for a in alts):
-                            alts.append({"source": "bailii-html", "payload_hash": payload_hash,
-                                         "text_path": text_path, "chars": len(parsed.text)})
-                        old_meta["alt_texts"] = alts
-                        for k, v in new_meta.items():
-                            old_meta.setdefault(k, v)
-                        cat.set_document_meta(slug, old_meta, title_if_empty=title, commit=False)
-                        disposition = "secondary"
-                        st["secondary"] += 1
-
+                if existing is not None and existing["payload_hash"] == payload_hash:
+                    # the identical text is already the document — just top up aliases
                     for key, source in alias_pairs:
                         cat.put_alias(key, slug, source=source, commit=False)
                         st["aliases"] += 1
+                    st["unchanged"] = st.get("unchanged", 0) + 1
                     if len(files) < 1000:
-                        files.append({"file": info.filename, "stable_id": slug, "title": title,
-                                      "citations": list(parsed.citations),
-                                      "disposition": disposition})
-                    if n % 100 == 0:
-                        cat.commit()
-                cat.commit()
-                for i, sid in enumerate(to_extract):
-                    if cancel_check and cancel_check():
-                        break
-                    _progress(on_progress, stage="extracting citations",
-                              done=i + 1, total=len(to_extract), item=sid)
-                    try:
-                        extract_document(cat, ts, sid)
-                        st["extracted"] += 1
-                    except Exception:  # noqa: BLE001
-                        pass
-                    if i % 100 == 0:
-                        cat.commit()
-                cat.commit()
-                _progress(on_progress, stage="resolving citations", done=0, total=0)
-                resolved = Resolver(cat).run()
+                        files.append({"file": filename, "stable_id": slug,
+                                      "title": title, "disposition": "unchanged"})
+                    continue
+
+                if existing is None or self._bailii_html_supersedes(
+                        existing, old_meta,
+                        len(parsed.text), self._text_len(ts, existing) if existing is not None else 0):
+                    meta = {**old_meta, **new_meta}
+                    if existing is not None and existing["has_text"] and \
+                            existing["payload_hash"] != payload_hash:
+                        # keep the replaced text reachable as a secondary rendition
+                        alts = meta.get("alt_texts", [])
+                        if not any(a.get("payload_hash") == existing["payload_hash"] for a in alts):
+                            alts.append({"source": existing["source"],
+                                         "payload_hash": existing["payload_hash"],
+                                         "text_path": existing["text_path"]})
+                        meta["alt_texts"] = alts
+                    record = Record(
+                        source="ie-caselaw" if slug.split("/", 1)[0] in IRISH_COURTS
+                        else "uk-caselaw",
+                        stable_id=slug, doc_type=DocType.JUDGMENT,
+                        title=title or (existing["title"] if existing is not None else None) or slug,
+                        court=court_from_slug(slug),
+                        decision_date=parsed.decision_date,
+                        language="en", source_language="en",
+                        landing_url=parsed.bailii_url,
+                        raw_bytes=data, raw_ext="html", payload_hash=payload_hash,
+                        text=parsed.text, segments=parsed.segments,
+                        extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER,
+                        extra=meta,
+                    )
+                    raw_path = str(rs.path_for(rs.put(data, ext="html"), "html"))
+                    text_path = str(ts.put(payload_hash, parsed.text))
+                    ts.put_segments(payload_hash, parsed.segments)
+                    cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+                    to_extract.append(slug)
+                    disposition = "imported" if existing is None else "superseded"
+                    st["imported" if existing is None else "superseded"] += 1
+                else:
+                    # held authoritatively — attach as a secondary text, merge metadata
+                    text_path = str(ts.put(payload_hash, parsed.text))
+                    alts = old_meta.get("alt_texts", [])
+                    if not any(a.get("payload_hash") == payload_hash for a in alts):
+                        alts.append({"source": "bailii-html", "payload_hash": payload_hash,
+                                     "text_path": text_path, "chars": len(parsed.text)})
+                    old_meta["alt_texts"] = alts
+                    for k, v in new_meta.items():
+                        old_meta.setdefault(k, v)
+                    cat.set_document_meta(slug, old_meta, title_if_empty=title, commit=False)
+                    disposition = "secondary"
+                    st["secondary"] += 1
+
+                for key, source in alias_pairs:
+                    cat.put_alias(key, slug, source=source, commit=False)
+                    st["aliases"] += 1
+                if len(files) < 1000:
+                    files.append({"file": filename, "stable_id": slug, "title": title,
+                                  "citations": list(parsed.citations),
+                                  "disposition": disposition})
+                if n % 100 == 0:
+                    cat.commit()
+            cat.commit()
+            for i, sid in enumerate(to_extract):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="extracting citations",
+                          done=i + 1, total=len(to_extract), item=sid)
+                try:
+                    extract_document(cat, ts, sid)
+                    st["extracted"] += 1
+                except Exception:  # noqa: BLE001
+                    pass
+                if i % 100 == 0:
+                    cat.commit()
+            cat.commit()
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            resolved = Resolver(cat).run()
         st["resolved_edges"] = resolved.resolved
         st["files"] = files
         self._invalidate_caches()

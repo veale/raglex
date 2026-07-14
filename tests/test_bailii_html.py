@@ -86,6 +86,23 @@ def _zip(tmp_path, pages: dict[str, bytes]) -> str:
     return str(zp)
 
 
+def test_dir_import_walks_folder_recursively_ignores_non_html(facade, tmp_path):
+    # the no-zip path: a Finder folder streamed up as loose files, nested, with cruft
+    d = tmp_path / "bailii-folder"
+    (d / "sub").mkdir(parents=True)
+    (d / "a.html").write_bytes(_page())
+    (d / "sub" / "b.html").write_bytes(_page(
+        url="https://www.bailii.org/ew/cases/EWCA/Civ/2000/18.html",
+        title="Banner Homes v Luff [2000] EWCA Civ 18 (28 January 2000)",
+        cites="[2000] EWCA Civ 18"))
+    (d / "notes.txt").write_text("not a judgment")
+    res = facade.import_bailii_dir(dir_path=str(d))
+    assert res["total"] == 2 and res["imported"] == 2  # the .txt is skipped
+    with facade._open() as (cat, _rs, _ts):
+        assert cat.get_document("ukhl/2000/57") is not None
+        assert cat.get_document("ewca/civ/2000/18") is not None
+
+
 def test_zip_import_creates_judgment_with_report_aliases(facade, tmp_path):
     res = facade.import_bailii_zip(zip_path=_zip(tmp_path, {"a.html": _page()}))
     assert res["imported"] == 1 and res["unparseable"] == 0

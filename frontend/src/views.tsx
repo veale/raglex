@@ -2001,25 +2001,66 @@ function GuidanceRulesPanel() {
 function BailiiZipPanel() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [prog, setProg] = useState<{ done: number; total: number } | null>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
+
+  // Folder / multi-file upload — no zip needed. The browser hands us every .html file
+  // in the picked folder; we stage them server-side in batches (so no single request is
+  // huge), then start one background import job over the whole staged set.
+  async function uploadFiles(fileList: FileList) {
+    const files = Array.from(fileList).filter((f) => /\.html?$/i.test(f.name));
+    if (!files.length) { setMsg("no .html files in that selection"); return; }
+    setBusy(true); setProg({ done: 0, total: files.length });
+    const uploadId = (crypto.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, "").slice(0, 24);
+    const BATCH = 200;
+    try {
+      for (let i = 0; i < files.length; i += BATCH) {
+        const r = await api.importBailiiFilesBatch(uploadId, files.slice(i, i + BATCH));
+        if (r.error) throw new Error(r.error);
+        setProg({ done: Math.min(i + BATCH, files.length), total: files.length });
+      }
+      setMsg("staged " + files.length + " files — starting import…");
+      const j = await api.importBailiiFilesStart(uploadId);
+      setMsg(j.error ? "error: " + j.error : `✓ queued as job ${j.job_id} (${files.length} files) — watch the Jobs panel`);
+    } catch (err: any) { setMsg("error: " + (err.message || err)); }
+    finally { setBusy(false); setProg(null); }
+  }
+
   return (
     <div className="panel">
-      <h3>BAILII judgments (zip of .html pages)</h3>
+      <h3>BAILII judgments (folder or zip of .html pages)</h3>
       <p className="muted" style={{ fontSize: 13 }}>
-        Drop a zip of BAILII case pages saved from bailii.org. Each page is parsed for its neutral
-        citation, case name, decision date, court and the full “Cite as:” list; new cases are imported
-        with the styled text, plain-text copies already in the corpus are superseded, and every report
-        citation is aliased so it resolves. Runs in the background — watch the Jobs panel.
+        Pick a whole folder of BAILII case pages saved from bailii.org — no zipping needed — or drop a
+        zip. Each page is parsed for its neutral citation, case name, decision date, court and the full
+        “Cite as:” list; new cases are imported with the styled text, plain-text copies already in the
+        corpus are superseded, and every report citation is aliased so it resolves. Runs in the
+        background — watch the Jobs panel.
       </p>
-      <input type="file" accept=".zip" disabled={busy} onChange={async (e) => {
-        const f = e.target.files?.[0];
-        if (!f) return;
-        setBusy(true); setMsg("uploading…");
-        try {
-          const r = await api.importBailiiZip(f);
-          setMsg(r.error ? "error: " + r.error : `✓ queued as job ${r.job_id} — watch the Jobs panel`);
-        } catch (err: any) { setMsg("error: " + (err.message || err)); }
-        finally { setBusy(false); e.target.value = ""; }
-      }} />
+      <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+        <button className="primary" disabled={busy} onClick={() => folderRef.current?.click()}>
+          Choose folder of .html files
+        </button>
+        {/* webkitdirectory: whole-folder picker (recursive). Not in the TS DOM types → cast. */}
+        <input ref={folderRef} type="file" multiple hidden
+          // @ts-expect-error non-standard folder-picker attributes
+          webkitdirectory="" directory=""
+          onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
+        <span className="muted" style={{ fontSize: 12 }}>or select files:</span>
+        <input type="file" multiple accept=".html,.htm" disabled={busy}
+          onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
+        <span className="muted" style={{ fontSize: 12 }}>or a zip:</span>
+        <input type="file" accept=".zip" disabled={busy} onChange={async (e) => {
+          const f = e.target.files?.[0];
+          if (!f) return;
+          setBusy(true); setMsg("uploading zip…");
+          try {
+            const r = await api.importBailiiZip(f);
+            setMsg(r.error ? "error: " + r.error : `✓ queued as job ${r.job_id} — watch the Jobs panel`);
+          } catch (err: any) { setMsg("error: " + (err.message || err)); }
+          finally { setBusy(false); e.target.value = ""; }
+        }} />
+      </div>
+      {prog && <p className="muted" style={{ fontSize: 12 }}>uploading {prog.done}/{prog.total} files…</p>}
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
     </div>
   );

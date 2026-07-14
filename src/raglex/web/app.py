@@ -11,6 +11,8 @@ Facade, so the two never drift.
 from __future__ import annotations
 
 import os
+import re
+import uuid as _uuid
 
 from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -729,8 +731,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         numbered paragraphs) and synthesised with the corpus — new cases imported,
         lower-fidelity copies superseded, authoritative ones enriched with aliases.
         The zip is spooled to disk so the job survives a restart."""
-        import uuid as _uuid
-
         data = await file.read()
         spool = facade.config.data_dir / "uploads"
         spool.mkdir(parents=True, exist_ok=True)
@@ -739,6 +739,56 @@ def create_app(config: Config | None = None) -> FastAPI:
         return jobs.start("import-bailii-zip",
                           f"Import BAILII zip ({file.filename or 'upload.zip'})",
                           {"zip_path": str(path)})
+
+    # No-zip path for a big Finder folder: the browser picks the whole folder and
+    # streams the .html files up in batches into a server-side spool directory, then
+    # starts ONE background job over that directory. Batching keeps any single request
+    # small (thousands of files never fit in one POST) and survives a restart.
+    _BAILII_SPOOL_ID = re.compile(r"^[A-Za-z0-9]{6,40}$")
+
+    def _bailii_batch_dir(upload_id: str):
+        if not _BAILII_SPOOL_ID.match(upload_id or ""):
+            return None  # reject anything that could escape the spool root
+        d = facade.config.data_dir / "uploads" / f"bailii-files-{upload_id}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @app.post("/import/bailii-files")
+    async def import_bailii_files_batch_ep(
+        upload_id: str = Form(...), files: list[UploadFile] = File(...),
+    ) -> dict:
+        """Receive one batch of BAILII ``.html`` files into the spool directory keyed by
+        ``upload_id``. Call repeatedly to stage a whole folder, then POST
+        ``/import/bailii-files/start`` to launch the import. Returns the running count."""
+        d = _bailii_batch_dir(upload_id)
+        if d is None:
+            return JSONResponse({"error": "bad upload_id"}, status_code=400)
+        written = 0
+        for f in files:
+            name = (f.filename or "").rsplit("/", 1)[-1]
+            if not name.lower().endswith((".html", ".htm")) or name.startswith("."):
+                continue
+            # de-dup within a batch selection by content-addressing the name collision
+            dest = d / name
+            if dest.exists():
+                dest = d / f"{_uuid.uuid4().hex[:8]}_{name}"
+            dest.write_bytes(await f.read())
+            written += 1
+        staged = sum(1 for _ in d.glob("*.htm*"))
+        return {"upload_id": upload_id, "received": written, "staged": staged}
+
+    @app.post("/import/bailii-files/start")
+    def import_bailii_files_start_ep(payload: dict = Body(...)) -> dict:
+        """Launch the import over everything staged under ``upload_id``."""
+        d = _bailii_batch_dir(payload.get("upload_id", ""))
+        if d is None:
+            return JSONResponse({"error": "bad upload_id"}, status_code=400)
+        staged = sum(1 for _ in d.glob("*.htm*"))
+        if not staged:
+            return {"error": "no files staged for this upload"}
+        return jobs.start("import-bailii-dir",
+                          f"Import BAILII folder ({staged} files)",
+                          {"dir_path": str(d)})
 
     @app.post("/documents/{doc_id:path}/attach")
     async def attach_ep(doc_id: str, file: UploadFile = File(...), kind: str = Form("exhibit")) -> dict:
