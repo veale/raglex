@@ -58,6 +58,7 @@ def _attach_case_pinpoints(text: str, cites: list[Citation]) -> list[Citation]:
 # say which instrument; the carry-forward pass attaches it to the last-named one.
 _BARE_PROVISION = re.compile(
     r"\b(?P<cue>section|sections|sub-?section|s|ss|article|articles|art|arts|"
+    r"recital|recitals|"
     r"regulation|regulations|reg|regs|paragraph|paragraphs|para|paras|schedule|sch)\.?\s*"
     r"(?P<num>\d+[A-Z]?(?:\(\d+[A-Z]?\))*)\b",
     re.IGNORECASE,
@@ -82,11 +83,17 @@ def _cue_allows(cue: str, kind: str) -> bool:
         return kind not in _EU_KINDS          # UK statutory provision → not an EU instrument
     if c.startswith(("article", "art")):
         return kind in _EU_KINDS              # Article → EU instrument / treaty, not a UK Act
+    if c.startswith("recital"):
+        # Recitals belong to EU instruments (regulations included — the GDPR is one) and
+        # never to a UK Act, which has no recitals.
+        return kind in _EU_KINDS or kind in {"regulation", "named"}
     return True                                # regulation / paragraph — leave to nearest
 
 
 def _bare_pinpoint(cue: str, num: str) -> str:
     c = cue.lower().rstrip(".")
+    if c.startswith("recital"):
+        return f"Recital {num}"
     if c.startswith(("article", "art")):
         return f"Article {num}"
     if c.startswith(("regulation", "reg")):
@@ -179,9 +186,11 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     narrative citations. More specific / earlier matches win an overlap."""
     if not text:
         return []
-    cites = grammar_citations(text)
-    if aliases:
-        cites += alias_citations(text, aliases)
+    # User shorthand rules take precedence over the built-in grammars on an overlap: a
+    # person who defines "UK GDPR" → X means it, over any generic grammar. They lead the
+    # list so the stable longest-match dedupe keeps them on a span tie.
+    cites = alias_citations(text, aliases) if aliases else []
+    cites += grammar_citations(text)
     grammar = _dedupe_overlaps(cites)
     if llm is None:
         return _attach_carry_forward(text, _attach_case_pinpoints(text, grammar))

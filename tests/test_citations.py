@@ -411,6 +411,45 @@ def test_uk_statute_names_stay_name_only_inside_irish_judgments(catalogue, tmp_p
     assert {"32016R0679", "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
 
 
+def test_recitals_pinpoint_to_the_instrument():
+    by = {c.raw: c for c in extract_citations(
+        "See Recital 47 of the GDPR, recital 65 of Regulation (EU) 2016/679, "
+        "Recitals 26 and 27 of the GDPR, and recital (11) of the Digital Markets Act.")}
+    assert by["Recital 47 of the GDPR"].candidate_id == "32016R0679"
+    assert by["Recital 47 of the GDPR"].pinpoint == "Recital 47"
+    assert by["recital 65 of Regulation (EU) 2016/679"].pinpoint == "Recital 65"
+    assert by["Recitals 26 and 27 of the GDPR"].pinpoint == "Recitals 26 and 27"
+    assert by["recital (11) of the Digital Markets Act"].candidate_id == "32022R1925"
+
+
+def test_bare_recital_carries_forward_to_named_instrument():
+    cites = extract_citations("The GDPR is central. Recital 47 explains consent.")
+    rec = next(c for c in cites if c.raw == "Recital 47")
+    assert rec.candidate_id == "32016R0679" and rec.pinpoint == "Recital 47"
+    assert rec.method == "carry_forward"
+
+
+def test_uk_gdpr_maps_to_the_assimilated_instrument_not_the_eu_original():
+    # "the UK GDPR" is the domestic assimilated regulation (eur/2016/679), distinct from
+    # the EU original (32016R0679) — and the article/recital must survive.
+    by = {c.raw: c for c in extract_citations(
+        "Article 20 of the UK GDPR and recital (26) of the UK GDPR apply.")}
+    assert by["Article 20 of the UK GDPR"].candidate_id == "european/regulation/2016/0679"
+    assert by["Article 20 of the UK GDPR"].pinpoint == "Article 20"
+    assert by["recital (26) of the UK GDPR"].candidate_id == "european/regulation/2016/0679"
+    assert by["recital (26) of the UK GDPR"].pinpoint == "Recital 26"
+
+
+def test_digital_regulation_names_resolve_with_subsection_pinpoints():
+    by = {c.candidate_id: c for c in extract_citations(
+        "Article 8(2) of the DMA and Article 5 of the DSA and the Law Enforcement Directive.")}
+    assert by["32022R1925"].pinpoint == "Article 8(2)"   # DMA, subsection kept
+    assert by["32022R2065"].pinpoint == "Article 5"      # DSA
+    assert "32016L0680" in by                             # LED full name
+    # the common word "led" (lower-case) must NOT resolve to the Law Enforcement Directive
+    assert all(c.candidate_id != "32016L0680" for c in extract_citations("she led the team"))
+
+
 def test_eu_guidance_links_eu_law_and_case_law_but_not_domestic_statute(catalogue, tmp_path):
     # An EDPB guidance document links EU legislation (CELEX), CJEU + ECHR case law
     # (ECLI) and English/Irish case-law neutral citations — all unambiguous — but a

@@ -90,7 +90,24 @@ def _eu_celex(kind: str, a: str, b: str) -> str | None:
 # GDPR and its multilingual short names → its CELEX.
 _NAME_TO_CELEX = {
     "gdpr": "32016R0679", "avg": "32016R0679", "dsgvo": "32016R0679", "rgpd": "32016R0679",
+    # the digital-regulation instruments, cited by acronym or full name in guidance/cases
+    "dma": "32022R1925", "digital markets act": "32022R1925",
+    "dsa": "32022R2065", "digital services act": "32022R2065",
+    "e-privacy directive": "32002L0058", "eprivacy directive": "32002L0058",
+    "eprivacy regulation": "32002L0058",
+    "law enforcement directive": "32016L0680", "led": "32016L0680",
 }
+# Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
+# resolves to the Law Enforcement Directive; the spelled-out names match case-
+# insensitively (a separate pattern). Both look up through ``_name_to_celex``.
+_EU_ACRONYMS = r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED"
+_EU_FULL_NAMES = "|".join(
+    re.escape(k).replace(r"\ ", r"\s+")
+    for k in sorted(_NAME_TO_CELEX, key=len, reverse=True) if " " in k)
+
+
+def _name_to_celex(name: str) -> str | None:
+    return _NAME_TO_CELEX.get(re.sub(r"\s+", " ", name).strip().lower())
 
 # UK statute short names → legislation.gov.uk id (for "section N of the X Act").
 _UK_ACT_TO_ID = {
@@ -417,7 +434,7 @@ register(Grammar(
 register(Grammar(
     "eu_instrument_numeric", "regulation",
     re.compile(
-        r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?)\s+(?:of\s+)?(?:the\s+)?)?"
+        r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?"
         r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
         r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})",
         re.IGNORECASE,
@@ -445,15 +462,94 @@ register(Grammar(
     lambda m: ("echr/convention", f"Article {m.group('num')}", "treaty"),
 ))
 
-# "Article 17 GDPR" / "Art. 22 of the GDPR" / "AVG".
+# "Article 17 GDPR" / "Art. 22 of the GDPR" / "Article 6 of the DMA" / "Digital
+# Services Act". Acronym form (uppercase) and spelled-out form (any case).
 register(Grammar(
     "eu_named", "regulation",
-    re.compile(r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?)\s+(?:of\s+(?:the\s+)?)?)?(?P<name>GDPR|AVG|DSGVO|RGPD)\b"),
+    re.compile(rf"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+(?:the\s+)?)?)?(?P<name>{_EU_ACRONYMS})\b"),
     lambda m: (
-        _NAME_TO_CELEX.get(m.group("name").lower()),
+        _name_to_celex(m.group("name")),
         f"Article {m.group('art')}" if m.group("art") else None,
         None,
     ),
+))
+register(Grammar(
+    "eu_named_full", "regulation",
+    re.compile(rf"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?(?P<name>{_EU_FULL_NAMES})\b",
+               re.IGNORECASE),
+    lambda m: (
+        _name_to_celex(m.group("name")),
+        f"Article {m.group('art')}" if m.group("art") else None,
+        None,
+    ),
+))
+
+# ── UK GDPR (the assimilated / "retained" EU GDPR) ───────────────────────────
+# "Article 20 of the UK GDPR" is the DOMESTIC, UK-amendable version — NOT the EU
+# original: it lives on legislation.gov.uk at ``eur/2016/679`` (fetched via
+# uk-legislation, giving the amended UK text), kept distinct from CELEX 32016R0679.
+# Registered so it beats the plain GDPR grammar, which would otherwise map "UK GDPR"
+# to the EU instrument and drop the article. "UK Data Protection Regulation" too.
+UK_GDPR_ID = "european/regulation/2016/0679"
+register(Grammar(
+    "uk_gdpr", "regulation",
+    re.compile(
+        r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?"
+        r"(?:UK|United\s+Kingdom)\s+GDPR\b",
+        re.IGNORECASE,
+    ),
+    lambda m: (UK_GDPR_ID, f"Article {m.group('art')}" if m.group("art") else None, "regulation"),
+))
+
+# ── recitals (EU instruments have them; UK Acts don't) ───────────────────────
+# Recitals are cited constantly in guidance and cases, in many shapes: "Recital 47",
+# "recital (47)", "Recitals 26 and 27", "recital 1 to 5", "recital 65 of Regulation
+# (EU) 2016/679", "Recital 47 of the GDPR", "recital (26) of the UK GDPR". They pin
+# to the SAME instrument node as an article, only the anchor differs ("Recital 47").
+# A bare "recital 47" (no instrument) is handled by the carry-forward pass, like a
+# bare article.
+_RECITAL = (r"[Rr]ecitals?\s*\(?(?P<rec>\d+\s*"
+            r"(?:(?:to|and|,|&|" + _DASH + r")\s*\d+\s*)*)\)?")
+
+
+def _recital_pin(rec: str) -> str:
+    """Normalise a recital number expression into a pinpoint anchor: "Recital 47", or
+    "Recitals 26 and 27" / "Recitals 1 to 5" when it's a list/range."""
+    rec = re.sub(r"\s+", " ", rec).strip().rstrip(",")
+    plural = bool(re.search(r"(?:to|and|,|&|" + _DASH + r")", rec))
+    return f"Recital{'s' if plural else ''} {rec}"
+
+
+# "recital 65 of Regulation (EU) 2016/679" / "Recitals 1 to 5 of Directive 2002/58/EC".
+register(Grammar(
+    "recital_eu_numeric", "regulation",
+    re.compile(
+        _RECITAL + r"\s+(?:of\s+)?(?:the\s+)?"
+        r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
+        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})",
+        re.IGNORECASE,
+    ),
+    lambda m: (_eu_celex(m.group("kind"), m.group("a"), m.group("b")),
+               _recital_pin(m.group("rec")), m.group("kind").lower()),
+))
+
+# "recital (26) of the UK GDPR" → the assimilated UK instrument (before plain GDPR).
+register(Grammar(
+    "recital_uk_gdpr", "regulation",
+    re.compile(_RECITAL + r"\s+(?:of\s+)?(?:the\s+)?(?:UK|United\s+Kingdom)\s+GDPR\b", re.IGNORECASE),
+    lambda m: (UK_GDPR_ID, _recital_pin(m.group("rec")), "regulation"),
+))
+
+# "Recital 47 of the GDPR" / "recital (26) GDPR" / "Recital 11 of the DMA".
+register(Grammar(
+    "recital_eu_named", "regulation",
+    re.compile(_RECITAL + rf"\s+(?:of\s+(?:the\s+)?)?(?P<name>{_EU_ACRONYMS})\b"),
+    lambda m: (_name_to_celex(m.group("name")), _recital_pin(m.group("rec")), None),
+))
+register(Grammar(
+    "recital_eu_named_full", "regulation",
+    re.compile(_RECITAL + rf"\s+(?:of\s+)?(?:the\s+)?(?P<name>{_EU_FULL_NAMES})\b", re.IGNORECASE),
+    lambda m: (_name_to_celex(m.group("name")), _recital_pin(m.group("rec")), None),
 ))
 
 # legislation.gov.uk URI, with optional /section/N pinpoint.
