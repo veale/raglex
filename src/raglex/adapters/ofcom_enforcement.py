@@ -84,11 +84,12 @@ def _parse_date(text: str) -> date | None:
 
 
 # ── listing ──────────────────────────────────────────────────────────────
-_CARD = re.compile(
-    r'search-results-block">\s*<a href="(?P<url>[^"]+)">.*?'
-    r'info-card-header">(?P<title>.*?)</h3>.*?'
-    r'(?:Published:|Updated:)\s*(?P<date>[^<]+?)</p>.*?'
-    r'<p>\s*(?P<summary>.*?)\s*</p>', re.S)
+# Parse card-by-card (split on the result-block marker) rather than one regex spanning
+# cards: a single card missing a summary/date paragraph must not desync the match and
+# drop the cards after it. Only the link + title are required.
+_CARD_URL = re.compile(r'<a[^>]+href="(?P<url>[^"]+)"')
+_CARD_TITLE = re.compile(r'info-card-header"[^>]*>(?P<title>.*?)</h3>', re.S)
+_CARD_DATE = re.compile(r'(?:Published|Updated):\s*(?P<date>[^<]+?)\s*</p>', re.S)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,14 +103,25 @@ class ListingItem:
 def parse_listing(html: str) -> list[ListingItem]:
     out: list[ListingItem] = []
     seen: set[str] = set()
-    for m in _CARD.finditer(html):
-        url = m.group("url")
+    for chunk in re.split(r'search-results-block', html)[1:]:
+        um, tm = _CARD_URL.search(chunk), _CARD_TITLE.search(chunk)
+        if not um or not tm:
+            continue
+        url = um.group("url")
         if url in seen or ".pdf" in url.lower():  # direct-PDF results handled by ofcom-osa
             continue
         seen.add(url)
-        out.append(ListingItem(url=url, title=_clean(m.group("title")),
-                               published=_parse_date(_clean(m.group("date"))),
-                               summary=_clean(m.group("summary"))))
+        dm = _CARD_DATE.search(chunk)
+        # the summary is the first prose <p> after the title that isn't the date line
+        summary = ""
+        for sm in re.finditer(r'<p[^>]*>(.*?)</p>', chunk, re.S):
+            t = _clean(sm.group(1))
+            if t and not re.match(r'^(Published|Updated):', t) and len(t) > 15:
+                summary = t
+                break
+        out.append(ListingItem(url=url, title=_clean(tm.group("title")),
+                               published=_parse_date(_clean(dm.group("date"))) if dm else None,
+                               summary=summary))
     return out
 
 
@@ -226,9 +238,15 @@ class OfcomEnforcementAdapter(BaseAdapter):
         for item in parse_listing(html):
             # fetch the action page to hash its content (status + doc set + narrative) —
             # the reliable update signal; passed on so fetch() need not re-fetch the HTML.
-            dresp = self._get(item.url if item.url.startswith("http") else BASE_URL + item.url)
-            dhtml = dresp.content.decode("utf-8", "replace") if isinstance(dresp.content, bytes) else str(dresp.content)
-            detail = parse_detail(dhtml)
+            # A single bad action page (404, transient error, unparseable) must NOT abort
+            # the whole crawl — skip it and carry on with the rest.
+            url = item.url if item.url.startswith("http") else BASE_URL + item.url
+            try:
+                dresp = self._get(url)
+                dhtml = dresp.content.decode("utf-8", "replace") if isinstance(dresp.content, bytes) else str(dresp.content)
+                detail = parse_detail(dhtml)
+            except Exception:  # noqa: BLE001 — one action shouldn't sink the register
+                continue
             yield Stub(
                 stable_id=_action_slug(item.url),
                 landing_url=item.url if item.url.startswith("http") else BASE_URL + item.url,

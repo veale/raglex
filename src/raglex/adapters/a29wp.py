@@ -221,8 +221,15 @@ class A29WPAdapter(BaseAdapter):
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         seen: set[str] = set()
         if self.surface in ("justice", "both"):
-            resp = self._get(JUSTICE_INDEX)
-            html = resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content)
+            # A transient failure fetching the index must not crash the whole run (the
+            # job would error instead of simply retrying next time); a RateLimitException
+            # still propagates so the pipeline pauses the source correctly.
+            try:
+                resp = self._get(JUSTICE_INDEX)
+            except FetchError:
+                resp = None
+            html = "" if resp is None else (
+                resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content))
             for d in parse_justice_index(html):
                 tail, aliases = self._wp_id(d.stem)
                 sid = f"a29wp/{tail or d.stem}"
