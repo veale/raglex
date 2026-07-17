@@ -3125,6 +3125,68 @@ class Facade:
         self._invalidate_caches()
         return st
 
+    # -- unified case-law import (one uploader, routed by extension) --------
+    @staticmethod
+    def _merge_caselaw_stats(a: dict, b: dict) -> dict:
+        """Merge two import runs' stat dicts: sum the counters, concatenate the per-file
+        disposition lists, keep the first scalar for anything else."""
+        out = dict(a)
+        for k, v in b.items():
+            if k == "files" and isinstance(v, list):
+                out[k] = (out.get(k) or []) + v
+            elif isinstance(v, (int, float)) and isinstance(out.get(k, 0), (int, float)):
+                out[k] = out.get(k, 0) + v
+            else:
+                out.setdefault(k, v)
+        return out
+
+    def import_caselaw_zip(self, *, zip_path: str, limit: int | None = None,
+                           on_progress=None, cancel_check=None) -> dict:
+        """Import a zip that may mix saved BAILII ``.html`` pages and Westlaw ``.rtf``
+        exports — each entry routed to its own parser by extension (:meth:`import_bailii_zip`
+        for HTML, :meth:`import_westlaw_zip` for RTF), the two runs' stats merged. A
+        single-source zip simply no-ops the other importer."""
+        import zipfile
+
+        with zipfile.ZipFile(zip_path) as zf:
+            names = [i.filename.lower() for i in zf.infolist() if not i.is_dir()]
+        has_html = any(n.endswith((".html", ".htm")) for n in names)
+        has_rtf = any(n.endswith(".rtf") for n in names)
+        if not has_html and not has_rtf:
+            return {"total": 0, "note": "no .html or .rtf files in the zip"}
+        stats: dict = {}
+        if has_html and not (cancel_check and cancel_check()):
+            stats = self._merge_caselaw_stats(stats, self.import_bailii_zip(
+                zip_path=zip_path, limit=limit, on_progress=on_progress, cancel_check=cancel_check))
+        if has_rtf and not (cancel_check and cancel_check()):
+            stats = self._merge_caselaw_stats(stats, self.import_westlaw_zip(
+                zip_path=zip_path, limit=limit, on_progress=on_progress, cancel_check=cancel_check))
+        return stats
+
+    def import_caselaw_dir(self, *, dir_path: str, limit: int | None = None,
+                           on_progress=None, cancel_check=None) -> dict:
+        """Import a folder that may mix BAILII ``.html`` pages and Westlaw ``.rtf`` exports
+        — the no-zip counterpart of :meth:`import_caselaw_zip`. Each importer walks the
+        same directory and picks up only its own extension."""
+        import os
+
+        has_html = has_rtf = False
+        for _root, _dirs, nms in os.walk(dir_path):
+            for nm in nms:
+                low = nm.lower()
+                has_html = has_html or low.endswith((".html", ".htm"))
+                has_rtf = has_rtf or low.endswith(".rtf")
+        if not has_html and not has_rtf:
+            return {"total": 0, "note": "no .html or .rtf files in the folder"}
+        stats: dict = {}
+        if has_html and not (cancel_check and cancel_check()):
+            stats = self._merge_caselaw_stats(stats, self.import_bailii_dir(
+                dir_path=dir_path, limit=limit, on_progress=on_progress, cancel_check=cancel_check))
+        if has_rtf and not (cancel_check and cancel_check()):
+            stats = self._merge_caselaw_stats(stats, self.import_westlaw_dir(
+                dir_path=dir_path, limit=limit, on_progress=on_progress, cancel_check=cancel_check))
+        return stats
+
     def harvest_reference(self, *, ref: str, candidate: str | None = None) -> dict:
         """The one-click resolution for a *routable* hanging reference: fetch exactly
         that item from the adapter that holds it, then resolve. ``ref`` is a row from

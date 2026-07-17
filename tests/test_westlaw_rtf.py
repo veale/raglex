@@ -237,6 +237,42 @@ def test_duplicate_case_files_merge_via_a_shared_report_citation(facade, tmp_pat
     assert len(docs) == 1
 
 
+def _bailii_page(*, url="https://www.bailii.org/uk/cases/UKHL/2000/57.html",
+                 title="Turkington v Times Newspapers [2000] UKHL 57 (2nd November, 2000)") -> bytes:
+    html = (f"<HTML><HEAD><TITLE>{title}</TITLE></HEAD><BODY>"
+            f"<TABLE><TR><TD><H1>House of Lords</H1></TD></TR>"
+            f"<TR><TD><SMALL>Cite as: [2000] UKHL 57<BR>URL: <I>{url}</I></SMALL><HR></TD></TR></TABLE>"
+            f"<hr><P>A judgment about the Data Protection Act 1998.</P>"
+            f"<P><HR><SMALL><B>BAILII:</B> copyright</SMALL></P></BODY></HTML>")
+    return html.encode("iso-8859-1")
+
+
+def test_unified_dir_import_routes_html_to_bailii_and_rtf_to_westlaw(facade, tmp_path):
+    d = _folder(tmp_path / "mix", {
+        "turkington.html": _bailii_page(),
+        "aranyosi.rtf": _eu_case(),
+        "mynydd.rtf": _transcript_case(),
+    })
+    res = facade.import_caselaw_dir(dir_path=str(d))
+    assert res["total"] == 3 and res["imported"] == 3   # 1 BAILII + 2 Westlaw, merged
+    with facade._open() as (cat, _rs, _ts):
+        assert cat.get_document("ukhl/2000/57") is not None            # BAILII page
+        assert cat.get_document("ECLI:EU:C:2016:198") is not None      # Westlaw EU
+        assert cat.get_document("ewhc/admin/2016/2581") is not None    # Westlaw transcript
+
+
+def test_unified_zip_import_handles_a_mixed_zip(facade, tmp_path):
+    zp = tmp_path / "mix.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("t.html", _bailii_page())
+        zf.writestr("macob.rtf", _digest_case())
+    res = facade.import_caselaw_zip(zip_path=str(zp))
+    assert res["total"] == 2
+    with facade._open() as (cat, _rs, _ts):
+        assert cat.get_document("ukhl/2000/57") is not None
+        assert cat.get_document("westlaw:1999-wl-250101") is not None
+
+
 def test_zip_import_supersedes_a_textless_stub(facade, tmp_path):
     # a held metadata-only stub for the same neutral slug is replaced by the full text
     from raglex.core.models import AddedBy, DocType, ExtractedVia, Record

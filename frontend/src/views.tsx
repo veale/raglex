@@ -1760,7 +1760,7 @@ export function ImportView({ open }: { open?: (id: string) => void }) {
           try { show(await api.importFile(file, { doc_type: docType, link_to: linkTo })); } catch (e: any) { show("error: " + e); }
         }}>Import file</button></p>
       </div>
-      <BailiiZipPanel />
+      <CaseLawImportPanel />
       <ZoteroPanel show={show} />
       <GuidanceRulesPanel />
       {msg && <div className="panel"><pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{msg}</pre></div>}
@@ -2000,32 +2000,38 @@ function GuidanceRulesPanel() {
   );
 }
 
-// Upload a zip of saved BAILII judgment .html pages — processed as a background job:
-// each page's URL line keys it by its neutral-citation slug, the "Cite as:" list becomes
-// resolution aliases, and the styled text supersedes any lower-fidelity copy already held.
-function BailiiZipPanel() {
+// Upload saved case law — a folder or zip mixing BAILII judgment .html pages and Westlaw
+// .rtf exports. Each file is routed to its own parser by extension in one background job:
+// a BAILII page keys by its neutral-citation slug and "Cite as:" list; a Westlaw RTF keys
+// by its strongest identity (neutral slug → ECLI → Westlaw id) with every parallel report
+// citation aliased. New cases are imported, lower-fidelity copies superseded.
+function CaseLawImportPanel() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState<{ done: number; total: number } | null>(null);
   const folderRef = useRef<HTMLInputElement>(null);
+  const CASE_RE = /\.(html?|rtf)$/i;
 
-  // Folder / multi-file upload — no zip needed. The browser hands us every .html file
-  // in the picked folder; we stage them server-side in batches (so no single request is
-  // huge), then start one background import job over the whole staged set.
+  // Folder / multi-file upload — no zip needed. The browser hands us every file in the
+  // picked folder; we keep the .html/.rtf, stage them server-side in batches (so no single
+  // request is huge), then start one background import job that routes each by extension.
   async function uploadFiles(fileList: FileList) {
-    const files = Array.from(fileList).filter((f) => /\.html?$/i.test(f.name));
-    if (!files.length) { setMsg("no .html files in that selection"); return; }
+    const files = Array.from(fileList).filter((f) => CASE_RE.test(f.name));
+    if (!files.length) { setMsg("no .html or .rtf files in that selection"); return; }
+    const html = files.filter((f) => /\.html?$/i.test(f.name)).length;
+    const rtf = files.length - html;
     setBusy(true); setProg({ done: 0, total: files.length });
     const uploadId = (crypto.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, "").slice(0, 24);
     const BATCH = 200;
     try {
       for (let i = 0; i < files.length; i += BATCH) {
-        const r = await api.importBailiiFilesBatch(uploadId, files.slice(i, i + BATCH));
+        const r = await api.importCaselawFilesBatch(uploadId, files.slice(i, i + BATCH));
         if (r.error) throw new Error(r.error);
         setProg({ done: Math.min(i + BATCH, files.length), total: files.length });
       }
-      setMsg("staged " + files.length + " files — starting import…");
-      const j = await api.importBailiiFilesStart(uploadId);
+      const kinds = [html && `${html} BAILII`, rtf && `${rtf} Westlaw`].filter(Boolean).join(" + ");
+      setMsg(`staged ${files.length} files (${kinds}) — starting import…`);
+      const j = await api.importCaselawFilesStart(uploadId);
       setMsg(j.error ? "error: " + j.error : `✓ queued as job ${j.job_id} (${files.length} files) — watch the Jobs panel`);
     } catch (err: any) { setMsg("error: " + (err.message || err)); }
     finally { setBusy(false); setProg(null); }
@@ -2033,17 +2039,18 @@ function BailiiZipPanel() {
 
   return (
     <div className="panel">
-      <h3>BAILII judgments (folder or zip of .html pages)</h3>
+      <h3>Case law (folder or zip of BAILII .html + Westlaw .rtf)</h3>
       <p className="muted" style={{ fontSize: 13 }}>
-        Pick a whole folder of BAILII case pages saved from bailii.org — no zipping needed — or drop a
-        zip. Each page is parsed for its neutral citation, case name, decision date, court and the full
-        “Cite as:” list; new cases are imported with the styled text, plain-text copies already in the
-        corpus are superseded, and every report citation is aliased so it resolves. Runs in the
-        background — watch the Jobs panel.
+        Pick a whole folder — no zipping needed — or drop a zip. Saved BAILII case pages
+        (<code>.html</code>) and Westlaw case exports (<code>.rtf</code>) can be mixed freely; each file is
+        routed to its own parser. BAILII pages key by neutral citation and the “Cite as:” list; Westlaw
+        RTFs key by neutral citation → ECLI → Westlaw id, with parties, court, judges, counsel and every
+        parallel report citation extracted and aliased (EU cases reported in UK series key by their
+        ECLI). Runs in the background — watch the Jobs panel.
       </p>
       <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 10 }}>
         <button className="primary" disabled={busy} onClick={() => folderRef.current?.click()}>
-          Choose folder of .html files
+          Choose folder
         </button>
         {/* webkitdirectory: whole-folder picker (recursive). Not in the TS DOM types → cast. */}
         <input ref={folderRef} type="file" multiple hidden
@@ -2051,7 +2058,7 @@ function BailiiZipPanel() {
           webkitdirectory="" directory=""
           onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
         <span className="muted" style={{ fontSize: 12 }}>or select files:</span>
-        <input type="file" multiple accept=".html,.htm" disabled={busy}
+        <input type="file" multiple accept=".html,.htm,.rtf" disabled={busy}
           onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
         <span className="muted" style={{ fontSize: 12 }}>or a zip:</span>
         <input type="file" accept=".zip" disabled={busy} onChange={async (e) => {
@@ -2059,7 +2066,7 @@ function BailiiZipPanel() {
           if (!f) return;
           setBusy(true); setMsg("uploading zip…");
           try {
-            const r = await api.importBailiiZip(f);
+            const r = await api.importCaselawZip(f);
             setMsg(r.error ? "error: " + r.error : `✓ queued as job ${r.job_id} — watch the Jobs panel`);
           } catch (err: any) { setMsg("error: " + (err.message || err)); }
           finally { setBusy(false); e.target.value = ""; }

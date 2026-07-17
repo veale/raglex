@@ -883,6 +883,67 @@ def create_app(config: Config | None = None) -> FastAPI:
                           f"Import Westlaw folder ({staged} files)",
                           {"dir_path": str(d)})
 
+    # Unified case-law import — one uploader that accepts a mixed folder/zip of saved
+    # BAILII .html pages and Westlaw .rtf exports, routing each file to its own parser by
+    # extension. This is what the Import UI drives; the source-specific endpoints above
+    # stay for CLI/API parity.
+    _CASELAW_EXTS = (".html", ".htm", ".rtf")
+
+    @app.post("/import/caselaw-zip")
+    async def import_caselaw_zip_ep(file: UploadFile = File(...)) -> dict:
+        """Accept a zip mixing BAILII ``.html`` pages and Westlaw ``.rtf`` exports; each
+        entry is routed to its parser by extension in one background job."""
+        data = await file.read()
+        spool = facade.config.data_dir / "uploads"
+        spool.mkdir(parents=True, exist_ok=True)
+        path = spool / f"caselaw-{_uuid.uuid4().hex[:12]}.zip"
+        path.write_bytes(data)
+        return jobs.start("import-caselaw-zip",
+                          f"Import case law zip ({file.filename or 'upload.zip'})",
+                          {"zip_path": str(path)})
+
+    def _caselaw_batch_dir(upload_id: str):
+        if not _BAILII_SPOOL_ID.match(upload_id or ""):
+            return None
+        d = facade.config.data_dir / "uploads" / f"caselaw-files-{upload_id}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @app.post("/import/caselaw-files")
+    async def import_caselaw_files_batch_ep(
+        upload_id: str = Form(...), files: list[UploadFile] = File(...),
+    ) -> dict:
+        """Stage one batch of ``.html``/``.htm``/``.rtf`` files under ``upload_id``. Call
+        repeatedly to stage a whole folder, then POST ``/import/caselaw-files/start``."""
+        d = _caselaw_batch_dir(upload_id)
+        if d is None:
+            return JSONResponse({"error": "bad upload_id"}, status_code=400)
+        written = 0
+        for f in files:
+            name = (f.filename or "").rsplit("/", 1)[-1]
+            if not name.lower().endswith(_CASELAW_EXTS) or name.startswith("."):
+                continue
+            dest = d / name
+            if dest.exists():
+                dest = d / f"{_uuid.uuid4().hex[:8]}_{name}"
+            dest.write_bytes(await f.read())
+            written += 1
+        staged = sum(1 for p in d.iterdir() if p.suffix.lower() in _CASELAW_EXTS)
+        return {"upload_id": upload_id, "received": written, "staged": staged}
+
+    @app.post("/import/caselaw-files/start")
+    def import_caselaw_files_start_ep(payload: dict = Body(...)) -> dict:
+        """Launch the mixed import over everything staged under ``upload_id``."""
+        d = _caselaw_batch_dir(payload.get("upload_id", ""))
+        if d is None:
+            return JSONResponse({"error": "bad upload_id"}, status_code=400)
+        staged = sum(1 for p in d.iterdir() if p.suffix.lower() in _CASELAW_EXTS)
+        if not staged:
+            return {"error": "no files staged for this upload"}
+        return jobs.start("import-caselaw-dir",
+                          f"Import case law folder ({staged} files)",
+                          {"dir_path": str(d)})
+
     @app.post("/documents/{doc_id:path}/attach")
     async def attach_ep(doc_id: str, file: UploadFile = File(...), kind: str = Form("exhibit")) -> dict:
         data = await file.read()
