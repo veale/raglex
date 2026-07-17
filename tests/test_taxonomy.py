@@ -30,3 +30,24 @@ def test_pending_candidates_classify_consistently():
     assert classify_candidate("ukpga/1998/42").subtype == "primary:UK-wide"
     assert classify_candidate("ewhc/2020/1").category == "uk-caselaw"
     assert classify_candidate("4451/70").category == "echr"
+
+
+def test_guidance_sources_get_their_own_category():
+    from raglex.citations.taxonomy import classify_document
+
+    t = classify_document(source="edpb", doc_type="guidance", stable_id="edpb/guidelines-x")
+    assert t.category == "guidance" and t.subtype == "edpb-guidance"
+    t = classify_document(source="edpb", doc_type="decision", stable_id="edpb/bd-01")
+    assert t.subtype == "edpb-decision"
+    # OSS register splits by lead DPA — the court carries it
+    t = classify_document(source="edpb-oss", doc_type="decision", court="dpa-lu",
+                          stable_id="edpb/oss/2026/3920")
+    assert t.category == "guidance" and t.subtype == "oss:lu"
+    assert t.subtype_label == "OSS decisions · LU" and t.filter["court"] == "dpa-lu"
+    t = classify_document(source="a29wp", doc_type="guidance", stable_id="a29wp/wp240")
+    assert t.subtype == "a29wp"
+    t = classify_document(source="a29wp", doc_type="note", stable_id="a29wp/item/1")
+    assert t.subtype == "a29wp-context"
+    # Zotero-imported guidance joins the same category
+    t = classify_document(source="zotero", doc_type="guidance", stable_id="zotero:ABC")
+    assert t.category == "guidance"

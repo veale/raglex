@@ -35,6 +35,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "eu-cellar": "EU case-law",
     "eu-legislation": "EU legislation",
     "echr": "ECHR",
+    "guidance": "Regulatory guidance",
     "ca-caselaw": "Canadian case-law",
     "au-caselaw": "Australian case-law",
     "nz-caselaw": "New Zealand case-law",
@@ -42,7 +43,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "other": "Other / unrouted",
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
-                  "eu-cellar", "eu-legislation", "echr",
+                  "eu-cellar", "eu-legislation", "echr", "guidance",
                   "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw", "other"]
 
 # Neutral-citation jurisdictions with no adapter (cases arrive by upload, if at all):
@@ -203,6 +204,34 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         sub, label = _eu_leg_subtype(stable_id)
         return Tax("eu-legislation", CATEGORY_LABELS["eu-legislation"], sub, label,
                    {"source": "eu-legislation"})
+    # Regulatory guidance (§1.9/§4a): the EDPB corpus splits by what the document IS
+    # (doc_type), the OSS register by lead DPA (court = dpa-xx — the per-authority
+    # split), A29WP by papers vs press/plenary context. Zotero-imported guidance
+    # (any other source, doc_type=guidance) joins the same category.
+    if source == "edpb":
+        sub, label = {
+            "guidance": ("edpb-guidance", "EDPB guidelines & recommendations"),
+            "opinion": ("edpb-opinion", "EDPB opinions"),
+            "decision": ("edpb-decision", "EDPB binding decisions"),
+            "commentary": ("edpb-study", "EDPB commissioned studies"),
+        }.get(doc_type or "", ("edpb-other", "EDPB other documents"))
+        return Tax("guidance", CATEGORY_LABELS["guidance"], sub, label,
+                   {"source": "edpb", **({"doc_type": doc_type} if doc_type else {})})
+    if source == "edpb-oss":
+        cc = (court or "").removeprefix("dpa-").upper() or "??"
+        return Tax("guidance", CATEGORY_LABELS["guidance"], f"oss:{cc.lower()}",
+                   f"OSS decisions · {cc}",
+                   {"source": "edpb-oss", **({"court": court} if court else {})})
+    if source == "a29wp":
+        if doc_type == "note":
+            return Tax("guidance", CATEGORY_LABELS["guidance"], "a29wp-context",
+                       "A29WP press & plenary", {"source": "a29wp", "doc_type": "note"})
+        return Tax("guidance", CATEGORY_LABELS["guidance"], "a29wp",
+                   "A29WP opinions & papers", {"source": "a29wp"})
+    if doc_type == "guidance":
+        return Tax("guidance", CATEGORY_LABELS["guidance"], source or "other",
+                   f"Guidance ({source})" if source else "Guidance",
+                   {"doc_type": "guidance", **({"source": source} if source else {})})
     if source == "echr":
         # "echr" arrives when grouped by slug-prefix (echr/convention → "echr"); a held
         # ECtHR case is an ECLI:CE:… id with no slash, so this only catches the Convention.
