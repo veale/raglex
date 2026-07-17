@@ -278,15 +278,24 @@ class OfcomEnforcementAdapter(BaseAdapter):
                                                extracted_via=ExtractedVia.STRUCTURED,
                                                resolution_status=ResolutionStatus.PENDING))
 
-        # the action's title/summary usually name the OSA section(s) it turns on
+        # Only assert an OSA link when the action is ACTUALLY under it — Ofcom's
+        # enforcement register spans many regimes (broadcasting, telecoms, …) and older
+        # actions predate the 2023 Act. We treat it as OSA only when the Act is named in
+        # the action's own text; everything else (incl. the specific sections) is linked
+        # by the §5b extractor from whatever Act the combined HTML+PDF text actually
+        # names. A bare "section N" in a title is only pinned to the OSA once we know the
+        # regime is the OSA.
         title_hay = f"{detail.title} {item.summary}"
-        _add(RelationshipType.INTERPRETS, "Online Safety Act 2023", regime)  # base link
-        for sec in _SECTION.findall(title_hay):
-            _add(RelationshipType.INTERPRETS, f"section {sec} of the Online Safety Act 2023",
-                 regime, f"s. {sec}")
-        for part in _PART.findall(title_hay):
-            _add(RelationshipType.INTERPRETS, f"Part {part} of the Online Safety Act 2023",
-                 regime, f"Part {part}")
+        osa_named = "online safety act" in f"{title_hay} {detail.narrative}".lower()
+        regime_for_extra = regime if osa_named else None
+        if osa_named:
+            _add(RelationshipType.INTERPRETS, "Online Safety Act 2023", regime)  # base link
+            for sec in _SECTION.findall(title_hay):
+                _add(RelationshipType.INTERPRETS, f"section {sec} of the Online Safety Act 2023",
+                     regime, f"s. {sec}")
+            for part in _PART.findall(title_hay):
+                _add(RelationshipType.INTERPRETS, f"Part {part} of the Online Safety Act 2023",
+                     regime, f"Part {part}")
         # referenced guidance PDFs → mentions edges that resolve to the held ofcom-osa docs
         for p in detail.pdfs:
             if not p.inline:
@@ -312,7 +321,7 @@ class OfcomEnforcementAdapter(BaseAdapter):
                         (detail.status or "").lower()],
             extra={k: v for k, v in {
                 "issuer": "ofcom",
-                "regime": regime,
+                "regime": regime_for_extra,
                 "status": detail.status,
                 "summary": item.summary,
                 "topic": self.topic,

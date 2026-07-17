@@ -137,3 +137,31 @@ def test_registry_and_taxonomy_wire_enforcement():
     assert cat["ofcom-enforcement"]["can_incremental"] is True
     t = classify_document(source="ofcom-enforcement", doc_type="decision", stable_id="ofcom-enf/x")
     assert t.category == "guidance" and t.subtype == "ofcom-enforcement"
+
+
+NON_OSA_DETAIL = """
+<h1>Investigation into a broadcaster under section 325 of the Communications Act 2003</h1>
+<span class="status-pill">Closed</span>
+<div class="standard-content-area">
+  <p>Ofcom investigated a licensed broadcaster for a breach of section 325 duties.</p>
+  <a href="/siteassets/decisions/x/decision.pdf?v=5">Decision</a>
+</div><footer>Follow us</footer>
+"""
+
+
+def test_non_osa_action_gets_no_forced_osa_edge():
+    from raglex.core.models import Stub
+    pdf = _tiny_pdf("Decision on a broadcasting standards breach. " * 20)
+
+    class _C:
+        def get(self, url, headers=None):
+            return _Resp(pdf if ".pdf" in url else NON_OSA_DETAIL)
+    ad = OfcomEnforcementAdapter(client=_C())
+    d = parse_detail(NON_OSA_DETAIL)
+    stub = Stub(stable_id="ofcom-enf/x", landing_url="u", raw_url="u", hint_date=None,
+                title=d.title, hints={"item": type("I", (), {"summary": "", "url": "u", "title": d.title, "published": None})(),
+                                      "detail": d, "contenthash": _content_hash(d)})
+    rec = ad.fetch(stub)
+    # the OSA is never named → no interprets edge to the OSA is asserted, and no regime
+    assert all(r.dst_id != OSA_ID for r in rec.relations)
+    assert "regime" not in rec.extra
