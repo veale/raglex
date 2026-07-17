@@ -13,13 +13,19 @@ RUN npm run build           # → /ui/dist
 FROM python:3.12-slim
 WORKDIR /app
 
+# tesseract: OCR fallback for scanned PDFs (the EDPB one-stop-shop register holds
+# decision scans with no text layer). eng only — the register PDFs are English.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY schema ./schema
-# Install with web + import + postgres + scrape extras (FastAPI, MCP, pypdf,
+# Install with web + import + postgres + scrape + ocr extras (FastAPI, MCP, pypdf,
 # psycopg, BeautifulSoup — bs4 is needed by the EUR-Lex HTML and BWB parsers).
-RUN uv pip install --system ".[web,import,postgres,scrape]"
+RUN uv pip install --system ".[web,import,postgres,scrape,ocr]"
 
 # Bundle the built UI; the API serves it when RAGLEX_FRONTEND_DIST points here.
 COPY --from=ui /ui/dist /app/frontend/dist

@@ -52,10 +52,12 @@ DEFAULT_ISSUERS: list[dict] = [
 
 # ── identity grammars (code — the numbering styles are strictly regular) ─────
 # EDPB instruments: "Guidelines 05/2020", "Recommendations 01/2020", "Opinion
-# 5/2019", "Statement 04/2021" — kind + number/year, number conventionally
-# zero-padded to two digits.
+# 5/2019", "Statement 04/2021", "Binding Decision 01/2021" — kind + number/year,
+# number conventionally zero-padded to two digits. Bare "Decision N/YYYY" is NOT
+# matched (that shape belongs to EU decisions), only the Board's "Binding Decision".
 _EDPB_SERIES = re.compile(
-    r"\b(?P<kind>Guidelines|Recommendations?|Opinion|Statement)\s+(?P<num>\d{1,3})/(?P<year>(?:19|20)\d{2})",
+    r"\b(?P<kind>Guidelines|Recommendations?|Opinion|Statement|Binding\s+Decision)\s+"
+    r"(?P<num>\d{1,3})/(?P<year>(?:19|20)\d{2})",
     re.IGNORECASE)
 # A29WP working papers: "WP248", "WP 248 rev.01", "WP29" is the BODY not a paper —
 # require ≥ 2 digits or a rev suffix so the body's own name never matches.
@@ -147,6 +149,8 @@ def classify_guidance(*, title: str | None = None, text: str | None = None,
         kind = m.group("kind").capitalize()
         if kind.lower().startswith("recommendation"):
             kind = "Recommendations"
+        elif kind.lower().startswith("binding"):
+            kind = "Binding Decision"
         num, year = m.group("num"), m.group("year")
         canonical = f"{kind} {int(num):02d}/{year}"
         out["number"] = _field(canonical, "series:edpb", m.group(0))

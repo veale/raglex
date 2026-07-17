@@ -309,3 +309,35 @@ def test_export_retrieval_citations_batches_and_filters(facade):
     # names included on request
     withn = facade.export_retrieval_citations(min_citing=2, include_names=True)
     assert "Smith v Jones" in [i["citation"] for b in withn["batches"] for i in b["items"]]
+
+
+def test_export_retrieval_citations_jurisdiction_filter(facade):
+    from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
+                                    ResolutionStatus, TypedRelation)
+    from datetime import date
+    with facade._open() as (cat, rs, ts):
+        reports = {"[1987] AC 460": 5, "[1990] ILRM 12": 5, "(1990) 70 DLR (4th) 385": 5}
+        di = 0
+        for raw, cnt in reports.items():
+            for _ in range(cnt):
+                sid = f"j/{di}"; di += 1
+                rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                             decision_date=date(2024, 1, 1), text="t", raw_bytes=b"t",
+                             extracted_via=ExtractedVia.STRUCTURED,
+                             relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                        raw_citation_string=raw, dst_id=None,
+                                        resolution_status=ResolutionStatus.PENDING)])
+                rec.ensure_payload_hash()
+                cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash + sid, "t")))
+
+    # UK-only: the Irish (ILRM) and Canadian (DLR) reports are filtered out —
+    # a Westlaw UK / Lexis+ UK run can't retrieve them anyway
+    uk = facade.export_retrieval_citations(min_citing=2, jurisdictions=("uk",))
+    flat = [i["citation"] for b in uk["batches"] for i in b["items"]]
+    assert "[1987] AC 460" in flat
+    assert all("ILRM" not in c and "DLR" not in c for c in flat)
+    # each exported item says which bucket it's in
+    assert all(i["jurisdiction"] == "uk" for b in uk["batches"] for i in b["items"])
+    # asking for Ireland gets the ILRM row
+    ie = facade.export_retrieval_citations(min_citing=2, jurisdictions=("ie",))
+    assert [i["citation"] for b in ie["batches"] for i in b["items"]] == ["[1990] ILRM 12"]

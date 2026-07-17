@@ -104,3 +104,37 @@ def test_tick_runs_only_due_watches():
     assert res["ran"] == 1
     # immediately after, not due again
     assert f.tick_watches()["ran"] == 0
+
+
+def test_keyword_seed_docs_unquotes_phrase_keywords():
+    """A phrase keyword quoted for the source API ('"data protection"') must still
+    post-filter — the quote characters never appear in a document, so the quoted
+    form used to match nothing and the watch silently seeded zero documents."""
+    f = _facade()
+    _doc(f, "g1", "An appeal about data protection and the GDPR")
+    assert f._keyword_seed_docs("uk-grc", ['"data protection"'], limit=10) == ["g1"]
+
+
+def test_run_watch_uses_per_watch_watermark(monkeypatch):
+    """Each watch keeps its own feed cursor — two watches on one source with different
+    queries must not share (and blind each other via) the source-wide watermark."""
+    f = _facade()
+    w = f.create_watch(name="DP", spec={"source": "uk-grc", "keywords": ["data"],
+                                        "degrees": 0, "max_pages": 3})
+    calls: list[dict] = []
+
+    def fake_harvest(source, **kw):
+        calls.append({"source": source, **kw})
+        return {"stored": 0}
+
+    monkeypatch.setattr(f, "harvest", fake_harvest)
+    f.run_watch(watch_id=w["watch_id"])
+    wm_key = f"watch:{w['watch_id']}:uk-grc"
+    assert calls[0]["watermark_key"] == wm_key
+    # no cursor yet → the first run is bounded by the watch's own max_pages
+    assert calls[0]["max_pages"] == 3
+    # once a cursor exists, the cursor bounds the crawl, not the page cap
+    with f._open() as (cat, _rs, _ts):
+        cat.set_watermark(wm_key, "2026-01-01T00:00:00+00:00")
+    f.run_watch(watch_id=w["watch_id"])
+    assert calls[1]["max_pages"] == 40

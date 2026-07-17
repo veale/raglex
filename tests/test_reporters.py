@@ -127,3 +127,18 @@ def test_frontier_resolves_statute_name_via_gazetteer():
 def test_frontier_returns_none_for_plain_case_name():
     # a case by name isn't specially classifiable here — caller falls back
     assert classify("Donoghue v Stevenson", None) is None
+
+
+def test_series_jurisdiction_buckets():
+    from raglex.citations.reporters import series_jurisdiction
+
+    assert series_jurisdiction("AC") == "uk"
+    assert series_jurisdiction("SLT") == "uk"          # Scottish series retrieve on Westlaw UK
+    assert series_jurisdiction("NI") == "uk"
+    assert series_jurisdiction("ILRM") == "ie"
+    assert series_jurisdiction("IR") == "ie"
+    assert series_jurisdiction("DLR (4th)") == "commonwealth"
+    assert series_jurisdiction("CLR") == "commonwealth"
+    assert series_jurisdiction("NZLR") == "commonwealth"
+    assert series_jurisdiction("CMLR") == "eu"
+    assert series_jurisdiction(None) == "uk"           # non-report shapes default UK

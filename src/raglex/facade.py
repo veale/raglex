@@ -1069,7 +1069,8 @@ class Facade:
     def export_retrieval_citations(self, *, min_citing: int = 2, batch_size: int = 100,
                                    scan_limit: int = 20000, include_names: bool = False,
                                    separator: str = "newline",
-                                   include_series: tuple[str, ...] | None = None) -> dict:
+                                   include_series: tuple[str, ...] | None = None,
+                                   jurisdictions: tuple[str, ...] | None = None) -> dict:
         """Mention-ranked citation batches to paste into Westlaw UK **Find & Print** or
         Lexis+ UK **Get & Print** — the pre-neutral / report-only authorities BAILII and
         Find Case Law don't hold, which those subscription databases usually do.
@@ -1080,13 +1081,17 @@ class Facade:
         CELLAR / HUDOC — are already wired). Each batch holds at most ``batch_size``
         citations (both tools cap a run at 100); ``separator`` is ``newline`` or
         ``semicolon`` (both platforms accept either). ``include_series`` restricts to
-        named report series (e.g. only WLR + Cr App R that Westlaw actually holds)."""
+        named report series (e.g. only WLR + Cr App R that Westlaw actually holds).
+        ``jurisdictions`` restricts by the series' jurisdiction bucket (``uk`` / ``ie``
+        / ``eu`` / ``commonwealth``) — a UK subscription can't retrieve an Irish or
+        Commonwealth report, so those citations just burn slots in a 100-cap batch."""
         import re as _re
 
-        from .citations.reporters import is_report_citation, report_series
+        from .citations.reporters import is_report_citation, report_series, series_jurisdiction
 
         sep = ";\n" if separator == "semicolon" else "\n"
         want_series = {s.upper() for s in include_series} if include_series else None
+        want_jur = {j.strip().lower() for j in jurisdictions if j.strip()} if jurisdictions else None
         # a bracketed/parenthesised year is the pasteable signal (report or neutral cite)
         cite_shape = _re.compile(r"[\[(](?:1[6-9]|20)\d{2}[\])]")
         seen: set[str] = set()
@@ -1106,12 +1111,16 @@ class Facade:
                     continue
             if want_series and (not series or series.upper() not in want_series):
                 continue
+            # non-report citation shapes here are UK neutral-citation-style → "uk"
+            jur = series_jurisdiction(series)
+            if want_jur and jur not in want_jur:
+                continue
             key = _re.sub(r"[\s.'’\[\]()]+", "", raw).upper()  # fold for dedup
             if not key or key in seen:
                 continue
             seen.add(key)
             items.append({"citation": raw, "citing_count": r["citing_count"],
-                          "series": series, "form": r["form"]})
+                          "series": series, "jurisdiction": jur, "form": r["form"]})
 
         items.sort(key=lambda x: x["citing_count"], reverse=True)
         batches = []
@@ -3363,8 +3372,14 @@ class Facade:
     def _keyword_seed_docs(self, source: str, keywords: list[str] | None, *, limit: int = 60) -> list[str]:
         """Documents from ``source`` matching the watch keywords — the universal
         keyword limiter (works regardless of API search support): scans title + text
-        for any term. No keywords → the source's most-recent docs."""
-        terms = [k.lower() for k in (keywords or []) if k.strip()]
+        for any term. No keywords → the source's most-recent docs.
+
+        Keywords are un-quoted first: a phrase keyword ('"data protection"', quoted for
+        the source API's exact-match search) must post-filter as the phrase itself —
+        the quote characters never appear in a document, so the quoted form matches
+        nothing and the watch silently seeds zero documents."""
+        terms = [k.strip().strip("\"'“”‘’").lower() for k in (keywords or []) if k.strip()]
+        terms = [t for t in terms if t]
         out: list[str] = []
         with self._open() as (cat, _rs, ts):
             for r in cat.list_documents(source=source, limit=1000):
@@ -4274,8 +4289,21 @@ class Facade:
             info = SOURCE_INFO.get(source)
             if keywords and info and info.keyword_search and "query" not in opts:
                 opts["query"] = " ".join(keywords)  # search at the source API
+            # Each watch keeps its OWN cursor: two watches on one source see different
+            # slices of the feed (different query/court), so sharing the source-wide
+            # watermark let whichever ran last blind the others. A brand-new watch
+            # starts from the top of the feed (bounded by max_pages) and then follows.
+            wm_key = f"watch:{watch_id}:{source}"
+            with self._open() as (cat, _rs, _ts):
+                has_cursor = cat.get_watermark(wm_key) is not None
+            # Once a cursor exists, the cursor bounds the crawl — page until we reach
+            # it (with a generous safety cap) rather than stopping at max_pages. A page
+            # cap on an incremental crawl silently loses everything between the cap and
+            # the cursor: the watermark still jumps to the newest item seen.
+            max_pages = (spec.get("max_pages_incremental", 40) if has_cursor
+                         else spec.get("max_pages", 1))
             h = self.harvest(source, backfill=bool(spec.get("backfill")),
-                             max_pages=spec.get("max_pages", 1), options=opts)
+                             max_pages=max_pages, options=opts, watermark_key=wm_key)
             result["harvest"] = h
             seed_ids = self._keyword_seed_docs(source, keywords, limit=spec.get("max_seeds", 60))
             result["seeds_from_source"] = len(seed_ids)
@@ -4339,7 +4367,7 @@ class Facade:
     def harvest(
         self, source: str, *, backfill: bool = False, since: str | None = None,
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
-        ignore_watermark: bool = False,
+        ignore_watermark: bool = False, watermark_key: str | None = None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
         "trigger a backfill / re-run a source from the browser" action. ``options``
@@ -4362,12 +4390,14 @@ class Facade:
             )
             before = cat.all_stable_ids()
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
-                             ignore_watermark=ignore_watermark)
+                             ignore_watermark=ignore_watermark, watermark_key=watermark_key)
             # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.
             # (Re-extracting all ~20k docs on every harvest was O(minutes) of pure-CPU
             # grammar work; resolution already links existing pending edges to the new
-            # nodes without re-mining their text.)
-            new_ids = list(cat.all_stable_ids() - before)
+            # nodes without re-mining their text.) Upstream-REVISED documents the crawl
+            # re-fetched (contenthash changed) aren't "new" but their text changed, so
+            # they get the same re-extract/classify pass.
+            new_ids = list((cat.all_stable_ids() - before) | set(stats.refreshed_ids))
             from .citations import extract_document
             from .treatment import classify_corpus
             llm_cite, classifier = self._llm_passes(None)  # auto: LLM iff configured
@@ -4375,6 +4405,15 @@ class Facade:
             for sid in new_ids:
                 extract_document(cat, ts, sid, llm=llm_cite, aliases=aliases)
                 classify_corpus(cat, ts, classifier=classifier, stable_id=sid)
+            # Guidance classification (§1.9/§4a): every guidance-typed document — and
+            # every EDPB publication regardless of doc_type (binding decisions and
+            # opinions carry the same citable series numbers) — gets its issuer /
+            # identity / version / status / regime fields the moment it lands. NOT
+            # edpb-oss: those are national DPA decisions, not Board guidance.
+            for sid in new_ids:
+                doc = cat.get_document(sid)
+                if doc is not None and (doc["doc_type"] == "guidance" or doc["source"] == "edpb"):
+                    self._classify_guidance_into(cat, ts, sid)
             # ``resolve=False`` lets a batch caller (e.g. seed-from-text over many seeds)
             # resolve ONCE at the end instead of re-resolving the whole graph per call.
             resolved_n = Resolver(cat).run().resolved if resolve else 0

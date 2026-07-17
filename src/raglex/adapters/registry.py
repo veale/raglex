@@ -12,7 +12,9 @@ from typing import Callable
 from ..core.adapter import Adapter
 from ..scraping.recipes import RECIPES
 from ..scraping.scrape_adapter import RecipeScrapeAdapter
+from .a29wp import A29WPAdapter
 from .echr import ECHRAdapter
+from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
 from .eu_legislation import EULegislationAdapter
 from .hol import HouseOfLordsAdapter
@@ -40,6 +42,15 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # House of Lords (1996–2009) — scraped from publications.parliament.uk. Resolves
     # "[YYYY] UKHL N" and gives pre-2001 report-only cases a home (§5a).
     "uk-hol": HouseOfLordsAdapter,
+    # EDPB (§1.9/§4a) — the Board's whole document register (guidelines, opinions,
+    # binding decisions, statements, reports…), classified by the guidance machinery.
+    "edpb": EDPBAdapter,
+    # EDPB one-stop-shop register — ~2,600 Art 60 final DPA decisions, EDPBI-keyed,
+    # split by lead SA, with interprets edges to the GDPR articles they apply.
+    "edpb-oss": lambda **kw: EDPBAdapter(register=True, **kw),
+    # Article 29 Working Party (1997–2018, closed archive) — the justice-site
+    # opinion/recommendation index + the newsroom items, WP-number identity.
+    "a29wp": A29WPAdapter,
     # Legislation (§0) — statute, not just cases. stable_ids are the resolution
     # targets so harvesting these closes the §5b loop (FOIA, DPA, GDPR, …).
     "uk-legislation": UKLegislationAdapter,
@@ -51,8 +62,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
 
 
 # Sources that are in-scope by construction (§4) — tagged, not topic-gated:
-# the GRC tribunal, GDPR-linked CJEU cases, and in-scope regulator scrape recipes.
-IN_SCOPE_SOURCES: set[str] = {"uk-grc", "eu-cellar", "echr"} | {
+# the GRC tribunal, GDPR-linked CJEU cases, the EDPB (a DP regulator: everything
+# it publishes is in scope), and in-scope regulator scrape recipes.
+IN_SCOPE_SOURCES: set[str] = {"uk-grc", "eu-cellar", "echr", "edpb", "edpb-oss", "a29wp"} | {
     key for key, recipe in RECIPES.items() if recipe.in_scope
 }
 
@@ -118,11 +130,42 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("ECLI:CE:ECHR:…", "application no. 58170/13"),
     ),
     "uk-legislation": SourceInfo(
-        "uk-legislation", "UK legislation (legislation.gov.uk)", "legislation", "GB", False,
-        "Fetches specific Acts/SIs by id (Akoma Ntoso). Defaults to the core FOI/DP "
-        "instruments; override with ids. Keywords don’t apply (you name the acts).",
-        (SourceOption("ids", "Legislation ids", "ukpga/2000/36,ukpga/2018/12"),),
+        "uk-legislation", "UK legislation (legislation.gov.uk)", "legislation", "GB", True,
+        "Fetches specific Acts/SIs by id (Akoma Ntoso), or follows the newest-published "
+        "feed: set feed=new (and optionally types) to auto-import new legislation as it "
+        "is made; keywords run a title search at the source.",
+        (SourceOption("ids", "Legislation ids", "ukpga/2000/36,ukpga/2018/12"),
+         SourceOption("feed", "Follow new-legislation feed", "new"),
+         SourceOption("types", "Feed types", "ukpga,uksi (default)"),
+         SourceOption("query", "Title search", "e.g. data protection")),
         ("legislation id (ukpga/2000/36)", "legislation.gov.uk URI"),
+    ),
+    "edpb": SourceInfo(
+        "edpb", "EDPB documents (guidelines, opinions, decisions…)", "guidance", "EU", False,
+        "The whole EDPB document register via its sitemap: guidelines, recommendations, "
+        "Art 70 opinions, Art 65 binding decisions, statements, reports, letters. "
+        "Incremental on the sitemap's lastmod; drafts are imported and become the "
+        "adopted version in place. Slow-paced (europa.eu WAF).",
+        (SourceOption("sections", "Only these sections", "e.g. guideline,recommendation,statement"),),
+        ("EDPB document page URL",),
+    ),
+    "edpb-oss": SourceInfo(
+        "edpb-oss", "EDPB one-stop-shop register (Art 60 final decisions)", "guidance", "EU", False,
+        "~2,600 final national-DPA decisions from the OSS register, keyed by their "
+        "EDPBI identifier, split by lead SA (court = dpa-xx), each linked to the GDPR "
+        "articles it applies. Scanned PDFs are OCR'd (tesseract) or flagged needs_ocr. "
+        "First run walks the whole register (resumable); then incremental by serial.",
+        (),
+        ("EDPBI identifier (EDPBI:LU:OSS:D:2026:3920)",),
+    ),
+    "a29wp": SourceInfo(
+        "a29wp", "Article 29 Working Party (archive, 1997–2018)", "guidance", "EU", False,
+        "The EDPB's predecessor: ~250 opinions/recommendations from the old justice-site "
+        "index plus ~120 newsroom items (guidelines, letters, press releases). A CLOSED "
+        "archive — harvest once; WP numbers key identity and mint citation aliases. "
+        "Scanned early-years PDFs are OCR'd or flagged. Slow-paced (europa.eu WAF).",
+        (SourceOption("surface", "Surface", "both | justice | newsroom"),),
+        ("WP number (WP248)",),
     ),
     "eu-legislation": SourceInfo(
         "eu-legislation", "EU legislation (CELLAR / Formex)", "legislation", "EU", False,
@@ -168,9 +211,12 @@ def source_catalog() -> list[dict]:
         row["can_keyword_search"] = bool(row.get("keyword_search"))
         row["can_discover_citing"] = key in DISCOVER_CITING_SOURCES
         row["can_gap_scan"] = key in GAP_SCAN_SOURCES
-        # incremental "check for new" makes sense for feed-like caselaw sources; the
-        # legislation/by-id sources are fetched by naming the item, not by a moving feed.
-        row["can_incremental"] = row.get("kind") == "caselaw"
+        # incremental "check for new" makes sense for feed-like sources: the caselaw
+        # feeds, UK legislation's newest-published search feed (feed=new), and the
+        # EDPB sitemap/register cursors. The other legislation/by-id sources are
+        # fetched by naming the item — no moving feed.
+        row["can_incremental"] = (row.get("kind") == "caselaw"
+                                  or key in ("uk-legislation", "edpb", "edpb-oss"))
         out.append(row)
     return out
 

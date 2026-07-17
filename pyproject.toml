@@ -33,6 +33,13 @@ import = [
     "pymupdf>=1.24",
     "striprtf>=0.0.26",
 ]
+# OCR fallback for scanned PDFs (§5c) — the EDPB one-stop-shop register in
+# particular holds decision scans with no text layer. Needs the tesseract
+# binary on the host/image; without it the harvest flags needs_ocr instead.
+ocr = [
+    "pytesseract>=0.3.10",
+    "pillow>=10",
+]
 scrape = [
     "beautifulsoup4>=4.15.0",
     # Anti-bot / JS scraping engines (§5a). Scrapling brings StealthyFetcher

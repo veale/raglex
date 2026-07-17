@@ -48,6 +48,9 @@ class RunStats:
     rate_limited: bool = False
     watermark: str | None = None
     notes: list[str] = field(default_factory=list)
+    # stable_ids re-fetched because the source said the content CHANGED (e.g. Find Case
+    # Law's contenthash) — not new documents, but they need re-extraction like new ones.
+    refreshed_ids: list[str] = field(default_factory=list)
 
     @property
     def outcome(self) -> str:
@@ -100,6 +103,7 @@ class Pipeline:
         max_pages: int | None = None,
         ignore_watermark: bool = False,
         record_health: bool = True,
+        watermark_key: str | None = None,
     ) -> RunStats:
         """Run one source. ``backfill`` ignores the stored watermark and pages deep
         from ``since`` (§5). ``ignore_watermark`` runs with NO date cursor at all and
@@ -107,10 +111,17 @@ class Pipeline:
         which isn't an incremental feed crawl, so the newest-first cutoff would otherwise
         drop every older result. ``record_health=False`` skips the consecutive-failures
         counter — used for targeted single-item fetches where a 404 means "this item
-        doesn't exist" rather than "the source feed is broken"."""
+        doesn't exist" rather than "the source feed is broken".
+
+        ``watermark_key`` scopes the incremental cursor. Two watches on the same source
+        with different queries see different slices of the feed — sharing the source-wide
+        cursor means whichever ran last pushes the other's cursor past everything it would
+        have found, so a fresh query-watch never sees a single document."""
         stats = RunStats(source=adapter.source)
-        watermark = None if ignore_watermark else (since if backfill else self.catalogue.get_watermark(adapter.source))
+        wm_key = watermark_key or adapter.source
+        watermark = None if ignore_watermark else (since if backfill else self.catalogue.get_watermark(wm_key))
         highest = watermark
+        wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
 
         try:
             for stub in adapter.discover(watermark, max_pages=max_pages):
@@ -121,9 +132,18 @@ class Pipeline:
                 # full-text harvest — e.g. discover-citing — returns mostly docs already in
                 # the corpus, so this turns 50 needless fetches into 50 cheap PK lookups.
                 # A backfill still re-fetches (to pick up upstream revisions).
+                refreshed = False
                 if not backfill and stub.stable_id and self.catalogue.get_document(stub.stable_id) is not None:
-                    stats.deduped += 1
-                    continue
+                    # …unless the feed says the content CHANGED: a differing contenthash
+                    # (FCL's change signal) means the held copy is a superseded revision —
+                    # re-fetch it. No hash on either side → assume unchanged (the old rule).
+                    feed_hash = stub.hints.get("contenthash")
+                    held_hash = (self.catalogue.document_meta(stub.stable_id) or {}).get(
+                        "contenthash") if feed_hash else None
+                    if not (feed_hash and held_hash and feed_hash != held_hash):
+                        stats.deduped += 1
+                        continue
+                    refreshed = True
 
                 # Stage 1: cheap topic gate (§4) over the stub's cheap fields.
                 if not self.skip_topic_gate and cheap_match(stub) is False:
@@ -143,6 +163,11 @@ class Pipeline:
                     stats.errors += 1
                     if exc.transient:
                         stats.errors_transient += 1
+                        # The item probably exists; we just couldn't get it NOW. Freeze
+                        # the cursor here so the next incremental run re-reaches this
+                        # stub and retries — advancing past it writes it off until its
+                        # upstream timestamp happens to move again.
+                        wm_frozen = True
                     else:
                         stats.errors_fatal += 1
                         if stub.stable_id:
@@ -164,8 +189,18 @@ class Pipeline:
 
                 if self._ingest(record, stats):
                     stats.stored += 1
+                    if refreshed:
+                        stats.refreshed_ids.append(record.stable_id)
 
-                highest = _max_watermark(highest, stub.hint_date and stub.hint_date.isoformat())
+                # A feed can carry a finer cursor than the date (hints["watermark"], e.g.
+                # FCL's full <updated> timestamp) — prefer it; date-only cursors lose
+                # same-day arrivals.
+                if not wm_frozen:
+                    highest = _max_watermark(
+                        highest,
+                        stub.hints.get("watermark")
+                        or (stub.hint_date and stub.hint_date.isoformat()),
+                    )
 
         except RateLimitException:
             stats.rate_limited = True
@@ -179,7 +214,7 @@ class Pipeline:
         # Advance the watermark only on a clean (non-rate-limited) crawl (§5) — never for
         # a targeted search, which isn't an incremental pass over the recency feed.
         if highest and not stats.rate_limited and not ignore_watermark:
-            self.catalogue.set_watermark(adapter.source, highest)
+            self.catalogue.set_watermark(wm_key, highest)
             stats.watermark = highest
 
         log.info(stats.summary())
@@ -266,6 +301,14 @@ class Pipeline:
                 a = a.strip()
                 if a:
                     self.catalogue.put_alias(a.casefold(), record.ecli, source="echr-appno")
+        # Generic adapter-declared aliases (§5b): forms the corpus cites this document
+        # by that aren't ECLI/CELEX-shaped — e.g. an EDPB register decision's EDPBI
+        # identifier. The adapter states them in extra["aliases"]; they resolve to the
+        # document's stable_id.
+        for alias in (record.extra.get("aliases") if record.extra else None) or ():
+            if alias:
+                self.catalogue.put_alias(str(alias).casefold(), record.stable_id,
+                                         source="adapter-alias")
         # Tribunal/court chamber recovery (§5b): a UK Find Case Law id carries the
         # chamber as a path segment (ukut/aac/2012/440), but a citation may omit it
         # ("[2012] UKUT 440" → ukut/2012/440). Mint the chamber-less alias so the

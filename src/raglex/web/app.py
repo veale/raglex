@@ -111,26 +111,32 @@ def create_app(config: Config | None = None) -> FastAPI:
     def export_retrieval_citations_ep(
         min_citing: int = 2, batch_size: int = 100, include_names: bool = False,
         separator: str = "newline", series: str | None = None,
+        jurisdictions: str | None = None,
     ) -> dict:
         """Mention-ranked, ≤100-per-batch citation lists to paste into Westlaw Find & Print
-        / Lexis+ Get & Print (the report-only authorities BAILII + FCL lack)."""
+        / Lexis+ Get & Print (the report-only authorities BAILII + FCL lack).
+        ``jurisdictions`` is a csv of uk/ie/eu/commonwealth — a UK subscription can't
+        retrieve the Irish/Commonwealth series, so filter them out of the batch."""
         inc = tuple(s.strip() for s in series.split(",") if s.strip()) if series else None
+        jur = tuple(j.strip() for j in jurisdictions.split(",") if j.strip()) if jurisdictions else None
         return facade.export_retrieval_citations(
             min_citing=min_citing, batch_size=batch_size, include_names=include_names,
-            separator=separator, include_series=inc)
+            separator=separator, include_series=inc, jurisdictions=jur)
 
     @app.get("/export/retrieval-citations.txt")
     def export_retrieval_citations_txt_ep(
         min_citing: int = 2, batch_size: int = 100, include_names: bool = False,
         separator: str = "newline", series: str | None = None,
+        jurisdictions: str | None = None,
     ):
         """The same export as a downloadable .txt (all batches, delimited by headers)."""
         from fastapi.responses import PlainTextResponse
 
         inc = tuple(s.strip() for s in series.split(",") if s.strip()) if series else None
+        jur = tuple(j.strip() for j in jurisdictions.split(",") if j.strip()) if jurisdictions else None
         res = facade.export_retrieval_citations(
             min_citing=min_citing, batch_size=batch_size, include_names=include_names,
-            separator=separator, include_series=inc)
+            separator=separator, include_series=inc, jurisdictions=jur)
         return PlainTextResponse(res["combined_text"], headers={
             "Content-Disposition": 'attachment; filename="raglex-citations-for-retrieval.txt"'})
 

@@ -241,3 +241,63 @@ def test_legislation_adapters_registered():
     assert get_adapter("uk-legislation").source == "uk-legislation"
     assert get_adapter("eu-legislation").source == "eu-legislation"
     assert get_adapter("nl-legislation").source == "nl-legislation"
+
+
+# -- new-legislation feed discovery (auto-import new statute, §5a) -----------
+LEG_FEED_PAGE1 = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:leg="http://www.legislation.gov.uk/namespaces/legislation">
+  <id>http://www.legislation.gov.uk/ukpga+uksi/data.feed</id>
+  <leg:page>1</leg:page>
+  <leg:morePages>2</leg:morePages>
+  <entry>
+    <id>http://www.legislation.gov.uk/id/uksi/2026/820</id>
+    <title>The Data Protection (Charges) (Amendment) Regulations 2026</title>
+    <published>2026-07-16T03:04:13+01:00</published>
+    <updated>2026-07-16T03:05:36+01:00</updated>
+  </entry>
+  <entry>
+    <id>http://www.legislation.gov.uk/id/ukia/2026/99</id>
+    <title>An impact assessment (not legislation)</title>
+    <published>2026-07-15T09:00:00+01:00</published>
+  </entry>
+  <entry>
+    <id>http://www.legislation.gov.uk/id/ukpga/2026/12</id>
+    <title>Data (Use and Access) Act 2026</title>
+    <published>2026-07-10T00:00:00+01:00</published>
+  </entry>
+</feed>
+"""
+
+
+def test_parse_legislation_feed_entries_and_paging():
+    from raglex.adapters.uk_legislation import parse_legislation_feed
+
+    page = parse_legislation_feed(LEG_FEED_PAGE1)
+    assert page.more_pages is True
+    paths = [e.path for e in page.entries]
+    assert paths == ["uksi/2026/820", "ukia/2026/99", "ukpga/2026/12"]
+    assert page.entries[0].published == "2026-07-16T03:04:13+01:00"
+    assert page.entries[0].title.startswith("The Data Protection")
+
+
+def test_feed_discovery_yields_new_items_and_stops_at_cursor():
+    ad = UKLegislationAdapter(feed="new", client=_FakeClient(LEG_FEED_PAGE1))
+    # no cursor: everything legislation-shaped (the ukia impact assessment is dropped)
+    stubs = list(ad.discover(None, max_pages=1))
+    assert [s.stable_id for s in stubs] == ["uksi/2026/820", "ukpga/2026/12"]
+    assert stubs[0].raw_url.endswith("/uksi/2026/820/data.akn")
+    # the full published timestamp is the cursor the pipeline stores
+    assert stubs[0].hints["watermark"] == "2026-07-16T03:04:13+01:00"
+    # with a cursor: stop at/before it — only the strictly-newer item comes back
+    stubs = list(ad.discover("2026-07-10T00:00:00+01:00", max_pages=1))
+    assert [s.stable_id for s in stubs] == ["uksi/2026/820"]
+
+
+def test_feed_mode_triggered_by_types_or_query_not_by_default():
+    assert UKLegislationAdapter(client=_FakeClient(b"")).feed is False
+    assert UKLegislationAdapter(types="ukpga", client=_FakeClient(b"")).feed is True
+    assert UKLegislationAdapter(query="data protection", client=_FakeClient(b"")).feed is True
+    # ids alone keeps the by-id path
+    ad = UKLegislationAdapter(ids="ukpga/2000/36", client=_FakeClient(b""))
+    assert ad.feed is False and list(ad.discover(None))[0].stable_id == "ukpga/2000/36"

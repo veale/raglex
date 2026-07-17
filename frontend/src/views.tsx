@@ -2320,6 +2320,7 @@ export function WatchesView() {
   const [tag, setTag] = useState("");
   const [cadence, setCadence] = useState(1440);
   const [maxPages, setMaxPages] = useState(1);
+  const [srcOpts, setSrcOpts] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState<number | "new" | null>(null);
 
@@ -2330,13 +2331,15 @@ export function WatchesView() {
     setBusy("new"); setMsg("");
     const spec: any = { degrees, max_pages: maxPages };
     if (source) spec.source = source;
+    const opts = Object.fromEntries(Object.entries(srcOpts).filter(([, v]) => v.trim()));
+    if (source && Object.keys(opts).length) spec.source_options = opts;
     if (keywords.trim()) spec.keywords = keywords.split(",").map((k) => k.trim()).filter(Boolean);
     if (citing.trim()) spec.discover = { citing: citing.trim(), via: "auto" };
     if (cites.trim()) spec.seed_rule = { cites: cites.trim() };
     if (tag.trim()) spec.tag = tag.trim();
     try {
       await api.createWatch({ name, spec, cadence_minutes: cadence });
-      setName(""); setKeywords(""); setCites(""); setCiting(""); setTag(""); reload();
+      setName(""); setKeywords(""); setCites(""); setCiting(""); setTag(""); setSrcOpts({}); reload();
     } catch (e: any) { setMsg("error: " + e); } finally { setBusy(null); }
   }
   async function run(id: number) {
@@ -2362,7 +2365,7 @@ export function WatchesView() {
         </p>
         <div className="row" style={{ flexWrap: "wrap" }}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="watch name, e.g. ‘UK DP cases’" style={{ minWidth: 180 }} />
-          <select value={source} onChange={(e) => setSource(e.target.value)} style={{ flex: "0 0 auto" }}>
+          <select value={source} onChange={(e) => { setSource(e.target.value); setSrcOpts({}); }} style={{ flex: "0 0 auto" }}>
             <option value="">— source (optional) —</option>
             {(cat ?? []).map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
           </select>
@@ -2371,6 +2374,15 @@ export function WatchesView() {
         {info && <div style={{ marginTop: 4 }}>
           <p className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{info.description}</p>
           <SourceCaps info={info} /></div>}
+        {/* per-source options (court filter, feed=new, legislation types, …) — the same
+            knobs the CLI's -o takes, so a watch can be scoped without leaving the UI */}
+        {info && (info.options ?? []).length > 0 && <div className="row" style={{ flexWrap: "wrap", marginTop: 4 }}>
+          {(info.options ?? []).filter((o: any) => o.name !== "query").map((o: any) => (
+            <input key={o.name} value={srcOpts[o.name] ?? ""} title={o.label}
+              onChange={(e) => setSrcOpts({ ...srcOpts, [o.name]: e.target.value })}
+              placeholder={`${o.label}${o.placeholder ? ` — ${o.placeholder}` : ""}`} style={{ minWidth: 200 }} />
+          ))}
+        </div>}
         <div className="row" style={{ flexWrap: "wrap", marginTop: 4 }}>
           {source && <input value={keywords} onChange={(e) => setKeywords(e.target.value)}
             placeholder={info?.keyword_search ? "keywords (searched at source), comma-sep" : "keywords (post-filter), comma-sep"} style={{ minWidth: 220 }} />}
@@ -2707,6 +2719,11 @@ function RetrievalExportPanel() {
   const [batchSize, setBatchSize] = useState(100);
   const [sep, setSep] = useState("newline");
   const [names, setNames] = useState(false);
+  // Westlaw UK / Lexis+ UK are UK subscriptions: an Irish or Commonwealth report in the
+  // batch can't retrieve and just burns one of the 100 slots — so default to UK only.
+  const JURS: [string, string][] = [["uk", "UK"], ["ie", "Ireland"], ["eu", "EU (CMLR…)"], ["commonwealth", "Commonwealth"]];
+  const [jurs, setJurs] = useState<Record<string, boolean>>({ uk: true, ie: false, eu: false, commonwealth: false });
+  const jurCsv = JURS.filter(([k]) => jurs[k]).map(([k]) => k).join(",");
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -2715,11 +2732,12 @@ function RetrievalExportPanel() {
     setBusy(true); setMsg("");
     try {
       setData(await api.exportRetrievalCitations({
-        min_citing: minCiting, batch_size: batchSize, separator: sep, include_names: names }));
+        min_citing: minCiting, batch_size: batchSize, separator: sep, include_names: names,
+        jurisdictions: jurCsv }));
     } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
   };
   const qs = new URLSearchParams({ min_citing: String(minCiting), batch_size: String(batchSize),
-    separator: sep, include_names: String(names) });
+    separator: sep, include_names: String(names), ...(jurCsv ? { jurisdictions: jurCsv } : {}) });
   return (
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>Export for Westlaw / Lexis batch retrieval
@@ -2745,6 +2763,16 @@ function RetrievalExportPanel() {
           <input type="checkbox" checked={names} onChange={(e) => setNames(e.target.checked)} />
           include cases cited by name (won't retrieve without a citation)
         </label>
+        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
+          title="Which report-series jurisdictions to include. A UK subscription can't retrieve Irish or Commonwealth reports — they'd burn slots in the 100-citation batch.">
+          <span className="muted">jurisdictions:</span>
+          {JURS.map(([k, label]) => (
+            <label key={k} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <input type="checkbox" checked={!!jurs[k]} onChange={(e) => setJurs({ ...jurs, [k]: e.target.checked })} />
+              {label}
+            </label>
+          ))}
+        </span>
         <button className="primary" disabled={busy} onClick={run}>{busy ? "building…" : "Build citation batches"}</button>
         {data && <a className="mini" href={`/api/export/retrieval-citations.txt?${qs}`} target="_blank" rel="noopener noreferrer">⬇ download all as .txt</a>}
       </div>

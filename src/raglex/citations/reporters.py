@@ -174,3 +174,37 @@ def report_series(raw: str | None) -> str | None:
 
 def is_report_citation(raw: str | None) -> bool:
     return report_series(raw) is not None
+
+
+# ── which subscription holds a series ───────────────────────────────────────
+# Westlaw UK / Lexis+ UK hold the UK series; the Irish and Commonwealth series
+# largely need the respective national services. Grouped coarsely — the point is
+# to keep un-retrievable citations out of a UK Find & Print batch, not to build a
+# gazetteer of publishers. Series not listed default to "uk" (the England & Wales,
+# Scottish, NI, nominate and practitioner series are the bulk of REPORT_SERIES).
+_JURISDICTION_SERIES: dict[str, frozenset[str]] = {
+    "ie": frozenset({"IR", "ILRM", "ILTR", "Ir Jur Rep", "Ir Jur", "LR Ir", "Frewen"}),
+    "eu": frozenset({"CMLR", "CEC", "ECR", "EHRR"}),
+    "commonwealth": frozenset({
+        # Canada
+        "DLR", "DLR (2d)", "DLR (3d)", "DLR (4th)", "SCR", "CCC", "CCC (2d)",
+        "CCC (3d)", "WWR", "OR (2d)", "OR (3d)", "CRR", "CPR (3d)",
+        # Australia
+        "CLR", "ALR", "ALJR", "NSWLR", "VR", "WAR", "SASR", "Qd R", "A Crim R",
+        "ACSR", "FamLR",
+        # New Zealand / Hong Kong / Singapore
+        "NZLR", "NZAR", "NZFLR", "HKLRD", "HKC", "SGCA", "SLR",
+    }),
+}
+_SERIES_TO_JURISDICTION: dict[str, str] = {
+    s: j for j, series in _JURISDICTION_SERIES.items() for s in series
+}
+
+
+def series_jurisdiction(series: str | None) -> str:
+    """The coarse jurisdiction bucket a report series belongs to — ``uk`` (default:
+    England & Wales, Scotland, NI, the nominate reports), ``ie``, ``eu``, or
+    ``commonwealth``. Drives the Westlaw/Lexis export filter: a UK subscription
+    can't retrieve an Irish or Commonwealth report, so exporting one just burns a
+    slot in the 100-citation batch."""
+    return _SERIES_TO_JURISDICTION.get(series or "", "uk")

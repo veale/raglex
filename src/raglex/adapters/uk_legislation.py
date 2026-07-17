@@ -10,12 +10,24 @@ nicely-renderable, machine-readable base.
 
 Default targets are the core UK data-protection / FOI instruments; override with
 ``-o ids=ukpga/2000/36,ukpga/2018/12`` or point it at any list.
+
+**Feed discovery** (the "auto-import new statute" path): legislation.gov.uk also
+publishes paginated Atom search feeds — ``/{type}/data.feed?sort=published`` lists a
+type's items newest-published first (types combine as ``ukpga+uksi``), and ``title=``
+scopes to a title search. Setting ``feed=new`` / ``types=…`` / ``query=…`` switches
+``discover`` to walking that feed with an incremental cursor on ``<published>``, so a
+watch on this source pulls each newly-made SI/Act as it appears instead of re-fetching
+a fixed id list forever.
 """
 
 from __future__ import annotations
 
+import re
 import time
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Iterator
+from xml.etree import ElementTree as ET
 
 from ..core.adapter import BaseAdapter
 from ..core.http import RateLimitedClient
@@ -41,6 +53,64 @@ DEFAULT_IDS = (
     "uksi/2004/3391",  # Environmental Information Regulations 2004
 )
 
+# Default feed scope: UK-wide primary + secondary legislation — what "new statute"
+# means for this corpus. Devolved/NI types can be added via ``types=``.
+DEFAULT_FEED_TYPES = ("ukpga", "uksi")
+
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+_LEG_NS = "{http://www.legislation.gov.uk/namespaces/legislation}"
+_ID_PATH = re.compile(r"legislation\.gov\.uk/id/(?P<path>[a-z]{2,6}/[^\s?#]+)", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class FeedEntry:
+    path: str            # ukpga/2026/12 — the stable_id / fetch path
+    title: str | None
+    published: str | None  # full ISO timestamp (the feed's sort key → the cursor)
+    updated: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FeedPage:
+    entries: list[FeedEntry]
+    more_pages: bool
+
+
+def parse_legislation_feed(xml_bytes: bytes) -> FeedPage:
+    """Parse one legislation.gov.uk search-feed page (pure). Entries carry their
+    ``/id/{type}/{year}/{number}`` URI, title, and published/updated timestamps;
+    ``<leg:morePages>`` says whether to keep paging."""
+    root = ET.fromstring(xml_bytes)
+    more = 0
+    mp = root.findtext(f"{_LEG_NS}morePages")
+    page = root.findtext(f"{_LEG_NS}page")
+    try:
+        more = int(mp or 0) > int(page or 1)
+    except ValueError:
+        more = False
+    entries: list[FeedEntry] = []
+    for entry in root.findall(f"{_ATOM_NS}entry"):
+        eid = (entry.findtext(f"{_ATOM_NS}id") or "").strip()
+        m = _ID_PATH.search(eid)
+        if not m:
+            continue
+        entries.append(FeedEntry(
+            path=m.group("path").strip("/").lower(),
+            title=(entry.findtext(f"{_ATOM_NS}title") or "").strip() or None,
+            published=(entry.findtext(f"{_ATOM_NS}published") or "").strip() or None,
+            updated=(entry.findtext(f"{_ATOM_NS}updated") or "").strip() or None,
+        ))
+    return FeedPage(entries=entries, more_pages=more)
+
+
+def _iso_date(ts: str | None) -> date | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
 
 class UKLegislationAdapter(BaseAdapter):
     source = "uk-legislation"
@@ -50,9 +120,17 @@ class UKLegislationAdapter(BaseAdapter):
 
     def __init__(self, *, ids: str | tuple[str, ...] | None = None,
                  version_date: str | None = None, client: RateLimitedClient | None = None,
-                 patient: bool = False) -> None:
+                 patient: bool = False, feed: str | None = None,
+                 types: str | None = None, query: str | None = None) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
+        # Feed mode (new-legislation discovery): any of feed/types/query switches
+        # discover() from the fixed id list to the search feed. ``types`` limits the
+        # legislation types ("ukpga,uksi"); ``query`` is a title search.
+        self.feed = bool(feed) or bool(types) or bool(query)
+        self.types = tuple(t.strip().lower() for t in (types or "").split(",") if t.strip()) \
+            or DEFAULT_FEED_TYPES
+        self.query = (query or "").strip() or None
         self.ids = tuple(ids) if ids else DEFAULT_IDS
         # point-in-time: fetch the law as it stood at this date (YYYY-MM-DD), so a
         # citation from an old case sees the live provisions, not today's repealed text.
@@ -92,6 +170,9 @@ class UKLegislationAdapter(BaseAdapter):
         return out
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        if self.feed:
+            yield from self._discover_feed(since, max_pages=max_pages)
+            return
         for leg_id in self.ids:
             if self.version_date:  # point-in-time copy, keyed distinctly as id@date
                 yield Stub(
@@ -107,6 +188,47 @@ class UKLegislationAdapter(BaseAdapter):
                     raw_url=f"{BASE_URL}/{leg_id}/data.akn",
                     court=None,
                 )
+
+    def _discover_feed(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        """Walk the search feed newest-published first, stopping at the incremental
+        cursor. ``sort=published`` makes ``<published>`` the sort key, so it is also the
+        cursor field — the crawl stops exactly where the last clean run got to.
+
+        A title-query feed redirects to ``/title/{q}/data.feed`` and DROPS the sort —
+        its order isn't publication date — so with a query the cursor is not applied
+        (each crawl re-walks its bounded pages; already-held items dedup cheaply)."""
+        from ..citations.snowball import UK_LEG_TYPES
+
+        type_path = "+".join(self.types) if self.types else "all"
+        pages = 0
+        page_no = 1
+        while True:
+            params: dict[str, object] = {"sort": "published", "page": page_no}
+            if self.query:
+                params["title"] = self.query
+            try:
+                resp = self._client.get(f"{BASE_URL}/{type_path}/data.feed", params=params)
+            except FetchError:
+                return  # a broken feed page ends the crawl; the cursor doesn't advance past it
+            feed = parse_legislation_feed(resp.content)
+            for e in feed.entries:
+                if not self.query and since and e.published and e.published <= since:
+                    return
+                head = e.path.split("/", 1)[0]
+                if head not in UK_LEG_TYPES:
+                    continue  # drafts / impact assessments / non-legislation ids
+                yield Stub(
+                    stable_id=e.path,
+                    landing_url=f"{BASE_URL}/{e.path}",
+                    raw_url=f"{BASE_URL}/{e.path}/data.akn",
+                    hint_date=_iso_date(e.published),
+                    title=e.title,
+                    hints={"watermark": e.published} if (e.published and not self.query) else {},
+                )
+            pages += 1
+            if not feed.more_pages or (max_pages is not None and pages >= max_pages):
+                return
+            page_no += 1
 
     def fetch(self, stub: Stub) -> Record | None:
         # Assimilated EU law (/european/…) isn't served at /data.akn — it needs AKN

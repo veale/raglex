@@ -38,6 +38,7 @@ from ..core.segmentation import assemble, blocks_by_localname, element_text
 BASE_URL = "https://caselaw.nationalarchives.gov.uk"
 
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
+_TNA_NS = "{https://caselaw.nationalarchives.gov.uk}"
 # Akoma Ntoso namespace varies by version; match on local-name to stay robust.
 
 
@@ -113,6 +114,18 @@ def parse_atom(xml_bytes: bytes) -> AtomPage:
         document_uri = _document_uri_from_url(landing)
         court = document_uri.split("/", 1)[0] if "/" in document_uri else None
 
+        # The full <updated> timestamp is the incremental cursor. A date-only cursor
+        # loses same-day arrivals FOREVER: the watermark lands on today's date, so a
+        # judgment published later today compares <= and the crawl stops before it.
+        hints: dict = {}
+        if updated:
+            hints["watermark"] = updated.strip()
+        # <tna:contenthash> is FCL's change signal — carried so a held judgment that
+        # was revised upstream (anonymisation, corrections) is re-fetched, not skipped.
+        contenthash = (entry.findtext(f"{_TNA_NS}contenthash") or "").strip()
+        if contenthash:
+            hints["contenthash"] = contenthash
+
         stubs.append(
             Stub(
                 stable_id=document_uri,
@@ -121,6 +134,7 @@ def parse_atom(xml_bytes: bytes) -> AtomPage:
                 hint_date=_parse_atom_date(updated),
                 title=title,
                 court=court,
+                hints=hints,
             )
         )
     return AtomPage(stubs=stubs, next_url=next_url)
@@ -212,7 +226,14 @@ class UKCaseLawAdapter(BaseAdapter):
             self.source = "uk-grc"
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        params: dict[str, object] = {"order": "-date", "per_page": self.per_page}
+        # Incremental crawls sort by -transformation ("body last modified", which is what
+        # the entry <updated> element carries) so the cursor field IS the sort field. The
+        # old -date sort orders by court publication date while the cursor compared
+        # <updated> — non-monotonic, so a late-published old judgment (decided last year,
+        # added to FCL yesterday) sat below the stop line and was never seen. First/full
+        # crawls keep -date (newest decisions first is the right seeding order).
+        order = "-transformation" if since else "-date"
+        params: dict[str, object] = {"order": order, "per_page": self.per_page}
         if self.court:
             params["court"] = self.court
         if self.query:
@@ -223,9 +244,14 @@ class UKCaseLawAdapter(BaseAdapter):
             resp = self._client.get(url, params=params if pages == 0 else None)
             page = parse_atom(resp.content)
             for stub in page.stubs:
-                # Incremental cursor: stop once we reach docs at/older than the
-                # watermark (feed is newest-first by order=-date).
-                if since and stub.hint_date and stub.hint_date.isoformat() <= since:
+                # Incremental cursor: stop once we reach docs at/older than the watermark
+                # (feed is newest-first). Compare the FULL timestamp — a date-only cursor
+                # skips everything else published the same day. An old date-only watermark
+                # ("2026-07-13") still compares correctly against a timestamp (same-day
+                # items re-fetch once, then dedup).
+                wm = stub.hints.get("watermark") or (
+                    stub.hint_date.isoformat() if stub.hint_date else None)
+                if since and wm and wm <= since:
                     return
                 yield stub
             pages += 1
@@ -255,4 +281,7 @@ class UKCaseLawAdapter(BaseAdapter):
             segments=segments,
             relations=relations,
             extracted_via=ExtractedVia.STRUCTURED,
+            # the feed's contenthash rides along so the next crawl can tell a revised
+            # judgment (hash changed upstream) from one we already hold
+            extra={"contenthash": stub.hints["contenthash"]} if stub.hints.get("contenthash") else {},
         )

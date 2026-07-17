@@ -165,3 +165,63 @@ def test_rate_limit_pauses_without_advancing_watermark(catalogue, rawstore):
     # one stored before the wall; watermark NOT advanced so the run resumes (§5a)
     assert stats.stored == 1
     assert catalogue.get_watermark("fake") is None
+
+
+class HintedAdapter(BaseAdapter):
+    """Adapter whose stubs carry feed hints (full-timestamp watermark, contenthash) —
+    the Find Case Law shape."""
+
+    source = "fake"
+    min_interval = 0.0
+
+    def __init__(self, records, hints_by_id=None):
+        self._records = records
+        self._hints = hints_by_id or {}
+        self.fetched: list[str] = []
+
+    def discover(self, since, *, max_pages=None) -> Iterator[Stub]:
+        for rec in self._records:
+            yield Stub(stable_id=rec.stable_id, title=rec.title, court=rec.court,
+                       hint_date=rec.decision_date, hints=self._hints.get(rec.stable_id, {}))
+
+    def fetch(self, stub: Stub) -> Record | None:
+        self.fetched.append(stub.stable_id)
+        return next(r for r in self._records if r.stable_id == stub.stable_id)
+
+
+def test_watermark_prefers_full_timestamp_hint(catalogue, rawstore):
+    rec = _rec("a", "personal data GDPR 2016/679")
+    pipe = Pipeline(catalogue, rawstore)
+    pipe.run(HintedAdapter([rec], {"a": {"watermark": "2024-01-01T15:30:00+00:00"}}))
+    # the cursor keeps the same-day TIME — a date-only cursor loses same-day arrivals
+    assert catalogue.get_watermark("fake") == "2024-01-01T15:30:00+00:00"
+
+
+def test_watermark_key_scopes_the_cursor(catalogue, rawstore):
+    rec = _rec("a", "personal data GDPR 2016/679")
+    pipe = Pipeline(catalogue, rawstore)
+    pipe.run(HintedAdapter([rec]), watermark_key="watch:7:fake")
+    # the watch's cursor advanced; the source-wide cursor is untouched
+    assert catalogue.get_watermark("watch:7:fake") == "2024-01-01"
+    assert catalogue.get_watermark("fake") is None
+
+
+def test_contenthash_change_refetches_held_document(catalogue, rawstore):
+    v1 = _rec("a", "personal data GDPR 2016/679 version one")
+    pipe = Pipeline(catalogue, rawstore)
+    v1.extra["contenthash"] = "hash-1"
+    pipe.run(HintedAdapter([v1], {"a": {"contenthash": "hash-1"}}))
+
+    # same hash → dedup before fetch (no needless download)
+    ad = HintedAdapter([v1], {"a": {"contenthash": "hash-1"}})
+    stats = pipe.run(ad)
+    assert ad.fetched == [] and stats.deduped == 1
+
+    # changed hash → the held copy is a superseded revision → re-fetch + flag refreshed
+    v2 = _rec("a", "personal data GDPR 2016/679 version two REVISED")
+    v2.extra["contenthash"] = "hash-2"
+    ad2 = HintedAdapter([v2], {"a": {"contenthash": "hash-2"}})
+    stats2 = pipe.run(ad2)
+    assert ad2.fetched == ["a"]
+    assert stats2.refreshed_ids == ["a"]
+    assert catalogue.document_meta("a")["contenthash"] == "hash-2"
