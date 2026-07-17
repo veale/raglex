@@ -223,18 +223,23 @@ class DMACasesAdapter(BaseAdapter):
         )
         return json.loads(resp.content)
 
-    def _all_records(self, *, max_pages: int | None) -> list[dict]:
+    # A case is assembled from several records (case + decisions + attachments) that the
+    # API returns interleaved across pages, so a PARTIAL fetch yields incomplete cases.
+    # The register is small and bounded, so we always page to completion (``max_pages``
+    # from the caller is a feed-crawl notion that doesn't apply here) — capped only as a
+    # runaway guard.
+    _PAGE_CAP = 100
+
+    def _all_records(self, *, max_pages: int | None = None) -> list[dict]:
         out: list[dict] = []
-        page, pages = 1, 0
-        while True:
+        page = 1
+        while page <= self._PAGE_CAP:
             data = self._search(page)
             results = data.get("results", []) if isinstance(data, dict) else []
             if not results:
                 break
             out.extend(r.get("metadata", {}) for r in results)
-            pages += 1
-            total = data.get("totalResults", 0)
-            if len(out) >= total or (max_pages is not None and pages >= max_pages):
+            if len(out) >= data.get("totalResults", 0):
                 break
             page += 1
         return out
