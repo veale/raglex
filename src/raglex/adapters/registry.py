@@ -13,6 +13,7 @@ from ..core.adapter import Adapter
 from ..scraping.recipes import RECIPES
 from ..scraping.scrape_adapter import RecipeScrapeAdapter
 from .a29wp import A29WPAdapter
+from .dma import DMACasesAdapter
 from .echr import ECHRAdapter
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
@@ -51,6 +52,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Article 29 Working Party (1997–2018, closed archive) — the justice-site
     # opinion/recommendation index + the newsroom items, WP-number identity.
     "a29wp": A29WPAdapter,
+    # Digital Markets Act enforcement cases — the Commission's DMA register via its
+    # ODSE search API; every case/decision linked to the DMA (32022R1925).
+    "dma-cases": DMACasesAdapter,
     # Legislation (§0) — statute, not just cases. stable_ids are the resolution
     # targets so harvesting these closes the §5b loop (FOIA, DPA, GDPR, …).
     "uk-legislation": UKLegislationAdapter,
@@ -64,7 +68,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
 # Sources that are in-scope by construction (§4) — tagged, not topic-gated:
 # the GRC tribunal, GDPR-linked CJEU cases, the EDPB (a DP regulator: everything
 # it publishes is in scope), and in-scope regulator scrape recipes.
-IN_SCOPE_SOURCES: set[str] = {"uk-grc", "eu-cellar", "echr", "edpb", "edpb-oss", "a29wp"} | {
+IN_SCOPE_SOURCES: set[str] = {"uk-grc", "eu-cellar", "echr", "edpb", "edpb-oss", "a29wp",
+                              "dma-cases"} | {
     key for key, recipe in RECIPES.items() if recipe.in_scope
 }
 
@@ -158,6 +163,15 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (),
         ("EDPBI identifier (EDPBI:LU:OSS:D:2026:3920)",),
     ),
+    "dma-cases": SourceInfo(
+        "dma-cases", "Digital Markets Act cases (Commission register)", "guidance", "EU", False,
+        "The Commission's DMA enforcement register via its ODSE search API — one document "
+        "per case with its full decision timeline, press releases and OJ references, every "
+        "case and decision linked to the DMA (Reg. 2022/1925). Incremental on the last "
+        "decision date; a new step on an existing case re-fetches it.",
+        (),
+        ("DMA case number (DMA.100209)",),
+    ),
     "a29wp": SourceInfo(
         "a29wp", "Article 29 Working Party (archive, 1997–2018)", "guidance", "EU", False,
         "The EDPB's predecessor: ~250 opinions/recommendations from the old justice-site "
@@ -216,7 +230,7 @@ def source_catalog() -> list[dict]:
         # EDPB sitemap/register cursors. The other legislation/by-id sources are
         # fetched by naming the item — no moving feed.
         row["can_incremental"] = (row.get("kind") == "caselaw"
-                                  or key in ("uk-legislation", "edpb", "edpb-oss"))
+                                  or key in ("uk-legislation", "edpb", "edpb-oss", "dma-cases"))
         out.append(row)
     return out
 
