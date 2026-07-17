@@ -411,6 +411,25 @@ def test_uk_statute_names_stay_name_only_inside_irish_judgments(catalogue, tmp_p
     assert {"32016R0679", "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
 
 
+def test_eu_guidance_links_eu_law_and_case_law_but_not_domestic_statute(catalogue, tmp_path):
+    # An EDPB guidance document links EU legislation (CELEX), CJEU + ECHR case law
+    # (ECLI) and English/Irish case-law neutral citations — all unambiguous — but a
+    # bare domestic statute NAME is a cross-jurisdiction collision, kept as name-only.
+    ts = TextStore(tmp_path / "text")
+    t = ("This guidance concerns Article 17 of Regulation (EU) 2016/679; see "
+         "ECLI:EU:C:2014:317, Smith v Jones [2020] EWCA Civ 99 and [2019] IESC 4. "
+         "Section 5 of the Data Protection Act 2018 is mentioned in passing.")
+    _doc(catalogue, ts, "edpb/guidelines-x", t, source="edpb", doc_type=DocType.GUIDANCE)
+    extract_document(catalogue, ts, "edpb/guidelines-x")
+    by_method = {}
+    for c in catalogue.citations_for("edpb/guidelines-x"):
+        by_method.setdefault(c["method"], []).append(c["candidate_id"])
+    assert by_method["uk_act_section"] == [None]          # domestic statute name suppressed
+    dsts = {e["dst_id"] for e in catalogue.relations_for("edpb/guidelines-x") if e["dst_id"]}
+    # EU law, CJEU ECLI, and both English + Irish case-law citations DO link
+    assert {"32016R0679", "ECLI:EU:C:2014:317", "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
+
+
 def test_irish_neutral_citations_mint_candidates_and_reporters_stay_maybe():
     by = {c.raw: c for c in extract_citations(
         "see [2008] IEHC 56, [2004] IESC 1, [1999] 1 IR 12 and [2001] 1 ILRM 22")}

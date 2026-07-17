@@ -104,6 +104,7 @@ class Pipeline:
         ignore_watermark: bool = False,
         record_health: bool = True,
         watermark_key: str | None = None,
+        on_progress=None,
     ) -> RunStats:
         """Run one source. ``backfill`` ignores the stored watermark and pages deep
         from ``since`` (§5). ``ignore_watermark`` runs with NO date cursor at all and
@@ -126,6 +127,12 @@ class Pipeline:
         try:
             for stub in adapter.discover(watermark, max_pages=max_pages):
                 stats.discovered += 1
+                # Per-stub heartbeat so a long crawl (the EDPB backfill fetches hundreds
+                # of PDFs at a slow, WAF-safe pace) keeps the job alive and shows live
+                # progress, instead of looking frozen behind one silent "harvesting" line.
+                if on_progress:
+                    on_progress(stage=f"harvesting {adapter.source}", done=stats.discovered,
+                                stored=stats.stored, item=stub.stable_id)
 
                 # Skip a stub we ALREADY hold before paying to download+parse it (dedup
                 # otherwise only fires on the payload hash, *after* the fetch). A query/

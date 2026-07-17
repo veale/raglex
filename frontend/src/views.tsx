@@ -1599,23 +1599,9 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
           <button onClick={refresh} style={{ flex: "0 0 auto" }}>↻ Refresh</button>
           <button onClick={() => act(api.embed(), "embed")} style={{ flex: "0 0 auto" }}>Embed pending</button>
           <button onClick={() => act(api.resolve(), "resolve")} style={{ flex: "0 0 auto" }}>Resolve citations</button>
-          <button onClick={() => act(api.backfillTitles(), "eurlex names")} style={{ flex: "0 0 auto" }}
-            title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings)">EU case names</button>
-          <button onClick={() => act(api.startJob("rescan-citations", {}).then((j) => `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "re-scan citations")}
-            style={{ flex: "0 0 auto" }}
-            title="Re-extract EVERY document with the current grammars — run after a new adapter/grammar (e.g. ECHR) so existing docs pick up the new citations. Runs in the background.">↻ Re-scan all citations</button>
-          <button onClick={() => act(api.startJob("rescan", { doc_types: ["judgment"] }).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "full relink — judgments")}
-            style={{ flex: "0 0 auto" }}
-            title="FULL RELINK, JUDGMENTS ONLY: re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain — legislation-name → held titles, reporters → cases, EHRR → ECtHR, parallel/ECR mining. The citation fixes all live in judgments. Watch Jobs for per-stage progress.">⟳ Full relink (judgments only)</button>
-          <button onClick={() => act(api.startJob("rescan", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "full relink — all")}
-            style={{ flex: "0 0 auto" }}
-            title="FULL RELINK, ALL DOCS: re-extract every document (incl. 122k legislation), then run the whole resolution chain. Slower; use 'judgments only' unless you also want legislation→legislation citations refreshed.">⟳ Full relink (all docs)</button>
-          <button onClick={() => act(api.startJob("harvest-echr", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "queue HUDOC cases")}
-            style={{ flex: "0 0 auto" }}
-            title="Queue the ECtHR cases the corpus cites by name/EHRR but doesn't hold, and fetch them from HUDOC by case-name search (most-cited first). Then links their EHRR citations. Runs in the background.">⇊ Queue missing ECtHR (HUDOC)</button>
-          <button onClick={() => act(api.startJob("expand-citing", {}).then((j) => j.error ? j.error : `started job ${j.job_id.slice(0,8)} (watch Jobs)`), "pull citing cases")}
-            style={{ flex: "0 0 auto" }}
-            title="Find and pull every case that CITES an EU case already in the corpus (via CELLAR's citation graph). Backward citation expansion. Runs in the background.">⇊ Pull cases citing EU cases</button>
+          <span className="muted" style={{ flex: 1, textAlign: "right", fontSize: 12 }}>
+            Re-scans, full relinks, EU-name / ECtHR backfills &amp; corpus-growth jobs live in <b>Maintain</b>.
+          </span>
         </div>
         <div className="row" style={{ marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span className="muted" style={{ flex: "0 0 auto" }}>Harvest from</span>
@@ -2154,6 +2140,7 @@ function SourceCaps({ info }: { info: any }) {
 // each a Run-now that fires a visible Job. So upkeep is legible, not folklore.
 function KeepCurrentPanel() {
   const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
   const runNow = (kind: any, label: string) => fireJob(kind, {}, (m) => setMsg(`${label}: ${m}`));
   const auto = [
     ["Pull EU case names / subjects (EUR-Lex)", "daily", "Fills missing CJEU case names so their OSCOLA citations read properly."],
@@ -2182,6 +2169,11 @@ function KeepCurrentPanel() {
       <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
         <button onClick={() => runNow("rebuild-citation-counts", "rebuild counts")}>↻ Rebuild citation counts</button>
         <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
+        <button disabled={busy} onClick={async () => {
+          setBusy(true); setMsg("EU case names: running…");
+          try { const r = await api.backfillTitles(); setMsg("EU case names: " + JSON.stringify(r)); }
+          catch (e: any) { setMsg("✗ " + e); } finally { setBusy(false); }
+        }} title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs the daily auto-task now.">⇊ EU case names</button>
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain">⟳ Full relink (judgments)</button>
         <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain">⟳ Full relink (all)</button>
@@ -2250,6 +2242,29 @@ function GapFillPanel() {
   );
 }
 
+// "Expand coverage" — one-off pulls that grow the corpus outward from what it already
+// holds (as opposed to Keep-current's automatic upkeep). Moved here from the Dashboard.
+function ExpandCoveragePanel() {
+  const [msg, setMsg] = useState("");
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Expand coverage <span className="muted">— one-off pulls that grow the corpus outward from what it holds</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Background jobs — watch the <b>Jobs</b> panel for progress. <b>Queue missing ECtHR</b> fetches the Strasbourg cases
+        your corpus cites by name / EHRR but doesn't hold; <b>Pull cases citing EU cases</b> walks CELLAR's citation graph to
+        pull every judgment that cites an EU case already held.
+      </p>
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        <button onClick={() => fireJob("harvest-echr", {}, setMsg)}
+          title="Queue the ECtHR cases the corpus cites by name/EHRR but doesn't hold, and fetch them from HUDOC by case-name search (most-cited first). Then links their EHRR citations.">⇊ Queue missing ECtHR (HUDOC)</button>
+        <button onClick={() => fireJob("expand-citing", {}, setMsg)}
+          title="Find and pull every case that CITES an EU case already in the corpus (via CELLAR's citation graph). Backward citation expansion.">⇊ Pull cases citing EU cases</button>
+      </div>
+      {msg && <p className={msg.startsWith("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
+    </div>
+  );
+}
+
 // The consolidated "Maintain" page: keep-current upkeep, gap backfill, watches, and rules —
 // the whole "grow + keep the corpus complete" surface in one place.
 export function MaintainView({ open }: { open: (id: string) => void }) {
@@ -2259,11 +2274,13 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
         <h2 style={{ margin: 0 }}>Maintain</h2>
         <p className="muted" style={{ marginTop: 4 }}>
           Grow the corpus and keep it current. <b>Keep current</b> is automatic upkeep; <b>Backfill gaps</b> chases 100%
-          completeness court-by-court; <b>Watches</b> pull new material on a schedule; <b>Rules</b> are optional shorthands.
+          completeness court-by-court; <b>Expand coverage</b> pulls in cited-but-missing authorities; <b>Watches</b> pull
+          new material on a schedule; <b>Rules</b> are optional shorthands.
         </p>
       </div>
       <KeepCurrentPanel />
       <GapFillPanel />
+      <ExpandCoveragePanel />
       <RefinementFlagsPanel open={open} />
       <WatchesView />
       <RulesView open={open} />

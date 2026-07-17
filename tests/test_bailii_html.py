@@ -341,3 +341,32 @@ def test_export_retrieval_citations_jurisdiction_filter(facade):
     # asking for Ireland gets the ILRM row
     ie = facade.export_retrieval_citations(min_citing=2, jurisdictions=("ie",))
     assert [i["citation"] for b in ie["batches"] for i in b["items"]] == ["[1990] ILRM 12"]
+
+
+def test_export_jurisdiction_filter_uses_candidate_for_neutral_citations(facade):
+    # An Irish NEUTRAL citation ("[2019] IESC 4") is not a report series, so its
+    # jurisdiction must come from the candidate's court token (iesc → Irish) — else it
+    # defaults to "uk" and leaks into a UK-only Westlaw batch (the reported bug).
+    from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
+                                    ResolutionStatus, TypedRelation)
+    from datetime import date
+    with facade._open() as (cat, rs, ts):
+        refs = {("[2019] IESC 4", "iesc/2019/4"): 4, ("[1987] AC 460", None): 4}
+        di = 0
+        for (raw, cand), cnt in refs.items():
+            for _ in range(cnt):
+                sid = f"n/{di}"; di += 1
+                rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                             decision_date=date(2024, 1, 1), text="t", raw_bytes=b"t",
+                             extracted_via=ExtractedVia.STRUCTURED,
+                             relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                        raw_citation_string=raw, dst_id=cand,
+                                        resolution_status=ResolutionStatus.PENDING)])
+                rec.ensure_payload_hash()
+                cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash + sid, "t")))
+
+    uk = facade.export_retrieval_citations(min_citing=2, jurisdictions=("uk",))
+    flat = [i["citation"] for b in uk["batches"] for i in b["items"]]
+    assert "[1987] AC 460" in flat and "[2019] IESC 4" not in flat  # Irish NC excluded
+    ie = facade.export_retrieval_citations(min_citing=2, jurisdictions=("ie",))
+    assert "[2019] IESC 4" in [i["citation"] for b in ie["batches"] for i in b["items"]]

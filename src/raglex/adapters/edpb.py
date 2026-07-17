@@ -427,11 +427,19 @@ class EDPBAdapter(BaseAdapter):
         doc_type = SECTION_DOCTYPE.get(section, DocType.GUIDANCE)
 
         pdfs = [f for f in meta["files"] if f["href"].lower().endswith(".pdf")]
-        main = next((f for f in pdfs if "_en" in f["href"].lower()), pdfs[0] if pdfs else None)
-        raw, raw_ext, text = resp.content, "html", None
+        # Prefer the English PDF, then any other PDF. Try each in turn: EDPB pages
+        # sometimes link a since-removed file (a 404), so one bad link must not lose
+        # the whole document — its page carries the title/date/topics regardless.
+        candidates = ([f for f in pdfs if "_en" in f["href"].lower()]
+                      + [f for f in pdfs if "_en" not in f["href"].lower()])
+        raw, raw_ext, text, main = resp.content, "html", None, None
         needs_ocr = False
-        if main:
-            pdf = self._get(f"{BASE_URL}{main['href']}", expect_pdf=True)
+        for cand in candidates:
+            try:
+                pdf = self._get(f"{BASE_URL}{cand['href']}", expect_pdf=True)
+            except FetchError:
+                continue  # this attachment 404'd/errored — try the next (RateLimit still propagates)
+            main = cand
             raw, raw_ext = pdf.content, "pdf"
             extracted = extract_bytes(raw, ext="pdf", mime="application/pdf")
             text = extracted.text
@@ -441,7 +449,11 @@ class EDPBAdapter(BaseAdapter):
                     text = ocr
                 else:
                     needs_ocr = True
+            break
+        pdf_unavailable = bool(candidates) and main is None
         if not text:
+            # no usable PDF (none listed, or all failed) — keep the page itself as the
+            # body so the document is still held, not dropped
             text = extract_bytes(html.encode(), ext="html").text
 
         status = (meta["version_status"] or "").lower()
@@ -456,6 +468,7 @@ class EDPBAdapter(BaseAdapter):
             "other_files": [f for f in meta["files"] if not main or f["href"] != main["href"]],
             **({"contenthash": stub.hints["contenthash"]} if stub.hints.get("contenthash") else {}),
             **({"needs_ocr": True} if needs_ocr else {}),
+            **({"pdf_unavailable": True} if pdf_unavailable else {}),
             **({"consultation_draft": True} if "consultation" in status else {}),
         }
         return Record(

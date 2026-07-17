@@ -73,6 +73,21 @@ def _is_irish_case(doc) -> bool:
     return doc["source"] == "ie-caselaw" or court in IRISH_COURTS or prefix in IRISH_COURTS
 
 
+# EU regulatory guidance / DPA decisions (EDPB, Article 29 WP, the one-stop-shop
+# register). These link cleanly to EU legislation (CELEX), CJEU + ECHR case law (ECLI,
+# case numbers) and — usefully — English & Irish case-law neutral citations, all of
+# which are unambiguous identifiers. But a bare *domestic* statute NAME ("Data
+# Protection Act 2018") in an EU-level document is a cross-jurisdiction name collision
+# (an EDPB guideline referencing "the Data Protection Act" could mean any member
+# state's), so keep the textual mention but drop the domestic-legislation candidate
+# (→ name-only) — exactly the guard the CJEU and Irish judgments already use.
+_EU_GUIDANCE_SOURCES = frozenset({"edpb", "edpb-oss", "a29wp"})
+
+
+def _is_eu_guidance(doc) -> bool:
+    return doc["source"] in _EU_GUIDANCE_SOURCES
+
+
 _UK_COUNTRY_RE = re.compile(r"united\s+kingdom|\bgreat\s+britain\b|\bGB\b|\bUK\b", re.IGNORECASE)
 
 
@@ -133,6 +148,15 @@ def extract_document(
     # resolve normally. The bare "section N" carry-forward follows automatically: with
     # no UK candidate there is no legislation antecedent to attach to.
     if _is_irish_case(doc):
+        cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
+                 for c in cites]
+
+    # EU guidance guard (EDPB / A29WP / OSS decisions): an EU-level document must not
+    # link a *domestic* statute by NAME (cross-jurisdiction collision), but its EU-law
+    # (CELEX), CJEU/ECHR (ECLI) and English/Irish case-law (neutral-citation) links are
+    # all unambiguous and kept. Domestic (ICO etc.) guidance is deliberately NOT gated —
+    # there a "Data Protection Act 2018" reference IS to the national statute.
+    if _is_eu_guidance(doc):
         cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
                  for c in cites]
 

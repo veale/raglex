@@ -155,6 +155,29 @@ def _is_junk_ref(ref: str) -> bool:
     return low.startswith(("http://", "https://"))
 
 
+# Corpus-Map category → coarse jurisdiction bucket, for the Westlaw/Lexis export filter.
+# (Report series map via reporters.series_jurisdiction; neutral citations & bare names
+# map here, off the candidate's court token.)
+_CATEGORY_JURISDICTION: dict[str, str] = {
+    "uk-caselaw": "uk", "uk-legislation": "uk",
+    "ie-caselaw": "ie", "ie-legislation": "ie",
+    "eu-cellar": "eu", "eu-legislation": "eu", "echr": "eu",
+    "ca-caselaw": "commonwealth", "au-caselaw": "commonwealth",
+    "nz-caselaw": "commonwealth", "in-caselaw": "commonwealth",
+}
+
+
+def _candidate_jurisdiction(candidate: str | None) -> str:
+    """The jurisdiction bucket (uk / ie / eu / commonwealth) of a non-report reference,
+    from its candidate's court token — so an Irish neutral citation ("[2019] IESC 4" →
+    ``iesc/2019/4``) reads as Irish, not the "uk" default. Bare names → "uk"."""
+    if not candidate:
+        return "uk"
+    from .citations.taxonomy import classify_candidate
+
+    return _CATEGORY_JURISDICTION.get(classify_candidate(candidate).category, "uk")
+
+
 class _SingleStubAdapter:
     """Wrap a real adapter to fetch exactly one known item: ``discover`` yields a
     single constructed stub, ``fetch`` delegates to the base adapter. Used for
@@ -1111,8 +1134,15 @@ class Facade:
                     continue
             if want_series and (not series or series.upper() not in want_series):
                 continue
-            # non-report citation shapes here are UK neutral-citation-style → "uk"
-            jur = series_jurisdiction(series)
+            # Jurisdiction: a recognised report series maps directly; otherwise the
+            # reference is a neutral citation ("[2019] IESC 4") or bare name, whose
+            # jurisdiction is read from the candidate's court token — so Irish (IESC/
+            # IECA/IEHC) and Commonwealth neutral citations don't default to "uk" and
+            # leak into a UK-only Westlaw batch.
+            if series:
+                jur = series_jurisdiction(series)
+            else:
+                jur = _candidate_jurisdiction(r.get("candidate"))
             if want_jur and jur not in want_jur:
                 continue
             key = _re.sub(r"[\s.'’\[\]()]+", "", raw).upper()  # fold for dedup
@@ -4303,7 +4333,8 @@ class Facade:
             max_pages = (spec.get("max_pages_incremental", 40) if has_cursor
                          else spec.get("max_pages", 1))
             h = self.harvest(source, backfill=bool(spec.get("backfill")),
-                             max_pages=max_pages, options=opts, watermark_key=wm_key)
+                             max_pages=max_pages, options=opts, watermark_key=wm_key,
+                             on_progress=on_progress)
             result["harvest"] = h
             seed_ids = self._keyword_seed_docs(source, keywords, limit=spec.get("max_seeds", 60))
             result["seeds_from_source"] = len(seed_ids)
@@ -4368,6 +4399,7 @@ class Facade:
         self, source: str, *, backfill: bool = False, since: str | None = None,
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
+        on_progress=None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
         "trigger a backfill / re-run a source from the browser" action. ``options``
@@ -4390,7 +4422,8 @@ class Facade:
             )
             before = cat.all_stable_ids()
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
-                             ignore_watermark=ignore_watermark, watermark_key=watermark_key)
+                             ignore_watermark=ignore_watermark, watermark_key=watermark_key,
+                             on_progress=on_progress)
             # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.
             # (Re-extracting all ~20k docs on every harvest was O(minutes) of pure-CPU
             # grammar work; resolution already links existing pending edges to the new
