@@ -823,6 +823,66 @@ def create_app(config: Config | None = None) -> FastAPI:
                           f"Import BAILII folder ({staged} files)",
                           {"dir_path": str(d)})
 
+    # Westlaw RTF import — the sibling of the BAILII-page path, for the other big source
+    # of older UK (and UK-reported EU) judgments. Same zip + batched-folder shape.
+    @app.post("/import/westlaw-zip")
+    async def import_westlaw_zip_ep(file: UploadFile = File(...)) -> dict:
+        """Accept a zip of Westlaw ``.rtf`` case exports and process it as a background
+        job: each file is parsed (parties, court, every parallel report citation, judges,
+        counsel, digest, numbered paragraphs / star-pages) and synthesised with the
+        corpus — keyed by its strongest identity (neutral slug → ECLI → Westlaw id)."""
+        data = await file.read()
+        spool = facade.config.data_dir / "uploads"
+        spool.mkdir(parents=True, exist_ok=True)
+        path = spool / f"westlaw-{_uuid.uuid4().hex[:12]}.zip"
+        path.write_bytes(data)
+        return jobs.start("import-westlaw-zip",
+                          f"Import Westlaw zip ({file.filename or 'upload.zip'})",
+                          {"zip_path": str(path)})
+
+    def _westlaw_batch_dir(upload_id: str):
+        if not _BAILII_SPOOL_ID.match(upload_id or ""):
+            return None  # reject anything that could escape the spool root
+        d = facade.config.data_dir / "uploads" / f"westlaw-files-{upload_id}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @app.post("/import/westlaw-files")
+    async def import_westlaw_files_batch_ep(
+        upload_id: str = Form(...), files: list[UploadFile] = File(...),
+    ) -> dict:
+        """Receive one batch of Westlaw ``.rtf`` files into the spool directory keyed by
+        ``upload_id``. Call repeatedly to stage a whole folder, then POST
+        ``/import/westlaw-files/start`` to launch the import."""
+        d = _westlaw_batch_dir(upload_id)
+        if d is None:
+            return JSONResponse({"error": "bad upload_id"}, status_code=400)
+        written = 0
+        for f in files:
+            name = (f.filename or "").rsplit("/", 1)[-1]
+            if not name.lower().endswith(".rtf") or name.startswith("."):
+                continue
+            dest = d / name
+            if dest.exists():
+                dest = d / f"{_uuid.uuid4().hex[:8]}_{name}"
+            dest.write_bytes(await f.read())
+            written += 1
+        staged = sum(1 for _ in d.glob("*.rtf"))
+        return {"upload_id": upload_id, "received": written, "staged": staged}
+
+    @app.post("/import/westlaw-files/start")
+    def import_westlaw_files_start_ep(payload: dict = Body(...)) -> dict:
+        """Launch the import over everything staged under ``upload_id``."""
+        d = _westlaw_batch_dir(payload.get("upload_id", ""))
+        if d is None:
+            return JSONResponse({"error": "bad upload_id"}, status_code=400)
+        staged = sum(1 for _ in d.glob("*.rtf"))
+        if not staged:
+            return {"error": "no files staged for this upload"}
+        return jobs.start("import-westlaw-dir",
+                          f"Import Westlaw folder ({staged} files)",
+                          {"dir_path": str(d)})
+
     @app.post("/documents/{doc_id:path}/attach")
     async def attach_ep(doc_id: str, file: UploadFile = File(...), kind: str = Form("exhibit")) -> dict:
         data = await file.read()

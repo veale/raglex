@@ -2856,6 +2856,275 @@ class Facade:
         except OSError:
             return 0
 
+    # -- Westlaw RTF import (§1.9, sibling of the BAILII-page path) ---------
+    def import_westlaw_zip(self, *, zip_path: str, limit: int | None = None,
+                           on_progress=None, cancel_check=None) -> dict:
+        """Import a **zip of Westlaw ``.rtf`` exports** — the counterpart to
+        :meth:`import_bailii_zip` for the other big source of older UK judgments. Each
+        RTF is parsed (:func:`parse_westlaw_rtf`), keyed by its strongest identity
+        (neutral-citation slug → ECLI → Westlaw-id surrogate), synthesised against the
+        corpus, then extracted + resolved once at the end."""
+        import zipfile
+
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = [i for i in zf.infolist()
+                     if not i.is_dir()
+                     and i.filename.lower().endswith(".rtf")
+                     and not i.filename.startswith("__MACOSX")
+                     and "/." not in "/" + i.filename]
+            if limit:
+                infos = infos[:limit]
+
+            def _entries():
+                for info in infos:
+                    yield info.filename, zf.read(info)
+
+            return self._import_westlaw_files(_entries(), total=len(infos),
+                                              on_progress=on_progress, cancel_check=cancel_check)
+
+    def import_westlaw_dir(self, *, dir_path: str, limit: int | None = None,
+                           on_progress=None, cancel_check=None) -> dict:
+        """Same synthesis as :meth:`import_westlaw_zip`, over a **directory** of ``.rtf``
+        exports (recursively) — the no-zip path for a Finder folder the web UI streamed
+        up in batches."""
+        import os
+
+        paths: list[str] = []
+        for root, _dirs, names in os.walk(dir_path):
+            for nm in names:
+                if nm.lower().endswith(".rtf") and not nm.startswith("."):
+                    paths.append(os.path.join(root, nm))
+        paths.sort()
+        if limit:
+            paths = paths[:limit]
+
+        def _entries():
+            for p in paths:
+                with open(p, "rb") as fh:
+                    yield os.path.basename(p), fh.read()
+
+        return self._import_westlaw_files(_entries(), total=len(paths),
+                                          on_progress=on_progress, cancel_check=cancel_check)
+
+    @staticmethod
+    def _westlaw_supersedes(existing, existing_meta: dict, new_len: int, old_len: int) -> bool:
+        """Should a parsed Westlaw RTF REPLACE the held text for its id? Yes when the held
+        copy is a lower-fidelity import (a BAILII page/dump, a manual upload, a prior
+        Westlaw RTF, or textless). A HoL scrape is replaced only by a comparably long
+        copy. An authoritative primary source — Find Case Law XML (uk-caselaw) or CELLAR
+        (eu-cellar) — stays; the Westlaw text attaches as a secondary rendition and only
+        its rich metadata (parallel citations, counsel, subjects) is merged."""
+        if not existing["has_text"]:
+            return True
+        if existing_meta.get("imported") in (
+                "bailii-corpus", "bailii-html", "bailii-pdf-stub", "westlaw-rtf"):
+            return True
+        if existing_meta.get("via") == "bailii-upload":
+            return True
+        if existing["source"] == "user-import":
+            return True
+        if existing["source"] == "uk-hol":
+            return new_len >= 0.8 * old_len
+        return False
+
+    @staticmethod
+    def _westlaw_meta(parsed) -> dict:
+        """The structured Westlaw fields worth keeping in ``documents.meta_json`` —
+        everything the RTF states that the bare judgment text does not."""
+        fields = {
+            "party_full": parsed.party_full,
+            "also_known_as": list(parsed.also_known_as),
+            "court_label": parsed.court_label,
+            "report_citations": list(parsed.report_citations),
+            "neutral_citation": parsed.neutral_citation,
+            "ecli": parsed.ecli,
+            "case_number": parsed.case_number,
+            "wl_number": parsed.wl_number,
+            "judges": list(parsed.judges),
+            "counsel": list(parsed.counsel),
+            "solicitors": list(parsed.solicitors),
+            "subjects": list(parsed.subjects),
+            "keywords": list(parsed.keywords),
+        }
+        return {k: v for k, v in fields.items() if v}
+
+    def _import_westlaw_files(self, entries, *, total: int,
+                              on_progress=None, cancel_check=None) -> dict:
+        """The shared Westlaw-RTF importer: consume ``entries`` (an iterable of
+        ``(filename, rtf_bytes)``), synthesising each against the corpus, then extract +
+        resolve once at the end. Both the zip and the directory paths feed it the same
+        stream — the exact shape of :meth:`_import_bailii_pages`, differing only in the
+        identity ladder (citation-keyed, not FCL-slug-keyed) and the richer metadata."""
+        from .adapters.uk_caselaw import court_from_slug
+        from .adapters.westlaw_rtf import parse_westlaw_rtf, westlaw_identity
+        from .citations import extract_document
+        from .citations.courts import IRISH_COURTS
+        from .citations.name_variants import name_variants
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+        from .pipeline.runner import _chamberless_alias
+        from .resolve.matchers import first_candidate
+        from .topics.gate import fold
+
+        st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0,
+              "merged": 0, "unparseable": 0, "aliases": 0, "extracted": 0}
+        files: list[dict] = []
+        with self._open() as (cat, rs, ts):
+            to_extract: list[str] = []
+            for n, (filename, data) in enumerate(entries, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["total"] += 1
+                _progress(on_progress, stage="importing", done=n, total=total, item=filename)
+                try:
+                    parsed = parse_westlaw_rtf(data, filename=filename)
+                except Exception as exc:  # noqa: BLE001 — one bad file mustn't sink the batch
+                    parsed = None
+                    if len(files) < 1000:
+                        files.append({"file": filename, "disposition": "error", "error": str(exc)})
+                if parsed is None or not parsed.text.strip():
+                    st["unparseable"] += 1
+                    if parsed is not None and len(files) < 1000:
+                        files.append({"file": filename, "disposition": "unparseable",
+                                      "title": parsed.title})
+                    continue
+
+                stable_id, id_kind = westlaw_identity(parsed)
+
+                # aliases: distinctive name variants + every parallel citation + the
+                # Westlaw/ECLI/CJEU ids + (for a neutral id) the chamber-less slug.
+                alias_pairs: list[tuple[str, str]] = []
+                for v, kind in name_variants(parsed.title or ""):
+                    if kind not in self._BAILII_ALIAS_KINDS:
+                        continue
+                    key = fold(v)
+                    if key and key != stable_id:
+                        alias_pairs.append((key, f"westlaw-name:{kind}"))
+                for c in parsed.report_citations:
+                    cand = first_candidate(c)
+                    key = fold(cand.value) if cand else fold(c)
+                    if key and key != stable_id:
+                        alias_pairs.append((key, "westlaw-report-alias"))
+                for ident in (parsed.wl_number, parsed.ecli, parsed.case_number):
+                    if ident:
+                        key = fold(ident)
+                        if key and key != stable_id:
+                            alias_pairs.append((key, "westlaw-id"))
+                if id_kind == "neutral":
+                    bare = _chamberless_alias(stable_id)
+                    if bare and bare != stable_id:
+                        alias_pairs.append((bare, "chamber-alias"))
+
+                # A pre-neutral case has only a Westlaw-id surrogate to key by — but if one
+                # of its parallel report citations already resolves to a held document (the
+                # same case from BAILII/ICLR), adopt that id and merge into it rather than
+                # minting a duplicate.
+                if id_kind == "wl":
+                    for key, src in alias_pairs:
+                        if src != "westlaw-report-alias":
+                            continue
+                        held = cat.get_alias(key)
+                        if held and cat.get_document(held) is not None:
+                            stable_id, id_kind = held, "merged"
+                            break
+
+                payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
+                head = stable_id.split("/", 1)[0]
+                source = ("eu-cellar" if parsed.is_eu
+                          else "ie-caselaw" if head in IRISH_COURTS else "uk-caselaw")
+                new_meta = {"imported": "westlaw-rtf", "westlaw": self._westlaw_meta(parsed)}
+                existing = cat.get_document(stable_id)
+                old_meta = cat.document_meta(stable_id) if existing is not None else {}
+
+                if existing is not None and existing["payload_hash"] == payload_hash:
+                    for key, src in alias_pairs:
+                        cat.put_alias(key, stable_id, source=src, commit=False)
+                        st["aliases"] += 1
+                    st["unchanged"] = st.get("unchanged", 0) + 1
+                    if len(files) < 1000:
+                        files.append({"file": filename, "stable_id": stable_id,
+                                      "title": parsed.title, "disposition": "unchanged"})
+                    continue
+
+                if existing is None or self._westlaw_supersedes(
+                        existing, old_meta, len(parsed.text),
+                        self._text_len(ts, existing) if existing is not None else 0):
+                    meta = {**old_meta, **new_meta}
+                    if existing is not None and existing["has_text"] and \
+                            existing["payload_hash"] != payload_hash:
+                        alts = meta.get("alt_texts", [])
+                        if not any(a.get("payload_hash") == existing["payload_hash"] for a in alts):
+                            alts.append({"source": existing["source"],
+                                         "payload_hash": existing["payload_hash"],
+                                         "text_path": existing["text_path"]})
+                        meta["alt_texts"] = alts
+                    record = Record(
+                        source=source, stable_id=stable_id, doc_type=DocType.JUDGMENT,
+                        title=parsed.title or (existing["title"] if existing is not None else None) or stable_id,
+                        court=court_from_slug(stable_id) or parsed.court_code,
+                        decision_date=parsed.decision_date,
+                        language="en", source_language="en",
+                        raw_bytes=data, raw_ext="rtf", payload_hash=payload_hash,
+                        text=parsed.text, segments=parsed.segments,
+                        extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER,
+                        extra=meta,
+                    )
+                    raw_path = str(rs.path_for(rs.put(data, ext="rtf"), "rtf"))
+                    text_path = str(ts.put(payload_hash, parsed.text))
+                    ts.put_segments(payload_hash, parsed.segments)
+                    cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+                    to_extract.append(stable_id)
+                    if existing is None:
+                        disposition, key = "imported", "imported"
+                    elif id_kind == "merged":
+                        disposition, key = "merged", "merged"
+                    else:
+                        disposition, key = "superseded", "superseded"
+                    st[key] += 1
+                else:
+                    # held authoritatively (FCL XML / CELLAR) — attach as secondary text,
+                    # merge the richer Westlaw metadata, keep the parallel-citation aliases.
+                    text_path = str(ts.put(payload_hash, parsed.text))
+                    alts = old_meta.get("alt_texts", [])
+                    if not any(a.get("payload_hash") == payload_hash for a in alts):
+                        alts.append({"source": "westlaw-rtf", "payload_hash": payload_hash,
+                                     "text_path": text_path, "chars": len(parsed.text)})
+                    old_meta["alt_texts"] = alts
+                    for k, v in new_meta.items():
+                        old_meta.setdefault(k, v)
+                    cat.set_document_meta(stable_id, old_meta, title_if_empty=parsed.title, commit=False)
+                    disposition = "secondary"
+                    st["secondary"] += 1
+
+                for key, src in alias_pairs:
+                    cat.put_alias(key, stable_id, source=src, commit=False)
+                    st["aliases"] += 1
+                if len(files) < 1000:
+                    files.append({"file": filename, "stable_id": stable_id, "title": parsed.title,
+                                  "citations": list(parsed.report_citations),
+                                  "disposition": disposition})
+                if n % 100 == 0:
+                    cat.commit()
+            cat.commit()
+            for i, sid in enumerate(to_extract):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="extracting citations",
+                          done=i + 1, total=len(to_extract), item=sid)
+                try:
+                    extract_document(cat, ts, sid)
+                    st["extracted"] += 1
+                except Exception:  # noqa: BLE001
+                    pass
+                if i % 100 == 0:
+                    cat.commit()
+            cat.commit()
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            resolved = Resolver(cat).run()
+        st["resolved_edges"] = resolved.resolved
+        st["files"] = files
+        self._invalidate_caches()
+        return st
+
     def harvest_reference(self, *, ref: str, candidate: str | None = None) -> dict:
         """The one-click resolution for a *routable* hanging reference: fetch exactly
         that item from the adapter that holds it, then resolve. ``ref`` is a row from

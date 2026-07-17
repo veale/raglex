@@ -233,6 +233,20 @@ export const api = {
   },
   importBailiiFilesStart: (upload_id: string) =>
     req<{ job_id?: string; error?: string }>("/import/bailii-files/start", { method: "POST", body: JSON.stringify({ upload_id }) }),
+  importWestlawZip: async (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return postForm("/import/westlaw-zip", fd) as Promise<{ job_id?: string; error?: string }>;
+  },
+  // no-zip folder upload: stage a batch of .rtf files under an upload id
+  importWestlawFilesBatch: async (upload_id: string, files: File[]) => {
+    const fd = new FormData();
+    fd.append("upload_id", upload_id);
+    for (const f of files) fd.append("files", f, f.name);
+    return postForm("/import/westlaw-files", fd) as Promise<{ received: number; staged: number; error?: string }>;
+  },
+  importWestlawFilesStart: (upload_id: string) =>
+    req<{ job_id?: string; error?: string }>("/import/westlaw-files/start", { method: "POST", body: JSON.stringify({ upload_id }) }),
   pendingSuggestions: (limit = 500) => req<any>(`/suggestions/pending?limit=${limit}`),
   exportRetrievalCitations: (p: { min_citing?: number; batch_size?: number; include_names?: boolean; separator?: string; series?: string; jurisdictions?: string } = {}) =>
     req<any>(`/export/retrieval-citations?${new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]))}`),

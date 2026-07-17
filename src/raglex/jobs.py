@@ -106,6 +106,8 @@ RUNNERS: dict[str, Callable] = {
     "import-bailii-corpus": lambda f, p, cb, cancel: f.import_bailii_corpus(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-zip": lambda f, p, cb, cancel: f.import_bailii_zip(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-dir": lambda f, p, cb, cancel: f.import_bailii_dir(**p, on_progress=cb, cancel_check=cancel),
+    "import-westlaw-zip": lambda f, p, cb, cancel: f.import_westlaw_zip(**p, on_progress=cb, cancel_check=cancel),
+    "import-westlaw-dir": lambda f, p, cb, cancel: f.import_westlaw_dir(**p, on_progress=cb, cancel_check=cancel),
     "classify-guidance": lambda f, p, cb, cancel: f.reclassify_guidance(**p, on_progress=cb, cancel_check=cancel),
     "mine-parallel": lambda f, p, cb, cancel: f.mine_parallel_citations(**p, on_progress=cb, cancel_check=cancel),
     "match-legislation": lambda f, p, cb, cancel: f.match_named_legislation(**p, on_progress=cb, cancel_check=cancel),

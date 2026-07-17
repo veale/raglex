@@ -401,6 +401,30 @@ def cmd_import_bailii(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_westlaw(args: argparse.Namespace) -> int:
+    """Import a folder (or zip) of Westlaw ``.rtf`` case exports, keying each by its
+    strongest identity (neutral-citation slug → ECLI → Westlaw-id) and minting every
+    parallel report citation as an alias (§5b)."""
+    import os
+
+    from .facade import Facade
+
+    f = Facade(Config.from_env())
+    is_zip = args.path.lower().endswith(".zip") or os.path.isfile(args.path)
+    print(f"importing Westlaw RTFs from {args.path}…")
+    if is_zip and args.path.lower().endswith(".zip"):
+        st = f.import_westlaw_zip(zip_path=args.path, limit=args.limit,
+                                  on_progress=lambda **p: None)
+    else:
+        st = f.import_westlaw_dir(dir_path=args.path, limit=args.limit,
+                                  on_progress=lambda **p: None)
+    print(f"  total={st['total']} imported={st['imported']} superseded={st['superseded']} "
+          f"merged={st['merged']} secondary={st['secondary']} unparseable={st['unparseable']}")
+    print(f"  aliases minted={st['aliases']} extracted={st['extracted']} "
+          f"resolved_edges={st['resolved_edges']}")
+    return 0
+
+
 def cmd_rescan(args: argparse.Namespace) -> int:
     """Full fresh relink: re-extract every document, then run the whole resolution chain
     (§5). Reports each fix's contribution."""
@@ -641,6 +665,12 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--match-reports", action="store_true",
                      help="after import, link classic law-report citations to the enlarged pool")
     imp.set_defaults(func=cmd_import_bailii)
+
+    wl = sub.add_parser("import-westlaw",
+                        help="import a folder (or zip) of Westlaw case .rtf exports")
+    wl.add_argument("path", help="a directory of .rtf files, or a .zip of them")
+    wl.add_argument("--limit", type=int, default=None, help="import at most N files")
+    wl.set_defaults(func=cmd_import_westlaw)
 
     rs2 = sub.add_parser("rescan", help="full fresh relink: re-extract all docs + run the whole chain (§5)")
     rs2.add_argument("--limit", type=int, default=None, help="re-extract at most N docs (default: all)")
