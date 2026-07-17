@@ -116,6 +116,11 @@ _UK_ACT_TO_ID = {
     "data protection act 2018": "ukpga/2018/12",
     "dpa 2018": "ukpga/2018/12",
     "human rights act 1998": "ukpga/1998/42",
+    # the Online Safety Act 2023 — Ofcom's online-safety guidance implements its
+    # sections/parts, so precise "section N of the Online Safety Act 2023" pinpoints
+    # link the guidance to the exact provision (both directions, via the graph).
+    "online safety act 2023": "ukpga/2023/50",
+    "online safety act": "ukpga/2023/50",
 }
 
 

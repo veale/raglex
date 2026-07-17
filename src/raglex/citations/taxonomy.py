@@ -231,6 +231,9 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
     if source == "dma-cases":
         return Tax("guidance", CATEGORY_LABELS["guidance"], "dma",
                    "DMA enforcement cases", {"source": "dma-cases"})
+    if source == "ofcom-osa":
+        return Tax("guidance", CATEGORY_LABELS["guidance"], "ofcom-osa",
+                   "Ofcom online-safety documents", {"source": "ofcom-osa"})
     if doc_type == "guidance":
         return Tax("guidance", CATEGORY_LABELS["guidance"], source or "other",
                    f"Guidance ({source})" if source else "Guidance",

@@ -17,6 +17,7 @@ from .dma import DMACasesAdapter
 from .echr import ECHRAdapter
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
+from .ofcom import OfcomOSAAdapter
 from .eu_legislation import EULegislationAdapter
 from .hol import HouseOfLordsAdapter
 from .nl_legislation import NLLegislationAdapter
@@ -55,6 +56,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Digital Markets Act enforcement cases — the Commission's DMA register via its
     # ODSE search API; every case/decision linked to the DMA (32022R1925).
     "dma-cases": DMACasesAdapter,
+    # Ofcom online-safety regulatory documents — Codes of Practice, risk guidance…
+    # implementing the Online Safety Act 2023, with supersession version chains.
+    "ofcom-osa": OfcomOSAAdapter,
     # Legislation (§0) — statute, not just cases. stable_ids are the resolution
     # targets so harvesting these closes the §5b loop (FOIA, DPA, GDPR, …).
     "uk-legislation": UKLegislationAdapter,
@@ -69,7 +73,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
 # the GRC tribunal, GDPR-linked CJEU cases, the EDPB (a DP regulator: everything
 # it publishes is in scope), and in-scope regulator scrape recipes.
 IN_SCOPE_SOURCES: set[str] = {"uk-grc", "eu-cellar", "echr", "edpb", "edpb-oss", "a29wp",
-                              "dma-cases"} | {
+                              "dma-cases", "ofcom-osa"} | {
     key for key, recipe in RECIPES.items() if recipe.in_scope
 }
 
@@ -163,6 +167,15 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (),
         ("EDPBI identifier (EDPBI:LU:OSS:D:2026:3920)",),
     ),
+    "ofcom-osa": SourceInfo(
+        "ofcom-osa", "Ofcom online-safety documents (Online Safety Act)", "guidance", "GB", False,
+        "Ofcom's regulatory documents implementing the Online Safety Act 2023 — Codes of "
+        "Practice, risk-assessment guidance, registers of risks. Version chains are "
+        "tracked: an updated document supersedes the old one (kept, marked superseded). "
+        "Each links to the OSA sections/parts it implements, both ways.",
+        (),
+        ("Ofcom regulatory document",),
+    ),
     "dma-cases": SourceInfo(
         "dma-cases", "Digital Markets Act cases (Commission register)", "guidance", "EU", False,
         "The Commission's DMA enforcement register via its ODSE search API — one document "
@@ -230,7 +243,8 @@ def source_catalog() -> list[dict]:
         # EDPB sitemap/register cursors. The other legislation/by-id sources are
         # fetched by naming the item — no moving feed.
         row["can_incremental"] = (row.get("kind") == "caselaw"
-                                  or key in ("uk-legislation", "edpb", "edpb-oss", "dma-cases"))
+                                  or key in ("uk-legislation", "edpb", "edpb-oss", "dma-cases",
+                                             "ofcom-osa"))
         out.append(row)
     return out
 
