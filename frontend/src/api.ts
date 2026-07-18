@@ -179,6 +179,9 @@ export const api = {
   sourceList: () => req<string[]>("/sources/list"),
   harvest: (body: Record<string, unknown>) =>
     req<any>("/harvest", { method: "POST", body: JSON.stringify(body) }),
+  // Background backfill of a whole source — max_pages: null means "no page cap".
+  harvestSource: (body: Record<string, unknown>) =>
+    req<any>("/jobs/harvest-source", { method: "POST", body: JSON.stringify(body) }),
   resolve: () => req<any>("/resolve", { method: "POST", body: "{}" }),
   embeddingHealth: () => req<any>("/health/embedding"),
   embedBacklog: () => req<{ provider: string; model: string; pending: number; indexed: number; total: number }>("/embed/backlog"),

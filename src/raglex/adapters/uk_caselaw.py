@@ -222,7 +222,7 @@ class UKCaseLawAdapter(BaseAdapter):
         self.per_page = per_page
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
         if court == "ukftt/grc":
-            # FTT(GRC) is the DP/info-rights tribunal — in-scope by construction (§4).
+            # FTT(GRC) — the General Regulatory Chamber; keyed under its own source.
             self.source = "uk-grc"
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:

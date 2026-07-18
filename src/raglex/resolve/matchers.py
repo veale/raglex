@@ -183,6 +183,40 @@ def match_ie_legislation(raw: str) -> Candidate | None:
     return Candidate(value=f"ie/{m.group('year')}/{typ}/{num}", method="ie_legislation")
 
 
+# Australian legislation, in the forms its registers use:
+#   Cth FRL   legislation.gov.au/C1901A00002  (Title id) → au/cth/act/1901/2
+#   LawMaker  legislation.{qld,nsw,tas}.gov.au/view/.../act-2016-001 → au/qld/act/2016/1
+_AU_FRL_RE = re.compile(
+    r"legislation\.gov\.au/(?:Details/)?(?P<c>[CF])(?P<year>\d{4})(?P<series>[A-Z])(?P<num>\d{5})",
+    re.IGNORECASE)
+_AU_LAWMAKER_RE = re.compile(
+    r"legislation\.(?P<juris>qld|nsw|tas|vic|wa|sa|act|nt)\.gov\.au/.*?"
+    r"(?P<type>act|sl|sr|si)-(?P<year>\d{4})-(?P<num>\d+[a-z]?)", re.IGNORECASE)
+_AU_FRL_SERIES = {"A": "act", "L": "sl", "N": "ni", "C": "compilation"}
+
+
+def match_au_legislation(raw: str) -> Candidate | None:
+    """An Australian legislation URL → its ``au/{juris}/{type}/{year}/{number}`` id.
+    A compilation id (``C…C…``) resolves to the same Work as its Act — a point-in-time
+    version is a pinpoint, not a separate node."""
+    m = _AU_FRL_RE.search(raw)
+    if m:
+        series = _AU_FRL_SERIES.get(m.group("series").upper(), m.group("series").lower())
+        # a C…C… compilation belongs to a Title we can't name from the URL alone; key it
+        # on the register id so it still resolves once the Title is harvested
+        if series == "compilation":
+            return Candidate(value=f"au/cth/{m.group(0).split('/')[-1].lower()}",
+                             method="au_legislation")
+        return Candidate(value=f"au/cth/{series}/{int(m.group('year'))}/{int(m.group('num'))}",
+                         method="au_legislation")
+    m = _AU_LAWMAKER_RE.search(raw)
+    if m:
+        num = m.group("num").lstrip("0").lower() or m.group("num").lower()
+        return Candidate(value=f"au/{m.group('juris').lower()}/{m.group('type').lower()}/"
+                               f"{m.group('year')}/{num}", method="au_legislation")
+    return None
+
+
 def match_caselaw_uri(raw: str) -> Candidate | None:
     m = _CASELAW_URI_RE.search(raw)
     if not m:
@@ -200,6 +234,7 @@ MATCHERS = (
     match_legislation_uri,
     match_legislation_regnal,
     match_ie_legislation,
+    match_au_legislation,
     match_uk_ncn,
 )
 

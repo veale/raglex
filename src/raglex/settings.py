@@ -53,6 +53,9 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("ZOTERO_API_KEY", "Zotero API key", True, "Zotero"),
     SettingSpec("ZOTERO_LIBRARY_ID", "Zotero library ID", False, "Zotero", "numeric user/group id"),
     SettingSpec("ZOTERO_LIBRARY_TYPE", "Zotero library type", False, "Zotero", "users | groups"),
+    SettingSpec("RAGLEX_NZ_API_KEY", "NZ Legislation API key", True, "Sources",
+                "PCO Developer API — apply at legislation.govt.nz; the NZ site is "
+                "bot-walled so there is no scraping fallback without this"),
     SettingSpec("EURLEX_USERNAME", "EUR-Lex webservice user", False, "Sources"),
     SettingSpec("EURLEX_PASSWORD", "EUR-Lex webservice password", True, "Sources"),
     SettingSpec("PISTE_KEY_ID", "PISTE KeyId (Judilibre)", True, "Sources"),

@@ -148,10 +148,9 @@ def test_fetch_both_surfaces():
 
 
 def test_registry_wires_a29wp():
-    from raglex.adapters.registry import IN_SCOPE_SOURCES, get_adapter, source_catalog
+    from raglex.adapters.registry import get_adapter, source_catalog
 
     assert get_adapter("a29wp").source == "a29wp"
-    assert "a29wp" in IN_SCOPE_SOURCES
     cat = {s["key"]: s for s in source_catalog()}
     assert cat["a29wp"]["kind"] == "guidance"
     assert cat["a29wp"]["can_incremental"] is False  # closed archive — harvest once

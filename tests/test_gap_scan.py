@@ -13,8 +13,7 @@ from raglex.facade import Facade
 def config(tmp_path) -> Config:
     return Config(
         data_dir=tmp_path, catalogue_path=tmp_path / "cat.sqlite", raw_dir=tmp_path / "raw",
-        text_dir=tmp_path / "text", settings_path=tmp_path / "settings.json",
-        topic_threshold=3.0, embed_provider="local-hashing", embed_model=None,
+        text_dir=tmp_path / "text", settings_path=tmp_path / "settings.json", embed_provider="local-hashing", embed_model=None,
     )
 
 

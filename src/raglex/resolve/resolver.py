@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from ..core.models import sha256_bytes
 from ..storage.catalogue import Catalogue
-from ..topics.gate import fold
+from ..core.text import fold
 from .matchers import Candidate, first_candidate
 
 log = logging.getLogger("raglex.resolve")

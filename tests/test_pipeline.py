@@ -55,7 +55,8 @@ def _rec(stable_id, text, court="uksc", d=date(2024, 1, 1), raw=None) -> Record:
     return rec
 
 
-def test_pipeline_stores_topical_drops_off_topic(catalogue, rawstore):
+def test_pipeline_stores_everything_no_topic_gate(catalogue, rawstore):
+    # Generic service: no topic filtering — every discovered/fetched document is stored.
     records = [
         _rec("a", "This concerns personal data and the GDPR 2016/679."),
         _rec("b", "A contract dispute about bricks and mortar."),
@@ -63,13 +64,9 @@ def test_pipeline_stores_topical_drops_off_topic(catalogue, rawstore):
     pipe = Pipeline(catalogue, rawstore)
     stats = pipe.run(FakeAdapter(records))
 
-    assert stats.stored == 1
-    assert stats.off_topic == 1
+    assert stats.stored == 2
     assert catalogue.get_document("a") is not None
-    assert catalogue.get_document("b") is None
-    # topical doc got tagged by stage-2 confirm
-    row = catalogue.get_document("a")
-    assert "data_protection" in row["topic_tags"]
+    assert catalogue.get_document("b") is not None
 
 
 def test_pipeline_content_hash_dedup(catalogue, rawstore):
@@ -83,15 +80,6 @@ def test_pipeline_content_hash_dedup(catalogue, rawstore):
     assert stats.stored == 0
 
 
-def test_pipeline_skip_gate_for_in_scope_source(catalogue, rawstore):
-    # An in-scope-by-construction source stores even non-topical-looking text (§4).
-    rec = _rec("grc-1", "An appeal about a fee notice.", court="ukftt-grc")
-    pipe = Pipeline(catalogue, rawstore, skip_topic_gate=True)
-    stats = pipe.run(FakeAdapter([rec]))
-    assert stats.stored == 1
-    assert stats.off_topic == 0
-
-
 def test_pipeline_mints_celex_to_ecli_alias(catalogue, rawstore):
     """Every harvest of an ECLI-keyed doc carrying a CELEX mints the CELEX→ECLI
     alias, so EU case-number citations resolve systematically (rec 3, §5b)."""
@@ -102,7 +90,7 @@ def test_pipeline_mints_celex_to_ecli_alias(catalogue, rawstore):
         extra={"celex": "62018CJ0311"},
     )
     rec.ensure_payload_hash()
-    Pipeline(catalogue, rawstore, skip_topic_gate=True).run(FakeAdapter([rec]))
+    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]))
     assert catalogue.get_alias("62018cj0311") == "ECLI:EU:C:2020:559"
 
 
@@ -110,7 +98,7 @@ def test_pipeline_mints_chamberless_alias(catalogue, rawstore):
     """Harvesting ukut/aac/2012/440 mints the chamber-less alias ukut/2012/440, so a
     citation that omits the chamber resolves to it (§5b)."""
     rec = _rec("ukut/aac/2012/440", "personal data GDPR 2016/679", court="ukut")
-    Pipeline(catalogue, rawstore, skip_topic_gate=True).run(FakeAdapter([rec]))
+    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]))
     assert catalogue.get_alias("ukut/2012/440") == "ukut/aac/2012/440"
     # find_document_id resolves the bare form via the alias
     assert catalogue.find_document_id("ukut/2012/440") == "ukut/aac/2012/440"
@@ -120,7 +108,7 @@ def test_record_extra_metadata_is_persisted(catalogue, rawstore):
     rec = _rec("ECLI:EU:C:2020:559", "A CJEU judgment.", court="cjeu")
     rec.extra = {"celex": "62018CJ0311", "origin_country": "United Kingdom",
                  "referring_courts": ["Upper Tribunal"]}
-    Pipeline(catalogue, rawstore, skip_topic_gate=True).run(FakeAdapter([rec]))
+    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]))
     meta = catalogue.document_meta("ECLI:EU:C:2020:559")
     assert meta["origin_country"] == "United Kingdom"
     assert meta["referring_courts"] == ["Upper Tribunal"]
@@ -137,13 +125,13 @@ def test_pipeline_records_outstanding_effects_queue(catalogue, rawstore):
     rec = _rec("ukpga/2018/12", "Data protection law.", court=None)
     rec.doc_type = DocType.LEGISLATION
     rec.extra = {"unapplied_effects": {"outstanding": 2, "affecting": ["ukpga/2025/8"]}}
-    Pipeline(catalogue, rawstore, skip_topic_gate=True).run(FakeAdapter([rec]))
+    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]))
     rows = catalogue.list_effects_refresh()
     assert [(r["stable_id"], r["outstanding"]) for r in rows] == [("ukpga/2018/12", 2)]
     # a later re-pull with everything incorporated drops it from the queue (the
     # refresh worker uses backfill=True to bypass the watermark, as here)
     rec.extra = {"unapplied_effects": {"outstanding": 0, "affecting": []}}
-    Pipeline(catalogue, rawstore, skip_topic_gate=True).run(FakeAdapter([rec]), backfill=True)
+    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]), backfill=True)
     assert catalogue.list_effects_refresh() == []
 
 

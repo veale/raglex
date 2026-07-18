@@ -294,10 +294,11 @@ def test_feed_discovery_yields_new_items_and_stops_at_cursor():
     assert [s.stable_id for s in stubs] == ["uksi/2026/820"]
 
 
-def test_feed_mode_triggered_by_types_or_query_not_by_default():
-    assert UKLegislationAdapter(client=_FakeClient(b"")).feed is False
+def test_feed_mode_is_the_default_and_ids_switch_to_by_id():
+    # No ids → full-catalogue feed discovery is the default.
+    assert UKLegislationAdapter(client=_FakeClient(b"")).feed is True
     assert UKLegislationAdapter(types="ukpga", client=_FakeClient(b"")).feed is True
-    assert UKLegislationAdapter(query="data protection", client=_FakeClient(b"")).feed is True
-    # ids alone keeps the by-id path
+    assert UKLegislationAdapter(query="unfair dismissal", client=_FakeClient(b"")).feed is True
+    # ids switch to the by-id path
     ad = UKLegislationAdapter(ids="ukpga/2000/36", client=_FakeClient(b""))
     assert ad.feed is False and list(ad.discover(None))[0].stable_id == "ukpga/2000/36"

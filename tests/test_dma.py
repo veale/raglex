@@ -123,11 +123,10 @@ def test_fetch_links_everything_to_the_dma_statute():
 
 
 def test_registry_wires_dma_cases():
-    from raglex.adapters.registry import IN_SCOPE_SOURCES, get_adapter, source_catalog
+    from raglex.adapters.registry import get_adapter, source_catalog
     from raglex.citations.taxonomy import classify_document
 
     assert get_adapter("dma-cases").source == "dma-cases"
-    assert "dma-cases" in IN_SCOPE_SOURCES
     cat = {s["key"]: s for s in source_catalog()}
     assert cat["dma-cases"]["can_incremental"] is True
     t = classify_document(source="dma-cases", doc_type="decision", stable_id="dma/DMA.100209")

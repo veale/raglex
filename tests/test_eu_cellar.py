@@ -116,7 +116,7 @@ class _BytesResp:
 
 
 def test_discover_yields_ecli_stub_with_celex_hint():
-    ad = EUCellarAdapter(client=FakeClient())
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     stubs = list(ad.discover(None))
     assert len(stubs) == 1
     s = stubs[0]
@@ -127,15 +127,15 @@ def test_discover_yields_ecli_stub_with_celex_hint():
 
 
 def test_fetch_builds_legislation_and_citation_edges():
-    ad = EUCellarAdapter(client=FakeClient())
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     stub = list(ad.discover(None))[0]
     rec = ad.fetch(stub)
 
     assert rec.ecli == "ECLI:EU:C:2025:117"
     assert "hereby rules" in rec.text  # Formex text extracted
 
-    # edge 1: the case INTERPRETS the GDPR (typed from the CDM link property)
-    leg = [r for r in rec.relations if r.dst_id == "32016R0679"]
+    # edge 1: the case INTERPRETS the instrument being followed (typed from the CDM link)
+    leg = [r for r in rec.relations if r.dst_id == "32004R0139"]
     assert len(leg) == 1
     assert leg[0].relationship_type == RelationshipType.INTERPRETS
 
@@ -147,7 +147,7 @@ def test_fetch_builds_legislation_and_citation_edges():
 
 def test_ag_opinion_links_to_its_judgment():
     """An AG opinion (CELEX …CC…) links to its judgment (…CJ…, same case number)."""
-    ad = EUCellarAdapter(client=FakeClient())
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     stub = Stub(stable_id="ECLI:EU:C:2019:1145",
                 raw_url="https://publications.europa.eu/resource/celex/62018CC0311",
                 hints={"celex": "62018CC0311", "link": "case-law_interpretes_resource_legal"})
@@ -166,7 +166,7 @@ def test_parse_national_judgements_extracts_court_and_url():
 
 
 def test_fetch_records_preliminary_reference_edge_and_metadata():
-    ad = EUCellarAdapter(client=FakeClient())
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     rec = ad.fetch(list(ad.discover(None))[0])
 
     pref = [r for r in rec.relations if r.relationship_type == RelationshipType.PRELIMINARY_REFERENCE]
@@ -181,7 +181,7 @@ def test_fetch_records_preliminary_reference_edge_and_metadata():
 def test_preliminary_reference_surfaces_in_worklist(catalogue):
     """Recorded now, resolved later: the referring national case sits in the
     harvest worklist until a national adapter harvests/scrapes it (§5b, user req)."""
-    ad = EUCellarAdapter(client=FakeClient())
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     rec = ad.fetch(list(ad.discover(None))[0])
     rec.ensure_payload_hash()
     catalogue.upsert_document(rec)
@@ -191,7 +191,7 @@ def test_preliminary_reference_surfaces_in_worklist(catalogue):
 
 
 def test_cellar_citation_resolves_against_corpus(catalogue):
-    ad = EUCellarAdapter(client=FakeClient())
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     rec = ad.fetch(list(ad.discover(None))[0])
 
     # harvest the cited case so the edge has a node to resolve to
@@ -206,7 +206,7 @@ def test_cellar_citation_resolves_against_corpus(catalogue):
     Resolver(catalogue).run()
     edges = {e["dst_id"]: e["resolution_status"] for e in catalogue.relations_for(rec.stable_id)}
     assert edges["ECLI:EU:C:2015:650"] == "resolved"   # cited CJEU case resolved
-    assert edges["32016R0679"] == "pending"            # GDPR not harvested yet → worklist
+    assert edges["32004R0139"] == "pending"      # instrument not harvested yet → worklist
 
 
 # -- older Formex: grounds in GR.SEQ, not NP.ECR (must not come out ruling-only) ----
@@ -312,7 +312,7 @@ def test_fetch_reference_marks_cellar_outage_transient_not_absent(monkeypatch, t
     monkeypatch.setitem(fmod._TARGETED_HARVEST, "eu-cellar", raising_builder)
     cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "cat.sqlite",
                  raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
-                 settings_path=tmp_path / "settings.json", topic_threshold=3.0,
+                 settings_path=tmp_path / "settings.json",
                  embed_provider="local-hashing", embed_model=None)
     f = fmod.Facade(cfg)
     with f._open() as (cat, rs, ts):

@@ -9,8 +9,12 @@ the GDPR resolves every "interprets 32016R0679" edge the CELLAR case adapter
 emitted (§5b). When CELLAR starts publishing an AKN4EU manifestation, it's a new
 ``format`` parser — the adapter is unchanged.
 
-Default targets are the core EU data-protection instruments; override with
-``-o celex=32016R0679,32016L0680``.
+**Discovery is a CELLAR SPARQL enumeration by default** — the full-catalogue path.
+Naming CELEXes (``-o celex=32016R0679,32016L0680``) fetches exactly those; otherwise
+``discover`` walks sector-3 legal acts (Regulations ``R``, Directives ``L``, Decisions
+``D``) newest-first, paging with ``OFFSET``. An **incremental** run stops at the stored
+document-date cursor; a **backfill** (no cursor, no page cap) walks the whole series.
+``types=`` picks the descriptors, ``years=`` bounds the span.
 """
 
 from __future__ import annotations
@@ -25,6 +29,12 @@ from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..formats import parse
 
 CELEX_BASE = "https://publications.europa.eu/resource/celex"
+SPARQL_ENDPOINT = "https://publications.europa.eu/webapi/rdf/sparql"
+CDM = "http://publications.europa.eu/ontology/cdm#"
+# Sector 3 = legal acts. R = Regulation, L = Directive, D = Decision — the legislative
+# mass. The trailing anchor drops corrigenda (``32019L1153R(02)``), which are not
+# separate instruments.
+DEFAULT_TYPES = ("R", "L", "D")
 
 # Sector-1 (primary law) descriptors → the instrument the article belongs to.
 _TREATY = {"E": "TFEU", "M": "TEU", "F": "TEU (pre-Lisbon)", "C": "EC Treaty",
@@ -58,13 +68,17 @@ def celex_title(celex: str) -> str | None:
 def _is_generic_title(t: str | None) -> bool:
     return not t or bool(_GENERIC_TITLE.match(t))
 
-DEFAULT_CELEX = (
-    "32016R0679",  # GDPR
-    "32016L0680",  # Law Enforcement Directive
-    "32018R1725",  # EUDPR (EU institutions)
-    "32002L0058",  # ePrivacy Directive
-)
 
+def _year_span(spec: str | None) -> tuple[int, int] | None:
+    """"1990-2026" or "2020" → (start, end); None if unset."""
+    if not spec:
+        return None
+    m = re.match(r"^\s*(\d{4})\s*(?:-\s*(\d{4}))?\s*$", str(spec))
+    if not m:
+        return None
+    a = int(m.group(1))
+    b = int(m.group(2)) if m.group(2) else a
+    return (min(a, b), max(a, b))
 
 class EULegislationAdapter(BaseAdapter):
     source = "eu-legislation"
@@ -72,13 +86,24 @@ class EULegislationAdapter(BaseAdapter):
     requires_js = False
     requires_proxy = False
 
-    def __init__(self, *, celex: str | tuple[str, ...] | None = None, client: RateLimitedClient | None = None) -> None:
+    def __init__(self, *, celex: str | tuple[str, ...] | None = None,
+                 types: str | None = None, years: str | None = None,
+                 page_size: int = 200, client: RateLimitedClient | None = None) -> None:
         if isinstance(celex, str):
             celex = tuple(c.strip() for c in celex.split(",") if c.strip())
-        self.celex_list = tuple(celex) if celex else DEFAULT_CELEX
+        self.celex_list = tuple(celex) if celex else ()
+        self.types = tuple(t.strip().upper() for t in (types or "").split(",") if t.strip()) \
+            or DEFAULT_TYPES
+        self.years = _year_span(years)
+        self.page_size = max(1, min(int(page_size), 1000))
+        # With no explicit CELEX list, enumerate the catalogue over SPARQL.
+        self.enumerate = not self.celex_list
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        if self.enumerate:
+            yield from self._discover_enumerate(since, max_pages=max_pages)
+            return
         for celex in self.celex_list:
             yield Stub(
                 stable_id=celex,
@@ -86,6 +111,64 @@ class EULegislationAdapter(BaseAdapter):
                 raw_url=f"{CELEX_BASE}/{celex}",
                 court=None,
             )
+
+    # -- SPARQL enumeration (the full-catalogue path) -----------------------
+    def _sparql(self, query: str) -> list[dict]:
+        resp = self._client.request(
+            "POST", SPARQL_ENDPOINT, data={"query": query},
+            headers={"Accept": "application/sparql-results+json"},
+        )
+        bindings = resp.json().get("results", {}).get("bindings", [])
+        return [{k: v["value"] for k, v in row.items()} for row in bindings]
+
+    def _enumerate_query(self, since: str | None, offset: int) -> str:
+        descriptors = "".join(self.types)
+        filters = [f'REGEX(STR(?celex), "^3[0-9]{{4}}[{descriptors}][0-9]{{4}}$")']
+        if since:
+            filters.append(f'STR(?date) > "{since[:10]}"')
+        if self.years:
+            filters.append(f'STR(?date) >= "{self.years[0]}-01-01"')
+            filters.append(f'STR(?date) <= "{self.years[1]}-12-31"')
+        where = " && ".join(filters)
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex ?date WHERE {{
+  ?work cdm:resource_legal_id_celex ?celex .
+  OPTIONAL {{ ?work cdm:work_date_document ?date }}
+  FILTER({where})
+}}
+ORDER BY DESC(?date)
+LIMIT {self.page_size} OFFSET {offset}
+"""
+
+    def _discover_enumerate(self, since: str | None, *, max_pages: int | None) -> Iterator[Stub]:
+        """Walk sector-3 legal acts newest-first. Incremental runs filter on the stored
+        document-date cursor; a backfill pages with OFFSET until the series runs out."""
+        offset = 0
+        pages = 0
+        seen: set[str] = set()
+        while True:
+            try:
+                rows = self._sparql(self._enumerate_query(since, offset))
+            except Exception:
+                return  # a SPARQL hiccup ends the crawl; the cursor doesn't advance past it
+            if not rows:
+                return
+            for row in rows:
+                celex = (row.get("celex") or "").strip()
+                if not celex or celex in seen:
+                    continue
+                seen.add(celex)
+                yield Stub(
+                    stable_id=celex,
+                    landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
+                    raw_url=f"{CELEX_BASE}/{celex}",
+                    hints={"watermark": row.get("date")} if row.get("date") else {},
+                )
+            pages += 1
+            offset += len(rows)
+            if len(rows) < self.page_size or (max_pages is not None and pages >= max_pages):
+                return
 
     def fetch(self, stub: Stub) -> Record | None:
         # Try Formex; a 404/FetchError (no Formex rendition) is NOT fatal — fall

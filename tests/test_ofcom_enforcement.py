@@ -128,11 +128,10 @@ def test_update_detection_hash_in_stub():
 
 
 def test_registry_and_taxonomy_wire_enforcement():
-    from raglex.adapters.registry import IN_SCOPE_SOURCES, get_adapter, source_catalog
+    from raglex.adapters.registry import get_adapter, source_catalog
     from raglex.citations.taxonomy import classify_document
 
     assert get_adapter("ofcom-enforcement").source == "ofcom-enforcement"
-    assert "ofcom-enforcement" in IN_SCOPE_SOURCES
     cat = {s["key"]: s for s in source_catalog()}
     assert cat["ofcom-enforcement"]["can_incremental"] is True
     t = classify_document(source="ofcom-enforcement", doc_type="decision", stable_id="ofcom-enf/x")

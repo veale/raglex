@@ -524,7 +524,33 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.harvest(
             payload["source"], backfill=payload.get("backfill", False),
             since=payload.get("since"), max_pages=payload.get("max_pages", 1),
+            options=payload.get("options"),
         )
+
+    @app.post("/jobs/harvest-source")
+    def job_harvest_source_ep(payload: dict = Body(...)) -> dict:
+        """Harvest/backfill one source as a background job.
+
+        A full-catalogue backfill (``max_pages: null``) walks a whole register and can
+        run for hours, so it goes in the job table where it survives the request, shows
+        progress in the Jobs panel, and can be cancelled — unlike ``POST /harvest``,
+        which is the small, bounded, synchronous version."""
+        source = (payload or {}).get("source")
+        if not source:
+            return {"error": "source is required"}
+        params: dict = {"source": source, "backfill": bool(payload.get("backfill", True))}
+        # max_pages absent/None → no page cap (the true "everything" walk).
+        if payload.get("max_pages") is not None:
+            params["max_pages"] = int(payload["max_pages"])
+        else:
+            params["max_pages"] = None
+        if payload.get("since"):
+            params["since"] = payload["since"]
+        if payload.get("options"):
+            params["options"] = payload["options"]
+        scope = "everything" if params["max_pages"] is None else f"{params['max_pages']} page(s)"
+        verb = "backfill" if params["backfill"] else "harvest"
+        return _start_job("harvest-source", f"{verb} {source} — {scope}", params)
 
     @app.get("/health/embedding")
     def embedding_health() -> dict:

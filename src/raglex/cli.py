@@ -20,9 +20,7 @@ from .config import Config
 from .pipeline import Pipeline
 from .resolve import Resolver
 from .storage import Catalogue, RawStore, TextStore
-from .tagging import RuleEngine, seed
-
-from .adapters.registry import IN_SCOPE_SOURCES as _SKIP_GATE  # noqa: E402
+from .tagging import RuleEngine
 
 
 def _open(config: Config) -> tuple[Catalogue, RawStore, TextStore]:
@@ -34,9 +32,9 @@ def _open(config: Config) -> tuple[Catalogue, RawStore, TextStore]:
 
 
 def _parse_opts(pairs: list[str] | None) -> dict[str, object]:
-    """Generic KEY=VALUE adapter options. Domain/jurisdiction focus is config, not
-    code: e.g. `--opt legislation_celex=32004R0139` points eu-cellar at the Merger
-    Regulation instead of its GDPR default. Digit strings coerce to int."""
+    """Generic KEY=VALUE adapter options. Scope is config, not code: e.g. `--opt
+    legislation_celex=32004R0139` points eu-cellar at the Merger Regulation. Digit
+    strings coerce to int."""
     opts: dict[str, object] = {}
     for pair in pairs or []:
         key, _, value = pair.partition("=")
@@ -49,13 +47,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     catalogue, rawstore, textstore = _open(config)
     try:
         adapter = get_adapter(args.source, **_parse_opts(args.opt))
-        pipeline = Pipeline(
-            catalogue,
-            rawstore,
-            textstore=textstore,
-            topic_threshold=config.topic_threshold,
-            skip_topic_gate=args.source in _SKIP_GATE,
-        )
+        pipeline = Pipeline(catalogue, rawstore, textstore=textstore)
         stats = pipeline.run(
             adapter,
             backfill=args.backfill,
@@ -614,10 +606,7 @@ def cmd_tag(args: argparse.Namespace) -> int:
     catalogue, *_ = _open(config)
     engine = RuleEngine(catalogue)
     try:
-        if args.tag_command == "seed":
-            ids = seed(engine)
-            print(f"seeded {len(ids)} rules: {ids}")
-        elif args.tag_command == "list":
+        if args.tag_command == "list":
             for r in catalogue.list_rules():
                 flag = "on " if r["enabled"] else "off"
                 print(f"  #{r['rule_id']} [{flag}] {r['tag']:<18} v{r['version']}  {r['note'] or ''}")
@@ -801,7 +790,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     tag = sub.add_parser("tag", help="rule-based tagging engine (§4a)")
     tag_sub = tag.add_subparsers(dest="tag_command", required=True)
-    tag_sub.add_parser("seed", help="bootstrap the §4 topic vocab as rules")
     tag_sub.add_parser("list", help="list tag rules")
     t_run = tag_sub.add_parser("run", help="run one rule (--rule N) or all enabled")
     t_run.add_argument("--rule", type=int, default=None)

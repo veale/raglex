@@ -40,11 +40,20 @@ CATEGORY_LABELS: dict[str, str] = {
     "au-caselaw": "Australian case-law",
     "nz-caselaw": "New Zealand case-law",
     "in-caselaw": "Indian case-law",
+    "sg-caselaw": "Singapore case-law",
+    "hk-caselaw": "Hong Kong case-law",
+    "za-caselaw": "South African case-law",
+    "my-caselaw": "Malaysian case-law",
+    "africa-caselaw": "African case-law (other)",
+    "caribbean-caselaw": "Caribbean case-law",
+    "pacific-caselaw": "Pacific case-law",
     "other": "Other / unrouted",
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
                   "eu-cellar", "eu-legislation", "echr", "guidance",
-                  "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw", "other"]
+                  "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw",
+                  "sg-caselaw", "hk-caselaw", "za-caselaw", "my-caselaw",
+                  "africa-caselaw", "caribbean-caselaw", "pacific-caselaw", "other"]
 
 # Neutral-citation jurisdictions with no adapter (cases arrive by upload, if at all):
 # the KNOWN_COURTS jurisdiction → the Corpus Map bucket. A "[2020] NZSC 12" pending
@@ -53,7 +62,20 @@ CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation"
 JURISDICTION_CATEGORY: dict[str, str] = {
     "IE": "ie-caselaw", "CA": "ca-caselaw", "AU": "au-caselaw",
     "NZ": "nz-caselaw", "IN": "in-caselaw",
+    # The wider Commonwealth. The big single jurisdictions get their own row; the long
+    # tail is grouped by region, because ~30 one-case rows would bury the map while
+    # "African case-law: 214 pending" is a signal worth acting on.
+    "SG": "sg-caselaw", "HK": "hk-caselaw", "ZA": "za-caselaw", "MY": "my-caselaw",
+    **{j: "africa-caselaw" for j in
+       ("KE", "GH", "TZ", "UG", "NG", "ZM", "MW", "ZW", "NA", "SZ", "BW", "MU", "SC",
+        "AFRICA", "EAC")},
+    **{j: "caribbean-caselaw" for j in ("TT", "JM", "BB", "BS", "GY", "BZ", "CARICOM")},
+    **{j: "pacific-caselaw" for j in
+       ("FJ", "PG", "SB", "VU", "WS", "TO", "NR", "CK", "KI", "TV")},
 }
+
+# The case-law categories that aren't UK — all classified by court token alone.
+NON_UK_CASELAW_CATEGORIES: frozenset[str] = frozenset(JURISDICTION_CATEGORY.values())
 
 # Which UK nation a legislation type-code belongs to (for the SI/Act-by-country split).
 UK_LEG_COUNTRY: dict[str, str] = {
@@ -182,7 +204,10 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         return Tax("uk-caselaw", CATEGORY_LABELS["uk-caselaw"], tok.lower() or "other",
                    known.name if known else (tok or "Other court"),
                    {"court": (court or prefix or "")})
-    if source in ("ie-caselaw", "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw"):
+    # Every non-UK case-law category routes the same way: the court token is the
+    # sub-type. Derived from CATEGORY_LABELS so registering a new jurisdiction bucket
+    # is a one-line data edit there, not a second edit here.
+    if source in NON_UK_CASELAW_CATEGORIES:
         tok = (court or prefix or "").upper()
         known = KNOWN_COURTS.get(tok)
         return Tax(source, CATEGORY_LABELS[source], tok.lower() or "other",

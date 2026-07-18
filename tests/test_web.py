@@ -51,7 +51,7 @@ def client(tmp_path):
 
     config = Config(
         data_dir=tmp_path, catalogue_path=cat_path, raw_dir=tmp_path / "raw",
-        text_dir=text_dir, settings_path=tmp_path / "settings.json", topic_threshold=3.0, embed_provider="local-hashing",
+        text_dir=text_dir, settings_path=tmp_path / "settings.json", embed_provider="local-hashing",
         embed_model=None,
     )
     return TestClient(create_app(config))
@@ -183,6 +183,21 @@ def test_sources_list_and_embedding_health(client):
 def test_harvest_unknown_source_returns_error(client):
     r = client.post("/harvest", json={"source": "does-not-exist"}).json()
     assert "error" in r  # endpoint wired; bad source handled without crashing
+
+
+def test_backfill_source_job_requires_a_source_and_queues_uncapped(client):
+    # no source → refused, not a crash
+    assert "error" in client.post("/jobs/harvest-source", json={}).json()
+    # A full backfill queues as a background job with NO page cap. Uses an unknown
+    # source deliberately: the job still queues (proving the wiring + label), and the
+    # unknown-source error surfaces inside the job instead of starting a real crawl
+    # against a live register from the test suite.
+    r = client.post("/jobs/harvest-source",
+                    json={"source": "no-such-source", "max_pages": None}).json()
+    assert "error" not in r
+    jobs = {j["kind"]: j for j in client.get("/jobs").json()}
+    assert "harvest-source" in jobs
+    assert "everything" in jobs["harvest-source"]["label"]
 
 
 def test_settings_endpoint_masks_and_persists(client, monkeypatch):

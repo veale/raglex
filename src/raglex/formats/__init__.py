@@ -11,6 +11,11 @@ from . import (  # noqa: F401  (register on import)
     eisb_xml,
     eurlex_html,
     formex,
+    frl_html,
+    hklm_xml,
+    lawmaker_html,
+    lims_xml,
+    nz_pco_xml,
     rtf,
 )
 from .base import ParsedDoc, available, parse, register

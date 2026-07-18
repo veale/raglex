@@ -209,8 +209,7 @@ def test_rejects_non_rtf_bytes():
 def facade(tmp_path) -> Facade:
     return Facade(Config(
         data_dir=tmp_path, catalogue_path=tmp_path / "cat.sqlite", raw_dir=tmp_path / "raw",
-        text_dir=tmp_path / "text", settings_path=tmp_path / "settings.json",
-        topic_threshold=3.0, embed_provider="local-hashing", embed_model=None,
+        text_dir=tmp_path / "text", settings_path=tmp_path / "settings.json", embed_provider="local-hashing", embed_model=None,
     ))
 
 
@@ -243,7 +242,7 @@ def test_uk_report_citation_of_an_eu_case_aliases_to_the_ecli_document(facade, t
     d = _folder(tmp_path / "wl", {"eu.rtf": _eu_case()})
     facade.import_westlaw_dir(dir_path=str(d))
     with facade._open() as (cat, _rs, _ts):
-        from raglex.topics.gate import fold
+        from raglex.core.text import fold
         # a citer writing "[2016] Q.B. 921" resolves to the canonical EU judgment
         assert cat.get_alias(fold("[2016] Q.B. 921")) == "ECLI:EU:C:2016:198"
 
@@ -302,7 +301,7 @@ def test_merges_into_an_existing_record_sharing_a_report_citation_alias(facade, 
     # alias — the Westlaw import of the same case must adopt that id, not mint a westlaw:
     # duplicate.
     from raglex.core.models import AddedBy, DocType, ExtractedVia, Record
-    from raglex.topics.gate import fold
+    from raglex.core.text import fold
     with facade._open() as (cat, _rs, ts):
         cat.upsert_document(Record(
             source="uk-caselaw", stable_id="ukhl/1981/tate", doc_type=DocType.JUDGMENT,
@@ -329,7 +328,7 @@ def test_refix_rekeys_a_legacy_hash_id_to_a_report_slug(facade, tmp_path):
     # slug, cascading every reference.
     from raglex.adapters.westlaw_rtf import parse_westlaw_rtf
     from raglex.core.models import AddedBy, DocType, ExtractedVia, Record
-    from raglex.topics.gate import fold
+    from raglex.core.text import fold
     parsed = parse_westlaw_rtf(_law_report_case())
     old = "westlaw:deadbeefdeadbeef"
     with facade._open() as (cat, _rs, ts):

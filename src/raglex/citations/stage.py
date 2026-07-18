@@ -213,7 +213,7 @@ def _drop_self_citations(catalogue: Catalogue, stable_id: str, edges: dict) -> d
     resolves to the citing document itself (one batched lookup; the citation
     *observations* stay, so the reader can still see the span — it just isn't an edge)."""
     from ..resolve.matchers import normalise_candidate
-    from ..topics.gate import fold
+    from ..core.text import fold
 
     keys = {ek: (normalise_candidate(rel.dst_id, rel.raw_citation_string)
                  or fold(rel.raw_citation_string or ""))

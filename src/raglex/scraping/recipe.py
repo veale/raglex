@@ -35,8 +35,6 @@ class ScrapeRecipe:
     requires_js: bool = False
     requires_proxy: bool = False
     min_interval: float = 2.0
-    # in-scope by construction (a regulator's enforcement listing) → skip topic gate
-    in_scope: bool = True
 
 
 @dataclass(slots=True)

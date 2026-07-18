@@ -1,7 +1,7 @@
 """Pipeline runner — sequences the shared stages over one source's stubs (§5).
 
-    discover → cheap topic gate → dedup (hash) → fetch (raw bytes)
-            → store raw → confirm topic → catalogue + typed relations edges
+    discover → dedup (hash) → fetch (raw bytes)
+            → store raw → catalogue + typed relations edges
 
 The DB *is* the orchestration state (§5): watermarks advance only after a clean
 run, so a crash re-pulls rather than skips, and a ``RateLimitException`` pauses
@@ -22,7 +22,6 @@ from ..core.models import Record, UpstreamStatus
 from ..storage.catalogue import Catalogue
 from ..storage.rawstore import RawStore
 from ..storage.textstore import TextStore
-from ..topics import cheap_match, confirm
 
 log = logging.getLogger("raglex.pipeline")
 
@@ -31,11 +30,9 @@ log = logging.getLogger("raglex.pipeline")
 class RunStats:
     source: str
     discovered: int = 0
-    gated_out: int = 0
     deduped: int = 0
     fetched: int = 0
     stored: int = 0
-    off_topic: int = 0
     errors: int = 0
     # Why a fetch failed decides whether the caller may cool the item off for months.
     # A 404/410 (or an adapter that found nothing upstream) means "this item does not
@@ -71,8 +68,7 @@ class RunStats:
     def summary(self) -> str:
         return (
             f"[{self.source}] discovered={self.discovered} stored={self.stored} "
-            f"gated_out={self.gated_out} deduped={self.deduped} off_topic={self.off_topic} "
-            f"errors={self.errors}"
+            f"deduped={self.deduped} errors={self.errors}"
             + (" RATE_LIMITED" if self.rate_limited else "")
         )
 
@@ -84,15 +80,10 @@ class Pipeline:
         rawstore: RawStore,
         *,
         textstore: TextStore | None = None,
-        topic_threshold: float = 3.0,
-        skip_topic_gate: bool = False,
     ) -> None:
         self.catalogue = catalogue
         self.rawstore = rawstore
         self.textstore = textstore
-        self.topic_threshold = topic_threshold
-        # In-scope-by-construction sources (ICO/DPC/EDPB) are tagged, not gated (§4).
-        self.skip_topic_gate = skip_topic_gate
 
     def run(
         self,
@@ -151,11 +142,6 @@ class Pipeline:
                         stats.deduped += 1
                         continue
                     refreshed = True
-
-                # Stage 1: cheap topic gate (§4) over the stub's cheap fields.
-                if not self.skip_topic_gate and cheap_match(stub) is False:
-                    stats.gated_out += 1
-                    continue
 
                 try:
                     record = adapter.fetch(stub)
@@ -241,7 +227,7 @@ class Pipeline:
         return stats
 
     def _ingest(self, record: Record, stats: RunStats) -> bool:
-        """Dedup → store raw → confirm topic → catalogue. Returns True if stored."""
+        """Dedup → store raw → catalogue. Returns True if stored."""
         record.ensure_payload_hash()
 
         # Outstanding amendments (§0): (re)schedule the effects re-check BEFORE the
@@ -266,16 +252,6 @@ class Pipeline:
         if record.payload_hash and self.catalogue.payload_hash_seen(record.payload_hash):
             stats.deduped += 1
             return False
-
-        # Stage 2: confirm topic over full text (§4), unless this source is
-        # in-scope by construction.
-        if not self.skip_topic_gate and record.text:
-            result = confirm(record.text, threshold=self.topic_threshold)
-            if not result.keep:
-                stats.off_topic += 1
-                return False
-            record.topic_tags = list(dict.fromkeys([*record.topic_tags, *result.tags]))
-            record.topic_score = result.score
 
         raw_path = None
         if record.raw_bytes is not None:

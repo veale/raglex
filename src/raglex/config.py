@@ -18,7 +18,6 @@ class Config:
     raw_dir: Path
     text_dir: Path
     settings_path: Path
-    topic_threshold: float
     embed_provider: str
     embed_model: str | None
 
@@ -45,7 +44,6 @@ class Config:
             ),
             raw_dir=Path(os.environ.get("RAGLEX_RAW_DIR", data_dir / "raw")),
             text_dir=Path(os.environ.get("RAGLEX_TEXT_DIR", data_dir / "text")),
-            topic_threshold=float(os.environ.get("RAGLEX_TOPIC_THRESHOLD", "3.0")),
             # Default to the zero-dep offline provider; set these to use a real
             # model (e.g. openrouter + a legal/multilingual model, §6a/§6d).
             embed_provider=os.environ.get("RAGLEX_EMBED_PROVIDER", "local-hashing"),

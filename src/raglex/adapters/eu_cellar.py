@@ -13,9 +13,10 @@ Two endpoints, no auth:
   ruling lives in `<JURISDICTION>` (NOT `<DISPOSITIF>`, which is a *legislative*
   element); reasoning is in `<CONTENTS.JUDGMENT>`; paragraphs are `<NP.ECR>`.
 
-This adapter discovers CJEU case law **linked to a piece of legislation** (default:
-the GDPR, `32016R0679`) — bounded, on-topic by construction (§4), and exactly the
-EU case law the corpus needs. Each case yields a typed edge to that legislation
+This adapter discovers CJEU case law **relative to a named instrument or case**: set
+`legislation_celex` to follow the case law on a piece of legislation, or
+`cited_by_celex` to find judgments citing a given case. One of the two is required —
+there is no default instrument. Each case yields a typed edge to that legislation
 (`interprets`/`applies`/`overrules`) plus `mentions` edges to the cases it cites,
 all with ECLI destinations so they resolve directly (§5b).
 
@@ -447,7 +448,7 @@ class EUCellarAdapter(BaseAdapter):
     def __init__(
         self,
         *,
-        legislation_celex: str = GDPR_CELEX,
+        legislation_celex: str | None = None,
         cited_by_celex: str | None = None,
         per_page: int = 100,
         with_citations: bool = True,
@@ -556,8 +557,12 @@ LIMIT {self.per_page}
 
     # -- adapter contract --------------------------------------------------
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        # Either cases CITING a target case (cited_by_celex) or cases linked to a piece of
-        # legislation (the default). (max_pages reserved for OFFSET paging in a later pass.)
+        # Either cases CITING a target case (cited_by_celex) or cases linked to a piece
+        # of legislation. One of the two must be set — this adapter discovers case law
+        # *relative to a named instrument or case*, so with neither there is nothing to
+        # crawl. (max_pages reserved for OFFSET paging in a later pass.)
+        if not self.cited_by_celex and not self.legislation_celex:
+            return
         query = self._citing_query(self.cited_by_celex) if self.cited_by_celex else self._discover_query(since)
         for row in self._sparql(query):
             celex = row["celex"]

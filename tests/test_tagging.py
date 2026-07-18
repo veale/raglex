@@ -6,7 +6,7 @@ import pytest
 
 from raglex.core.models import DocType, Record
 from raglex.storage import TextStore
-from raglex.tagging import RuleEngine, seed
+from raglex.tagging import RuleEngine
 from raglex.tagging.predicates import DocView, pred_field, pred_grep_like, pred_literal, pred_regex
 from raglex.tagging.tree import evaluate, root_method, validate_tree
 
@@ -140,11 +140,14 @@ def test_rerun_is_a_reprojection(catalogue, tmp_path):
     assert len([t for t in catalogue.tags_for("a") if t["tag"] == "gdpr"]) == 1
 
 
-def test_seed_rules_tag_corpus(catalogue, tmp_path):
+def test_user_defined_rule_tags_corpus(catalogue, tmp_path):
+    # The generic build ships no built-in topical rules — tags come entirely from
+    # user-defined rules over the document text.
     _store_doc(catalogue, tmp_path, "a", "This decision concerns persoonsgegevens (AVG).")
     _store_doc(catalogue, tmp_path, "b", "freedom of information request refused.")
     engine = RuleEngine(catalogue)
-    seed(engine)
+    engine.add_rule("privacy", {"predicate": "literal", "args": {"value": "persoonsgegevens"}})
+    engine.add_rule("foi", {"predicate": "literal", "args": {"value": "freedom of information"}})
     engine.run_all()
-    assert "data_protection" in catalogue.get_document("a")["topic_tags"]
+    assert "privacy" in catalogue.get_document("a")["topic_tags"]
     assert "foi" in catalogue.get_document("b")["topic_tags"]

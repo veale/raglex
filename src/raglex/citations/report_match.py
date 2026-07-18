@@ -69,7 +69,7 @@ def surnames(text: str | None) -> set[str]:
     Law-report abbreviations are canonicalised first (``normalise_abbrev``) so "A-G" and
     "Attorney General", "Ltd" and "Limited" tokenise to the same token — otherwise the two
     forms of one name share nothing distinctive."""
-    from ..topics.gate import fold
+    from ..core.text import fold
     from .name_variants import normalise_abbrev
 
     # accent-fold so "Confédération" matches "Confederation" and "Öztürk" matches "Ozturk"

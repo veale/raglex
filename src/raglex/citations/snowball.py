@@ -27,7 +27,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from ..storage.catalogue import Catalogue
-from .courts import lookup
+from .courts import classify
 
 # CELEX sector/descriptor → human form + the adapter that fetches it. The number
 # part is variable-width (treaty articles like 12008E267 = Art 267 TFEU, Charter
@@ -134,9 +134,15 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
     m = _NEUTRAL_RE.match(candidate)
     if m:
         court = m.group("court").upper()
-        known = lookup(court)
-        if known:
+        known = classify(court)
+        if known and not known.generic:
             return (f"neutral citation ({court})", known.jurisdiction, known.adapter)
+        if known:
+            # The tribunal isn't registered, but the medium-neutral-citation convention
+            # puts the ISO country code first, so the citation still has a country. It
+            # stays in the snowball (no adapter) while reading as e.g. Kenyan case law
+            # rather than as an unplaceable unknown.
+            return (f"neutral citation ({court})", known.jurisdiction, None)
         return (f"neutral citation ({court})", None, None)  # unknown court → snowball
     return (kind or "citation"), None, None
 

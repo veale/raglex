@@ -240,11 +240,10 @@ def test_looks_unocrd_thresholds():
 
 
 def test_registry_wires_edpb_sources():
-    from raglex.adapters.registry import IN_SCOPE_SOURCES, get_adapter, source_catalog
+    from raglex.adapters.registry import get_adapter, source_catalog
 
     assert get_adapter("edpb").source == "edpb"
     assert get_adapter("edpb-oss").source == "edpb-oss"
-    assert {"edpb", "edpb-oss"} <= IN_SCOPE_SOURCES
     cat = {s["key"]: s for s in source_catalog()}
     assert cat["edpb"]["can_incremental"] is True
     assert cat["edpb-oss"]["kind"] == "guidance"

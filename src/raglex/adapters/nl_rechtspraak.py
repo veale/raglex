@@ -9,8 +9,7 @@ hands you a **citation graph for free**: each decision's `dcterms:relation`
 ECLI destinations resolve directly (§5b).
 
 This is the adapter that exercises the cross-jurisdiction premise: an ECLI-native
-NL source feeding the exact same pipeline as the UK Atom/LegalDocML source, with
-the multilingual topic gate (§4) handling Dutch (persoonsgegevens / AVG).
+NL source feeding the exact same pipeline as the UK Atom/LegalDocML source.
 
 Parsing is split from HTTP (`parse_index` / `parse_content` are pure) so the
 adapter is testable against fixture XML with no network.

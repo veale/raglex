@@ -44,7 +44,7 @@ SINGLETON_KINDS = frozenset({
 })
 MAX_CONCURRENT_JOBS = 6
 # Keyed jobs deduped by (kind, params): don't start an identical one while it's in flight.
-DEDUP_KINDS = frozenset({"run-watch", "gap-scan"})
+DEDUP_KINDS = frozenset({"run-watch", "gap-scan", "harvest-source"})
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
 # its worker thread is parked on a network socket that died when the host slept/woke. We
 # can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
@@ -121,6 +121,10 @@ RUNNERS: dict[str, Callable] = {
     "suggest-matches": lambda f, p, cb, cancel: f.suggest_matches(**p, on_progress=cb, cancel_check=cancel),
     "harvest-echr": lambda f, p, cb, cancel: f.harvest_missing_echr(**p, on_progress=cb, cancel_check=cancel),
     "run-watch": lambda f, p, cb, cancel: f.run_watch(watch_id=p["watch_id"], on_progress=cb, cancel_check=cancel),
+    # Harvest one source in the background — the "backfill this whole source" action.
+    # Long-running by design (a full catalogue walk), so it belongs in the job table
+    # rather than a request that has to return.
+    "harvest-source": lambda f, p, cb, cancel: f.harvest(**p, on_progress=cb),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
 }
 

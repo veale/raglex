@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..core.registry import Registry
-from .courts import DIVISIONS
+from .courts import COURTS_BY_CODE, DIVISIONS
 
 # Resolvable candidate, pinpoint anchor, optional entity-kind override.
 Normalised = tuple[str | None, str | None, str | None]
@@ -403,7 +403,13 @@ from .reporters import (  # noqa: E402
 
 # Fold every report-series token into the set the neutral-citation grammars use to reject
 # a court, so "1999 SC 583" (Session Cases) is never minted as a fake sc/1999/583 slug.
-REPORT_SERIES |= {re.sub(r"[.\s'’&]", "", s).upper() for s in _ALL_REPORT_SERIES}
+#
+# Registered court codes are held back from that fold. A token listed in BOTH tables is a
+# data error, and letting the reporter side win silently suppresses a whole court's
+# citations: "SGCA" was catalogued as a series, so every "[2011] SGCA 9" was rejected as a
+# report and the Singapore Court of Appeal minted no candidates at all. Courts win.
+_REPORT_TOKENS = {re.sub(r"[.\s'’&]", "", s).upper() for s in _ALL_REPORT_SERIES}
+REPORT_SERIES |= _REPORT_TOKENS - set(COURTS_BY_CODE)
 
 
 def _law_report(m: "re.Match[str]") -> Normalised:
@@ -614,3 +620,11 @@ register(Grammar(
     ),
     _resolve_named_statute,
 ))
+
+
+# Commonwealth citation forms that break the shapes above — India's colon-delimited
+# neutral citation and AIR, Canada's CanLII slot, the South African SA-report shape,
+# Nigeria's NWLR part format, Kenya's eKLR database id, and Hong Kong registry case
+# numbers. Imported last so its (longer, more specific) patterns are registered
+# alongside the generic ones; the extractor's longest-match dedupe does the rest.
+from . import commonwealth as _commonwealth  # noqa: E402,F401  (registers on import)

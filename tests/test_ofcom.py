@@ -104,11 +104,10 @@ def test_fetch_links_to_osa_and_supersedes_and_titles_it():
 
 
 def test_registry_and_taxonomy_wire_ofcom():
-    from raglex.adapters.registry import IN_SCOPE_SOURCES, get_adapter, source_catalog
+    from raglex.adapters.registry import get_adapter, source_catalog
     from raglex.citations.taxonomy import classify_document
 
     assert get_adapter("ofcom-osa").source == "ofcom-osa"
-    assert "ofcom-osa" in IN_SCOPE_SOURCES
     cat = {s["key"]: s for s in source_catalog()}
     assert cat["ofcom-osa"]["can_incremental"] is True and cat["ofcom-osa"]["kind"] == "guidance"
     t = classify_document(source="ofcom-osa", doc_type="guidance", stable_id="ofcom/x")

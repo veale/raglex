@@ -13,7 +13,11 @@ from ..core.adapter import Adapter
 from ..scraping.recipes import RECIPES
 from ..scraping.scrape_adapter import RecipeScrapeAdapter
 from .a29wp import A29WPAdapter
+from .au_legislation import CommonwealthAdapter, LawMakerAdapter
+from .ca_legislation import CanadaFederalAdapter
 from .dma import DMACasesAdapter
+from .hk_legislation import HKLegislationAdapter
+from .nz_legislation import NZLegislationAdapter
 from .echr import ECHRAdapter
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
@@ -35,11 +39,11 @@ def _scrape_factory(recipe):
 # Factory per source key. Build steps 5+ (FR/DE/CH) add rows here.
 ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-caselaw": UKCaseLawAdapter,
-    # UK FTT(GRC) — the info-rights / data-protection tribunal (§2, §4).
+    # UK FTT — General Regulatory Chamber (information rights, environment, charity…).
     "uk-grc": lambda **kw: UKCaseLawAdapter(court="ukftt/grc", **kw),
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
-    # EU — CELLAR SPARQL + Formex; CJEU case law interpreting the GDPR (§2, §6).
+    # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
     "eu-cellar": EUCellarAdapter,
     # ECHR — HUDOC; resolves by ECLI (ECLI:CE:ECHR:…) OR application number (58170/13).
     "echr": ECHRAdapter,
@@ -64,8 +68,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Ofcom enforcement actions — one record per investigation/decision (HTML + its
     # case PDFs combined), linked to the OSA sections it turns on.
     "ofcom-enforcement": OfcomEnforcementAdapter,
-    # Legislation (§0) — statute, not just cases. stable_ids are the resolution
-    # targets so harvesting these closes the §5b loop (FOIA, DPA, GDPR, …).
+    # Legislation — statute, not just cases. stable_ids are the resolution targets, so
+    # harvesting these closes the §5b loop for every statutory citation in the corpus.
     "uk-legislation": UKLegislationAdapter,
     "eu-legislation": EULegislationAdapter,
     # Ireland — the eISB (Acts + SIs as enacted/made, the OFFICIAL text) and the LRC
@@ -73,18 +77,26 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Ireland is another ELI source beside legislation.gov.uk and EUR-Lex.
     "ie-legislation": IrishStatuteBookAdapter,
     "ie-revised": IrishRevisedActsAdapter,
+    # Australia — nine registers, one model. The Commonwealth OData API (au-cth) plus
+    # the three LawMaker states that share one adapter (Qld/NSW/Tas). Jurisdiction is a
+    # first-class key: stable_ids are au/{juris}/{type}/{year}/{number}.
+    "au-cth": CommonwealthAdapter,
+    "au-qld": lambda **kw: LawMakerAdapter(jurisdiction="qld", **kw),
+    "au-nsw": lambda **kw: LawMakerAdapter(jurisdiction="nsw", **kw),
+    "au-tas": lambda **kw: LawMakerAdapter(jurisdiction="tas", **kw),
+    # Canada federal — the Justice Laws open XML corpus, read from a local clone of
+    # justicecanada/laws-lois-xml. Version-controlled primary law: the repo IS the
+    # distribution channel, so enumeration and change detection are both offline.
+    "ca-federal": CanadaFederalAdapter,
+    # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
+    # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
+    "hk-legislation": HKLegislationAdapter,
+    # New Zealand — the PCO Developer API (key required). The website is bot-walled
+    # (HTTP 405 human-verification), so there is deliberately no HTML fallback.
+    "nz-legislation": NZLegislationAdapter,
     "nl-legislation": NLLegislationAdapter,
     # Scrape recipes (§5a) — regulator portals with no API.
     **{key: _scrape_factory(recipe) for key, recipe in RECIPES.items()},
-}
-
-
-# Sources that are in-scope by construction (§4) — tagged, not topic-gated:
-# the GRC tribunal, GDPR-linked CJEU cases, the EDPB (a DP regulator: everything
-# it publishes is in scope), and in-scope regulator scrape recipes.
-IN_SCOPE_SOURCES: set[str] = {"uk-grc", "eu-cellar", "echr", "edpb", "edpb-oss", "a29wp",
-                              "dma-cases", "ofcom-osa", "ofcom-enforcement"} | {
-    key for key, recipe in RECIPES.items() if recipe.in_scope
 }
 
 
@@ -121,9 +133,10 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("neutral citation (e.g. [2024] EWCA Civ 1)", "Find Case Law document URI"),
     ),
     "uk-grc": SourceInfo(
-        "uk-grc", "UK FTT — General Regulatory Chamber (info rights / DP)", "caselaw", "GB", True,
-        "The information-rights / data-protection tribunal. In-scope by construction "
-        "(not topic-gated). Keywords are full-text searched at the source.",
+        "uk-grc", "UK FTT — General Regulatory Chamber", "caselaw", "GB", True,
+        "The First-tier Tribunal's General Regulatory Chamber (information rights, "
+        "environment, charity, and other regulatory appeals). Keywords are full-text "
+        "searched at the source.",
         (SourceOption("query", "Keyword query", "free text, searched in the API"),),
         ("neutral citation",),
     ),
@@ -136,9 +149,10 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     ),
     "eu-cellar": SourceInfo(
         "eu-cellar", "EU CJEU case law (CELLAR / SPARQL)", "caselaw", "EU", False,
-        "CJEU judgments + AG opinions discovered by what legislation they interpret. "
-        "Set the instrument to follow; keywords post-filter the results.",
-        (SourceOption("legislation_celex", "Legislation CELEX to follow", "e.g. 32016R0679 (GDPR)"),),
+        "CJEU judgments + AG opinions discovered relative to a named instrument or case. "
+        "Set the instrument to follow (required); keywords post-filter the results.",
+        (SourceOption("legislation_celex", "Legislation CELEX to follow", "e.g. 32004R0139"),
+         SourceOption("cited_by_celex", "Find cases citing this case", "e.g. 62018CJ0311")),
         ("CJEU case CELEX (62018CJ0511)", "ECLI:EU:C:…"),
     ),
     "echr": SourceInfo(
@@ -150,13 +164,14 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     ),
     "uk-legislation": SourceInfo(
         "uk-legislation", "UK legislation (legislation.gov.uk)", "legislation", "GB", True,
-        "Fetches specific Acts/SIs by id (Akoma Ntoso), or follows the newest-published "
-        "feed: set feed=new (and optionally types) to auto-import new legislation as it "
-        "is made; keywords run a title search at the source.",
+        "Walks the newest-published search feed by default (Akoma Ntoso): an incremental "
+        "run imports new legislation as it is made; a backfill walks the whole "
+        "back-catalogue for the chosen types. Name ids to fetch specific Acts/SIs; "
+        "keywords run a title search at the source.",
         (SourceOption("ids", "Legislation ids", "ukpga/2000/36,ukpga/2018/12"),
          SourceOption("feed", "Follow new-legislation feed", "new"),
          SourceOption("types", "Feed types", "ukpga,uksi (default)"),
-         SourceOption("query", "Title search", "e.g. data protection")),
+         SourceOption("query", "Title search", "e.g. companies")),
         ("legislation id (ukpga/2000/36)", "legislation.gov.uk URI"),
     ),
     "edpb": SourceInfo(
@@ -215,9 +230,13 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     ),
     "eu-legislation": SourceInfo(
         "eu-legislation", "EU legislation (CELLAR / Formex)", "legislation", "EU", False,
-        "Fetches specific instruments by CELEX (Formex; articles + recitals). Defaults "
-        "to the GDPR; override with celex. Keywords don’t apply.",
-        (SourceOption("celex", "CELEX ids", "32016R0679,32002L0058"),),
+        "Walks sector-3 legal acts (Regulations, Directives, Decisions) via a CELLAR "
+        "SPARQL enumeration by default, newest-first: an incremental run picks up newly "
+        "published acts, a backfill pages through the whole series. Name CELEXes to "
+        "fetch specific instruments (Formex; articles + recitals).",
+        (SourceOption("celex", "CELEX ids", "32016R0679,32002L0058"),
+         SourceOption("types", "Descriptors to enumerate", "R,L,D (default)"),
+         SourceOption("years", "Year range", "1990-2026")),
         ("CELEX (32016R0679)", "Directive/Regulation number"),
     ),
     "ie-legislation": SourceInfo(
@@ -246,6 +265,110 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("ids", "Limit to these Acts", "ie/2003/act/32"),
          SourceOption("language", "Language", "en (default) | ga")),
         ("ELI id (ie/2003/act/32)",),
+    ),
+    "au-cth": SourceInfo(
+        "au-cth", "Australian Commonwealth legislation (Federal Register, OData API)",
+        "legislation", "AU", True,
+        "The Federal Register of Legislation via its keyless OData v4 API: query Acts / "
+        "instruments by filter, page with $skip. Gives the amendment graph as structured "
+        "edges (statusHistory), the point-in-time compilation series, the originating "
+        "Bill link and name history, all inline. Body text from the register's "
+        "unzipped-EPUB HTML. Incremental by asMadeRegisteredAt.",
+        (SourceOption("ids", "Title ids", "C1901A00002 or au/cth/act/1901/2"),
+         SourceOption("collection", "Collection", "Act (default) | LegislativeInstrument"),
+         SourceOption("filter", "Extra OData $filter", "year eq 2024"),
+         SourceOption("principal_only", "Principal titles only", "true (default) | false")),
+        ("FRL Title id (C1901A00002)", "au/cth/act/1901/2", "legislation.gov.au URL"),
+    ),
+    "au-qld": SourceInfo(
+        "au-qld", "Queensland legislation (LawMaker)", "legislation", "AU", False,
+        "Queensland Acts and subordinate legislation via LawMaker's deterministic "
+        "/view/whole/html/{status}/{date}/{docid} URLs. Default discovery is the crawler "
+        "feed (recently-changed deltas — the incremental path). For a full-catalogue "
+        "backfill set enumerate=true (optionally years=1990-2026) to walk every "
+        "{type}-{year}-{n}. Point-in-time is a path segment.",
+        (SourceOption("ids", "Document ids", "act-2016-001, sl-2023-0107"),
+         SourceOption("enumerate", "Full-catalogue backfill", "true"),
+         SourceOption("years", "Year range to enumerate", "1990-2026"),
+         SourceOption("types", "Types:width to enumerate", "act:3,sl:4 (default)"),
+         SourceOption("status", "View status", "inforce (default) | asmade | repealed")),
+        ("LawMaker docid (act-2016-001)", "au/qld/act/2016/1"),
+    ),
+    "au-nsw": SourceInfo(
+        "au-nsw", "New South Wales legislation (LawMaker)", "legislation", "AU", False,
+        "NSW Acts and regulations via LawMaker's deterministic point-in-time URLs. NSW "
+        "has no headless-reachable feed, so discovery is either named ids or a "
+        "full-catalogue enumerate=true backfill (years=…) that walks every "
+        "{type}-{year}-{n}.",
+        (SourceOption("ids", "Document ids", "act-1900-088"),
+         SourceOption("enumerate", "Full-catalogue backfill", "true"),
+         SourceOption("years", "Year range to enumerate", "1990-2026"),
+         SourceOption("types", "Types:width to enumerate", "act:3,sl:4,epi:4 (default)"),
+         SourceOption("status", "View status", "inforce (default) | asmade | repealed")),
+        ("LawMaker docid", "au/nsw/act/1900/88"),
+    ),
+    "au-tas": SourceInfo(
+        "au-tas", "Tasmania legislation (LawMaker)", "legislation", "AU", False,
+        "Tasmanian Acts and statutory rules via LawMaker's deterministic point-in-time "
+        "URLs and its crawler feed (deltas — the incremental path). For a full-catalogue "
+        "backfill set enumerate=true (optionally years=…).",
+        (SourceOption("ids", "Document ids", "act-2000-019, sr-2026-046"),
+         SourceOption("enumerate", "Full-catalogue backfill", "true"),
+         SourceOption("years", "Year range to enumerate", "1990-2026"),
+         SourceOption("types", "Types:width to enumerate", "act:3,sr:3 (default)"),
+         SourceOption("status", "View status", "inforce (default) | asmade | repealed")),
+        ("LawMaker docid", "au/tas/act/2000/19"),
+    ),
+    "ca-federal": SourceInfo(
+        "ca-federal", "Canada federal legislation (Justice Laws XML)", "legislation",
+        "CA", False,
+        "All consolidated federal Acts and Regulations, read from a local clone of "
+        "justicecanada/laws-lois-xml. Enumeration and change detection come from the "
+        "repo's own lookup manifest (each document's consolidation date is the change "
+        "signal), so a full run needs no network at all; set pull=true to git-pull "
+        "first. Gives provision-level point-in-time (lims:inforce-start-date), the "
+        "regulation→enabling-Act edge, and the Act→regulations-made-under-it edge. "
+        "English and French are equally authoritative — lang selects which to ingest.",
+        (SourceOption("path", "Path to laws-lois-xml clone", "/path/to/laws-lois-xml"),
+         SourceOption("lang", "Language", "eng (default) | fra | both"),
+         SourceOption("types", "Types", "act,regulation (default)"),
+         SourceOption("ids", "Limit to these", "C-46, SOR/2018-69, ca/act/a-1"),
+         SourceOption("include_repealed", "Include repealed laws", "true | false (default)"),
+         SourceOption("pull", "git pull before run", "true | false (default)")),
+        ("chapter code (C-46)", "instrument number (SOR/2018-69)", "ca/act/c-46"),
+    ),
+    "hk-legislation": SourceInfo(
+        "hk-legislation", "Hong Kong legislation (e-Legislation bulk XML)", "legislation",
+        "HK", False,
+        "The consolidated Hong Kong statute book from the Department of Justice bulk XML "
+        "drop — Ordinances, subsidiary legislation and the Basic Law instruments. "
+        "Content is read from the local drop and never fetched over HTTP: "
+        "elegislation.gov.hk's robots.txt disallows all paths but /sitemap. Each "
+        "chapter's consolidation date is encoded in its filename, so re-pointing at a "
+        "refreshed drop imports only what changed. check_sitemap=true additionally "
+        "reports chapters that exist upstream but are missing from the drop.",
+        (SourceOption("path", "Path to bulk XML drop", "/path/to/hkleg"),
+         SourceOption("ids", "Limit to these chapters", "486, 571, cap.1"),
+         SourceOption("check_sitemap", "Report chapters missing from the drop", "true"),
+         SourceOption("include_repealed", "Include repealed", "true (default) | false")),
+        ("chapter number (Cap. 486)", "hk/cap/486"),
+    ),
+    "nz-legislation": SourceInfo(
+        "nz-legislation", "New Zealand legislation (PCO Developer API)", "legislation",
+        "NZ", True,
+        "Acts, secondary legislation and Bills via the Parliamentary Counsel Office's "
+        "Developer API. REQUIRES an API key (set RAGLEX_NZ_API_KEY) — without one the "
+        "source yields nothing by design: the legislation website is bot-walled (HTTP "
+        "405 human-verification), so there is deliberately no scraping fallback. "
+        "Point-in-time is native (each consolidation is its own addressable version). "
+        "Title keywords are searched at the API. Note the XML schema is not yet verified "
+        "against a live sample — text is always captured, structure is inferred.",
+        (SourceOption("legislation_type", "Type", "act (default) | secondary-legislation | bill"),
+         SourceOption("query", "Title search", "e.g. privacy"),
+         SourceOption("ids", "Work ids", "act_public_1990_109"),
+         SourceOption("status", "Status", "in_force | not_in_force"),
+         SourceOption("agency", "Administering agency", "e.g. Ministry of Justice")),
+        ("work id (act_public_1990_109)", "nz/act/public/1990/109"),
     ),
     "nl-legislation": SourceInfo(
         "nl-legislation", "NL legislation (KOOP / BWB)", "legislation", "NL", False,
@@ -292,7 +415,15 @@ def source_catalog() -> list[dict]:
                                   or key in ("uk-legislation", "edpb", "edpb-oss", "dma-cases",
                                              "ofcom-osa", "ofcom-enforcement",
                                              # year cursor / "Updated to" cursor
-                                             "ie-legislation", "ie-revised"))
+                                             "ie-legislation", "ie-revised",
+                                             # asMadeRegisteredAt cursor / crawler-feed deltas
+                                             "au-cth", "au-qld", "au-tas",
+                                             # consolidation-date cursors: the Canadian
+                                             # manifest's LastConsolidationDate, the HK
+                                             # drop's filename timestamp, and the NZ
+                                             # API's most_recently_updated sort
+                                             "ca-federal", "hk-legislation",
+                                             "nz-legislation"))
         out.append(row)
     return out
 

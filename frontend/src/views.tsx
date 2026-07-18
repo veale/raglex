@@ -442,7 +442,7 @@ function AdvancedForm({ filters, setFilters, onSearch }:
     <div className="adv-form">
       <div className="adv-row">
         <label>Title / id contains <span className="muted">(free text — words in any order)</span></label>
-        <input value={filters.query || ""} placeholder="e.g. data protection erasure"
+        <input value={filters.query || ""} placeholder="e.g. unfair dismissal"
           onChange={(e) => set("query", e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSearch()} />
       </div>
       <div className="adv-grid">
@@ -2280,18 +2280,90 @@ function ExpandCoveragePanel() {
 
 // The consolidated "Maintain" page: keep-current upkeep, gap backfill, watches, and rules —
 // the whole "grow + keep the corpus complete" surface in one place.
+// "Get everything from this source" — the full-catalogue backfill, as a background job.
+// Distinct from a Watch (which keeps a source *current* on a cadence): this is the
+// one-off walk that fills the corpus from a register's back-catalogue.
+function BackfillPanel() {
+  const [cat] = useAsync(() => api.sourceCatalog(), []);
+  const [source, setSource] = useState("");
+  const [srcOpts, setSrcOpts] = useState<Record<string, string>>({});
+  const [bounded, setBounded] = useState(false);
+  const [maxPages, setMaxPages] = useState(5);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const info = (cat ?? []).find((s: any) => s.key === source);
+
+  async function run() {
+    if (!source) { setMsg("pick a source"); return; }
+    setBusy(true); setMsg("");
+    const opts = Object.fromEntries(Object.entries(srcOpts).filter(([, v]) => v.trim()));
+    try {
+      const r = await api.harvestSource({
+        source, backfill: true,
+        max_pages: bounded ? maxPages : null,
+        ...(Object.keys(opts).length ? { options: opts } : {}),
+      });
+      if (r.error) setMsg("✗ " + r.error);
+      else if (r.already_running) setMsg("• a backfill of this source is already running");
+      else setMsg("✓ queued — follow it in the Jobs panel (bottom-left)");
+    } catch (e: any) { setMsg("✗ " + e); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Backfill a source <span className="muted">— pull its whole back-catalogue</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Runs the source with its <b>backfill</b> path: no incremental cursor and, unless you cap it, no page limit —
+        so it walks the register as far as it goes. Registers with a real feed or API (UK &amp; EU legislation, the
+        Australian Commonwealth) enumerate their whole catalogue; the Irish eISB walks every year; the Australian
+        LawMaker states need <span className="kbd">enumerate=true</span> (set it in the options below) because their
+        feed only carries recent changes. This can run for hours and is paced politely — it runs as a job, so you can
+        leave the page.
+      </p>
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        <select value={source} onChange={(e) => { setSource(e.target.value); setSrcOpts({}); }} style={{ flex: "0 0 auto", minWidth: 260 }}>
+          <option value="">— source —</option>
+          {(cat ?? []).map((s: any) => <option key={s.key} value={s.key}>{s.label}</option>)}
+        </select>
+        <label style={{ flex: "0 0 auto" }} title="Uncapped walks the whole catalogue; capping is useful for a trial run.">
+          <input type="checkbox" checked={bounded} onChange={(e) => setBounded(e.target.checked)} /> cap at
+          <input type="number" min={1} max={500} value={maxPages} disabled={!bounded}
+            onChange={(e) => setMaxPages(+e.target.value || 1)} style={{ width: 64, marginLeft: 6 }} /> pages
+        </label>
+        <button className="primary" disabled={busy || !source} style={{ flex: "0 0 auto" }} onClick={run}>
+          {busy ? "queuing…" : "⤓ Backfill everything"}
+        </button>
+      </div>
+      {info && <div style={{ marginTop: 6 }}>
+        <p className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{info.description}</p>
+        <SourceCaps info={info} />
+      </div>}
+      {info && (info.options ?? []).length > 0 && <div className="row" style={{ flexWrap: "wrap", marginTop: 6 }}>
+        {(info.options ?? []).map((o: any) => (
+          <input key={o.name} value={srcOpts[o.name] ?? ""} title={o.label}
+            onChange={(e) => setSrcOpts({ ...srcOpts, [o.name]: e.target.value })}
+            placeholder={`${o.label}${o.placeholder ? ` — ${o.placeholder}` : ""}`} style={{ minWidth: 210 }} />
+        ))}
+      </div>}
+      {msg && <p className={msg.startsWith("✗") ? "err" : "ok"} style={{ wordBreak: "break-word" }}>{msg}</p>}
+    </div>
+  );
+}
+
 export function MaintainView({ open }: { open: (id: string) => void }) {
   return (
     <div>
       <div className="panel" style={{ background: "transparent", border: "none", padding: 0, marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Maintain</h2>
         <p className="muted" style={{ marginTop: 4 }}>
-          Grow the corpus and keep it current. <b>Keep current</b> is automatic upkeep; <b>Backfill gaps</b> chases 100%
-          completeness court-by-court; <b>Expand coverage</b> pulls in cited-but-missing authorities; <b>Watches</b> pull
-          new material on a schedule; <b>Rules</b> are optional shorthands.
+          Grow the corpus and keep it current. <b>Keep current</b> is automatic upkeep; <b>Backfill a source</b> pulls a
+          register's whole back-catalogue; <b>Backfill gaps</b> chases 100% completeness court-by-court;{" "}
+          <b>Expand coverage</b> pulls in cited-but-missing authorities; <b>Watches</b> pull new material on a schedule;{" "}
+          <b>Rules</b> are optional shorthands.
         </p>
       </div>
       <KeepCurrentPanel />
+      <BackfillPanel />
       <GapFillPanel />
       <ExpandCoveragePanel />
       <RefinementFlagsPanel open={open} />
@@ -2394,7 +2466,7 @@ export function WatchesView() {
           document, use the <b>❅ Snowball</b> button there instead.
         </p>
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="watch name, e.g. ‘UK DP cases’" style={{ minWidth: 180 }} />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="watch name, e.g. ‘UK tax cases’" style={{ minWidth: 180 }} />
           <select value={source} onChange={(e) => { setSource(e.target.value); setSrcOpts({}); }} style={{ flex: "0 0 auto" }}>
             <option value="">— source (optional) —</option>
             {(cat ?? []).map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}

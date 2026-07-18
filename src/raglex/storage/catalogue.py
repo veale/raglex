@@ -440,7 +440,18 @@ class Catalogue:
 
     def _migrate(self) -> None:
         """Additive, idempotent column migrations for DBs created before a column existed
-        (the DDL is CREATE-IF-NOT-EXISTS, which doesn't add columns to a live table)."""
+        (the DDL is CREATE-IF-NOT-EXISTS, which doesn't add columns to a live table).
+
+        Crucially, **check the column exists before issuing any ALTER** on either backend.
+        ``ALTER TABLE … ADD COLUMN IF NOT EXISTS`` still requests an ACCESS EXCLUSIVE lock on
+        Postgres even when the column is already there — so on an already-migrated DB (the
+        steady state) an unconditional ALTER needlessly grabs a table lock, and if a
+        concurrent reader holds the table (e.g. the periodic ``pg_dump`` backup, which holds
+        ACCESS SHARE on every table for the whole dump) the ALTER queues behind it and every
+        subsequent read queues behind the ALTER — deadlocking the app against its own backup
+        until the pool times out. Reading ``information_schema`` first means zero DDL, and
+        zero locks, whenever there is nothing to migrate. A short ``lock_timeout`` bounds the
+        rare genuine ALTER so it can never hang startup for a backup's duration."""
         for table, col, decl in (
             ("documents", "meta_json", "TEXT"),
             ("relations", "candidate_id", "TEXT"),
@@ -448,7 +459,13 @@ class Catalogue:
         ):
             try:
                 if self.backend == "postgres":
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {decl}")
+                    exists = self.conn.execute(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name = ? AND column_name = ?", (table, col)).fetchone()
+                    if not exists:
+                        self.conn.execute("SET lock_timeout = '5s'")
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {decl}")
+                        self.conn.execute("SET lock_timeout = 0")
                 else:
                     cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
                     if col not in cols:
@@ -663,7 +680,7 @@ class Catalogue:
         instead of re-running the matcher ladder (§5b)."""
         # Imported lazily: resolve/ imports the catalogue, so a module-level import cycles.
         from ..resolve.matchers import normalise_candidate
-        from ..topics.gate import fold
+        from ..core.text import fold
 
         raw = rel.raw_citation_string
         return normalise_candidate(rel.dst_id, raw), (fold(raw) if raw else None)
@@ -1301,7 +1318,7 @@ class Catalogue:
         steady state (candidate_id is the hot column), so over millions of edges that would
         be a full scan each. Build a throwaway index for the duration and drop it after."""
         from ..resolve.matchers import normalise_candidate
-        from ..topics.gate import fold
+        from ..core.text import fold
 
         temp_index = False
         try:

@@ -40,7 +40,7 @@ def test_facade_link_with_anchors(tmp_path, monkeypatch):
 
     cfg = Config(
         data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite", raw_dir=tmp_path / "raw",
-        text_dir=tmp_path / "text", settings_path=tmp_path / "s.json", topic_threshold=3.0,
+        text_dir=tmp_path / "text", settings_path=tmp_path / "s.json",
         embed_provider="local-hashing", embed_model=None,
     )
     f = Facade(cfg)

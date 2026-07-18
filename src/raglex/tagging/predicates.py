@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from ..topics.gate import fold
+from ..core.text import fold
 
 # Safety rail (§4a): cap the text a single regex/literal scans so a pathological
 # pattern can't run unbounded. A true catastrophic-backtracking guard (timeouts)

@@ -9,9 +9,9 @@ from __future__ import annotations
 from ..core.models import DocType
 from .recipe import ScrapeRecipe
 
-# UK Information Commissioner — enforcement actions (data protection / FOI).
-# First-party, in-scope by construction (§3/§4). Selectors are a best-effort
-# template; confirm live before a real backfill.
+# UK Information Commissioner — enforcement actions. An example first-party
+# regulator recipe; selectors are a best-effort template — confirm live before a
+# real backfill.
 ICO_ENFORCEMENT = ScrapeRecipe(
     source="uk-ico",
     base_url="https://ico.org.uk",

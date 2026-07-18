@@ -58,15 +58,33 @@ REPORT_SERIES: tuple[str, ...] = (
     # here: they're real courts in citations.courts, and listing them would
     # suppress the iehc/2008/56 candidate their citations must mint) --
     "IR", "ILRM", "ILTR", "Ir Jur Rep", "Ir Jur", "LR Ir", "Frewen",
-    # -- EU (parallel to CELEX) & frequently-cited Commonwealth --
-    "CMLR", "CEC", "DLR", "CLR", "SCR", "NZLR", "HKLRD", "HKC", "SGCA", "SLR",
+    # -- EU (parallel to CELEX) --
+    "CMLR", "CEC",
+    # -- pan-Commonwealth / wide-travelling series (see WIDE_TRAVELLING below) --
+    "LRC", "BHRC", "ITELR", "WIR", "EA", "Cth LR",
     # -- Canada (ordinal series print as "(1990) 70 DLR (4th) 385") --
-    "DLR (2d)", "DLR (3d)", "DLR (4th)", "CCC", "CCC (2d)", "CCC (3d)", "WWR",
-    "OR (2d)", "OR (3d)", "CRR", "CPR (3d)",
+    "DLR", "DLR (2d)", "DLR (3d)", "DLR (4th)", "SCR", "RCS", "CCC", "CCC (2d)",
+    "CCC (3d)", "CR", "WWR", "OR", "OR (2d)", "OR (3d)", "OAC", "CRR", "CPR", "CPR (3d)",
+    "BCLR", "AR", "Alta LR", "Man R", "Sask R", "NSR", "NBR", "Nfld & PEIR", "RJQ",
+    "ETR", "RFL", "CTC", "ATC", "Admin LR", "MVR",
     # -- Australia --
-    "ALR", "ALJR", "NSWLR", "VR", "WAR", "SASR", "Qd R", "A Crim R", "ACSR", "FamLR",
+    "CLR", "ALR", "ALJR", "FCR", "FLR", "Fam LR", "ALD", "FLC",
+    "NSWLR", "SR (NSW)", "VR", "VLR", "Qd R", "St R Qd", "SASR", "SRSA", "WAR", "WALR",
+    "Tas R", "Tas SR", "NTLR", "NTR", "ACTLR", "ACTR",
+    "A Crim R", "ACSR", "FamLR", "IR",
     # -- New Zealand --
-    "NZAR", "NZFLR",
+    "NZLR", "NZAR", "NZFLR", "DCR", "NZBLC", "BCL",
+    # -- Singapore & Malaysia (MLJ spans both, plus historical Brunei) --
+    "SLR", "SLR(R)", "MLJ", "MLJU", "CLJ", "AMR",
+    # -- Hong Kong --
+    "HKLRD", "HKC", "HKCFAR", "HKLR", "HKEC", "HKCU",
+    # -- South Africa --
+    "SA", "All SA", "BCLR", "SACR", "ILJ", "SALR",
+    # -- India --
+    "SCC", "AIR", "SCALE", "JT", "Bom LR", "Ker LT", "All LJ",
+    # -- Africa (other) --
+    "KLR", "GLR", "SCGLR", "GLRD", "NWLR", "FWLR", "NSCC", "LPELR", "ZLR", "NR", "ZR",
+    "ULR",
     # -- nominate / very old (year-bracketed usage) --
     "ER", "Term Rep", "East", "B & C", "B & Ald", "M & W", "Bing", "Taunt", "Camp",
     "Esp", "Stark", "H & N", "H Bl", "Wils KB", "Barn KB", "Burr", "Cowp", "Doug KB",
@@ -82,6 +100,75 @@ _OLD_LR_COURTS = (
     "HL", "PC", "HL Sc", "HL Ir", "Sc & Div", "QB", "CP", "Ex", "Eq", "Ch App", "Ch",
     "P & D", "A & E", "CCR", "Adm & Ecc", "Ir", "Ind App", "PC App",
 )
+
+
+# Series that travel across jurisdictions — they name the *series*, never the country.
+# A "[2015] 3 LRC 1" tells you the report, not whether the case is Ghanaian or Fijian, so
+# jurisdiction must come from the court in the parallel neutral citation or the trailing
+# "(COURT)" parenthetical. Inferring a country from these is simply wrong.
+WIDE_TRAVELLING: frozenset[str] = frozenset({
+    "LRC",          # Law Reports of the Commonwealth — any member state
+    "BHRC",         # Butterworths Human Rights Cases — international
+    "ITELR",        # International Trust & Estate Law Reports
+    "WIR",          # West Indian Reports — regional, Commonwealth Caribbean
+    "EA",           # East Africa Law Reports — Kenya/Uganda/Tanzania
+    "MLJ", "MLJU",  # Malayan Law Journal — Malaysia + pre-1965 Singapore + Brunei
+    "AC", "WLR", "QB", "KB", "Ch", "All ER", "ER",  # English series cited everywhere
+    "Lloyd's Rep", "BCLC",
+})
+
+# Series that DO tie to one jurisdiction. Used to place a reported-only citation
+# ("(2019) 12 NWLR (Pt 1685) 1" → Nigeria) that has no neutral citation to learn from.
+# Deliberately omits the wide-travelling series above and the worst collisions below.
+REPORTER_JURISDICTION: dict[str, str] = {
+    # Canada
+    **{r: "CA" for r in ("DLR", "SCR", "RCS", "CCC", "CR", "WWR", "OR", "OAC", "BCLR",
+                         "AR", "Alta LR", "Man R", "Sask R", "NSR", "NBR",
+                         "Nfld & PEIR", "RJQ", "ETR", "RFL", "CTC", "ATC", "MVR")},
+    # Australia
+    **{r: "AU" for r in ("CLR", "ALR", "ALJR", "FCR", "ALD", "FLC", "NSWLR", "SR (NSW)",
+                         "VR", "VLR", "Qd R", "St R Qd", "SASR", "SRSA", "WAR", "WALR",
+                         "Tas R", "Tas SR", "NTLR", "NTR", "ACTLR", "ACTR", "A Crim R",
+                         "ACSR")},
+    # New Zealand
+    **{r: "NZ" for r in ("NZLR", "NZAR", "NZFLR", "DCR", "NZBLC", "BCL")},
+    # Singapore / Hong Kong / South Africa / India
+    **{r: "SG" for r in ("SLR", "SLR(R)")},
+    **{r: "HK" for r in ("HKLRD", "HKC", "HKCFAR", "HKLR", "HKEC", "HKCU")},
+    **{r: "ZA" for r in ("All SA", "SACR", "SALR")},
+    **{r: "IN" for r in ("SCC", "AIR", "SCALE", "JT", "Bom LR", "Ker LT", "All LJ")},
+    **{r: "MY" for r in ("CLJ", "AMR")},
+    # Africa
+    **{r: "KE" for r in ("KLR",)},
+    **{r: "GH" for r in ("GLR", "SCGLR", "GLRD")},
+    **{r: "NG" for r in ("NWLR", "FWLR", "NSCC", "LPELR")},
+    **{r: "ZW" for r in ("ZLR",)}, **{r: "ZM" for r in ("ZR",)},
+    **{r: "NA" for r in ("NR",)}, **{r: "UG" for r in ("ULR",)},
+    # Ireland
+    **{r: "IE" for r in ("IR", "ILRM", "ILTR", "Ir Jur Rep", "LR Ir", "Frewen")},
+}
+
+# Abbreviations that mean different things in different places and must NEVER be read as
+# a jurisdiction signal on their own (reference Part 14). "SA" is the South African Law
+# Reports *and* South Australia; "IR" is the Irish Reports *and* Australian Industrial
+# Reports; "SC" is Session Cases, a Nigerian reporter, and "Supreme Court" in a dozen
+# systems. These resolve only from surrounding court context.
+COLLIDING_ABBREVS: frozenset[str] = frozenset({
+    "SA", "SC", "CA", "LR", "IR", "AC", "CR", "SCR", "EA", "NR", "FCA", "HCA", "SCC",
+})
+
+
+def reporter_jurisdiction(series: str) -> str | None:
+    """The jurisdiction a report series implies, or None when it implies none.
+
+    Returns None for wide-travelling series and for the known collisions — the honest
+    answer, because guessing a country from an ambiguous abbreviation is exactly the
+    error the collision table warns about.
+    """
+    token = " ".join((series or "").split())
+    if token in WIDE_TRAVELLING or token in COLLIDING_ABBREVS:
+        return None
+    return REPORTER_JURISDICTION.get(token)
 
 
 def _dotify(token: str) -> str:

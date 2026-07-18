@@ -540,7 +540,7 @@ class Facade:
             if hit:
                 return hit
         if raw:
-            from .topics.gate import fold
+            from .core.text import fold
 
             dst = cat.get_alias(fold(raw))
             if dst:
@@ -2042,7 +2042,7 @@ class Facade:
         # (pre-digital case, absent CELLAR rendition), not "the source feed is broken" —
         # don't let it increment the source's consecutive_failures counter.
         try:
-            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+            stats = Pipeline(cat, rs, textstore=ts).run(
                 adapter, max_pages=1, record_health=False)
         except Exception as exc:  # noqa: BLE001
             return {"candidate": cand, "adapter": adapter_key, "stored": 0,
@@ -2053,7 +2053,7 @@ class Facade:
                 and cand.lower().startswith("ukhl/")):
             try:
                 hol = _targeted_uk_hol(cand)
-                hstats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                hstats = Pipeline(cat, rs, textstore=ts).run(
                     hol, max_pages=1, record_health=False)
                 if hstats.stored:
                     return {"candidate": cand, "adapter": "uk-hol", "stored": hstats.stored,
@@ -2081,7 +2081,7 @@ class Facade:
 
         adapter = get_adapter("uk-legislation", ids=base, version_date=date)
         with self._open() as (cat, rs, ts):
-            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(adapter, max_pages=1)
+            stats = Pipeline(cat, rs, textstore=ts).run(adapter, max_pages=1)
             from .citations import extract_corpus
             extract_corpus(cat, ts, stable_id=f"{base}@{date}")
             Resolver(cat).run()
@@ -2175,10 +2175,10 @@ class Facade:
             ids = [r["stable_id"] for r in due]
             before = {r["stable_id"]: r["outstanding"] for r in due}
             adapter = get_adapter("uk-legislation", ids=",".join(ids))
-            # backfill=True ignores the watermark; skip the topic gate (already in corpus).
+            # backfill=True ignores the watermark (the item is already in corpus).
             # Each fetch re-records the effects state via the pipeline (_ingest), so the
             # queue is rescheduled/cleared as a side effect of the re-pull.
-            Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(adapter, backfill=True)
+            Pipeline(cat, rs, textstore=ts).run(adapter, backfill=True)
             cleared, still = 0, 0
             for sid in ids:
                 row = cat.conn.execute(
@@ -2297,7 +2297,7 @@ class Facade:
         from .extraction import extract_bytes
         from .pipeline.runner import _chamberless_alias
         from .resolve.matchers import first_candidate
-        from .topics.gate import fold
+        from .core.text import fold
 
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         extracted = extract_bytes(data, ext=ext)
@@ -2401,7 +2401,7 @@ class Facade:
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
         from .resolve.matchers import first_candidate
-        from .topics.gate import fold
+        from .core.text import fold
 
         names = load_name_index(names_csv) if names_csv else {}
         st = {"total": 0, "imported": 0, "secondary": 0, "no_slug": 0, "named": 0,
@@ -2651,7 +2651,7 @@ class Facade:
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
         from .resolve.matchers import first_candidate
-        from .topics.gate import fold
+        from .core.text import fold
 
         st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0,
               "unparseable": 0, "aliases": 0, "extracted": 0}
@@ -2994,7 +2994,7 @@ class Facade:
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
         from .resolve.matchers import first_candidate
-        from .topics.gate import fold
+        from .core.text import fold
 
         from .adapters.westlaw_legislation import parse_westlaw_legislation
 
@@ -3226,7 +3226,7 @@ class Facade:
         from .adapters.westlaw_legislation import parse_westlaw_legislation
         from .citations import extract_document
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
-        from .topics.gate import fold
+        from .core.text import fold
 
         parsed = parse_westlaw_legislation(data, filename=filename)
         if parsed is None:
@@ -3319,7 +3319,7 @@ class Facade:
 
         from .adapters.westlaw_rtf import ParsedWestlaw, westlaw_identity
         from .resolve.matchers import first_candidate
-        from .topics.gate import fold
+        from .core.text import fold
 
         st = {"scanned": 0, "rekeyed": 0, "merged": 0, "unchanged": 0, "applied": apply}
         changes: list[dict] = []
@@ -4051,7 +4051,7 @@ class Facade:
         keyword limiter (works regardless of API search support): scans title + text
         for any term. No keywords → the source's most-recent docs.
 
-        Keywords are un-quoted first: a phrase keyword ('"data protection"', quoted for
+        Keywords are un-quoted first: a phrase keyword ('"unfair dismissal"', quoted for
         the source API's exact-match search) must post-filter as the phrase itself —
         the quote characters never appear in a document, so the quoted form matches
         nothing and the watch silently seeds zero documents."""
@@ -4184,7 +4184,7 @@ class Facade:
         with self._open() as (cat, rs, ts):
             _progress(on_progress, stage="scraping House of Lords index", done=0, total=0)
             before = cat.all_stable_ids()
-            stats = Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+            stats = Pipeline(cat, rs, textstore=ts).run(
                 adapter, max_pages=limit, record_health=True)
             stored_ids = [s for s in cat.all_stable_ids() - before]
             self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
@@ -4208,7 +4208,7 @@ class Facade:
             HOL_PLAUSIBLE_SERIES, extract_preceding_name, match_report,
         )
         from .citations.reporters import report_series
-        from .topics.gate import fold
+        from .core.text import fold
 
         def _year(d):
             return int(d[:4]) if d and len(d) >= 4 and d[:4].isdigit() else None
@@ -4344,7 +4344,7 @@ class Facade:
         so it never goes stale and covers every Act that's been fetched — including recent
         ones the offline list predates. Mints an alias per confident match, then resolves."""
         from .citations.statute_gazetteer import normalise_title, reference_key
-        from .topics.gate import fold
+        from .core.text import fold
 
         with self._open() as (cat, _rs, _ts):
             # held-legislation title index, keyed by normalised title; keep only the
@@ -4403,7 +4403,7 @@ class Facade:
                     break
                 _progress(on_progress, stage="harvesting ECtHR from HUDOC", done=i, total=total)
                 adapter = get_adapter("echr", ids=names[i: i + chunk])
-                stored += Pipeline(cat, rs, textstore=ts, skip_topic_gate=True).run(
+                stored += Pipeline(cat, rs, textstore=ts).run(
                     adapter, record_health=False).stored
             stored_ids = list(cat.all_stable_ids() - before)
             self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
@@ -4427,7 +4427,7 @@ class Facade:
         import re as _re
 
         from .citations.report_match import score_candidate, surnames
-        from .topics.gate import fold
+        from .core.text import fold
 
         def _year(d):
             return int(d[:4]) if d and len(d) >= 4 and d[:4].isdigit() else None
@@ -4514,7 +4514,7 @@ class Facade:
             extract_name_candidates, match_report, score_candidate, surnames,
         )
         from .citations.statute_gazetteer import _index as _gz_index, reference_key, normalise_title
-        from .topics.gate import fold
+        from .core.text import fold
 
         st = {"statute": 0, "report": 0, "echr": 0, "auto_aliased": 0}
 
@@ -4721,7 +4721,7 @@ class Facade:
         suggestion), and resolves. Reject just records the decision so the suggester
         never re-asks. ``resolve=False`` defers the resolver pass — the bulk accept-all
         sweep decides many rows then runs :meth:`resolve` once at the end."""
-        from .topics.gate import fold
+        from .core.text import fold
 
         with self._open() as (cat, rs, ts):
             n = cat.set_suggestion_status(ref, suggested_id, "accepted" if accept else "rejected")
@@ -4780,7 +4780,7 @@ class Facade:
             ClusterIndex, Occurrence, adjacency_groups, coref_key, link_eu_reports, occ_neutral,
         )
         from .citations.report_match import extract_preceding_name
-        from .topics.gate import fold
+        from .core.text import fold
 
         idx = ClusterIndex()
         adjacency_keys: set[str] = set()
@@ -5054,11 +5054,11 @@ class Facade:
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
         "trigger a backfill / re-run a source from the browser" action. ``options``
-        are passed to the adapter (e.g. ``{"query": "data protection"}`` for the
+        are passed to the adapter (e.g. ``{"query": "unfair dismissal"}`` for the
         Find Case Law keyword search, ``{"court": "ewca/civ"}``). Foreground and
         bounded by ``max_pages`` so a UI click returns; large backfills run via the
         CLI/cron."""
-        from .adapters.registry import IN_SCOPE_SOURCES, get_adapter
+        from .adapters.registry import get_adapter
         from .pipeline import Pipeline
         from .tagging import RuleEngine
 
@@ -5067,10 +5067,7 @@ class Facade:
         except (KeyError, TypeError) as exc:
             return {"error": str(exc)}
         with self._open() as (cat, rs, ts):
-            pipe = Pipeline(
-                cat, rs, textstore=ts, topic_threshold=self.config.topic_threshold,
-                skip_topic_gate=source in IN_SCOPE_SOURCES,
-            )
+            pipe = Pipeline(cat, rs, textstore=ts)
             before = cat.all_stable_ids()
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,

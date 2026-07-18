@@ -55,8 +55,7 @@ def test_facade_settings_roundtrip(tmp_path, monkeypatch):
 
     config = Config(
         data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite", raw_dir=tmp_path / "raw",
-        text_dir=tmp_path / "text", settings_path=tmp_path / "settings.json",
-        topic_threshold=3.0, embed_provider="local-hashing", embed_model=None,
+        text_dir=tmp_path / "text", settings_path=tmp_path / "settings.json", embed_provider="local-hashing", embed_model=None,
     )
     f = Facade(config)
     f.update_settings({"ZOTERO_API_KEY": "zkey", "ZOTERO_LIBRARY_ID": "42"})

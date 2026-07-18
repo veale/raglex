@@ -1,23 +1,19 @@
 """UK legislation adapter — legislation.gov.uk Akoma Ntoso (LegalDocML).
 
-Harvesting statute, not just cases (§0). legislation.gov.uk serves clean
-**Akoma Ntoso** at ``/{type}/{year}/{number}/data.akn`` with point-in-time
-versions at ``/{type}/{year}/{number}/{YYYY-MM-DD}/...``. The stable_id is the
-legislation URI form (``ukpga/2000/36``) — which is exactly what the §5b resolver
-mints for a ``legislation.gov.uk`` citation, so harvesting FOIA/DPA makes all the
-dangling "cites FOIA s.14" edges resolve, and the AKN gives a structured,
+legislation.gov.uk serves clean **Akoma Ntoso** at ``/{type}/{year}/{number}/data.akn``
+with point-in-time versions at ``/{type}/{year}/{number}/{YYYY-MM-DD}/...``. The
+stable_id is the legislation URI form (``ukpga/2000/36``) — which is exactly what the
+§5b resolver mints for a ``legislation.gov.uk`` citation, so harvesting an Act makes its
+dangling "cites … s.14" edges resolve, and the AKN gives a structured,
 nicely-renderable, machine-readable base.
 
-Default targets are the core UK data-protection / FOI instruments; override with
-``-o ids=ukpga/2000/36,ukpga/2018/12`` or point it at any list.
-
-**Feed discovery** (the "auto-import new statute" path): legislation.gov.uk also
-publishes paginated Atom search feeds — ``/{type}/data.feed?sort=published`` lists a
-type's items newest-published first (types combine as ``ukpga+uksi``), and ``title=``
-scopes to a title search. Setting ``feed=new`` / ``types=…`` / ``query=…`` switches
-``discover`` to walking that feed with an incremental cursor on ``<published>``, so a
-watch on this source pulls each newly-made SI/Act as it appears instead of re-fetching
-a fixed id list forever.
+**Discovery is the search feed by default** — the full-catalogue path. Naming ids
+(``-o ids=ukpga/2000/36,…``) fetches exactly those; otherwise ``discover`` walks the
+paginated Atom search feed ``/{type}/data.feed?sort=published`` (types combine as
+``ukpga+uksi``), newest-published first. An **incremental** run stops at the stored
+``<published>`` cursor (new legislation as it is made); a **backfill** (no cursor, no
+page cap) walks the feed to its end — the entire back-catalogue of those types.
+``types=`` sets which legislation types to walk; ``query=`` is a title search.
 """
 
 from __future__ import annotations
@@ -46,15 +42,8 @@ from .leg_effects import parse_unapplied_effects, summarise_effects
 
 BASE_URL = "https://www.legislation.gov.uk"
 
-# Core UK information-rights statutes (§3/§4 focus).
-DEFAULT_IDS = (
-    "ukpga/2000/36",   # Freedom of Information Act 2000
-    "ukpga/2018/12",   # Data Protection Act 2018
-    "uksi/2004/3391",  # Environmental Information Regulations 2004
-)
-
-# Default feed scope: UK-wide primary + secondary legislation — what "new statute"
-# means for this corpus. Devolved/NI types can be added via ``types=``.
+# Default feed scope: UK-wide primary + secondary legislation. Devolved/NI types can
+# be added via ``types=`` (e.g. ``asp,asc,nia,wsi``).
 DEFAULT_FEED_TYPES = ("ukpga", "uksi")
 
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -124,14 +113,16 @@ class UKLegislationAdapter(BaseAdapter):
                  types: str | None = None, query: str | None = None) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
-        # Feed mode (new-legislation discovery): any of feed/types/query switches
-        # discover() from the fixed id list to the search feed. ``types`` limits the
-        # legislation types ("ukpga,uksi"); ``query`` is a title search.
-        self.feed = bool(feed) or bool(types) or bool(query)
+        self.ids = tuple(ids) if ids else ()
+        # Feed mode is the DEFAULT: with no explicit ids, discover() walks the
+        # newest-published search feed over ``types`` — so an incremental run pulls new
+        # legislation and a ``--backfill`` (no cursor, no page cap) walks the entire
+        # back-catalogue. Naming ids switches to fetching exactly those. ``types`` limits
+        # the legislation types ("ukpga,uksi"); ``query`` is a title search.
+        self.feed = bool(feed) or bool(types) or bool(query) or not self.ids
         self.types = tuple(t.strip().lower() for t in (types or "").split(",") if t.strip()) \
             or DEFAULT_FEED_TYPES
         self.query = (query or "").strip() or None
-        self.ids = tuple(ids) if ids else DEFAULT_IDS
         # point-in-time: fetch the law as it stood at this date (YYYY-MM-DD), so a
         # citation from an old case sees the live provisions, not today's repealed text.
         self.version_date = version_date
