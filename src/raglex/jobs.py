@@ -109,6 +109,7 @@ RUNNERS: dict[str, Callable] = {
     "import-bailii-zip": lambda f, p, cb, cancel: f.import_bailii_zip(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-dir": lambda f, p, cb, cancel: f.import_bailii_dir(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-parquet": lambda f, p, cb, cancel: f.import_bailii_parquet(**p, on_progress=cb, cancel_check=cancel),
+    "import-indian-sci": lambda f, p, cb, cancel: f.import_indian_sci(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-zip": lambda f, p, cb, cancel: f.import_westlaw_zip(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-dir": lambda f, p, cb, cancel: f.import_westlaw_dir(**p, on_progress=cb, cancel_check=cancel),
     "import-caselaw-zip": lambda f, p, cb, cancel: f.import_caselaw_zip(**p, on_progress=cb, cancel_check=cancel),

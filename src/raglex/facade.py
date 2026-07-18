@@ -2877,6 +2877,140 @@ class Facade:
             st["aliases"] += 1
         return disposition
 
+    # -- Supreme Court of India (KanoonGPT parquet dump) --------------------
+    def import_indian_sci(self, *, dir_path: str, limit: int | None = None,
+                          extract: bool = True,
+                          on_progress=None, cancel_check=None) -> dict:
+        """Import the **Supreme Court of India** slice of the KanoonGPT ``indian-case-laws``
+        dump (see :mod:`.adapters.in_caselaw` for why only that slice).
+
+        The dump is ~17M rows across the SCI and 25 High Courts; the predicate
+        ``court_code == 'SCI'`` is pushed down to the parquet reader so only the ~43k
+        Supreme Court rows are materialised. Those rows are one-per-*report-entry*, so they
+        are merged in memory by neutral citation (5,252 citations repeat, up to seven times)
+        before anything is written — each judgment becomes one document carrying every
+        S.C.R. citation it was reported at.
+
+        What lands: a document keyed ``insc/2020/387`` (the same id the extractor mints for
+        "2020 INSC 387"), an alias per Supreme Court Reports citation so report-only
+        references resolve, and the judgment PDF's URL in metadata. The headnote is stored
+        as text only when it reads as prose — for pre-1960s cases it is garbled OCR — and is
+        always flagged ``text_is_headnote`` so a ~600-character snippet is never mistaken
+        for the judgment."""
+        import pyarrow.compute as pc
+        import pyarrow.dataset as pyds
+
+        from .adapters.in_caselaw import SCI_COLUMNS, ParsedSCI, parse_sci_row
+
+        st = {"rows": 0, "judgments": 0, "imported": 0, "updated": 0, "skipped": 0,
+              "aliases": 0, "extracted": 0}
+        merged: dict[str, ParsedSCI] = {}
+        dataset = pyds.dataset(dir_path, format="parquet", partitioning="hive")
+        scanner = dataset.scanner(columns=SCI_COLUMNS,
+                                  filter=pc.field("court_code") == "SCI",
+                                  batch_size=4000)
+        for batch in scanner.to_batches():
+            if cancel_check and cancel_check():
+                break
+            d = batch.to_pydict()
+            for i in range(batch.num_rows):
+                st["rows"] += 1
+                parsed = parse_sci_row({c: d[c][i] for c in SCI_COLUMNS})
+                if parsed is None:
+                    continue
+                if parsed.stable_id in merged:
+                    merged[parsed.stable_id].merge(parsed)
+                else:
+                    merged[parsed.stable_id] = parsed
+            if st["rows"] % 4000 == 0:
+                _progress(on_progress, stage="reading SCI rows", done=st["rows"],
+                          total=None, item=f"{len(merged)} judgments")
+            if limit and len(merged) >= limit:
+                break
+
+        st["judgments"] = len(merged)
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+        from .core.text import fold
+
+        with self._open() as (cat, rs, ts):
+            for n, (sid, p) in enumerate(merged.items(), 1):
+                if cancel_check and cancel_check():
+                    break
+                if n % 200 == 0:
+                    _progress(on_progress, stage="importing SCI judgments",
+                              done=n, total=len(merged), item=sid)
+                meta = {
+                    "imported": "indian-sci-parquet",
+                    "neutral_citation": p.neutral_citation,
+                    "report_citations": p.report_citations,
+                    "docket_number": p.docket_number, "cnr_number": p.cnr_number,
+                    "coram": p.coram, "bench": p.bench, "disposition": p.disposition,
+                    "source_pdf_url": p.pdf_url,
+                    # The headnote is a truncated (~600 char) snippet, OCR-garbled for older
+                    # cases — metadata, never the document's text. Storing it as text would
+                    # set has_text and drop every one of these out of the needs-full-text
+                    # worklist, which is exactly where they belong until the PDF is fetched.
+                    "headnote": p.headnote,
+                    "needs_full_text": True,
+                }
+                # content hash over the metadata that would change on a re-release, so a
+                # re-run is a cheap no-op rather than a rewrite of 43k rows.
+                fingerprint = sha256_bytes(
+                    "|".join([p.title or "", str(p.decision_date or ""), p.pdf_url or "",
+                              *sorted(p.report_citations)]).encode("utf-8"))
+                existing = cat.get_document(sid)
+                if existing is not None and existing["payload_hash"] == fingerprint:
+                    st["skipped"] += 1
+                else:
+                    rec = Record(
+                        source="in-caselaw", stable_id=sid, doc_type=DocType.JUDGMENT,
+                        title=p.title or sid, court="insc", decision_date=p.decision_date,
+                        language="en", source_language="en", landing_url=p.pdf_url,
+                        text=None, payload_hash=fingerprint,
+                        extracted_via=ExtractedVia.STRUCTURED, added_by=AddedBy.HARVEST,
+                        extra={**(cat.document_meta(sid) if existing is not None else {}), **meta},
+                    )
+                    cat.upsert_document(rec, raw_path=None, text_path=None)
+                    st["imported" if existing is None else "updated"] += 1
+                # every S.C.R. citation this judgment was reported at resolves to it
+                for c in p.report_citations:
+                    key = fold(c)
+                    if key and key != sid:
+                        cat.put_alias(key, sid, source="sci-report-alias", commit=False)
+                        st["aliases"] += 1
+                if p.neutral_citation:
+                    key = fold(p.neutral_citation)
+                    if key and key != sid:
+                        cat.put_alias(key, sid, source="sci-neutral-alias", commit=False)
+                        st["aliases"] += 1
+                if n % 200 == 0:
+                    cat.commit()
+            cat.commit()
+            resolved_n = 0
+            if extract and not (cancel_check and cancel_check()):
+                from .citations import extract_document
+                aliases = cat.named_alias_map()
+                pending = cat.text_document_ids(source="in-caselaw", only_unextracted=True)
+                for i, sid in enumerate(pending):
+                    if cancel_check and cancel_check():
+                        break
+                    if i % 100 == 0:
+                        _progress(on_progress, stage="extracting citations",
+                                  done=i + 1, total=len(pending), item=sid)
+                    try:
+                        extract_document(cat, ts, sid, aliases=aliases)
+                        st["extracted"] += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if i % 200 == 0:
+                        cat.commit()
+                cat.commit()
+                _progress(on_progress, stage="resolving citations", done=0, total=0)
+                resolved_n = Resolver(cat).run().resolved
+        st["resolved_edges"] = resolved_n
+        self._invalidate_caches()
+        return st
+
     # -- outbound LII links (§5b) -------------------------------------------
     def lii_links_for(self, stable_id: str) -> list[dict]:
         """Canonical LII URLs for one held document. Prefers the landing URL the importer

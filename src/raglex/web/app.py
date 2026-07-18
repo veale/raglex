@@ -851,6 +851,20 @@ def create_app(config: Config | None = None) -> FastAPI:
                           f"Import BAILII folder ({staged} files)",
                           {"dir_path": str(d)})
 
+    @app.post("/import/indian-sci")
+    def import_indian_sci_ep(payload: dict = Body(...)) -> dict:
+        """Import the Supreme Court of India slice of a server-side KanoonGPT
+        ``indian-case-laws`` parquet dump (``dir_path`` points at ``structured/v1``)."""
+        dir_path = (payload.get("dir_path") or "").strip()
+        if not dir_path or not os.path.isdir(dir_path):
+            return JSONResponse({"error": f"not a directory: {dir_path!r}"}, status_code=400)
+        params: dict = {"dir_path": dir_path}
+        if isinstance(payload.get("limit"), int):
+            params["limit"] = payload["limit"]
+        if isinstance(payload.get("extract"), bool):
+            params["extract"] = payload["extract"]
+        return jobs.start("import-indian-sci", "Import Supreme Court of India", params)
+
     @app.get("/document-lii-links")
     def document_lii_links_ep(id: str) -> dict:
         """Outbound LII links for one document — what the reader shows when a case is a
