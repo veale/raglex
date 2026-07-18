@@ -270,7 +270,11 @@ class A29WPAdapter(BaseAdapter):
     def _extract(self, raw: bytes) -> tuple[str | None, bool]:
         from ..extraction import extract_bytes
 
-        text = extract_bytes(raw, ext="pdf", mime="application/pdf").text
+        try:
+            text = extract_bytes(raw, ext="pdf", mime="application/pdf").text
+        except Exception:  # noqa: BLE001 — a corrupt/served-as-HTML "PDF" (the 1990s
+            # archive has a few) must not abort the crawl; flag it for OCR/attention.
+            return None, True
         if looks_unocrd(text, _pdf_pages(raw)):
             # 1997-2005 papers in particular are scans with no text layer
             ocr = ocr_pdf(raw)

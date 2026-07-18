@@ -225,3 +225,28 @@ def test_contenthash_change_refetches_held_document(catalogue, rawstore):
     assert ad2.fetched == ["a"]
     assert stats2.refreshed_ids == ["a"]
     assert catalogue.document_meta("a")["contenthash"] == "hash-2"
+
+
+def test_one_malformed_document_does_not_sink_the_run(catalogue, rawstore):
+    """A parser blowing up on a corrupt file (e.g. PyMuPDF's "Failed to open stream")
+    must not abort the crawl and lose every item after it — it's a transient item error."""
+    class _BoomAdapter(FakeAdapter):
+        def fetch(self, stub):
+            if stub.stable_id == "bad":
+                raise RuntimeError("Failed to open stream")
+            return super().fetch(stub)
+
+    good1 = _rec("a", "personal data GDPR 2016/679 data protection")
+    bad = _rec("bad", "personal data GDPR 2016/679 data protection two")
+    good2 = _rec("b", "personal data GDPR 2016/679 data protection three")
+    stats = Pipeline(catalogue, rawstore).run(_BoomAdapter([good1, bad, good2]))
+
+    # the run continued past the bad document and stored the ones after it
+    assert catalogue.get_document("a") is not None
+    assert catalogue.get_document("b") is not None
+    assert catalogue.get_document("bad") is None
+    assert stats.stored == 2
+    # counted as a TRANSIENT item error (unknown cause → retry, never "this doesn't exist")
+    assert stats.errors == 1 and stats.errors_transient == 1 and stats.errors_fatal == 0
+    # and it says which document blew up, and how
+    assert any("bad" in n and "Failed to open stream" in n for n in stats.notes)

@@ -72,13 +72,23 @@ class EmbedStage:
         self.config = config or ChunkConfig(max_tokens=min(512, provider.max_input_tokens))
         self.batch_size = batch_size
 
-    def run(self, *, limit: int | None = None) -> EmbedStats:
+    def run(self, *, limit: int | None = None, on_progress=None, cancel_check=None) -> EmbedStats:
+        """Embed every document that has text but no vectors in the current family.
+        Resumable and cancellable: each document is committed as it lands (``mark_embedded``
+        + its chunks), so a stop/restart picks up exactly where it left off from
+        ``pending_embedding`` — the queue drains monotonically. ``on_progress`` reports
+        ``done``/``total`` for the jobs panel; ``cancel_check`` lets a job stop cleanly."""
         p = self.provider
         stats = EmbedStats(provider=p.name, model=p.model)
         pending = self.catalogue.pending_embedding(p.name, p.model, p.model_version)
         if limit is not None:
             pending = pending[:limit]
-        for row in pending:
+        total = len(pending)
+        for i, row in enumerate(pending, 1):
+            if cancel_check and cancel_check():
+                break
+            if on_progress:
+                on_progress(stage="embedding", done=i, total=total, item=row["stable_id"])
             text = self._load_text(row["text_path"])
             if not text:
                 stats.skipped_no_text += 1
@@ -99,6 +109,8 @@ class EmbedStage:
             self._embed_and_store(row, chunks, stats)
             self.catalogue.mark_embedded(row["stable_id"])
             stats.documents += 1
+            # commit per document so a long run persists incrementally and resumes cleanly
+            self.catalogue.conn.commit()
         self.catalogue.conn.commit()
         log.info(stats.summary())
         return stats

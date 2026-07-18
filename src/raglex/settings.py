@@ -65,6 +65,10 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("RAGLEX_SCRAPLING_MCP_KEY", "Scrapling MCP key", True, "Network"),
     SettingSpec("RAGLEX_AUTOHARVEST", "Auto-drain worklist (refs/tick)", False, "Network",
                 "0 = off; e.g. 25 — the scheduler slowly fetches routable citations each tick"),
+    SettingSpec("RAGLEX_AUTOEMBED", "Auto-index backlog (docs/tick)", False, "Embeddings",
+                "0 = off; e.g. 500 — the scheduler indexes that many un-embedded documents "
+                "each tick, building the keyword (FTS) + vector index search reads. Resumable: "
+                "changing the embedding model re-queues the whole corpus as a new family"),
     SettingSpec("RAGLEX_MISS_TTL_DAYS", "Absent-reference cooldown (days)", False, "Network",
                 "90 — days to skip a reference the source said does not exist (404). Only genuine absences land here"),
     SettingSpec("RAGLEX_RETRY_TTL_HOURS", "Unreachable-reference cooldown (hours)", False, "Network",

@@ -186,6 +186,19 @@ class Pipeline:
                     stats.notes.append(f"{stub.stable_id}: {exc}")
                     log.warning("fetch failed for %s: %s", stub.stable_id, exc)
                     continue
+                except Exception as exc:  # noqa: BLE001
+                    # ONE malformed document must never sink a whole source run. A parser
+                    # blowing up on a corrupt PDF ("Failed to open stream"), a surprise
+                    # encoding, an adapter bug — previously any of these propagated out of
+                    # the crawl and failed the job, losing every item after it. Treat it as
+                    # a transient item error: record it, freeze the cursor so the item is
+                    # retried, and carry on with the rest.
+                    stats.errors += 1
+                    stats.errors_transient += 1
+                    wm_frozen = True
+                    stats.notes.append(f"{stub.stable_id}: {type(exc).__name__}: {exc}")
+                    log.exception("unexpected error fetching %s", stub.stable_id)
+                    continue
 
                 if record is None:
                     # The adapter reached the source and found nothing there — an absence,

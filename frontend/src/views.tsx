@@ -1580,12 +1580,13 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
   const [worklist, , reloadWork] = useAsync(() => api.worklist(20), []);
   const [srcList] = useAsync(() => api.sourceList(), []);
   const [health] = useAsync(() => api.embeddingHealth(), []);
+  const [backlog, , reloadBacklog] = useAsync(() => api.embedBacklog(), []);
   const [msg, setMsg] = useState("");
   const [harvestSrc, setHarvestSrc] = useState("");
   const [backfill, setBackfill] = useState(false);
   const [pages, setPages] = useState(1);
 
-  const refresh = () => { reloadSources(); reloadQueues(); reloadAlerts(); reloadStats(); reloadWork(); };
+  const refresh = () => { reloadSources(); reloadQueues(); reloadAlerts(); reloadStats(); reloadWork(); reloadBacklog(); };
   async function act(p: Promise<any>, label: string) {
     setMsg(label + "…");
     try { const r = await p; setMsg(`${label}: ` + JSON.stringify(r)); refresh(); }
@@ -1597,7 +1598,10 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
         <div className="row" style={{ alignItems: "center" }}>
           <b style={{ flex: 1 }}>Operations</b>
           <button onClick={refresh} style={{ flex: "0 0 auto" }}>↻ Refresh</button>
-          <button onClick={() => act(api.embed(), "embed")} style={{ flex: "0 0 auto" }}>Embed pending</button>
+          <button onClick={() => act(api.embed(), "embed")} style={{ flex: "0 0 auto" }}
+            title={backlog ? `${backlog.indexed.toLocaleString()} indexed · ${backlog.pending.toLocaleString()} pending (${backlog.provider}/${backlog.model})` : "index documents for search"}>
+            Embed / index{backlog ? ` (${backlog.pending.toLocaleString()} pending)` : ""}
+          </button>
           <button onClick={() => act(api.resolve(), "resolve")} style={{ flex: "0 0 auto" }}>Resolve citations</button>
           <span className="muted" style={{ flex: 1, textAlign: "right", fontSize: 12 }}>
             Re-scans, full relinks, EU-name / ECtHR backfills &amp; corpus-growth jobs live in <b>Maintain</b>.

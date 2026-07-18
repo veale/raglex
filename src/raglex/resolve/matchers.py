@@ -146,6 +146,43 @@ def match_legislation_regnal(raw: str) -> Candidate | None:
     return Candidate(value=m.group("path"), method="legislation_regnal")
 
 
+# Irish legislation, in every form the two services and their documents use:
+#   ELI       irishstatutebook.ie/eli/2018/act/7/…  revisedacts.lawreform.ie/eli/2003/act/32/…
+#   legacy    irishstatutebook.ie/2013/en/act/pub/0015/print.html#sec36
+#             irishstatutebook.ie/1993/en/si/0266.html
+# The candidate is the Act — a section cite is a pinpoint, not a separate document.
+_IE_ELI_RE = re.compile(
+    r"(?:irishstatutebook\.ie|lawreform\.ie)/eli/(?P<year>\d{4})/"
+    r"(?P<type>act|si|sro|prv|ca|bps)/(?P<num>\d+[a-z]?)", re.IGNORECASE)
+_IE_LEGACY_ACT_RE = re.compile(
+    r"irishstatutebook\.ie/(?P<year>\d{4})/(?:en|ga)/act/(?P<sub>pub|prv)/(?P<num>\d+)",
+    re.IGNORECASE)
+_IE_LEGACY_SI_RE = re.compile(
+    r"irishstatutebook\.ie/(?P<year>\d{4})/(?:en|ga)/(?P<type>si|sro)/(?P<num>\d+[a-z]?)",
+    re.IGNORECASE)
+
+
+def match_ie_legislation(raw: str) -> Candidate | None:
+    """An Irish instrument URL → its ``ie/{year}/{type}/{number}`` stable_id. The number
+    keeps any letter suffix (SROs are numbered ``1a``/``1b``) but drops the zero padding
+    the legacy paths use, so ``/1993/en/si/0266.html`` and ``/eli/1993/si/266`` are the
+    same node."""
+    m = _IE_ELI_RE.search(raw)
+    if m:
+        typ = m.group("type").lower()
+    else:
+        m = _IE_LEGACY_ACT_RE.search(raw)
+        if m:
+            typ = "act" if m.group("sub").lower() == "pub" else "prv"
+        else:
+            m = _IE_LEGACY_SI_RE.search(raw)
+            if not m:
+                return None
+            typ = m.group("type").lower()
+    num = m.group("num").lstrip("0").lower() or m.group("num").lower()
+    return Candidate(value=f"ie/{m.group('year')}/{typ}/{num}", method="ie_legislation")
+
+
 def match_caselaw_uri(raw: str) -> Candidate | None:
     m = _CASELAW_URI_RE.search(raw)
     if not m:
@@ -162,6 +199,7 @@ MATCHERS = (
     match_legislation_eu_uri,   # /european/… before the generic legislation URI
     match_legislation_uri,
     match_legislation_regnal,
+    match_ie_legislation,
     match_uk_ncn,
 )
 

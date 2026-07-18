@@ -3785,13 +3785,32 @@ class Facade:
                         "relationship_type": rel_type.value}
             return {"error": "nothing to do — pass treatment, dst_id, or suppress"}
 
-    def embed(self, *, limit: int | None = None) -> dict:
+    def embed(self, *, limit: int | None = None, on_progress=None, cancel_check=None) -> dict:
+        """Embed/index documents that have text but no vectors in the current embedding
+        family — the lexical (FTS) + semantic (vector) index both search reads. Resumable
+        and cancellable; run as the ``embed`` background job so it shows progress and can be
+        stopped. Returns per-run stats (documents, chunks, skipped)."""
         with self._open() as (cat, _rs, ts):
-            return asdict(EmbedStage(cat, self._provider(), textstore=ts).run(limit=limit))
+            stats = asdict(EmbedStage(cat, self._provider(), textstore=ts).run(
+                limit=limit, on_progress=on_progress, cancel_check=cancel_check))
+        self._invalidate_caches()  # has_embedding changed → coverage/search availability
+        return stats
+
+    def embedding_backlog(self) -> dict:
+        """How much of the corpus is indexed in the current embedding family — the number
+        a UI shows next to the 'Embed' button so it's clear how much work remains."""
+        p = self._provider()
+        with self._open() as (cat, _rs, _ts):
+            pending = len(cat.pending_embedding(p.name, p.model, p.model_version))
+            total = cat.count_documents()
+        return {"provider": p.name, "model": p.model,
+                "pending": pending, "indexed": max(total - pending, 0), "total": total}
 
     def resolve(self) -> dict:
         with self._open() as (cat, _rs, _ts):
-            return asdict(Resolver(cat).run())
+            stats = asdict(Resolver(cat).run())
+        self._invalidate_caches()  # edges flipped → worklist/unfetchable/dashboard are stale
+        return stats
 
     def _llm_passes(self, use_llm: bool | None):
         """Build the optional LLM extractor + treatment classifier. ``use_llm``:

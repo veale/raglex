@@ -310,6 +310,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print("[watch] auto-drain: previous tick still running; skipping")
                     elif started.get("error"):
                         print(f"[watch] auto-drain: {started['error']}")
+                # Slow index drain: embed a bounded batch each tick so search coverage grows
+                # on its own instead of waiting for someone to press the button. Same shape as
+                # the worklist drain — bounded, resumable, and a singleton, so a long tick
+                # simply continues next time rather than stacking passes over one queue.
+                embed_batch = int(os.environ.get("RAGLEX_AUTOEMBED") or 0)
+                if embed_batch > 0:
+                    started = jobs.start("embed", f"auto-embed ({embed_batch}/tick)",
+                                         {"limit": embed_batch})
+                    if started.get("already_running"):
+                        print("[watch] auto-embed: previous tick still running; skipping")
+                    elif started.get("error"):
+                        print(f"[watch] auto-embed: {started['error']}")
                 # Once a day: pull EU case names/subjects from the EUR-Lex webservice
                 # (batched, skipping known-empty CELEXes). No-op without creds. The service
                 # 500s for days at a time; when it does, stop asking until tomorrow rather

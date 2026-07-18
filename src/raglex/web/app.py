@@ -957,9 +957,21 @@ def create_app(config: Config | None = None) -> FastAPI:
     def tag_ep(payload: dict = Body(...)) -> dict:
         return facade.tag(**payload)
 
+    @app.get("/embed/backlog")
+    def embed_backlog_ep() -> dict:
+        """How many docs still need indexing in the current embedding family."""
+        return facade.embedding_backlog()
+
     @app.post("/embed")
     def embed_ep(payload: dict = Body(default={})) -> dict:
-        return facade.embed(limit=payload.get("limit"))
+        """Index/embed documents as a background job (resumable) — returns a job_id so it
+        shows progress in the Jobs panel. Pass ``{"sync": true}`` to run inline (small
+        batches / scripts), optionally with ``limit``."""
+        params = {k: v for k, v in {"limit": payload.get("limit")}.items() if v is not None}
+        if payload.get("sync"):
+            return facade.embed(**params)
+        backlog = facade.embedding_backlog()
+        return jobs.start("embed", f"Embed / index ({backlog['pending']} pending)", params)
 
     @app.post("/resolve")
     def resolve_ep() -> dict:

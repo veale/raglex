@@ -181,6 +181,7 @@ export const api = {
     req<any>("/harvest", { method: "POST", body: JSON.stringify(body) }),
   resolve: () => req<any>("/resolve", { method: "POST", body: "{}" }),
   embeddingHealth: () => req<any>("/health/embedding"),
+  embedBacklog: () => req<{ provider: string; model: string; pending: number; indexed: number; total: number }>("/embed/backlog"),
   tag: (doc_id: string, tag: string) =>
     req<any>("/tag", { method: "POST", body: JSON.stringify({ doc_id, tag }) }),
   link: (src_id: string, dst_id: string, relationship: string, src_anchor?: string, dst_anchor?: string) =>

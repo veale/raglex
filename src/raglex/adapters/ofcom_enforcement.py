@@ -224,18 +224,38 @@ class OfcomEnforcementAdapter(BaseAdapter):
         self.results = results
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
-    def _listing_url(self) -> str:
+    # The listing endpoint is unreliable about NumberOfResults: some values return the
+    # whole set, others fall back to a single page of 27 — with no pattern (54→54, 81→27,
+    # 108→61, 200→27), which looks like server-side caching of particular URLs. There is
+    # no pagination parameter to fall back on, so ask for several sizes and take the
+    # UNION of what comes back; whichever value the server happens to serve fully today,
+    # we get the complete register.
+    LISTING_SIZES = (108, 216, 54, 27)
+
+    def _listing_url(self, size: int | None = None) -> str:
         q = urlencode({"query": "", "SelectedTopic": self.topic, "IncludePDF": "true",
-                       "SortBy": "Newest", "NumberOfResults": self.results})
+                       "SortBy": "Newest", "NumberOfResults": size or self.results})
         return f"{BASE_URL}/enforcement?{q}"
+
+    def _all_listing_items(self) -> list[ListingItem]:
+        """Every action in the topic, unioned across several NumberOfResults values
+        (see LISTING_SIZES) and de-duplicated by URL."""
+        merged: dict[str, ListingItem] = {}
+        for size in dict.fromkeys((self.results, *self.LISTING_SIZES)):
+            try:
+                resp = self._get(self._listing_url(size))
+            except Exception:  # noqa: BLE001 — one bad size shouldn't lose the others
+                continue
+            html = resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content)
+            for item in parse_listing(html):
+                merged.setdefault(item.url, item)
+        return list(merged.values())
 
     def _get(self, url: str):
         return self._client.get(url, headers=_HEADERS)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        resp = self._get(self._listing_url())
-        html = resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content)
-        for item in parse_listing(html):
+        for item in self._all_listing_items():
             # fetch the action page to hash its content (status + doc set + narrative) —
             # the reliable update signal; passed on so fetch() need not re-fetch the HTML.
             # A single bad action page (404, transient error, unparseable) must NOT abort

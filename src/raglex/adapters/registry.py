@@ -21,6 +21,7 @@ from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
 from .hol import HouseOfLordsAdapter
+from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .uk_caselaw import UKCaseLawAdapter
@@ -67,6 +68,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # targets so harvesting these closes the §5b loop (FOIA, DPA, GDPR, …).
     "uk-legislation": UKLegislationAdapter,
     "eu-legislation": EULegislationAdapter,
+    # Ireland — the eISB (Acts + SIs as enacted/made, the OFFICIAL text) and the LRC
+    # Revised Acts (administrative consolidations, point-in-time). Both speak ELI, so
+    # Ireland is another ELI source beside legislation.gov.uk and EUR-Lex.
+    "ie-legislation": IrishStatuteBookAdapter,
+    "ie-revised": IrishRevisedActsAdapter,
     "nl-legislation": NLLegislationAdapter,
     # Scrape recipes (§5a) — regulator portals with no API.
     **{key: _scrape_factory(recipe) for key, recipe in RECIPES.items()},
@@ -214,6 +220,33 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("celex", "CELEX ids", "32016R0679,32002L0058"),),
         ("CELEX (32016R0679)", "Directive/Regulation number"),
     ),
+    "ie-legislation": SourceInfo(
+        "ie-legislation", "Irish legislation — as enacted (eISB)", "legislation", "IE", False,
+        "Acts and Statutory Instruments from the electronic Irish Statute Book, as "
+        "enacted / as made — the OFFICIAL text. Walks the yearly indexes (or fetches "
+        "named ids), probing xml → print → html because SIs and pre-1922 Acts have no "
+        "XML. Harvests the RDFa metadata block for the amendment graph, EU "
+        "transposition links and enabling powers, plus the ISBC tables for what "
+        "amended each Act and what was made under it.",
+        (SourceOption("ids", "Instrument ids", "ie/2018/act/7, S.I. No. 201 of 2016"),
+         SourceOption("years", "Years to walk", "2016 or 2016-2018 (default: from 1922)"),
+         SourceOption("types", "Resource types", "act,si (default)"),
+         SourceOption("isbc", "Fetch amendment tables", "true (default) | false")),
+        ("ELI id (ie/2018/act/7)", "No. 7 of 2018", "S.I. No. 201 of 2016",
+         "irishstatutebook.ie URL"),
+    ),
+    "ie-revised": SourceInfo(
+        "ie-revised", "Irish legislation — revised (LRC consolidations)", "legislation", "IE", False,
+        "The Law Reform Commission's Revised Acts: ~600 Acts consolidated with "
+        "amendments applied and annotated, each stamped with the date it consolidates "
+        "to. NON-AUTHORITATIVE (administrative consolidation) and flagged as such. "
+        "The list's 'Updated to' column is the whole change signal, so a new "
+        "consolidation is detected without fetching a document; each becomes a new "
+        "point-in-time record rather than overwriting the last.",
+        (SourceOption("ids", "Limit to these Acts", "ie/2003/act/32"),
+         SourceOption("language", "Language", "en (default) | ga")),
+        ("ELI id (ie/2003/act/32)",),
+    ),
     "nl-legislation": SourceInfo(
         "nl-legislation", "NL legislation (KOOP / BWB)", "legislation", "NL", False,
         "Dutch consolidated legislation via the KOOP SRU service; supports topic "
@@ -257,7 +290,9 @@ def source_catalog() -> list[dict]:
         # fetched by naming the item — no moving feed.
         row["can_incremental"] = (row.get("kind") == "caselaw"
                                   or key in ("uk-legislation", "edpb", "edpb-oss", "dma-cases",
-                                             "ofcom-osa", "ofcom-enforcement"))
+                                             "ofcom-osa", "ofcom-enforcement",
+                                             # year cursor / "Updated to" cursor
+                                             "ie-legislation", "ie-revised"))
         out.append(row)
     return out
 
