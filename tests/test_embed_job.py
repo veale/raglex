@@ -88,3 +88,17 @@ def test_indexing_makes_body_text_searchable(facade):
     facade.embed()
     hits = facade.search("abuse of process", k=3)
     assert any(h["doc_id"] == "a/1" for h in hits)           # found by body, not title
+
+
+def test_embed_strips_nul_bytes_that_would_otherwise_abort_the_job(facade):
+    """Bulk-imported corpora (A2AJ, Open Australian Legal Corpus) occasionally carry a
+    literal NUL byte from whatever upstream tool produced their text. Both sqlite and
+    psycopg refuse to bind a string containing one — without stripping it, this one bad
+    document kills the whole embed job, not just itself (§ catalogue.add_chunk)."""
+    with facade._open() as (cat, _rs, ts):
+        _doc(cat, ts, "a/1", "A judgment with a stray\x00 NUL byte from upstream extraction.")
+        cat.commit()
+    stats = facade.embed()  # must not raise ValueError / psycopg.DataError
+    assert stats["documents"] == 1
+    hits = facade.search("stray NUL byte", k=3)
+    assert any(h["doc_id"] == "a/1" for h in hits)

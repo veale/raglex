@@ -2039,6 +2039,16 @@ class Catalogue:
         char_start: int | None = None,
         char_end: int | None = None,
     ) -> None:
+        # Bulk-imported corpora (A2AJ Canadian parquet, Open Australian Legal Corpus
+        # JSONL…) occasionally carry a literal NUL byte from whatever upstream tool
+        # produced their text. psycopg refuses to bind it at all — "PostgreSQL text
+        # fields cannot contain NUL (0x00) bytes" — which aborts the *entire* embed
+        # job on the first offending chunk, not just that one document. Strip it here,
+        # at the last point before it becomes a query parameter, so char offsets and
+        # the embedding input (already sent to the provider by this point) are
+        # untouched — only the bytes Postgres/SQLite can't store are dropped.
+        if "\x00" in chunk_text:
+            chunk_text = chunk_text.replace("\x00", "")
         if self.backend == "postgres":
             # pgvector for the vector; tsvector (GIN) for FTS — both in one table.
             self.conn.execute(
