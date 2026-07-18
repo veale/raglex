@@ -158,7 +158,17 @@ class CommonwealthAdapter(BaseAdapter):
         ``isPrincipal`` is **post-filtered client-side**, not sent in ``$filter``: the FRL
         API returns the field but no longer accepts it as a filter predicate (a
         ``$filter`` containing ``isPrincipal eq true`` now 400s, which silently returned
-        zero titles). So we select the field and drop non-principal rows after the fetch."""
+        zero titles). So we select the field and drop non-principal rows after the fetch.
+        The same applies to range predicates on ``year`` (``year ge 1990`` 400s; only
+        equality is accepted), which is why a year scope is expressed as ``year eq YYYY``.
+
+        A **backfill walks newest-first** (``year desc``). Ordering by ``id`` — the obvious
+        choice, and what this did — is effectively oldest-first, which meant a full-catalogue
+        run spent its first days on 1901-1920s Acts. Those are the worst possible ones to
+        start with: the register only generates the unzipped-EPUB HTML this adapter reads
+        for *recent* compilations, so an Act last compiled in 1901 (or 1996) yields metadata
+        and no text at all, and they are the least-cited material in the corpus. Newest-first
+        gets the Acts that actually have text and that judgments actually cite."""
         clauses = [f"collection eq '{self.collection}'"]
         if self.extra_filter:
             clauses.append(f"({self.extra_filter})")
@@ -171,7 +181,7 @@ class CommonwealthAdapter(BaseAdapter):
         while True:
             params = {
                 "$filter": filt,
-                "$orderby": "asMadeRegisteredAt desc" if since else "id",
+                "$orderby": "asMadeRegisteredAt desc" if since else "year desc",
                 "$top": self.page_size,
                 "$skip": skip,
                 "$select": "id,name,collection,year,number,status,isInForce,isPrincipal,"
@@ -323,7 +333,20 @@ class CommonwealthAdapter(BaseAdapter):
     def _fetch_body_fallback(self, title_id: str):
         """When the current compilation's HTML isn't up yet, try recent compilations
         (from the Documents set, newest first) until one yields text. Returns
-        (ParsedDoc | None, point_in_time_date | None)."""
+        (ParsedDoc | None, point_in_time_date | None).
+
+        This is the path that usually succeeds, not a rare fallback: the *current*
+        compilation's static HTML is routinely not generated yet (the Privacy Act's
+        2026-06-04 compilation 404s while its 2025-02-01 one serves 538k characters).
+
+        Returning ``(None, None)`` is a legitimate outcome, not a failure to retry: the
+        register generates the unzipped-EPUB HTML tree only for reasonably recent
+        compilations. An Act whose last compilation predates that — a repealed 1901 Act
+        last compiled in 1996, say — has Word/PDF/Epub *files* listed in the API but no
+        HTML tree at any date, so every candidate 404s. Those titles are stored as metadata
+        (title, year, number, status, in-force flags), which is enough for the name-only
+        statute matcher to resolve "the Audit Act 1901" against them: that matcher indexes
+        held legislation by **title**, and never needs the body."""
         try:
             data = json.loads(self._client.get(
                 f"{FRL_API}/Documents",
