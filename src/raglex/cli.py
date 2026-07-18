@@ -277,6 +277,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_effects = 0.0
         last_counts = 0.0
         last_gazetteer = 0.0
+        last_au_repair = 0.0
         eurlex_broken_until = 0.0
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
@@ -314,6 +315,22 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print("[watch] auto-embed: previous tick still running; skipping")
                     elif started.get("error"):
                         print(f"[watch] auto-embed: {started['error']}")
+                # Self-healing repair drain for the Commonwealth register: re-fetch bodies
+                # an older adapter's route couldn't reach, and mint canonical year/number
+                # citation aliases. Deliberately a recurring bounded drain rather than a
+                # deploy-time migration — after pulling a version whose adapter can reach
+                # more, the backlog converges on its own with nobody remembering to run
+                # anything, and it costs nothing on the ticks where there's nothing to fix.
+                repair_batch = int(os.environ.get("RAGLEX_AUCTH_REPAIR") or 25)
+                if repair_batch > 0 and time.time() - last_au_repair >= 900:
+                    last_au_repair = time.time()
+                    started = jobs.start("repair-au-cth",
+                                         f"repair au-cth ({repair_batch}/tick)",
+                                         {"limit": repair_batch})
+                    if started.get("already_running"):
+                        print("[watch] au-cth repair: previous tick still running; skipping")
+                    elif started.get("error"):
+                        print(f"[watch] au-cth repair: {started['error']}")
                 # Once a day: pull EU case names/subjects from the EUR-Lex webservice
                 # (batched, skipping known-empty CELEXes). No-op without creds. The service
                 # 500s for days at a time; when it does, stop asking until tomorrow rather

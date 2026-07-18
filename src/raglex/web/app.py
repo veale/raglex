@@ -853,6 +853,15 @@ def create_app(config: Config | None = None) -> FastAPI:
                           f"Import BAILII folder ({staged} files)",
                           {"dir_path": str(d)})
 
+    @app.post("/jobs/repair-au-cth")
+    def job_repair_au_cth_ep(payload: dict = Body(default={})) -> dict:
+        """Heal au-cth records an older adapter left incomplete: re-fetch missing bodies
+        via the API content endpoint, and mint canonical year/number citation aliases.
+        Idempotent and bounded — safe to run any time, does nothing when nothing is wrong."""
+        limit = (payload or {}).get("limit")
+        params = {"limit": int(limit)} if isinstance(limit, int) else {}
+        return _start_job("repair-au-cth", "repair au-cth (bodies + citation aliases)", params)
+
     @app.post("/import/indian-sci")
     def import_indian_sci_ep(payload: dict = Body(...)) -> dict:
         """Import the Supreme Court of India slice of a server-side KanoonGPT

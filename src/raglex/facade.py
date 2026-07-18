@@ -2877,6 +2877,110 @@ class Facade:
             st["aliases"] += 1
         return disposition
 
+    # -- self-healing repair for the Commonwealth register ------------------
+    def repair_au_cth(self, *, limit: int = 100, on_progress=None,
+                      cancel_check=None) -> dict:
+        """Heal ``au-cth`` records that an earlier, worse harvest left incomplete.
+
+        Written as a **bounded, idempotent drain** rather than a one-shot migration, because
+        the thing it repairs is "whatever the last version of the adapter couldn't do". Run
+        it every so often and the corpus converges on its own after a deploy; run it when
+        there is nothing wrong and it does nothing. Two independent repairs:
+
+        **1. Missing bodies.** The adapter used to read a website path that existed for only
+        some compilations, so ~1,200 titles were stored as metadata with no text. Those are
+        re-fetched through the API's content endpoint, which serves them all. Bounded by
+        ``limit`` because each is a real download.
+
+        **2. Canonical-citation aliases.** A title's stable_id is built from the FRL
+        *register* id, which carries the year the title was **registered**, not enacted:
+        the Privacy Act 1988 is ``C2004A03712`` and so lands at ``au/cth/act/2004/3712``.
+        That is faithful to the register's own key and worth keeping as the id — but it means
+        a citation naming the Act's real year and number resolves against nothing. The real
+        year/number are already stored in the record's metadata, so this mints
+        ``au/cth/act/1988/119`` as an **alias** to the held document.
+
+        Aliasing rather than re-keying is deliberate: renaming a stable_id would mean
+        rewriting the primary key plus every relation, citation and alias that points at it,
+        which is a destructive operation to run automatically on a deploy. An alias reaches
+        the same place and cannot lose data."""
+        from .adapters.au_legislation import CommonwealthAdapter
+        from .core.models import (AddedBy, DocType, ExtractedVia, Record, sha256_bytes)
+        from .formats.lawmaker_html import au_id
+
+        st = {"alias_candidates": 0, "aliases_minted": 0, "textless": 0,
+              "refetched": 0, "still_textless": 0, "errors": 0}
+        with self._open() as (cat, rs, ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, meta_json FROM documents "
+                "WHERE source = 'au-cth' AND is_latest = 1").fetchall()
+            # -- 1. canonical-citation aliases (cheap, no network) --------------
+            for r in rows:
+                meta = json.loads(r["meta_json"] or "{}")
+                year, number = meta.get("year"), meta.get("number")
+                series = (meta.get("series_type") or meta.get("collection") or "act").lower()
+                if not year or number in (None, ""):
+                    continue
+                canonical = au_id("cth", series, int(year), str(number))
+                if canonical == r["stable_id"]:
+                    continue                      # id already carries the real year/number
+                st["alias_candidates"] += 1
+                if cat.get_alias(canonical) is None:
+                    cat.put_alias(canonical, r["stable_id"],
+                                  source="au-cth-canonical-id", commit=False)
+                    st["aliases_minted"] += 1
+            cat.commit()
+
+            # -- 2. re-fetch the bodies an older adapter couldn't reach ----------
+            textless = cat.conn.execute(
+                "SELECT stable_id FROM documents "
+                "WHERE source = 'au-cth' AND is_latest = 1 AND has_text = 0 "
+                "ORDER BY stable_id LIMIT ?", (limit,)).fetchall()
+            st["textless"] = len(textless)
+            if textless:
+                adapter = CommonwealthAdapter()
+                for n, r in enumerate(textless, 1):
+                    if cancel_check and cancel_check():
+                        break
+                    sid = r["stable_id"]
+                    doc_row = cat.get_document(sid)
+                    meta = cat.document_meta(sid)
+                    tid = meta.get("frl_title_id")
+                    if doc_row is None or not tid:
+                        continue
+                    _progress(on_progress, stage="re-fetching au-cth bodies",
+                              done=n, total=len(textless), item=sid)
+                    try:
+                        doc, as_at = adapter.fetch_body_api(tid)
+                    except Exception:  # noqa: BLE001 — one bad title mustn't sink the drain
+                        st["errors"] += 1
+                        continue
+                    if doc is None or not doc.text:
+                        st["still_textless"] += 1
+                        continue
+                    payload_hash = sha256_bytes(doc.text.encode("utf-8"))
+                    rec = Record(
+                        source="au-cth", stable_id=sid, doc_type=DocType.LEGISLATION,
+                        title=doc_row["title"], court=doc_row["court"],
+                        language="en", source_language="en",
+                        landing_url=doc_row["landing_url"],
+                        text=doc.text, segments=doc.segments, payload_hash=payload_hash,
+                        extracted_via=ExtractedVia.STRUCTURED, added_by=AddedBy.HARVEST,
+                        extra={**meta, "body_repaired": True,
+                               "as_at_specification": as_at},
+                    )
+                    text_path = str(ts.put(payload_hash, doc.text))
+                    ts.put_segments(payload_hash, doc.segments)
+                    cat.upsert_document(rec, raw_path=doc_row["raw_path"],
+                                        text_path=text_path)
+                    st["refetched"] += 1
+                    if n % 20 == 0:
+                        cat.commit()
+                cat.commit()
+        if st["refetched"] or st["aliases_minted"]:
+            self._invalidate_caches()
+        return st
+
     # -- Supreme Court of India (KanoonGPT parquet dump) --------------------
     def import_indian_sci(self, *, dir_path: str, limit: int | None = None,
                           extract: bool = True,

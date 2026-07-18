@@ -35,7 +35,7 @@ log = logging.getLogger("raglex.jobs")
 # so these stay one-at-a-time. Everything else (seed-from-text, harvest a category,
 # radiate, expand-citing) is keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
-    "rescan-citations", "backfill-metadata", "backfill-edge-keys",
+    "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "rebuild-citation-counts", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
@@ -110,6 +110,7 @@ RUNNERS: dict[str, Callable] = {
     "import-bailii-dir": lambda f, p, cb, cancel: f.import_bailii_dir(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-parquet": lambda f, p, cb, cancel: f.import_bailii_parquet(**p, on_progress=cb, cancel_check=cancel),
     "import-indian-sci": lambda f, p, cb, cancel: f.import_indian_sci(**p, on_progress=cb, cancel_check=cancel),
+    "repair-au-cth": lambda f, p, cb, cancel: f.repair_au_cth(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-zip": lambda f, p, cb, cancel: f.import_westlaw_zip(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-dir": lambda f, p, cb, cancel: f.import_westlaw_dir(**p, on_progress=cb, cancel_check=cancel),
     "import-caselaw-zip": lambda f, p, cb, cancel: f.import_caselaw_zip(**p, on_progress=cb, cancel_check=cancel),
