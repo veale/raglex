@@ -228,3 +228,42 @@ register(Grammar(
     re.compile(r"\b(?P<series>SOR|DORS|SI|TR)/(?P<num>\d{2,4}-\d+)\b"),
     _ca_reg,
 ))
+
+
+# -- Australian legislation -------------------------------------------------
+# Australian judgments cite statutes as "<Title> Act <year> (<Juris>)" — "Migration Act
+# 1958 (Cth)", "s 61 of the Crimes Act 1900 (NSW)". The registers publish the act NUMBER,
+# not the citation, so there is no id to build from the text; instead this stays a
+# name-only reference that facade.match_named_legislation resolves against the *titles* of
+# the Australian legislation actually harvested (au-cth, au-nsw, …).
+#
+# The jurisdiction tag is deliberately CONSUMED (not just look-ahead asserted) for two
+# reasons: it makes this match longer than the generic UK "<Title> Act <year>" grammar, so
+# the extractor's longest-match dedupe prefers it; and it keeps an Australian citation off
+# the UK statute gazetteer, which would otherwise mis-resolve "Companies Act 2006 (Cth)" to
+# the UK Companies Act. reference_key() strips the trailing tag back off before matching a
+# held title, so "Fair Work Act 2009 (Cth)" still lands on the held "Fair Work Act 2009".
+AU_JURISDICTION_TAGS = ("Cth", "Commonwealth", "NSW", "Vic", "Qld", "WA", "SA",
+                        "Tas", "ACT", "NT")
+_AU_JURIS = "|".join(AU_JURISDICTION_TAGS)
+
+
+def _au_statute(m: "re.Match[str]") -> Normalised:
+    sec = m.groupdict().get("sec")
+    # Name-only: no id yet (the citation carries no act number), resolved by title against
+    # harvested Australian legislation. Not routed through any gazetteer.
+    return None, (f"s. {sec}" if sec else None), "act"
+
+
+register(Grammar(
+    "au_statute_named", "act",
+    re.compile(
+        r"(?:s(?:ection|s|\.)?\.?\s*(?P<sec>\d+[A-Za-z]?(?:\(\d+[A-Za-z]?\))*)\s+of\s+)?"
+        r"(?:the\s+)?"
+        r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
+        r"(?:,?\s+(?:and|of|for|to|in|on|the|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,40}\)))*?"
+        r"\s+Act)\s+(?P<year>(?:18|19|20)\d{2})"
+        rf"\s*\((?P<juris>{_AU_JURIS})\)"
+    ),
+    _au_statute,
+))

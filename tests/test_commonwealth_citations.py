@@ -292,3 +292,33 @@ def test_ca_federal_mints_annual_citation_aliases():
     assert _annual_aliases("2019, c. 10") == ["S.C. 2019, c. 10", "L.C. 2019, c. 10"]
     assert _annual_aliases("A-1") == []          # a consolidated code, not an annual number
     assert _annual_aliases("") == []
+
+
+# -- Australian legislation citations ---------------------------------------
+
+def test_australian_statute_citation_is_name_only_and_captures_juris_and_pinpoint():
+    """Australian registers publish the act NUMBER, not the citation, so there is no id to
+    build — the reference stays name-only and resolves by title against harvested AU
+    legislation. The (Juris) tag is consumed so the match beats the generic UK grammar."""
+    cites = {c.raw.strip(): c for c in extract_citations("s 61 of the Crimes Act 1900 (NSW)")}
+    c = next(iter(cites.values()))
+    assert c.candidate_id is None and c.entity_kind == "act" and c.pinpoint == "s. 61"
+    assert "(NSW)" in list(cites)[0]   # the jurisdiction tag is part of the match
+
+
+def test_australian_citation_does_not_misresolve_to_a_same_named_uk_act():
+    """Without the AU grammar, "Companies Act 2006 (Cth)" would hit the UK statute
+    gazetteer and wrongly mint ukpga/2006/46. The consumed (Cth) tag keeps it off the
+    gazetteer entirely."""
+    got = candidates("under the Companies Act 2006 (Cth)")
+    assert all(v is None for v in got.values())
+
+
+def test_reference_key_strips_the_australian_jurisdiction_tag():
+    """So a name-only "Fair Work Act 2009 (Cth)" resolves against the held title
+    "Fair Work Act 2009" — normalise_title leaves the tag word, reference_key removes it."""
+    from raglex.citations.statute_gazetteer import normalise_title, reference_key
+    assert reference_key("Fair Work Act 2009 (Cth)") == normalise_title("Fair Work Act 2009")
+    assert reference_key("s 5 of the Crimes Act 1900 (NSW)") == normalise_title("Crimes Act 1900")
+    # a UK reference with no tag is unchanged
+    assert reference_key("the Human Rights Act 1998") == "human rights act 1998"

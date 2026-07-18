@@ -123,13 +123,22 @@ _PROVISION_PREFIX = re.compile(
 )
 
 
+# The Australian jurisdiction tag a citation carries after the year ("… Act 2009 (Cth)").
+# normalise_title strips the brackets but leaves the tag word, so it has to be removed
+# explicitly or "fair work act 2009 cth" never matches the held title "fair work act 2009".
+_AU_JURIS_SUFFIX = re.compile(
+    r"\s+(?:cth|commonwealth|nsw|vic|qld|wa|sa|tas|act|nt)$")
+
+
 def reference_key(raw: str) -> str:
     """Normalise a *cited* statute reference to the key its title is indexed by — dropping
     any leading provision phrase ("section 78 of the Police and Criminal Evidence Act 1984"
-    → ``police and criminal evidence act 1984``). Used to match a name-only citation
-    against the titles of legislation the corpus already holds (which never goes stale, and
-    unlike the offline gazetteer covers every Act that's been harvested)."""
-    return _PROVISION_PREFIX.sub("", normalise_title(raw)).strip()
+    → ``police and criminal evidence act 1984``) and any trailing Australian jurisdiction
+    tag ("Fair Work Act 2009 (Cth)" → ``fair work act 2009``). Used to match a name-only
+    citation against the titles of legislation the corpus already holds (which never goes
+    stale, and unlike the offline gazetteer covers every Act that's been harvested)."""
+    key = _PROVISION_PREFIX.sub("", normalise_title(raw)).strip()
+    return _AU_JURIS_SUFFIX.sub("", key).strip()
 
 
 _FEED_ENTRY = re.compile(r"<entry>.*?</entry>", re.S)

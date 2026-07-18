@@ -245,12 +245,36 @@ def test_commonwealth_adapter_returns_metadata_node_when_no_text_reachable():
 
 def test_commonwealth_discover_query_pages_and_filters():
     page = {"value": [{"id": "C2024A00002", "name": "Fair Work Act 2024",
-                       "asMadeRegisteredAt": "2024-02-01T00:00:00"}]}
+                       "isPrincipal": True, "asMadeRegisteredAt": "2024-02-01T00:00:00"}]}
     client = _Client({"/titles?": json.dumps(page)})
     adapter = CommonwealthAdapter(collection="Act", client=client, page_size=1)
     stubs = list(adapter.discover(None, max_pages=1))
     assert stubs[0].stable_id == "au/cth/act/2024/2"
-    assert "collection eq 'Act'" in client.seen[0] and "isPrincipal eq true" in client.seen[0]
+    # isPrincipal is post-filtered client-side — the FRL API no longer accepts it as a
+    # $filter predicate (it 400s), so the query must NOT send it.
+    assert "collection eq 'Act'" in client.seen[0]
+    assert "isPrincipal eq true" not in client.seen[0]
+
+
+def test_commonwealth_discover_post_filters_non_principal_titles():
+    """isPrincipal is applied in Python now — a non-principal title is dropped after the
+    fetch, since the API can no longer filter on it server-side."""
+    page = {"value": [
+        {"id": "C2024A00002", "name": "Fair Work Act 2024", "isPrincipal": True,
+         "asMadeRegisteredAt": "2024-02-01T00:00:00"},
+        {"id": "C2024A00009", "name": "Fair Work Amendment Act 2024", "isPrincipal": False,
+         "asMadeRegisteredAt": "2024-03-01T00:00:00"},
+    ]}
+    client = _Client({"/titles?": json.dumps(page)})
+    adapter = CommonwealthAdapter(collection="Act", client=client, page_size=2)
+    ids = [s.stable_id for s in adapter.discover(None, max_pages=1)]
+    assert ids == ["au/cth/act/2024/2"]           # the amendment (non-principal) is dropped
+
+
+def test_commonwealth_page_size_is_capped_at_the_api_limit():
+    """The FRL API caps $top at 100; a larger page 400s and silently returned nothing."""
+    assert CommonwealthAdapter(page_size=200).page_size == 100
+    assert CommonwealthAdapter(page_size=50).page_size == 50
 
 
 # -- LawMaker adapter --------------------------------------------------------

@@ -125,7 +125,7 @@ class CommonwealthAdapter(BaseAdapter):
 
     def __init__(self, *, ids: str | tuple[str, ...] | None = None,
                  collection: str | None = None, filter: str | None = None,
-                 principal_only: bool = True, page_size: int = 200,
+                 principal_only: bool = True, page_size: int = 100,
                  client: RateLimitedClient | None = None) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
@@ -133,7 +133,9 @@ class CommonwealthAdapter(BaseAdapter):
         self.collection = (collection or DEFAULT_COLLECTION).strip()
         self.extra_filter = (filter or "").strip() or None
         self.principal_only = str(principal_only).lower() not in ("false", "0", "no")
-        self.page_size = max(1, min(int(page_size), 1000))
+        # The FRL API caps $top at 100 — a larger page 400s ("The limit of '100' for Top
+        # query has been exceeded"), which silently returned zero titles.
+        self.page_size = max(1, min(int(page_size), 100))
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, user_agent=_UA, timeout=60)
 
@@ -151,10 +153,13 @@ class CommonwealthAdapter(BaseAdapter):
     def _discover_query(self, since: str | None, *, max_pages: int | None) -> Iterator[Stub]:
         """Page the ``Titles`` set with ``$filter``/``$orderby``. Incremental by
         ``asMadeRegisteredAt`` (the register-published timestamp) — a daily run pulls
-        everything registered since the cursor, newest first, and stops at it."""
+        everything registered since the cursor, newest first, and stops at it.
+
+        ``isPrincipal`` is **post-filtered client-side**, not sent in ``$filter``: the FRL
+        API returns the field but no longer accepts it as a filter predicate (a
+        ``$filter`` containing ``isPrincipal eq true`` now 400s, which silently returned
+        zero titles). So we select the field and drop non-principal rows after the fetch."""
         clauses = [f"collection eq '{self.collection}'"]
-        if self.principal_only:
-            clauses.append("isPrincipal eq true")
         if self.extra_filter:
             clauses.append(f"({self.extra_filter})")
         if since:
@@ -169,7 +174,7 @@ class CommonwealthAdapter(BaseAdapter):
                 "$orderby": "asMadeRegisteredAt desc" if since else "id",
                 "$top": self.page_size,
                 "$skip": skip,
-                "$select": "id,name,collection,year,number,status,isInForce,"
+                "$select": "id,name,collection,year,number,status,isInForce,isPrincipal,"
                            "asMadeRegisteredAt,makingDate",
                 "$format": "json",
             }
@@ -183,6 +188,9 @@ class CommonwealthAdapter(BaseAdapter):
             for row in rows:
                 tid = row.get("id")
                 if not tid:
+                    continue
+                # Principal-title filter, applied client-side (see docstring).
+                if self.principal_only and row.get("isPrincipal") is False:
                     continue
                 yield Stub(
                     stable_id=frl_stable_id(tid),
