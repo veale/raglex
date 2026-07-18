@@ -261,7 +261,9 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         # Australia is nine registers under one banner (au/{juris}/{type}/…), so the
         # useful split is by jurisdiction — Commonwealth vs Queensland vs NSW — not by
         # instrument type. Everywhere else the second segment IS the type.
-        sub = parts[1].lower() if len(parts) > 2 else "other"
+        # The Corpus Map's held path supplies only the leading segments of the id
+        # ("ca/act"), so the type is parts[1] whenever a second segment exists at all.
+        sub = parts[1].lower() if len(parts) > 1 and parts[1] else "other"
         label = (AU_JURISDICTIONS.get(sub, sub.upper()) if category == "au-legislation"
                  else COMMONWEALTH_LEG_TYPES.get(sub, sub.title() or "Other"))
         return Tax(category, CATEGORY_LABELS[category], sub, label,

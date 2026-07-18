@@ -2507,14 +2507,28 @@ class Catalogue:
 
     def document_subtype_counts(self) -> list[sqlite3.Row]:
         """Held-document counts grouped by (source, doc_type, court, slug-prefix) — the raw
-        material for the Corpus Map's per-sub-type "Held" column. The slug-prefix is the part
-        of stable_id before the first '/' (``uksi/2016/413`` → ``uksi``); for ids without a
-        slash (CELEX/ECLI) it's the whole id. Backend-portable (different string fns)."""
+        material for the Corpus Map's per-sub-type "Held" column.
+
+        The prefix keeps the **first two** slug segments (``uksi/2016/413`` → ``uksi/2016``,
+        ``ca/act/a-1`` → ``ca/act``); for ids without a slash (CELEX/ECLI) it's the whole id.
+        Two segments, not one, because id grammars put the document type in different
+        places: UK ids lead with it (``uksi``) but the Commonwealth registers lead with the
+        jurisdiction and put the type second (``ca/act``, ``hk/cap``, ``au/qld``). Grouping
+        on one segment collapsed every Canadian Act and Regulation into a single "ca" row,
+        so the map could only ever show them as "Other". Callers that want just the leading
+        segment still split it off themselves. Backend-portable (different string fns)."""
         if self.backend == "postgres":
-            prefix = "split_part(stable_id, '/', 1)"
+            prefix = ("split_part(stable_id, '/', 1) || "
+                      "CASE WHEN split_part(stable_id, '/', 2) <> '' "
+                      "THEN '/' || split_part(stable_id, '/', 2) ELSE '' END")
         else:
-            prefix = ("substr(stable_id, 1, CASE WHEN instr(stable_id, '/') > 0 "
-                      "THEN instr(stable_id, '/') - 1 ELSE length(stable_id) END)")
+            head = ("substr(stable_id, 1, CASE WHEN instr(stable_id, '/') > 0 "
+                    "THEN instr(stable_id, '/') - 1 ELSE length(stable_id) END)")
+            rest = ("substr(stable_id, instr(stable_id, '/') + 1)")
+            second = (f"CASE WHEN instr({rest}, '/') > 0 "
+                      f"THEN substr({rest}, 1, instr({rest}, '/') - 1) ELSE {rest} END")
+            prefix = (f"CASE WHEN instr(stable_id, '/') > 0 "
+                      f"THEN {head} || '/' || {second} ELSE stable_id END")
         sql = (f"SELECT source, doc_type, court, {prefix} AS prefix, COUNT(*) AS n "
                "FROM documents GROUP BY source, doc_type, court, prefix")
         return self.conn.execute(sql).fetchall()
