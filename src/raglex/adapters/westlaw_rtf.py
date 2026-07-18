@@ -548,7 +548,12 @@ def westlaw_identity(parsed: ParsedWestlaw) -> tuple[str, str]:
         CELLAR already uses, so a Westlaw EU export merges rather than duplicating;
       * ``wl`` — otherwise a surrogate from the Westlaw document id
         (``westlaw:1999-wl-250101``); the parallel report citations still resolve to it
-        as aliases.
+        as aliases;
+      * ``report`` — a pre-neutral law report with **no** Westlaw id in its header (the
+        header citation *is* the report, e.g. "[1982] 1 W.L.R. 149") → a surrogate slugged
+        from that preferred report citation (``westlaw:1982-1-w-l-r-149``). Stable across
+        re-downloads and dedup-friendly, unlike a content hash;
+      * ``hash`` — last resort for a citation-less export: a content-hash surrogate.
 
     The importer additionally checks whether any report-citation alias already resolves
     to a held document before minting a fresh surrogate — that's where a pre-neutral
@@ -565,6 +570,14 @@ def westlaw_identity(parsed: ParsedWestlaw) -> tuple[str, str]:
         return parsed.ecli, "ecli"
     if parsed.wl_number:
         return "westlaw:" + parsed.wl_number.lower().replace(" ", "-"), "wl"
+    # a preferred report citation → a stable, meaningful surrogate (a re-download of the
+    # same report keys the same id, so it dedupes; an opaque hash would not).
+    for c in parsed.report_citations:
+        if _WLUK.search(c) or _WL_NUMBER.search(c):
+            continue  # Westlaw's own pseudo-citations aren't a durable public identity
+        slug = re.sub(r"[^a-z0-9]+", "-", c.lower()).strip("-")
+        if slug:
+            return "westlaw:" + slug, "report"
     # last resort: a content hash surrogate (a citation-less export)
     from ..core.models import sha256_bytes
-    return "westlaw:" + sha256_bytes(parsed.text.encode("utf-8"))[:16], "wl"
+    return "westlaw:" + sha256_bytes(parsed.text.encode("utf-8"))[:16], "hash"

@@ -3014,16 +3014,24 @@ class Facade:
                     if bare and bare != stable_id:
                         alias_pairs.append((bare, "chamber-alias"))
 
-                # A pre-neutral case has only a Westlaw-id surrogate to key by — but if one
-                # of its parallel report citations already resolves to a held document (the
-                # same case from BAILII/ICLR), adopt that id and merge into it rather than
-                # minting a duplicate.
-                if id_kind == "wl":
+                # A pre-neutral case has only a surrogate id to key by (a Westlaw id, a
+                # slugged report citation, or a content hash) — but if any of its PRECISE
+                # identifiers already points at a held document (the same case from
+                # BAILII/ICLR/CELLAR, or a prior import), adopt that id and merge into it
+                # rather than minting a duplicate. Precise = a parallel report citation, a
+                # Westlaw/ECLI/CJEU id, or the chamber-less slug; a bare party-name variant
+                # is deliberately NOT enough to merge on ("Harris v Harris", "Thomas v
+                # Thomas" name many distinct cases), so name aliases are skipped.
+                if id_kind in ("wl", "report", "hash"):
                     for key, src in alias_pairs:
-                        if src != "westlaw-report-alias":
+                        if src.startswith("westlaw-name:"):
                             continue
+                        # the key may already be an alias of a held doc, or itself be a
+                        # held doc's id (an ECLI / report-slug / neutral slug).
                         held = cat.get_alias(key)
-                        if held and cat.get_document(held) is not None:
+                        if held is None and cat.get_document(key) is not None:
+                            held = key
+                        if held and held != stable_id and cat.get_document(held) is not None:
                             stable_id, id_kind = held, "merged"
                             break
 
@@ -3139,6 +3147,89 @@ class Facade:
             else:
                 out.setdefault(k, v)
         return out
+
+    def refix_westlaw_imports(self, *, apply: bool = False, limit: int | None = None,
+                              on_progress=None, cancel_check=None) -> dict:
+        """Repair already-imported Westlaw documents whose id predates the current identity
+        rules — chiefly the opaque ``westlaw:<hash>`` keys minted before WL-less law reports
+        keyed by their report citation. Recompute each doc's identity from its stored
+        ``meta_json`` (no re-parse of the raw RTF needed) and, where it differs, re-key the
+        document in place (:meth:`Catalogue.rekey_document`, cascading every reference). Also
+        folds a doc into a held record that shares a **precise** alias (report citation or
+        WL/ECLI/CJEU id) — never a bare party name. ``apply=False`` is a dry run that just
+        reports the planned changes."""
+        import json
+
+        from .adapters.westlaw_rtf import ParsedWestlaw, westlaw_identity
+        from .resolve.matchers import first_candidate
+        from .topics.gate import fold
+
+        st = {"scanned": 0, "rekeyed": 0, "merged": 0, "unchanged": 0, "applied": apply}
+        changes: list[dict] = []
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, meta_json FROM documents WHERE meta_json LIKE ?",
+                ('%"imported": "westlaw-rtf"%',)).fetchall()
+            if limit:
+                rows = rows[:limit]
+            # Only the opaque content-hash surrogates need repair — a doc already keyed by
+            # an ECLI, a neutral slug, a WL id or a report slug is authoritative and must be
+            # left alone (its meta_json may be incomplete after a merge, so recomputing from
+            # meta could wrongly demote a good id).
+            hash_id = re.compile(r"^westlaw:[0-9a-f]{16}$")
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                cur = r["stable_id"]
+                if not hash_id.match(cur):
+                    st["unchanged"] += 1
+                    continue
+                try:
+                    wl = (json.loads(r["meta_json"]) or {}).get("westlaw") or {}
+                except (ValueError, TypeError):
+                    st["unchanged"] += 1
+                    continue
+                p = ParsedWestlaw(
+                    title=None, text="",
+                    report_citations=tuple(wl.get("report_citations") or ()),
+                    neutral_citation=wl.get("neutral_citation"),
+                    ecli=wl.get("ecli"), wl_number=wl.get("wl_number"),
+                    case_number=wl.get("case_number"))
+                # only ever re-key TO a citation-derived identity — never to a fresh hash
+                if not (p.neutral_citation or p.ecli or p.wl_number or p.report_citations):
+                    st["unchanged"] += 1
+                    continue
+                target, kind = westlaw_identity(p)
+                # fold into a held record sharing a precise alias (report cite / id)
+                if kind in ("wl", "report", "hash"):
+                    precise = list(p.report_citations) + [
+                        x for x in (p.wl_number, p.ecli, p.case_number) if x]
+                    for c in precise:
+                        cand = first_candidate(c)
+                        key = fold(cand.value) if cand else fold(c)
+                        held = cat.get_alias(key)
+                        if held is None and cat.get_document(key) is not None:
+                            held = key
+                        if held and held != cur and cat.get_document(held) is not None:
+                            target, kind = held, "merged"
+                            break
+                if target == cur or not target:
+                    st["unchanged"] += 1
+                    continue
+                changes.append({"old": cur, "new": target, "kind": kind})
+                if apply:
+                    action = cat.rekey_document(cur, target, commit=False)
+                    st["merged" if action == "merge" else "rekeyed"] += 1
+                    if n % 100 == 0:
+                        cat.commit()
+                _progress(on_progress, stage="refix westlaw", done=n, total=len(rows), item=cur)
+            if apply:
+                cat.commit()
+        if apply:
+            self._invalidate_caches()
+        st["changes"] = changes[:5000]
+        return st
 
     def import_caselaw_zip(self, *, zip_path: str, limit: int | None = None,
                            on_progress=None, cancel_check=None) -> dict:

@@ -163,6 +163,30 @@ def test_transcript_layout_lifts_neutral_from_dateline_and_numbers_paragraphs():
     assert [s.label for s in p.segments] == ["para 1", "para 2", "para 3"]
 
 
+def _law_report_case() -> bytes:
+    """A reproduced ICLR law report whose header citation IS the report (no Westlaw id):
+    keyed by a stable slug of that preferred citation, not a content hash."""
+    body = _blocks(
+        r"*149 Tate & Lyle Food and Distribution Ltd v Greater London Council",
+        _IMG + r"Negative Judicial Consideration",
+        _b(r"Court", r"Queen\rquote s Bench Division"),
+        _b(r"Judgment Date", r"22 May 1981"),
+        _b(r"Report Citation", r"[1982] 1 W.L.R. 149"),
+        _b(r"Representation", r"Solicitors: Morgan Cole ; Wragge & Co ."),
+    )
+    return _rtf(r"Tate & Lyle Industries Ltd v Greater London Council, [1982] 1 W.L.R. 149 (1981)", body)
+
+
+def test_wl_less_law_report_keys_by_a_stable_report_slug_not_a_hash():
+    p = parse_westlaw_rtf(_law_report_case())
+    assert p.wl_number is None and p.neutral_citation is None
+    assert "[1982] 1 W.L.R. 149" in p.report_citations
+    sid, kind = westlaw_identity(p)
+    assert kind == "report"
+    assert sid == "westlaw:1982-1-w-l-r-149"     # stable, re-download-safe (no content hash)
+    assert p.title == "Tate & Lyle Industries Ltd v Greater London Council"
+
+
 def test_eu_case_keys_by_ecli_not_the_uk_report_citations():
     p = parse_westlaw_rtf(_eu_case())
     assert p.is_eu and p.court_code == "cjeu"
@@ -271,6 +295,69 @@ def test_unified_zip_import_handles_a_mixed_zip(facade, tmp_path):
     with facade._open() as (cat, _rs, _ts):
         assert cat.get_document("ukhl/2000/57") is not None
         assert cat.get_document("westlaw:1999-wl-250101") is not None
+
+
+def test_merges_into_an_existing_record_sharing_a_report_citation_alias(facade, tmp_path):
+    # a held record (e.g. from BAILII/ICLR) already carries the report citation as an
+    # alias — the Westlaw import of the same case must adopt that id, not mint a westlaw:
+    # duplicate.
+    from raglex.core.models import AddedBy, DocType, ExtractedVia, Record
+    from raglex.topics.gate import fold
+    with facade._open() as (cat, _rs, ts):
+        cat.upsert_document(Record(
+            source="uk-caselaw", stable_id="ukhl/1981/tate", doc_type=DocType.JUDGMENT,
+            title="Tate & Lyle v GLC", text="held elsewhere", raw_bytes=b"x", raw_ext="html",
+            payload_hash="beef", extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER))
+        cat.put_alias(fold("[1982] 1 W.L.R. 149"), "ukhl/1981/tate", source="cite-as")
+        cat.commit()
+    d = _folder(tmp_path / "wl", {"tate.rtf": _law_report_case()})
+    res = facade.import_caselaw_dir(dir_path=str(d))
+    # merged into the held record (attached as a secondary rendition, since that record is
+    # authoritative) — NOT imported as a fresh document
+    assert res["imported"] == 0 and res["secondary"] == 1
+    with facade._open() as (cat, _rs, _ts):
+        assert cat.get_document("westlaw:1982-1-w-l-r-149") is None   # no duplicate minted
+        # the report alias still resolves to the pre-existing record
+        assert cat.get_alias(fold("[1982] 1 W.L.R. 149")) == "ukhl/1981/tate"
+        # the Westlaw rendition + its rich metadata landed on the held record
+        assert "westlaw" in cat.document_meta("ukhl/1981/tate")
+
+
+def test_refix_rekeys_a_legacy_hash_id_to_a_report_slug(facade, tmp_path):
+    # a doc imported under the OLD rules: a WL-less law report keyed by a content hash.
+    # refix recomputes its identity from meta_json and re-keys it to the report-citation
+    # slug, cascading every reference.
+    from raglex.adapters.westlaw_rtf import parse_westlaw_rtf
+    from raglex.core.models import AddedBy, DocType, ExtractedVia, Record
+    from raglex.topics.gate import fold
+    parsed = parse_westlaw_rtf(_law_report_case())
+    old = "westlaw:deadbeefdeadbeef"
+    with facade._open() as (cat, _rs, ts):
+        cat.upsert_document(Record(
+            source="uk-caselaw", stable_id=old, doc_type=DocType.JUDGMENT, title=parsed.title,
+            text=parsed.text, raw_bytes=b"x", raw_ext="rtf", payload_hash="ph1",
+            extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER,
+            extra={"imported": "westlaw-rtf", "westlaw": facade._westlaw_meta(parsed)}))
+        cat.put_alias(fold("[1982] 1 W.L.R. 149"), old, source="westlaw-report-alias")
+        # an incoming citation already resolved to the hash id
+        cat.conn.execute(
+            "INSERT INTO relations (src_id, dst_id, candidate_id, relationship_type, "
+            "resolution_status, extracted_via) VALUES (?,?,?,?,?,?)",
+            ("some/citing/doc", old, old, "mentions", "resolved", "grammar"))
+        cat.commit()
+
+    dry = facade.refix_westlaw_imports(apply=False)
+    assert dry["scanned"] == 1 and len(dry["changes"]) == 1
+    assert dry["changes"][0] == {"old": old, "new": "westlaw:1982-1-w-l-r-149", "kind": "report"}
+
+    res = facade.refix_westlaw_imports(apply=True)
+    assert res["rekeyed"] == 1
+    with facade._open() as (cat, _rs, _ts):
+        new = "westlaw:1982-1-w-l-r-149"
+        assert cat.get_document(old) is None and cat.get_document(new) is not None
+        assert cat.get_alias(fold("[1982] 1 W.L.R. 149")) == new          # alias repointed
+        rel = cat.conn.execute("SELECT dst_id, candidate_id FROM relations WHERE src_id='some/citing/doc'").fetchone()
+        assert rel["dst_id"] == new and rel["candidate_id"] == new         # relation repointed
 
 
 def test_zip_import_supersedes_a_textless_stub(facade, tmp_path):

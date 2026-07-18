@@ -425,6 +425,24 @@ def cmd_import_westlaw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_refix_westlaw(args: argparse.Namespace) -> int:
+    """Repair already-imported Westlaw documents whose id predates the current identity
+    rules (opaque ``westlaw:<hash>`` → the report-citation slug), cascading every
+    reference. Dry run by default; ``--apply`` performs the re-keys."""
+    from .facade import Facade
+
+    st = Facade(Config.from_env()).refix_westlaw_imports(
+        apply=args.apply, on_progress=lambda **p: None)
+    verb = "re-keyed" if args.apply else "would re-key"
+    print(f"scanned={st['scanned']} {verb}={len(st['changes'])} "
+          f"(merged={st['merged']} unchanged={st['unchanged']})")
+    for c in st["changes"][:40]:
+        print(f"  {c['kind']:8} {c['old']}  →  {c['new']}")
+    if not args.apply and st["changes"]:
+        print("\n(dry run — re-run with --apply to perform these re-keys)")
+    return 0
+
+
 def cmd_rescan(args: argparse.Namespace) -> int:
     """Full fresh relink: re-extract every document, then run the whole resolution chain
     (§5). Reports each fix's contribution."""
@@ -671,6 +689,12 @@ def build_parser() -> argparse.ArgumentParser:
     wl.add_argument("path", help="a directory of .rtf files, or a .zip of them")
     wl.add_argument("--limit", type=int, default=None, help="import at most N files")
     wl.set_defaults(func=cmd_import_westlaw)
+
+    wlf = sub.add_parser("refix-westlaw",
+                         help="repair already-imported Westlaw docs' ids (hash → report-slug)")
+    wlf.add_argument("--apply", action="store_true",
+                     help="apply the re-keys (default: dry run — just report the plan)")
+    wlf.set_defaults(func=cmd_refix_westlaw)
 
     rs2 = sub.add_parser("rescan", help="full fresh relink: re-extract all docs + run the whole chain (§5)")
     rs2.add_argument("--limit", type=int, default=None, help="re-extract at most N docs (default: all)")

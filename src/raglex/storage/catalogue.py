@@ -508,6 +508,62 @@ class Catalogue:
         except (ValueError, TypeError):
             return {}
 
+    # Every table column that holds a document's stable_id (so a re-key cascades cleanly).
+    # (table, column, only_when_equal) — candidate_id/dst_id hold an id only when it's a
+    # resolved target, so they must repoint too.
+    _DOC_ID_REFS = (
+        ("citation_aliases", "dst_id"),
+        ("relations", "src_id"), ("relations", "dst_id"), ("relations", "candidate_id"),
+        ("citations", "src_id"), ("citations", "candidate_id"),
+        ("embeddings", "doc_id"), ("document_tags", "doc_id"),
+        ("document_assets", "doc_id"), ("document_versions", "stable_id"),
+        ("refinement_flags", "doc_id"),
+    )
+
+    def rekey_document(self, old_id: str, new_id: str, *, commit: bool = True) -> str:
+        """Move a document from ``old_id`` to ``new_id``, cascading **every** stable-id
+        reference (aliases, relations, citations, embeddings, tags, assets, versions,
+        flags). If ``new_id`` is free it's a plain RENAME; if it already names a document
+        the old row is dropped and its references fold into ``new_id`` (a MERGE — used to
+        collapse a duplicate). Returns ``'noop' | 'rename' | 'merge'``.
+
+        Conflict-safe on the columns that carry a uniqueness constraint (a chunk/tag/alias
+        the target already has): the old row's copy is dropped rather than duplicated."""
+        if old_id == new_id:
+            return "noop"
+        merging = self.get_document(new_id) is not None
+        with self._atomic():
+            # repoint references, skipping any row whose move would collide with one the
+            # target already owns (only possible when merging).
+            for table, col in self._DOC_ID_REFS:
+                if merging:
+                    keycols = self._UNIQUE_KEYCOLS.get((table, col))
+                    if keycols:
+                        cols = ", ".join(keycols)
+                        self.conn.execute(
+                            f"DELETE FROM {table} WHERE {col} = ? AND ({cols}) IN "
+                            f"(SELECT {cols} FROM {table} WHERE {col} = ?)",
+                            (old_id, new_id))
+                self.conn.execute(
+                    f"UPDATE {table} SET {col} = ? WHERE {col} = ?", (new_id, old_id))
+            if merging:
+                self.conn.execute("DELETE FROM documents WHERE stable_id = ?", (old_id,))
+            else:
+                self.conn.execute(
+                    "UPDATE documents SET stable_id = ? WHERE stable_id = ?", (new_id, old_id))
+        if commit:
+            self.conn.commit()
+        return "merge" if merging else "rename"
+
+    # For a MERGE, the (col, uniqueness-key) that would clash if the target already holds
+    # an equivalent row — those old rows are dropped instead of moved.
+    _UNIQUE_KEYCOLS = {
+        ("embeddings", "doc_id"): ("chunk_id", "provider", "model", "model_version"),
+        ("document_tags", "doc_id"): ("tag",),
+        ("document_versions", "stable_id"): ("version",),
+        ("citation_aliases", "dst_id"): ("alias",),
+    }
+
     def set_document_meta(self, stable_id: str, meta: dict, *, title_if_empty: str | None = None,
                           commit: bool = True) -> None:
         """Overwrite a document's ``meta_json`` bag (and, only when the row's title is
