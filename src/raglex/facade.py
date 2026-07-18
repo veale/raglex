@@ -1395,10 +1395,21 @@ class Facade:
             imported = self.import_url(url=url, doc_type=doc_type, title=title or identifier or ref)
             target = imported.get("stable_id")
         elif content_base64:
-            imported = self.import_base64(content_base64=content_base64,
-                                          filename=filename or "reference.pdf",
-                                          doc_type=doc_type, title=title or identifier or ref)
-            target = imported.get("stable_id")
+            # A Westlaw legislation export satisfies a hanging *statute* reference — and it
+            # must land as the Act itself (ukpga/1889/63, section-segmented) rather than as
+            # an opaque commentary blob, or the pinpoint edges ("s. 38 of …") still can't
+            # resolve. Try that first; anything else falls through to the generic import.
+            import base64 as _b64
+
+            raw = _b64.b64decode(content_base64)
+            leg = self.import_westlaw_legislation(data=raw, filename=filename)
+            if not leg.get("error"):
+                imported, target = leg, leg["stable_id"]
+            else:
+                imported = self.import_base64(content_base64=content_base64,
+                                              filename=filename or "reference.pdf",
+                                              doc_type=doc_type, title=title or identifier or ref)
+                target = imported.get("stable_id")
 
         with self._open() as (cat, _rs, _ts):
             if existing_id and cat.get_document(existing_id) is None:
@@ -2889,7 +2900,7 @@ class Facade:
         with zipfile.ZipFile(zip_path) as zf:
             infos = [i for i in zf.infolist()
                      if not i.is_dir()
-                     and i.filename.lower().endswith(".rtf")
+                     and i.filename.lower().endswith((".rtf", ".doc"))
                      and not i.filename.startswith("__MACOSX")
                      and "/." not in "/" + i.filename]
             if limit:
@@ -2912,7 +2923,7 @@ class Facade:
         paths: list[str] = []
         for root, _dirs, names in os.walk(dir_path):
             for nm in names:
-                if nm.lower().endswith(".rtf") and not nm.startswith("."):
+                if nm.lower().endswith((".rtf", ".doc")) and not nm.startswith("."):
                     paths.append(os.path.join(root, nm))
         paths.sort()
         if limit:
@@ -2985,9 +2996,14 @@ class Facade:
         from .resolve.matchers import first_candidate
         from .topics.gate import fold
 
+        from .adapters.westlaw_legislation import parse_westlaw_legislation
+
         st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0,
-              "merged": 0, "unparseable": 0, "aliases": 0, "extracted": 0}
+              "merged": 0, "unparseable": 0, "aliases": 0, "extracted": 0, "legislation": 0}
         files: list[dict] = []
+        # A Westlaw folder can mix case law and legislation. Acts are deferred to a second
+        # pass so the Act importer opens its own session rather than nesting one.
+        leg_entries: list[tuple[str, bytes]] = []
         with self._open() as (cat, rs, ts):
             to_extract: list[str] = []
             for n, (filename, data) in enumerate(entries, 1):
@@ -2995,6 +3011,12 @@ class Facade:
                     break
                 st["total"] += 1
                 _progress(on_progress, stage="importing", done=n, total=total, item=filename)
+                try:
+                    if parse_westlaw_legislation(data, filename=filename) is not None:
+                        leg_entries.append((filename, data))
+                        continue
+                except Exception:  # noqa: BLE001 — fall through to the case parser
+                    pass
                 try:
                     parsed = parse_westlaw_rtf(data, filename=filename)
                 except Exception as exc:  # noqa: BLE001 — one bad file mustn't sink the batch
@@ -3149,6 +3171,26 @@ class Facade:
             _progress(on_progress, stage="resolving citations", done=0, total=0)
             resolved = Resolver(cat).run()
         st["resolved_edges"] = resolved.resolved
+        # second pass: the Acts, each imported under its legislation.gov.uk id
+        for filename, data in leg_entries:
+            if cancel_check and cancel_check():
+                break
+            _progress(on_progress, stage="importing legislation", done=0, total=len(leg_entries),
+                      item=filename)
+            res = self.import_westlaw_legislation(data=data, filename=filename, match_names=False)
+            if res.get("error"):
+                st["unparseable"] += 1
+                disposition, sid = "error", None
+            else:
+                st["legislation"] += 1
+                st["aliases"] += res.get("aliases", 0)
+                disposition, sid = res["disposition"], res["stable_id"]
+            if len(files) < 1000:
+                files.append({"file": filename, "stable_id": sid, "title": res.get("title"),
+                              "kind": "legislation", "disposition": disposition,
+                              "error": res.get("error")})
+        if st["legislation"]:  # one name-match pass links every new Act's hanging references
+            st["resolved_edges"] += self.match_named_legislation().get("resolved_edges", 0)
         st["files"] = files
         self._invalidate_caches()
         return st
@@ -3167,6 +3209,101 @@ class Facade:
             else:
                 out.setdefault(k, v)
         return out
+
+    def import_westlaw_legislation(self, *, data: bytes, filename: str | None = None,
+                                   match_names: bool = True) -> dict:
+        """Import a Westlaw **legislation** export (an RTF, often named ``.doc``) as a real,
+        citable Act — the route for statutes legislation.gov.uk only holds as a scanned PDF
+        (the Interpretation Act 1889 and its vintage), where Westlaw is the only
+        machine-readable text and the Act would otherwise stay a hanging reference forever.
+
+        Keyed by the legislation.gov.uk id the resolver already routes to
+        (``ukpga/1889/63``), with one ``Segment`` per provision so "section 38 of the
+        Interpretation Act 1889" lands on s. 38. The as-enacted/as-amended banner is kept in
+        meta — an as-enacted text of a much-amended Act is not current law and must not
+        silently pose as it. Never overwrites an authoritative legislation.gov.uk copy that
+        already has text; it supersedes only a textless/PDF-only stub."""
+        from .adapters.westlaw_legislation import parse_westlaw_legislation
+        from .citations import extract_document
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+        from .topics.gate import fold
+
+        parsed = parse_westlaw_legislation(data, filename=filename)
+        if parsed is None:
+            return {"error": "not a recognisable Westlaw legislation export", "file": filename}
+        if not parsed.stable_id:
+            return {"error": f"no legislation id derivable from {parsed.title!r}",
+                    "file": filename}
+
+        sid = parsed.stable_id
+        payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
+        meta = {
+            "imported": "westlaw-legislation",
+            "westlaw_legislation": {k: v for k, v in {
+                "chapter": parsed.chapter, "long_title": parsed.long_title,
+                "version": parsed.version_note, "provisions": len(parsed.provisions),
+                "crossheadings": parsed.crossheadings or None,
+            }.items() if v},
+        }
+        with self._open() as (cat, rs, ts):
+            existing = cat.get_document(sid)
+            old_meta = cat.document_meta(sid) if existing is not None else {}
+            # an authoritative copy WITH text wins; a textless/PDF-only stub is superseded
+            authoritative = (
+                existing is not None and existing["has_text"]
+                and old_meta.get("imported") not in ("westlaw-legislation",)
+                and existing["source"] not in ("user-import",))
+            if authoritative:
+                text_path = str(ts.put(payload_hash, parsed.text))
+                alts = old_meta.get("alt_texts", [])
+                if not any(a.get("payload_hash") == payload_hash for a in alts):
+                    alts.append({"source": "westlaw-legislation", "payload_hash": payload_hash,
+                                 "text_path": text_path, "chars": len(parsed.text)})
+                old_meta["alt_texts"] = alts
+                for k, v in meta.items():
+                    old_meta.setdefault(k, v)
+                cat.set_document_meta(sid, old_meta, title_if_empty=parsed.title)
+                disposition = "secondary"
+            else:
+                record = Record(
+                    source="uk-legislation", stable_id=sid, doc_type=DocType.LEGISLATION,
+                    title=parsed.title, decision_date=parsed.enacted_date,
+                    language="en", source_language="en",
+                    raw_bytes=data, raw_ext="rtf", payload_hash=payload_hash,
+                    text=parsed.text, segments=parsed.segments,
+                    extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER,
+                    extra={**old_meta, **meta},
+                )
+                raw_path = str(rs.path_for(rs.put(data, ext="rtf"), "rtf"))
+                text_path = str(ts.put(payload_hash, parsed.text))
+                ts.put_segments(payload_hash, parsed.segments)
+                cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+                disposition = "imported" if existing is None else "superseded"
+            # the Act's short title is how it is actually cited — alias it so
+            # "the Interpretation Act 1889" resolves without a section pinpoint
+            aliases = 0
+            key = fold(parsed.title)
+            if key and key != sid:
+                cat.put_alias(key, sid, source="westlaw-legislation", commit=False)
+                aliases += 1
+            cat.commit()
+            if disposition != "secondary":
+                try:
+                    extract_document(cat, ts, sid)
+                except Exception:  # noqa: BLE001
+                    pass
+            resolved = Resolver(cat).run().resolved
+        # Name-only references ("section 38 of the Interpretation Act 1889") carry no
+        # candidate id, so the plain resolver can't reach the new Act — the statute
+        # name-matcher does, indexing the held Act's title and minting the alias. That's
+        # what turns the hanging edges live, so run it unless a batch defers one pass to the end.
+        if match_names:
+            resolved += self.match_named_legislation().get("resolved_edges", 0)
+        self._invalidate_caches()
+        return {"stable_id": sid, "title": parsed.title, "disposition": disposition,
+                "provisions": len(parsed.provisions), "chars": len(parsed.text),
+                "version": parsed.version_note, "aliases": aliases,
+                "resolved_edges": resolved}
 
     def refix_westlaw_imports(self, *, apply: bool = False, limit: int | None = None,
                               on_progress=None, cancel_check=None) -> dict:
@@ -3311,7 +3448,7 @@ class Facade:
         with zipfile.ZipFile(zip_path) as zf:
             names = [i.filename.lower() for i in zf.infolist() if not i.is_dir()]
         has_html = any(n.endswith((".html", ".htm")) for n in names)
-        has_rtf = any(n.endswith(".rtf") for n in names)
+        has_rtf = any(n.endswith((".rtf", ".doc")) for n in names)
         if not has_html and not has_rtf:
             return {"total": 0, "note": "no .html or .rtf files in the zip"}
         stats: dict = {}
@@ -3335,7 +3472,7 @@ class Facade:
             for nm in nms:
                 low = nm.lower()
                 has_html = has_html or low.endswith((".html", ".htm"))
-                has_rtf = has_rtf or low.endswith(".rtf")
+                has_rtf = has_rtf or low.endswith((".rtf", ".doc"))
         if not has_html and not has_rtf:
             return {"total": 0, "note": "no .html or .rtf files in the folder"}
         stats: dict = {}

@@ -860,14 +860,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         written = 0
         for f in files:
             name = (f.filename or "").rsplit("/", 1)[-1]
-            if not name.lower().endswith(".rtf") or name.startswith("."):
+            if not name.lower().endswith((".rtf", ".doc")) or name.startswith("."):
                 continue
             dest = d / name
             if dest.exists():
                 dest = d / f"{_uuid.uuid4().hex[:8]}_{name}"
             dest.write_bytes(await f.read())
             written += 1
-        staged = sum(1 for _ in d.glob("*.rtf"))
+        staged = sum(1 for p in d.iterdir() if p.suffix.lower() in (".rtf", ".doc"))
         return {"upload_id": upload_id, "received": written, "staged": staged}
 
     @app.post("/import/westlaw-files/start")
@@ -876,7 +876,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         d = _westlaw_batch_dir(payload.get("upload_id", ""))
         if d is None:
             return JSONResponse({"error": "bad upload_id"}, status_code=400)
-        staged = sum(1 for _ in d.glob("*.rtf"))
+        staged = sum(1 for p in d.iterdir() if p.suffix.lower() in (".rtf", ".doc"))
         if not staged:
             return {"error": "no files staged for this upload"}
         return jobs.start("import-westlaw-dir",
@@ -887,7 +887,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     # BAILII .html pages and Westlaw .rtf exports, routing each file to its own parser by
     # extension. This is what the Import UI drives; the source-specific endpoints above
     # stay for CLI/API parity.
-    _CASELAW_EXTS = (".html", ".htm", ".rtf")
+    _CASELAW_EXTS = (".html", ".htm", ".rtf", ".doc")
 
     @app.post("/import/caselaw-zip")
     async def import_caselaw_zip_ep(file: UploadFile = File(...)) -> dict:

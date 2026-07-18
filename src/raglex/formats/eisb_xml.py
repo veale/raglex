@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from html.entities import html5 as _HTML_ENTITIES
 from xml.etree import ElementTree as ET
 
 from ..core.models import (
@@ -63,6 +64,7 @@ _GLYPH_RE = re.compile(r"<(" + "|".join(_GLYPHS) + r")\s*/>")
 _UNICODE_RE = re.compile(r'<unicode\s+ch="([0-9A-Fa-f]{4})"\s*/>')
 _ESCAPED_RE = re.compile(r"\\u([0-9A-Fa-f]{4})")
 _DOCTYPE_RE = re.compile(r"<!DOCTYPE.*?(?:\[.*?\])?\s*>", re.S)
+_NAMED_ENTITY_RE = re.compile(r"&([A-Za-z][A-Za-z0-9]{1,31});")
 _ENTITY_DECL_RE = re.compile(r'<!ENTITY\s+(?P<name>[A-Za-z_][\w.-]*)\s+"(?P<value>[^"]*)"\s*>')
 
 # The document's own label children — they become the segment label, so they must not
@@ -178,7 +180,24 @@ def decode(data: bytes) -> str:
     text = expand_entities(text)
     text = _ESCAPED_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
     text = _UNICODE_RE.sub(lambda m: _escape(chr(int(m.group(1), 16))), text)
-    return _GLYPH_RE.sub(lambda m: _escape(_GLYPHS[m.group(1)]), text)
+    text = _GLYPH_RE.sub(lambda m: _escape(_GLYPHS[m.group(1)]), text)
+    return _resolve_stray_entities(text)
+
+
+def _resolve_stray_entities(text: str) -> str:
+    """Turn any remaining named entity into its character (or drop it).
+
+    ElementTree fails the *whole document* on a single undefined entity, so one stray
+    HTML-ism — an ``&uacute;`` inside an LRC annotation, say — would cost us the entire
+    Act rather than one character. Anything resolvable through the HTML5 table becomes
+    its character; anything else is dropped. The five XML built-ins are left alone."""
+    def sub(m: "re.Match[str]") -> str:
+        name = m.group(1)
+        if name in ("amp", "lt", "gt", "quot", "apos"):
+            return m.group(0)
+        return _escape(_HTML_ENTITIES.get(f"{name};", ""))
+
+    return _NAMED_ENTITY_RE.sub(sub, text)
 
 
 def _escape(ch: str) -> str:
@@ -267,7 +286,10 @@ def _child_text(elem: ET.Element, name: str) -> str | None:
     child = _child(elem, name)
     if child is None:
         return None
-    return " ".join("".join(child.itertext()).split()) or None
+    # Joined with a space, not concatenated: a container's <title> holds its number and
+    # its heading as separate <p>s ("PART 1", "Preliminary"), which run together into
+    # "PART 1Preliminary" if the element boundary isn't treated as a break.
+    return " ".join(" ".join(child.itertext()).split()) or None
 
 
 def _label(elem: ET.Element, kind: str) -> str:

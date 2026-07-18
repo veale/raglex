@@ -2014,14 +2014,14 @@ function CaseLawImportPanel() {
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState<{ done: number; total: number } | null>(null);
   const folderRef = useRef<HTMLInputElement>(null);
-  const CASE_RE = /\.(html?|rtf)$/i;
+  const CASE_RE = /\.(html?|rtf|doc)$/i;
 
   // Folder / multi-file upload — no zip needed. The browser hands us every file in the
   // picked folder; we keep the .html/.rtf, stage them server-side in batches (so no single
   // request is huge), then start one background import job that routes each by extension.
   async function uploadFiles(fileList: FileList) {
     const files = Array.from(fileList).filter((f) => CASE_RE.test(f.name));
-    if (!files.length) { setMsg("no .html or .rtf files in that selection"); return; }
+    if (!files.length) { setMsg("no .html, .rtf or .doc files in that selection"); return; }
     const html = files.filter((f) => /\.html?$/i.test(f.name)).length;
     const rtf = files.length - html;
     setBusy(true); setProg({ done: 0, total: files.length });
@@ -2043,14 +2043,16 @@ function CaseLawImportPanel() {
 
   return (
     <div className="panel">
-      <h3>Case law (folder or zip of BAILII .html + Westlaw .rtf)</h3>
+      <h3>Case law &amp; legislation (folder or zip of BAILII .html + Westlaw .rtf/.doc)</h3>
       <p className="muted" style={{ fontSize: 13 }}>
         Pick a whole folder — no zipping needed — or drop a zip. Saved BAILII case pages
-        (<code>.html</code>) and Westlaw case exports (<code>.rtf</code>) can be mixed freely; each file is
-        routed to its own parser. BAILII pages key by neutral citation and the “Cite as:” list; Westlaw
-        RTFs key by neutral citation → ECLI → Westlaw id, with parties, court, judges, counsel and every
-        parallel report citation extracted and aliased (EU cases reported in UK series key by their
-        ECLI). Runs in the background — watch the Jobs panel.
+        (<code>.html</code>) and Westlaw exports (<code>.rtf</code>/<code>.doc</code>) can be mixed freely; each
+        file is routed to its own parser. BAILII pages key by neutral citation and the “Cite as:” list;
+        Westlaw <i>judgments</i> key by neutral citation → ECLI → Westlaw id (parties, court, judges, counsel
+        and every parallel report citation extracted and aliased); Westlaw <i>legislation</i> keys by its
+        legislation.gov.uk id (<code>ukpga/1889/63</code>), section-segmented so statute pinpoints resolve —
+        the way to hold old Acts legislation.gov.uk only has as a scanned PDF. Runs in the background —
+        watch the Jobs panel.
       </p>
       <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 10 }}>
         <button className="primary" disabled={busy} onClick={() => folderRef.current?.click()}>
@@ -2062,7 +2064,7 @@ function CaseLawImportPanel() {
           webkitdirectory="" directory=""
           onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
         <span className="muted" style={{ fontSize: 12 }}>or select files:</span>
-        <input type="file" multiple accept=".html,.htm,.rtf" disabled={busy}
+        <input type="file" multiple accept=".html,.htm,.rtf,.doc" disabled={busy}
           onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
         <span className="muted" style={{ fontSize: 12 }}>or a zip:</span>
         <input type="file" accept=".zip" disabled={busy} onChange={async (e) => {
