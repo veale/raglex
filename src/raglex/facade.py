@@ -104,6 +104,26 @@ def _act_level(candidate: str | None) -> str | None:
     return act_level(candidate)
 
 
+# European Court Reports series → the CJEU court its ECLI must name:
+#   "ECR I-…"  → Court of Justice     (ECLI:EU:C:)
+#   "ECR II-…" → General Court / CFI  (ECLI:EU:T:), incl. the Civil Service Tribunal (EU:F:)
+#   no series letter (pre-1989 "[1974] ECR 837") → Court of Justice (EU:C:)
+# so an ECR string can never legitimately resolve to a decision from the wrong court.
+def _ecr_series_ok(ecr_alias: str, target: str) -> bool:
+    """True if ``target`` (an ECLI or a raw id) is court-consistent with the ECR series in
+    ``ecr_alias``. Non-ECLI / court-less targets pass (nothing to contradict)."""
+    m = re.search(r"ECLI:EU:([CTF]):", target or "", re.IGNORECASE)
+    if not m:
+        return True
+    court = m.group(1).upper()
+    low = ecr_alias.lower()
+    if re.search(r"\bii-", low):
+        return court in ("T", "F")
+    if re.search(r"\bi-", low):
+        return court == "C"
+    return court == "C"  # no series letter → Court of Justice
+
+
 def _neutral_citation_from_slug(stable_id: str) -> str | None:
     """A UK Find Case Law slug → its neutral citation, for searching out citing cases.
     ``uksc/2021/12`` → ``[2021] UKSC 12``; ``ewca/civ/2015/454`` → ``[2015] EWCA Civ 454``;
@@ -3231,6 +3251,55 @@ class Facade:
         st["changes"] = changes[:5000]
         return st
 
+    def repair_ecr_aliases(self, *, apply: bool = False, limit: int | None = None,
+                           on_progress=None, cancel_check=None) -> dict:
+        """Repair 'dead' European Court Reports aliases — an ``ECR → CELEX`` alias whose
+        CELEX names no held document, because the mint-time chain to the case's ECLI didn't
+        fire (the CELEX→ECLI alias was minted later). Follow that second hop now and, when
+        it lands on a **held** judgment whose court is consistent with the ECR series
+        (:func:`_ecr_series_ok` — "ECR II-" must be General Court, not Court of Justice),
+        re-point the ECR alias straight at the ECLI so a bare "[2000] ECR II-491" resolves.
+        A chain that fails the series guard is left dead rather than resolved to the wrong
+        decision. ``apply=False`` is a dry run. Follow with :meth:`resolve`."""
+        st = {"scanned": 0, "repaired": 0, "already_ok": 0,
+              "skipped_series": 0, "skipped_unheld": 0, "applied": apply}
+        changes: list[dict] = []
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                "SELECT alias, dst_id FROM citation_aliases WHERE alias LIKE ? OR alias LIKE ?",
+                ("%ecr %", "%e.c.r%")).fetchall()
+            if limit:
+                rows = rows[:limit]
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                alias, dst = r["alias"], r["dst_id"]
+                st["scanned"] += 1
+                # already lands on a held document (by stable_id or ECLI)? nothing to do.
+                if cat.get_document(dst) is not None:
+                    st["already_ok"] += 1
+                    continue
+                hop = cat.get_alias(dst.lower()) if dst else None
+                if not hop or cat.get_document(hop) is None:
+                    st["skipped_unheld"] += 1
+                    continue
+                if not _ecr_series_ok(alias, hop):
+                    st["skipped_series"] += 1
+                    continue
+                changes.append({"alias": alias, "was": dst, "now": hop})
+                st["repaired"] += 1
+                if apply:
+                    cat.put_alias(alias, hop, source="ecr-repair", commit=False)
+                    if n % 500 == 0:
+                        cat.commit()
+                _progress(on_progress, stage="repair ecr", done=n, total=len(rows), item=alias)
+            if apply:
+                cat.commit()
+        if apply:
+            self._invalidate_caches()
+        st["changes"] = changes[:5000]
+        return st
+
     def import_caselaw_zip(self, *, zip_path: str, limit: int | None = None,
                            on_progress=None, cancel_check=None) -> dict:
         """Import a zip that may mix saved BAILII ``.html`` pages and Westlaw ``.rtf``
@@ -4661,9 +4730,13 @@ class Facade:
                     st["aliased"] += 1
 
             # EU report links: alias each ECR string to its CJEU case, chaining one level
-            # through a CELEX→ECLI alias when the case is held under its ECLI.
+            # through a CELEX→ECLI alias when the case is held under its ECLI. The series
+            # guard rejects a chain whose court contradicts the ECR series ("ECR II-" is
+            # the General Court → an ECLI:EU:C: target is a mis-chain, so keep the raw
+            # case candidate rather than resolve to the wrong decision).
             for ecr_key, case_cand in eu_report_links.items():
-                target = cat.get_alias(fold(case_cand)) or case_cand
+                chained = cat.get_alias(fold(case_cand))
+                target = chained if (chained and _ecr_series_ok(ecr_key, chained)) else case_cand
                 cat.put_alias(ecr_key, target, source="eu-report", commit=False)
                 st["eu_report_links"] += 1
             cat.commit()

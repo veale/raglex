@@ -443,6 +443,25 @@ def cmd_refix_westlaw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repair_ecr(args: argparse.Namespace) -> int:
+    """Re-chain dead ECR aliases (``ECR → CELEX`` where the CELEX names no held doc) to the
+    held judgment's ECLI, guarded by the report series. Dry run unless ``--apply``."""
+    from .facade import Facade
+
+    f = Facade(Config.from_env())
+    st = f.repair_ecr_aliases(apply=args.apply, on_progress=lambda **p: None)
+    verb = "repaired" if args.apply else "would repair"
+    print(f"scanned={st['scanned']} {verb}={len(st['changes'])} "
+          f"(already_ok={st['already_ok']} skipped_series={st['skipped_series']} "
+          f"skipped_unheld={st['skipped_unheld']})")
+    for c in st["changes"][:30]:
+        print(f"  {c['alias']}  {c['was']} → {c['now']}")
+    if args.apply and len(st["changes"]):
+        r = f.resolve()
+        print(f"resolve: resolved={r['resolved']} still_pending={r['still_pending']}")
+    return 0
+
+
 def cmd_rescan(args: argparse.Namespace) -> int:
     """Full fresh relink: re-extract every document, then run the whole resolution chain
     (§5). Reports each fix's contribution."""
@@ -695,6 +714,11 @@ def build_parser() -> argparse.ArgumentParser:
     wlf.add_argument("--apply", action="store_true",
                      help="apply the re-keys (default: dry run — just report the plan)")
     wlf.set_defaults(func=cmd_refix_westlaw)
+
+    ecr = sub.add_parser("repair-ecr",
+                         help="re-chain dead European Court Reports aliases to held ECLIs (series-guarded)")
+    ecr.add_argument("--apply", action="store_true", help="apply (default: dry run)")
+    ecr.set_defaults(func=cmd_repair_ecr)
 
     rs2 = sub.add_parser("rescan", help="full fresh relink: re-extract all docs + run the whole chain (§5)")
     rs2.add_argument("--limit", type=int, default=None, help="re-extract at most N docs (default: all)")
