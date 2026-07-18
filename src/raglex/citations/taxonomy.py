@@ -47,13 +47,19 @@ CATEGORY_LABELS: dict[str, str] = {
     "africa-caselaw": "African case-law (other)",
     "caribbean-caselaw": "Caribbean case-law",
     "pacific-caselaw": "Pacific case-law",
+    "ca-legislation": "Canadian legislation (federal)",
+    "au-legislation": "Australian legislation",
+    "nz-legislation": "New Zealand legislation",
+    "hk-legislation": "Hong Kong legislation",
     "other": "Other / unrouted",
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
                   "eu-cellar", "eu-legislation", "echr", "guidance",
                   "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw",
                   "sg-caselaw", "hk-caselaw", "za-caselaw", "my-caselaw",
-                  "africa-caselaw", "caribbean-caselaw", "pacific-caselaw", "other"]
+                  "africa-caselaw", "caribbean-caselaw", "pacific-caselaw",
+                  "ca-legislation", "au-legislation", "nz-legislation", "hk-legislation",
+                  "other"]
 
 # Neutral-citation jurisdictions with no adapter (cases arrive by upload, if at all):
 # the KNOWN_COURTS jurisdiction → the Corpus Map bucket. A "[2020] NZSC 12" pending
@@ -76,6 +82,34 @@ JURISDICTION_CATEGORY: dict[str, str] = {
 
 # The case-law categories that aren't UK — all classified by court token alone.
 NON_UK_CASELAW_CATEGORIES: frozenset[str] = frozenset(JURISDICTION_CATEGORY.values())
+
+# Commonwealth legislation sources → their Corpus Map category. Without these the
+# registers land in "Other / unrouted", which hides several thousand held documents.
+COMMONWEALTH_LEG_CATEGORY: dict[str, str] = {
+    "ca-federal": "ca-legislation",
+    "hk-legislation": "hk-legislation",
+    "nz-legislation": "nz-legislation",
+    "au-cth": "au-legislation", "au-qld": "au-legislation",
+    "au-nsw": "au-legislation", "au-tas": "au-legislation",
+}
+
+# The register-native document types, as they appear in a stable_id's second segment.
+COMMONWEALTH_LEG_TYPES: dict[str, str] = {
+    "act": "Acts", "regulation": "Regulations",          # Canada
+    "cap": "Ordinances & subsidiary legislation",         # Hong Kong (chapter-numbered)
+    "instrument": "Constitutional instruments",           # HK Basic Law and companions
+    "sl": "Subordinate legislation", "sr": "Statutory rules",  # Australia
+    "si": "Statutory instruments", "ni": "Notifiable instruments",
+    "public": "Public Acts", "secondary-legislation": "Secondary legislation",  # NZ
+    "bill": "Bills",
+}
+
+# Australia's nine registers, keyed by the jurisdiction segment of an au/… stable_id.
+AU_JURISDICTIONS: dict[str, str] = {
+    "cth": "Commonwealth", "nsw": "New South Wales", "qld": "Queensland",
+    "vic": "Victoria", "wa": "Western Australia", "sa": "South Australia",
+    "tas": "Tasmania", "act": "ACT", "nt": "Northern Territory",
+}
 
 # Which UK nation a legislation type-code belongs to (for the SI/Act-by-country split).
 UK_LEG_COUNTRY: dict[str, str] = {
@@ -217,6 +251,21 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         sub, label = IE_LEG_TYPES.get(prefix, ("other", "Other"))
         return Tax("ie-legislation", CATEGORY_LABELS["ie-legislation"], sub, label,
                    {"source": "ie-legislation", "id_prefix": prefix})
+    # Commonwealth legislation registers. Each splits into the register's own document
+    # types, taken from the stable_id's second segment (ca/act/… vs ca/regulation/…,
+    # hk/cap/… vs hk/instrument/…), so Acts and secondary legislation are separate rows
+    # rather than one undifferentiated pile.
+    if source in COMMONWEALTH_LEG_CATEGORY:
+        category = COMMONWEALTH_LEG_CATEGORY[source]
+        parts = stable_id.split("/")
+        # Australia is nine registers under one banner (au/{juris}/{type}/…), so the
+        # useful split is by jurisdiction — Commonwealth vs Queensland vs NSW — not by
+        # instrument type. Everywhere else the second segment IS the type.
+        sub = parts[1].lower() if len(parts) > 2 else "other"
+        label = (AU_JURISDICTIONS.get(sub, sub.upper()) if category == "au-legislation"
+                 else COMMONWEALTH_LEG_TYPES.get(sub, sub.title() or "Other"))
+        return Tax(category, CATEGORY_LABELS[category], sub, label,
+                   {"source": source, "id_prefix": f"{prefix}/{sub}"})
     if source == "eu-cellar":
         sub, label = _eu_case_subtype(doc_type, court, stable_id)
         filt = {"source": "eu-cellar"}

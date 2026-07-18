@@ -221,3 +221,27 @@ def test_parallel_commonwealth_citations_both_survive():
 ])
 def test_bracketed_commonwealth_neutral_citations_resolve(citation, expected):
     assert candidates(citation)[citation] == expected
+
+
+# -- Corpus Map routing for the legislation registers ------------------------
+
+@pytest.mark.parametrize("source,stable_id,category,subtype_label", [
+    ("ca-federal", "ca/act/a-1", "ca-legislation", "Acts"),
+    ("ca-federal", "ca/regulation/crc-c-870", "ca-legislation", "Regulations"),
+    ("hk-legislation", "hk/cap/486", "hk-legislation",
+     "Ordinances & subsidiary legislation"),
+    ("hk-legislation", "hk/instrument/a101", "hk-legislation",
+     "Constitutional instruments"),
+    ("nz-legislation", "nz/act/public/1990/109", "nz-legislation", "Acts"),
+    # Australia is nine registers under one banner, so it splits by jurisdiction
+    ("au-cth", "au/cth/act/1901/2", "au-legislation", "Commonwealth"),
+    ("au-qld", "au/qld/sl/2023/107", "au-legislation", "Queensland"),
+])
+def test_commonwealth_registers_route_out_of_other_unrouted(
+        source, stable_id, category, subtype_label):
+    """Without a category these registers land in "Other / unrouted", which hid
+    several thousand held documents on the first deployment."""
+    from raglex.citations.taxonomy import classify_document
+    tax = classify_document(source=source, stable_id=stable_id)
+    assert tax.category == category
+    assert tax.subtype_label == subtype_label
