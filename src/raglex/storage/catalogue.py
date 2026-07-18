@@ -1367,6 +1367,50 @@ class Catalogue:
                 pass
         return done
 
+    def unheld_case_candidates(self, *, limit: int = 5000) -> list[sqlite3.Row]:
+        """Distinct case references the corpus cites but does **not** hold, most-cited
+        first — the target list for building outbound LII links.
+
+        Only candidate-shaped references (a neutral-citation slug like ``nzhc/2012/2551``)
+        qualify: a bare report-series string carries no court/year/number and so has no
+        derivable URL. ``inferred`` carry-forwards are excluded for the same reason they
+        never enter the worklist — too ambiguous to act on."""
+        return self.conn.execute(
+            """
+            SELECT r.candidate_id                 AS candidate,
+                   MIN(r.raw_citation_string)     AS raw,
+                   COUNT(*)                       AS occurrences,
+                   COUNT(DISTINCT r.src_id)       AS citing_count
+            FROM relations r
+            LEFT JOIN documents d ON d.stable_id = r.candidate_id
+            WHERE r.resolution_status = 'pending'
+              AND r.extracted_via <> 'inferred'
+              AND r.candidate_id IS NOT NULL
+              AND d.stable_id IS NULL
+            GROUP BY r.candidate_id
+            ORDER BY citing_count DESC, r.candidate_id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    def textless_case_documents(self, *, limit: int = 5000) -> list[sqlite3.Row]:
+        """Held judgments with no extracted text — the name-only/stub records whose full
+        text has to come from somewhere else. Ordered by how often they are cited, so the
+        ones worth chasing first come first."""
+        return self.conn.execute(
+            """
+            SELECT d.stable_id, d.title, d.court, d.source, d.landing_url,
+                   (SELECT COUNT(*) FROM relations r
+                     WHERE r.candidate_id = d.stable_id) AS citing_count
+            FROM documents d
+            WHERE d.is_latest = 1 AND d.has_text = 0 AND d.doc_type = 'judgment'
+            ORDER BY citing_count DESC, d.stable_id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
     def pending_reference_groups(self) -> list[sqlite3.Row]:
         """One row per distinct hanging reference — the worklist, as a single GROUP BY
         instead of a 450k-row Python pass (§5b, §8).

@@ -2877,6 +2877,72 @@ class Facade:
             st["aliases"] += 1
         return disposition
 
+    # -- outbound LII links (§5b) -------------------------------------------
+    def lii_links_for(self, stable_id: str) -> list[dict]:
+        """Canonical LII URLs for one held document. Prefers the landing URL the importer
+        actually recorded (exact, including any case-sensitive filename quirk) and falls
+        back to constructing the URL from the slug."""
+        from .citations.lii import lii_links
+
+        with self._open() as (cat, _rs, _ts):
+            doc = cat.get_document(stable_id)
+            meta = cat.document_meta(stable_id) if doc is not None else {}
+        out: list[dict] = []
+        recorded = (doc["landing_url"] if doc is not None else None) or meta.get("bailii_url")
+        if recorded and "bailii.org" in recorded:
+            out.append({"site": "bailii", "site_name": "BAILII", "url": recorded,
+                        "certainty": "recorded"})
+        for link in lii_links(stable_id, court=(doc["court"] if doc is not None else None)):
+            if not any(o["url"] == link.url for o in out):
+                out.append({"site": link.site, "site_name": link.site_name,
+                            "url": link.url, "certainty": link.certainty})
+        return out
+
+    def lii_link_targets(self, *, scope: str = "unheld", limit: int = 5000,
+                         sites: list[str] | None = None) -> list[dict]:
+        """The worklist for fetching missing full text from the LIIs.
+
+        ``scope`` picks the target set: ``unheld`` (cases the corpus cites but does not
+        hold), ``textless`` (held records that are a name and citation with no judgment
+        text), or ``both``. Rows come back most-cited first, so working down the list
+        retrieves the cases the corpus actually leans on.
+
+        Each row carries a ``filename`` — the slug with ``/`` replaced by ``_`` — which is
+        what makes the manual round-trip work: save each page under that name and the
+        importer can recover the document's identity from the filename alone, with no
+        mapping file to keep in step."""
+        from .citations.lii import lii_links
+
+        rows: list[dict] = []
+        want = {s.lower() for s in sites} if sites else None
+        with self._open() as (cat, _rs, _ts):
+            targets: list[tuple[str, str | None, str | None, int, str]] = []
+            if scope in ("unheld", "both"):
+                for r in cat.unheld_case_candidates(limit=limit):
+                    targets.append((r["candidate"], None, r["raw"], r["citing_count"], "unheld"))
+            if scope in ("textless", "both"):
+                for r in cat.textless_case_documents(limit=limit):
+                    targets.append((r["stable_id"], r["title"], None,
+                                    r["citing_count"] or 0, "held-no-text"))
+            for slug, title, raw, citing, kind in targets:
+                for link in lii_links(slug):
+                    if want and link.site not in want:
+                        continue
+                    rows.append({
+                        "stable_id": slug,
+                        "title": title,
+                        "citation": raw,
+                        "status": kind,
+                        "citing_count": citing,
+                        "site": link.site,
+                        "site_name": link.site_name,
+                        "url": link.url,
+                        "certainty": link.certainty,
+                        "filename": slug.replace("/", "_") + ".html",
+                    })
+        rows.sort(key=lambda r: (-r["citing_count"], r["stable_id"]))
+        return rows
+
     @staticmethod
     def _text_len(ts, doc) -> int:
         """Character length of a held document's primary text (0 if unreadable)."""

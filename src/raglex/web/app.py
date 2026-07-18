@@ -851,6 +851,46 @@ def create_app(config: Config | None = None) -> FastAPI:
                           f"Import BAILII folder ({staged} files)",
                           {"dir_path": str(d)})
 
+    @app.get("/documents/{stable_id:path}/lii-links")
+    def document_lii_links_ep(stable_id: str) -> dict:
+        """Outbound LII links for one document — what the reader shows when a case is a
+        name-only record with no judgment text, so the text can be fetched from the
+        institute that publishes it."""
+        return {"stable_id": stable_id, "links": facade.lii_links_for(stable_id)}
+
+    @app.get("/lii-links")
+    def lii_links_ep(scope: str = "unheld", limit: int = 2000,
+                     sites: str | None = None) -> dict:
+        """The LII fetch worklist: constructed links to cases the corpus cites but cannot
+        show. ``scope`` is ``unheld`` | ``textless`` | ``both``."""
+        site_list = [s for s in (sites or "").split(",") if s] or None
+        rows = facade.lii_link_targets(scope=scope, limit=limit, sites=site_list)
+        return {"scope": scope, "count": len(rows), "links": rows}
+
+    @app.get("/lii-links.csv")
+    def lii_links_csv_ep(scope: str = "unheld", limit: int = 20000,
+                         sites: str | None = None):
+        """The same worklist as a CSV download — the aggregate list someone works through
+        by hand, saving each page under the ``filename`` column so the companion importer
+        can recover each document's identity from the filename alone."""
+        import csv as _csv
+        import io as _io
+
+        from fastapi.responses import Response
+
+        site_list = [s for s in (sites or "").split(",") if s] or None
+        rows = facade.lii_link_targets(scope=scope, limit=limit, sites=site_list)
+        cols = ["stable_id", "citation", "title", "status", "citing_count",
+                "site", "site_name", "url", "certainty", "filename"]
+        buf = _io.StringIO()
+        w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+        return Response(
+            content=buf.getvalue(), media_type="text/csv",
+            headers={"Content-Disposition":
+                     f'attachment; filename="lii-links-{scope}.csv"'})
+
     @app.post("/import/bailii-parquet")
     def import_bailii_parquet_ep(payload: dict = Body(...)) -> dict:
         """Launch an import of a **server-side BAILII parquet dump** (a bulk Scrapy crawl
