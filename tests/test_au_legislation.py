@@ -308,3 +308,86 @@ def test_lawmaker_adapter_incremental_cursor_on_published():
     adapter = LawMakerAdapter(jurisdiction="qld", client=client)
     # nothing published after this cursor
     assert list(adapter.discover("2027-01-01T00:00:00+10:00")) == []
+
+
+# -- the FRL content endpoint (the route that actually serves text) -----------
+
+def _epub_bytes(*members: tuple[str, str]) -> bytes:
+    """A minimal EPUB: a zip whose OEBPS members are the frl-html the parser reads."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("META-INF/container.xml", "<container/>")
+        for name, html in members:
+            zf.writestr(name, html)
+    return buf.getvalue()
+
+
+_ACT_HTML = (
+    "<html><body><h1>Widget Act 1975</h1>"
+    "<p>Act No. 28 of 1975</p>"
+    "<h2>Part I&#8212;Preliminary</h2>"
+    "<p>1  Short title</p><p>This Act may be cited as the Widget Act 1975.</p>"
+    "<p>2  Commencement</p><p>This Act commences on Royal Assent.</p>"
+    "</body></html>"
+)
+
+
+def test_content_endpoint_needs_the_whole_odata_signature():
+    """OData won't resolve the function unless every parameter is present — dropping
+    uniqueTypeNumber/volumeNumber/rectificationSpecification 404s in a way that reads like
+    "no such document", which is what made this look like a coverage gap."""
+    from raglex.adapters.au_legislation import CommonwealthAdapter
+
+    url = CommonwealthAdapter(client=_Client({}))._content_url("C2004A00250", "Current")
+    for required in ("titleid='C2004A00250'", "asatspecification='Current'", "type='Primary'",
+                     "format='Epub'", "uniqueTypeNumber=0", "volumeNumber=0",
+                     "rectificationSpecification='Latest'"):
+        assert required in url, required
+    assert "/documents/find(" in url
+
+
+def test_body_comes_from_the_binary_epub_not_the_metadata_json():
+    from raglex.adapters.au_legislation import CommonwealthAdapter
+
+    client = _Client({"asatspecification='Current'":
+                      _epub_bytes(("OEBPS/document_1/document_1.html", _ACT_HTML))})
+    doc, as_at = CommonwealthAdapter(client=client).fetch_body_api("C2004A00250")
+    assert as_at == "Current"
+    assert doc is not None and "Widget Act 1975" in doc.text
+    assert doc.metadata["format"] == "frl-epub"
+
+
+def test_falls_through_current_to_latest_for_a_repealed_title():
+    """A repealed or uncompiled Act has no 'Current' document but does have a 'Latest'
+    one — trying only 'Current' is what left repealed Acts textless."""
+    from raglex.adapters.au_legislation import CommonwealthAdapter
+
+    client = _Client({"asatspecification='Latest'":
+                      _epub_bytes(("OEBPS/document_1/document_1.html", _ACT_HTML))})
+    doc, as_at = CommonwealthAdapter(client=client).fetch_body_api("C1901A00004")
+    assert as_at == "Latest" and doc is not None and doc.text
+
+
+def test_multi_volume_epub_members_merge_with_shifted_segment_offsets():
+    from raglex.adapters.au_legislation import CommonwealthAdapter
+
+    second = _ACT_HTML.replace("Widget Act 1975", "Widget Act 1975 (Volume 2)")
+    client = _Client({"asatspecification='Current'": _epub_bytes(
+        ("OEBPS/document_1/document_1.html", _ACT_HTML),
+        ("OEBPS/document_2/document_2.html", second))})
+    doc, _ = CommonwealthAdapter(client=client).fetch_body_api("C1968A00063")
+    assert "Volume 2" in doc.text
+    for seg in doc.segments:
+        assert 0 <= seg.char_start <= seg.char_end <= len(doc.text)
+
+
+def test_a_non_zip_response_is_not_mistaken_for_a_document():
+    """The site serves a 200 HTML app-shell for unknown routes; only a real zip counts."""
+    from raglex.adapters.au_legislation import CommonwealthAdapter
+
+    client = _Client({"documents/find(": "<html><body>Just a moment…</body></html>"})
+    doc, as_at = CommonwealthAdapter(client=client).fetch_body_api("C2004A00250")
+    assert doc is None and as_at is None

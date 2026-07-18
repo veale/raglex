@@ -11,8 +11,10 @@ largest open states:
   ``api.prod.legislation.gov.au``. You *query* rather than crawl. It hands over the
   amendment graph as structured edges (``statusHistory``), the point-in-time version
   series (``Versions/Find``), the originating Bill link, and the name history — all
-  inline. The document *body* is fetched from the register's unzipped-EPUB HTML (the
-  Angular front-end pages are client-rendered and no use to a scraper).
+  inline. The document *body* is a **separate binary fetch**: metadata and content are
+  different endpoint families on this API, and ``documents/find`` returns the compilation
+  as an EPUB/Word/PDF octet-stream, never as text inside the JSON (see
+  :meth:`CommonwealthAdapter._fetch_body`).
 * **``au-qld`` / ``au-nsw`` / ``au-tas``** (LawMaker states) — one adapter, three
   jurisdictions, because they share the Lawlab/LawMaker platform with an identical,
   deterministic, point-in-time-addressable URL grammar
@@ -256,17 +258,20 @@ class CommonwealthAdapter(BaseAdapter):
         # Ireland's related_to Bill link); kept as a mention so it isn't lost.
         bill = title.get("originatingBillUri")
 
-        # Body text: the register's unzipped-EPUB HTML, which is server-rendered clean
-        # markup (the Angular pages are not). Best-effort — a metadata-rich node with the
-        # full amendment graph is still valuable even if the text can't be reached.
+        # Body text comes from the API's *content* endpoint (a binary EPUB), not from the
+        # metadata JSON and not from the website. The two scrape paths below are retained
+        # only as a safety net; the API route is the one that works for repealed, old and
+        # uncompiled titles alike.
         body_pit = (version or {}).get("start", "")[:10] or None
-        text_doc = self._fetch_body(tid, body_pit, body_pit)
+        text_doc, as_at_used = self.fetch_body_api(tid)
         if text_doc is None:
-            # The very latest compilation's static HTML can lag its registration, so its
-            # EPUB path 404s. Fall back to the most recent compilation that HAS text —
-            # its dates come from the Documents set — so we hold the law rather than a
-            # bare node. The point_in_time we record is then the one we actually got.
-            text_doc, body_pit = self._fetch_body_fallback(tid)
+            text_doc = self._fetch_body(tid, body_pit, body_pit)
+            if text_doc is None:
+                text_doc, body_pit = self._fetch_body_fallback(tid)
+        elif as_at_used != "Current":
+            # we hold an older or as-made compilation, not the in-force one — don't let the
+            # current version's date stand in for text we didn't get from it
+            body_pit = None
 
         title_name = title.get("name") or (text_doc.title if text_doc else None) or stub.stable_id
         segments = text_doc.segments if text_doc else []
@@ -330,23 +335,31 @@ class CommonwealthAdapter(BaseAdapter):
             return None
         return data if data.get("registerId") else None
 
+    # ``asAtSpecification`` values to try, in order. "Current" is the in-force compilation
+    # and is what we want when it exists; it 404s for anything repealed or not currently
+    # compiled, where "Latest" (the most recent compilation there is) succeeds. "AsMade"
+    # is the original enactment — the last resort, and the only text some very old Acts
+    # have. Trying all three is what takes body coverage from a handful of titles to
+    # effectively all of them.
+    _AS_AT_ORDER = ("Current", "Latest", "AsMade")
+
+    def _content_url(self, title_id: str, as_at: str, fmt: str = "Epub") -> str:
+        """The register's **content** endpoint. Note this is a different endpoint family
+        from the metadata sets: it streams the compilation as an octet-stream, and OData
+        will not resolve the function unless *every* parameter in the signature is
+        supplied — omitting ``uniqueTypeNumber``/``volumeNumber``/``rectificationSpecification``
+        yields a 404 that reads exactly like "this document doesn't exist"."""
+        return (f"{FRL_API}/documents/find(titleid='{title_id}',"
+                f"asatspecification='{as_at}',type='Primary',format='{fmt}',"
+                f"uniqueTypeNumber=0,volumeNumber=0,rectificationSpecification='Latest')")
+
     def _fetch_body_fallback(self, title_id: str):
-        """When the current compilation's HTML isn't up yet, try recent compilations
-        (from the Documents set, newest first) until one yields text. Returns
-        (ParsedDoc | None, point_in_time_date | None).
+        """Deprecated site-scrape path, kept only as a last resort behind the API fetch.
 
-        This is the path that usually succeeds, not a rare fallback: the *current*
-        compilation's static HTML is routinely not generated yet (the Privacy Act's
-        2026-06-04 compilation 404s while its 2025-02-01 one serves 538k characters).
-
-        Returning ``(None, None)`` is a legitimate outcome, not a failure to retry: the
-        register generates the unzipped-EPUB HTML tree only for reasonably recent
-        compilations. An Act whose last compilation predates that — a repealed 1901 Act
-        last compiled in 1996, say — has Word/PDF/Epub *files* listed in the API but no
-        HTML tree at any date, so every candidate 404s. Those titles are stored as metadata
-        (title, year, number, status, in-force flags), which is enough for the name-only
-        statute matcher to resolve "the Audit Act 1901" against them: that matcher indexes
-        held legislation by **title**, and never needs the body."""
+        It walks ``legislation.gov.au/{id}/{date}/{date}/text/{vol}/epub/OEBPS/…`` — an
+        *incidental* static path that exists for some compilations and not others, which is
+        why it produced text for 19 of 1,204 titles. :meth:`_fetch_body` (the documented
+        content endpoint) supersedes it."""
         try:
             data = json.loads(self._client.get(
                 f"{FRL_API}/Documents",
@@ -363,14 +376,74 @@ class CommonwealthAdapter(BaseAdapter):
                 return doc, start
         return None, None
 
+    def fetch_body_api(self, title_id: str):
+        """A title's text via the register's documented content endpoint. Returns
+        ``(ParsedDoc | None, as_at_specification_used | None)``.
+
+        The FRL API keeps **metadata and content in separate endpoint families**: the
+        ``Titles``/``Versions`` sets return JSON that never contains the law's text, and
+        ``documents/find`` returns the compilation itself as an octet-stream. Only four
+        formats exist — ``Word``, ``Pdf``, ``Epub``, ``NameOnly`` — with no text/HTML/XML
+        option, so EPUB is the parse-friendly choice: it is a zip of XHTML, one member per
+        volume, which the existing ``frl-html`` parser reads unchanged.
+
+        Each ``asAtSpecification`` is tried in turn (see :attr:`_AS_AT_ORDER`), because a
+        repealed or uncompiled Act has no "Current" document but does have a "Latest" or
+        "AsMade" one."""
+        import io
+        import zipfile
+
+        from ..formats.base import ParsedDoc
+
+        for as_at in self._AS_AT_ORDER:
+            try:
+                resp = self._client.get(self._content_url(title_id, as_at))
+            except FetchError:
+                continue
+            blob = resp.content or b""
+            if blob[:2] != b"PK":          # not a zip → not an EPUB we can read
+                continue
+            try:
+                with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                    members = sorted(n for n in zf.namelist()
+                                     if n.lower().endswith((".html", ".xhtml")))
+                    docs = [parse("frl-html", zf.read(n)) for n in members]
+            except (zipfile.BadZipFile, KeyError):
+                continue
+            docs = [d for d in docs if d.text]
+            if not docs:
+                continue
+            merged = ParsedDoc(text="", segments=[], relations=[], metadata={})
+            parts: list[str] = []
+            cursor = 0
+            for doc in docs:                       # multi-volume Acts: one member each
+                if parts:
+                    cursor += 2                    # the "\n\n" join below
+                for seg in doc.segments:
+                    merged.segments.append(type(seg)(
+                        label=seg.label, char_start=cursor + seg.char_start,
+                        char_end=cursor + seg.char_end, kind=seg.kind, level=seg.level))
+                parts.append(doc.text)
+                cursor += len(doc.text)
+                if merged.title is None:
+                    merged.title = doc.title
+                merged.metadata.setdefault("endnotes", []).extend(
+                    doc.metadata.get("endnotes") or [])
+                merged.relations.extend(doc.relations)
+            merged.text = "\n\n".join(parts)
+            merged.metadata["format"] = "frl-epub"
+            merged.metadata["as_at_specification"] = as_at
+            return merged, as_at
+        return None, None
+
     def _fetch_body(self, title_id: str, start: str | None, retro: str | None):
-        """Fetch a compilation's text as the register's unzipped-EPUB HTML.
+        """Legacy site-scrape of the unzipped-EPUB HTML, kept behind the API fetch.
 
         The URL is ``{titleId}/{start}/{retrospectiveStart}/text/{vol}/epub/OEBPS/
         document_{vol}/document_{vol}.html`` — the two dates are the Version's two time
         axes (legal-effect vs retrospective knowledge). Multi-volume Acts split into
-        ``document_1…N``; volumes are walked until one 404s. The very latest compilation
-        can 404 (its static HTML isn't generated yet) — tolerated, not fatal."""
+        ``document_1…N``; volumes are walked until one 404s. That static tree only exists
+        for some compilations, which is why this is no longer the primary route."""
         if not start:
             return None
         retro = retro or start
