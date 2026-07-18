@@ -20,6 +20,7 @@ from .ca_legislation import CanadaFederalAdapter
 from .dma import DMACasesAdapter
 from .hk_legislation import HKLegislationAdapter
 from .nz_legislation import NZLegislationAdapter
+from .sg_legislation import SGLegislationAdapter
 from .echr import ECHRAdapter
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
@@ -86,6 +87,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "au-qld": lambda **kw: LawMakerAdapter(jurisdiction="qld", **kw),
     "au-nsw": lambda **kw: LawMakerAdapter(jurisdiction="nsw", **kw),
     "au-tas": lambda **kw: LawMakerAdapter(jurisdiction="tas", **kw),
+    # Singapore — Singapore Statutes Online (SSO). Keyless server-rendered HTML, no ELI;
+    # keyed by SSO's own act code (sg/act/coa1967). `subsidiary=true` browses the SL listing.
+    "sg-legislation": SGLegislationAdapter,
+    "sg-sl": lambda **kw: SGLegislationAdapter(subsidiary=True, **kw),
     # Canada federal — the Justice Laws open XML corpus, read from a local clone of
     # justicecanada/laws-lois-xml. Version-controlled primary law: the repo IS the
     # distribution channel, so enumeration and change detection are both offline.
@@ -327,6 +332,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("types", "Types:width to enumerate", "act:3,sr:3 (default)"),
          SourceOption("status", "View status", "inforce (default) | asmade | repealed")),
         ("LawMaker docid", "au/tas/act/2000/19"),
+    ),
+    "sg-legislation": SourceInfo(
+        "sg-legislation", "Singapore legislation (Singapore Statutes Online)",
+        "legislation", "SG", False,
+        "Singapore Statutes Online (sso.agc.gov.sg): keyless, server-rendered HTML, no ELI "
+        "and no search API (robots.txt disallows /search, crawl-delay 6s). Browses the "
+        "current Acts / subsidiary-legislation listings and fetches each document, keyed by "
+        "SSO's own act code (sg/act/coa1967). Large Acts lazy-load their provision bodies, "
+        "backfilled section-by-section via ?ProvIds. Seed the bulk from the SSO parquet "
+        "snapshot first (import_sg_seed); this keeps it current.",
+        (SourceOption("subsidiary", "Browse subsidiary legislation", "true | false (default)"),
+         SourceOption("ids", "SSO act codes", "CoA1967, SCJA1969-N2"),
+         SourceOption("max_backfill", "Max lazy-loaded sections to fetch", "400 (default)")),
+        ("SSO act code (CoA1967)", "sg/act/coa1967", "sso.agc.gov.sg URL"),
     ),
     "ca-federal": SourceInfo(
         "ca-federal", "Canada federal legislation (Justice Laws XML)", "legislation",

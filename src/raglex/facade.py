@@ -3115,6 +3115,197 @@ class Facade:
         self._invalidate_caches()
         return st
 
+    # -- Singapore legislation seed (SSO parquet snapshot) ------------------
+    def import_sg_seed(self, *, dir_path: str, reconcile: bool = True,
+                       limit: int | None = None,
+                       on_progress=None, cancel_check=None) -> dict:
+        """Seed Singapore legislation from the SSO parquet snapshot (``documents.parquet`` +
+        ``sections.parquet``): 2,317 documents, 55,221 sections, parsed from the source PDFs
+        so the section text is *complete* (SSO's own HTML lazy-loads large Acts).
+
+        The snapshot's names are **truncated at 50 characters**, which is no good as an
+        identity or a stored title. When ``reconcile`` is set (the default) this first pulls
+        the live SSO browse listings and matches each truncated name to a full title + the
+        SSO act code by prefix — so a document is keyed by its real code (``sg/act/coa1967``),
+        carries its full title, and lines up with anything the ongoing harvester later
+        fetches. Where a name can't be matched (or matches more than one Act), the document
+        falls back to a name-slug id and recovers its full title from its own front matter.
+
+        Idempotent: re-running re-keys nothing already correct and skips unchanged text."""
+        import glob
+        import os
+
+        import pyarrow.parquet as pq
+
+        from .adapters.sg_legislation import (
+            SGLegislationAdapter, name_key, sg_act_id, sg_landing_url, sg_sl_id,
+            title_from_frontmatter,
+        )
+        from .core.models import (AddedBy, DocType, ExtractedVia, Record, Segment,
+                                  sha256_bytes)
+        from .core.text import fold
+
+        docs_pq = os.path.join(dir_path, "documents.parquet")
+        secs_pq = os.path.join(dir_path, "sections.parquet")
+        if not (os.path.exists(docs_pq) and os.path.exists(secs_pq)):
+            return {"error": f"expected documents.parquet + sections.parquet under {dir_path}"}
+
+        st = {"documents": 0, "imported": 0, "skipped": 0, "sections": 0,
+              "reconciled": 0, "frontmatter_title": 0, "unmatched": 0, "aliases": 0}
+
+        # -- 1. build the name→(code,title) index from the live browse listings --
+        act_index: dict[str, tuple[str, str]] = {}   # name_key → (code, full_title)
+        sl_index: dict[str, tuple[str, str]] = {}
+        ambiguous: set[str] = set()
+        if reconcile and not (cancel_check and cancel_check()):
+            for subsidiary, index in ((False, act_index), (True, sl_index)):
+                adapter = SGLegislationAdapter(subsidiary=subsidiary)
+                _progress(on_progress, stage="indexing SSO browse listing",
+                          done=0, total=0, item="SL" if subsidiary else "Act")
+                try:
+                    for e in adapter.browse_index():
+                        k = name_key(e.title)
+                        if k in index and index[k][0] != e.code:
+                            ambiguous.add(k)
+                        index[k] = (e.code, e.title)
+                except Exception:  # noqa: BLE001 — reconciliation is best-effort; seed still lands
+                    pass
+
+        def _lookup(name: str, seed_subsidiary: bool) -> tuple[str, str, bool] | None:
+            """Match a truncated seed name to (code, full_title, subsidiary).
+
+            Searches **both** the Act and SL indexes rather than trusting the seed's
+            ``doc_type``, which is unreliable (it labels some subsidiary legislation as an
+            Act). The index a name matches in is the true classification. An exact key wins;
+            otherwise a truncated name resolves iff exactly one full title across both
+            indexes starts with it — the whole-corpus uniqueness is what makes a 50-char
+            prefix safe to trust. The seed's own flag only breaks a tie between two indexes."""
+            k = name_key(name)
+            if len(k) < 6:
+                return None
+            candidates: list[tuple[str, str, bool]] = []
+            for index, sub in ((act_index, False), (sl_index, True)):
+                if k in index and k not in ambiguous:
+                    candidates.append((*index[k], sub))
+            if len(candidates) == 1:
+                return candidates[0]
+            if candidates:   # exact match in both indexes → trust the seed's flag
+                return next((c for c in candidates if c[2] == seed_subsidiary), candidates[0])
+            # prefix match across both indexes, unique
+            hits = [(code, title, sub)
+                    for index, sub in ((act_index, False), (sl_index, True))
+                    for kk, (code, title) in index.items()
+                    if len(k) >= 12 and kk.startswith(k)]
+            uniq = {c[0]: c for c in hits}
+            return next(iter(uniq.values())) if len(uniq) == 1 else None
+
+        # -- 2. read the section rows, grouped by document (file order = document order) --
+        wanted = ["doc_name", "doc_type", "parent_act", "section_title", "part",
+                  "division", "text"]
+        # documents.parquet order is the import order; sections.parquet is grouped by doc.
+        from collections import OrderedDict
+        groups: "OrderedDict[str, list[dict]]" = OrderedDict()
+        for batch in pq.ParquetFile(secs_pq).iter_batches(batch_size=8000, columns=wanted):
+            d = batch.to_pydict()
+            for i in range(len(d["doc_name"])):
+                groups.setdefault(d["doc_name"][i], []).append(
+                    {k: d[k][i] for k in wanted})
+        st["documents"] = len(groups)
+
+        with self._open() as (cat, rs, ts):
+            for n, (doc_name, rows) in enumerate(groups.items(), 1):
+                if cancel_check and cancel_check():
+                    break
+                if limit and n > limit:
+                    break
+                seed_subsidiary = (rows[0].get("doc_type") or "") == "subsidiary_legislation"
+                parent = (rows[0].get("parent_act") or "").strip() or None
+                if n % 50 == 0:
+                    _progress(on_progress, stage="importing SG legislation",
+                              done=n, total=len(groups), item=doc_name)
+
+                # text + per-section segments (skip the "Unsectioned" front matter as a
+                # section, but keep it for title recovery)
+                parts: list[str] = []
+                segs: list[Segment] = []
+                cursor = 0
+                frontmatter = ""
+                for r in rows:
+                    body = (r.get("text") or "").strip()
+                    if not body:
+                        continue
+                    stitle = (r.get("section_title") or "").strip()
+                    if stitle.lower() == "unsectioned" and not frontmatter:
+                        frontmatter = body
+                    if parts:
+                        cursor += 2
+                    label = stitle or "section"
+                    segs.append(Segment(label=label, char_start=cursor,
+                                        char_end=cursor + len(body),
+                                        kind="section", level=1))
+                    parts.append(body)
+                    cursor += len(body)
+                text = "\n\n".join(parts)
+                if not text:
+                    st["skipped"] += 1
+                    continue
+                st["sections"] += len(segs)
+
+                # identity + full title — the match decides act vs SL (seed doc_type is
+                # unreliable); fall back to the seed's flag only when nothing matched.
+                match = _lookup(doc_name, seed_subsidiary)
+                if match:
+                    code, full_title, subsidiary = match
+                    stable_id = (sg_sl_id if subsidiary else sg_act_id)(code)
+                    landing = sg_landing_url(code, subsidiary=subsidiary)
+                    st["reconciled"] += 1
+                else:
+                    subsidiary = seed_subsidiary
+                    full_title = title_from_frontmatter(frontmatter)
+                    if full_title:
+                        st["frontmatter_title"] += 1
+                    else:
+                        full_title = doc_name
+                    code = None
+                    stable_id = f"sg/{'sl' if subsidiary else 'act'}/{fold(name_key(doc_name)).replace(' ', '-')}"
+                    landing = None
+                    st["unmatched"] += 1
+
+                payload_hash = sha256_bytes(text.encode("utf-8"))
+                existing = cat.get_document(stable_id)
+                if existing is not None and existing["payload_hash"] == payload_hash:
+                    st["skipped"] += 1
+                    continue
+                meta = {**(cat.document_meta(stable_id) if existing is not None else {}),
+                        "jurisdiction": "sg", "imported": "sg-seed",
+                        "subsidiary_legislation": subsidiary,
+                        "parent_act": parent, "sso_code": code,
+                        "seed_name_truncated": doc_name,
+                        "is_authoritative": False,
+                        "sso_terms": "https://sso.agc.gov.sg/Terms-of-Use"}
+                rec = Record(
+                    source="sg-legislation", stable_id=stable_id,
+                    doc_type=DocType.LEGISLATION, title=full_title, court=None,
+                    language="en", source_language="en", landing_url=landing,
+                    text=text, segments=segs, payload_hash=payload_hash,
+                    extracted_via=ExtractedVia.STRUCTURED, added_by=AddedBy.HARVEST,
+                    extra=meta)
+                text_path = str(ts.put(payload_hash, text))
+                ts.put_segments(payload_hash, segs)
+                cat.upsert_document(rec, raw_path=None, text_path=text_path)
+                st["imported"] += 1
+                # the truncated seed name resolves to the document too
+                if code:
+                    key = fold(name_key(doc_name))
+                    if key and cat.get_alias(key) is None:
+                        cat.put_alias(key, stable_id, source="sg-seed-name", commit=False)
+                        st["aliases"] += 1
+                if n % 100 == 0:
+                    cat.commit()
+            cat.commit()
+        self._invalidate_caches()
+        return st
+
     # -- outbound LII links (§5b) -------------------------------------------
     def lii_links_for(self, stable_id: str) -> list[dict]:
         """Canonical LII URLs for one held document. Prefers the landing URL the importer

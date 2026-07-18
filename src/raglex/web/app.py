@@ -862,6 +862,22 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {"limit": int(limit)} if isinstance(limit, int) else {}
         return _start_job("repair-au-cth", "repair au-cth (bodies + citation aliases)", params)
 
+    @app.post("/import/sg-seed")
+    def import_sg_seed_ep(payload: dict = Body(...)) -> dict:
+        """Seed Singapore legislation from a server-side SSO parquet snapshot (``dir_path``
+        points at the folder holding documents.parquet + sections.parquet). Reconciles the
+        truncated seed names to SSO act codes via the live browse listing unless
+        ``reconcile: false``."""
+        dir_path = (payload.get("dir_path") or "").strip()
+        if not dir_path or not os.path.isdir(dir_path):
+            return JSONResponse({"error": f"not a directory: {dir_path!r}"}, status_code=400)
+        params: dict = {"dir_path": dir_path}
+        if isinstance(payload.get("reconcile"), bool):
+            params["reconcile"] = payload["reconcile"]
+        if isinstance(payload.get("limit"), int):
+            params["limit"] = payload["limit"]
+        return jobs.start("import-sg-seed", "Seed Singapore legislation (SSO)", params)
+
     @app.post("/import/indian-sci")
     def import_indian_sci_ep(payload: dict = Body(...)) -> dict:
         """Import the Supreme Court of India slice of a server-side KanoonGPT

@@ -53,6 +53,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "au-legislation": "Australian legislation",
     "nz-legislation": "New Zealand legislation",
     "hk-legislation": "Hong Kong legislation",
+    "sg-legislation": "Singapore legislation",
     "other": "Other / unrouted",
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
@@ -62,6 +63,7 @@ CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation"
                   "africa-caselaw", "caribbean-caselaw", "pacific-caselaw",
                   "ci-caselaw", "offshore-caselaw",
                   "ca-legislation", "au-legislation", "nz-legislation", "hk-legislation",
+                  "sg-legislation",
                   "other"]
 
 # Neutral-citation jurisdictions with no adapter (cases arrive by upload, if at all):
@@ -97,6 +99,7 @@ COMMONWEALTH_LEG_CATEGORY: dict[str, str] = {
     "nz-legislation": "nz-legislation",
     "au-cth": "au-legislation", "au-qld": "au-legislation",
     "au-nsw": "au-legislation", "au-tas": "au-legislation",
+    "sg-legislation": "sg-legislation",
 }
 
 # The register-native document types, as they appear in a stable_id's second segment.
@@ -104,7 +107,7 @@ COMMONWEALTH_LEG_TYPES: dict[str, str] = {
     "act": "Acts", "regulation": "Regulations",          # Canada
     "cap": "Ordinances & subsidiary legislation",         # Hong Kong (chapter-numbered)
     "instrument": "Constitutional instruments",           # HK Basic Law and companions
-    "sl": "Subordinate legislation", "sr": "Statutory rules",  # Australia
+    "sl": "Subordinate legislation", "sr": "Statutory rules",  # Australia (also SG SL)
     "si": "Statutory instruments", "ni": "Notifiable instruments",
     "public": "Public Acts", "secondary-legislation": "Secondary legislation",  # NZ
     "bill": "Bills",
