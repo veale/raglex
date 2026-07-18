@@ -1444,22 +1444,33 @@ class Catalogue:
 
     def text_document_ids(self, *, limit: int | None = None,
                           doc_types: list[str] | None = None,
-                          source: str | None = None) -> list[str]:
+                          source: str | None = None,
+                          only_unextracted: bool = False) -> list[str]:
         """Document ids that have extractable text, in id order — the target set for a
         re-extraction. ``doc_types`` scopes it (e.g. ``['judgment']`` to skip the 122k
         legislation docs, which mostly cite only other legislation); ``source`` scopes it
         to one adapter (e.g. re-extract just the freshly-imported ``ca-caselaw`` after a
         new grammar lands, instead of the whole 700k-doc corpus). A single cheap
-        single-column scan (no row bodies), so it streams 200k+ ids without their metadata."""
-        sql = "SELECT stable_id FROM documents WHERE has_text = 1"
+        single-column scan (no row bodies), so it streams 200k+ ids without their metadata.
+
+        ``only_unextracted`` narrows it to documents that have **no citation rows at all** —
+        the resume set. A bulk import that dies partway (or is OOM-killed) leaves thousands
+        of documents with text but no edges, and a plain re-run would redo the whole corpus
+        to reach them; this selects exactly the backlog, so re-running is cheap and
+        convergent. It is deliberately "no rows at all" rather than a timestamp check: a
+        document that genuinely cites nothing is re-tried each run, which is far cheaper
+        than the alternative of re-extracting everything."""
+        sql = "SELECT d.stable_id FROM documents d WHERE d.has_text = 1"
         params: list = []
         if doc_types:
-            sql += f" AND doc_type IN ({','.join('?' * len(doc_types))})"
+            sql += f" AND d.doc_type IN ({','.join('?' * len(doc_types))})"
             params.extend(doc_types)
         if source:
-            sql += " AND source = ?"
+            sql += " AND d.source = ?"
             params.append(source)
-        sql += " ORDER BY stable_id"
+        if only_unextracted:
+            sql += " AND NOT EXISTS (SELECT 1 FROM citations c WHERE c.src_id = d.stable_id)"
+        sql += " ORDER BY d.stable_id"
         if limit:
             sql += " LIMIT ?"
             params.append(limit)

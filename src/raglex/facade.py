@@ -2890,7 +2890,8 @@ class Facade:
     # -- BAILII parquet-dump import (§1.9, the bulk sibling of the saved-page path) ----
     def import_bailii_parquet(self, *, dir_path: str, databases: list[str] | None = None,
                               exclude_databases: list[str] | None = None,
-                              limit: int | None = None,
+                              limit: int | None = None, start_row: int = 0,
+                              batch_size: int = 200, extract: bool = True,
                               on_progress=None, cancel_check=None) -> dict:
         """Import a *BAILII parquet dump* — a bulk Scrapy crawl of bailii.org exported as
         Parquet shards (the ``bailii_260505`` dataset: ~551k rows, columns ``path`` /
@@ -2915,7 +2916,27 @@ class Facade:
         ``databases`` / ``exclude_databases`` filter by the dump's ``database_name`` column
         (e.g. ``exclude_databases=["UKAITUR"]`` to skip the asylum-tribunal bulk). Only
         ``/…/cases/…`` rows are imported; legislation and treaty rows are ignored (RAGLex
-        sources legislation natively). Extraction + one resolve pass run once at the end."""
+        sources legislation natively).
+
+        **Resuming.** A half-million-row import is long enough to be interrupted (a restart,
+        an OOM kill), so it is built to be re-launched rather than redone:
+
+        * ``start_row`` skips that many rows before doing any work — the dump is a static
+          snapshot read in a stable order (shards sorted by name, rows in file order), so
+          the ``done`` count a previous run reported is exactly the offset to resume from,
+          and skipping costs nothing but the scan;
+        * the per-document synthesis is idempotent anyway — an unchanged document short-
+          circuits on its payload hash — so an overlapping resume range is safe;
+        * extraction is **not** held in memory. The earlier design queued every imported id
+          and extracted at the end, which meant an interrupted run lost the whole queue and
+          left thousands of documents with text but no edges. Instead the extraction pass
+          selects documents that have no citation rows (``only_unextracted``), so it always
+          picks up exactly the backlog — including one left by a previous crashed run. Pass
+          ``extract=False`` to import only and run the extraction later as its own job.
+
+        ``batch_size`` bounds peak memory: rows are materialised a batch at a time and the
+        dump holds documents up to ~6 MB, so a large batch can spike badly (a 2000-row batch
+        was enough to OOM the box)."""
         import glob
         import os
         import pyarrow.parquet as pq
@@ -2930,23 +2951,33 @@ class Facade:
         total = sum(pq.ParquetFile(s).metadata.num_rows for s in shards)
 
         cols = ["path", "title", "citation", "date", "court", "database_name", "html_content"]
-        st = {"total": 0, "rows": 0, "imported": 0, "superseded": 0, "secondary": 0,
-              "enriched": 0, "stub": 0, "skipped": 0, "unparseable": 0, "aliases": 0,
-              "extracted": 0}
+        st = {"total": 0, "rows_scanned": 0, "resumed_at": start_row, "imported": 0,
+              "superseded": 0, "secondary": 0, "enriched": 0, "stub": 0, "skipped": 0,
+              "unparseable": 0, "aliases": 0, "extracted": 0}
         files: list[dict] = []
         with self._open() as (cat, rs, ts):
-            to_extract: list[str] = []
             seen = 0
             for shard in shards:
                 if cancel_check and cancel_check():
                     break
                 pf = pq.ParquetFile(shard)
-                for batch in pf.iter_batches(batch_size=2000, columns=cols):
+                # whole shards before the resume point are skipped without being read
+                shard_rows = pf.metadata.num_rows
+                if seen + shard_rows <= start_row:
+                    seen += shard_rows
+                    continue
+                for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
                     if cancel_check and cancel_check():
                         break
+                    n_rows = batch.num_rows
+                    if seen + n_rows <= start_row:      # batch entirely before the cursor
+                        seen += n_rows
+                        continue
                     d = batch.to_pydict()
-                    for i in range(len(d["path"])):
+                    for i in range(n_rows):
                         seen += 1
+                        if seen <= start_row:
+                            continue
                         if seen % 500 == 0:
                             _progress(on_progress, stage="importing", done=seen,
                                       total=total, item=d["path"][i])
@@ -2967,43 +2998,50 @@ class Facade:
                         self._ingest_bailii_row(
                             cat, rs, ts, parsed=parsed,
                             raw_bytes=(row["html_content"] or "").encode("utf-8"),
-                            st=st, files=files, to_extract=to_extract)
+                            st=st, files=files)
                         if st["total"] % 200 == 0:
                             cat.commit()
                         if limit and st["total"] >= limit:
                             break
+                    d = None                      # release the batch's Python copies
                     if limit and st["total"] >= limit:
                         break
                 if limit and st["total"] >= limit:
                     break
             cat.commit()
-            for i, sid in enumerate(to_extract):
-                if cancel_check and cancel_check():
-                    break
-                _progress(on_progress, stage="extracting citations",
-                          done=i + 1, total=len(to_extract), item=sid)
-                try:
-                    self._extract_one(cat, ts, sid)
-                    st["extracted"] += 1
-                except Exception:  # noqa: BLE001
-                    pass
-                if i % 100 == 0:
-                    cat.commit()
-            cat.commit()
-            _progress(on_progress, stage="resolving citations", done=0, total=0)
-            resolved = Resolver(cat).run()
-        st["resolved_edges"] = resolved.resolved
+            st["rows_scanned"] = seen
+            # Extraction backlog straight from the database rather than an in-memory queue:
+            # every case-law document that has text but no citation rows. That set is exactly
+            # what this run imported PLUS anything a previously-interrupted run left behind,
+            # so re-launching after a crash converges instead of starting over.
+            resolved_n = 0
+            if extract and not (cancel_check and cancel_check()):
+                from .citations import extract_document
+                aliases = cat.named_alias_map()
+                pending = cat.text_document_ids(doc_types=["judgment"], only_unextracted=True)
+                for i, sid in enumerate(pending):
+                    if cancel_check and cancel_check():
+                        break
+                    if i % 100 == 0:
+                        _progress(on_progress, stage="extracting citations",
+                                  done=i + 1, total=len(pending), item=sid)
+                    try:
+                        extract_document(cat, ts, sid, aliases=aliases)
+                        st["extracted"] += 1
+                    except Exception:  # noqa: BLE001 — one unreadable doc mustn't sink the pass
+                        pass
+                    if i % 200 == 0:
+                        cat.commit()
+                cat.commit()
+                _progress(on_progress, stage="resolving citations", done=0, total=0)
+                resolved_n = Resolver(cat).run().resolved
+        st["resolved_edges"] = resolved_n
         st["files"] = files
         self._invalidate_caches()
         return st
 
-    @staticmethod
-    def _extract_one(cat, ts, sid: str) -> None:
-        from .citations import extract_document
-        extract_document(cat, ts, sid)
-
     def _ingest_bailii_row(self, cat, rs, ts, *, parsed, raw_bytes: bytes,
-                           st: dict, files: list, to_extract: list) -> None:
+                           st: dict, files: list) -> None:
         """Synthesise one parsed parquet row against the corpus. Mirrors the saved-page
         importer's disposition ladder (import / supersede / secondary / stub) but keys by
         the row's reconciled identity: an EU case under its ECLI, an ECtHR case matched via
@@ -3129,7 +3167,8 @@ class Facade:
             text_path = str(ts.put(payload_hash, parsed.text))
             ts.put_segments(payload_hash, parsed.segments)
             cat.upsert_document(rec, raw_path=raw_path, text_path=text_path)
-            to_extract.append(target)
+            # no in-memory extraction queue: the run's extraction pass finds this document
+            # (text, no citation rows) by query, so an interrupted run loses nothing.
             disp = "imported" if existing is None else "superseded"
             st["imported" if existing is None else "superseded"] += 1
         else:
@@ -4550,6 +4589,7 @@ class Facade:
 
     def rescan(self, *, limit: int | None = None, coref: bool = True, parallel: bool = True,
                doc_types: list[str] | None = None, source: str | None = None,
+               only_unextracted: bool = False,
                on_progress=None, cancel_check=None) -> dict:
         """Full fresh relink of the corpus: re-extract every text document with the current
         grammars, then run the whole resolution chain — so every fix (statute-name grammar,
@@ -4565,7 +4605,14 @@ class Facade:
         ``source`` scopes the re-extraction to one adapter's documents — e.g. re-extract
         just a freshly-imported corpus after a new grammar lands, rather than re-running
         the whole 700k-doc corpus. The relink chain afterwards still operates corpus-wide
-        on the pending references (that's where the new edges get resolved)."""
+        on the pending references (that's where the new edges get resolved).
+
+        ``only_unextracted`` makes the run a **resume** rather than a redo: it takes only
+        the documents that have no citation rows yet. A bulk import (or a rescan) that is
+        interrupted — an OOM kill, a container restart — leaves a backlog of text documents
+        with no edges; without this, picking up where it left off means re-extracting the
+        entire source from scratch. With it, a killed 200k-document run can simply be
+        re-launched and will process only what never finished."""
         from .citations import extract_document
 
         report: dict = {}
@@ -4575,7 +4622,8 @@ class Facade:
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()          # user shorthand rules — loaded ONCE
-            ids = cat.text_document_ids(limit=limit, doc_types=doc_types, source=source)
+            ids = cat.text_document_ids(limit=limit, doc_types=doc_types, source=source,
+                                        only_unextracted=only_unextracted)
             total = len(ids)
             docs = cites = 0
             for i, sid in enumerate(ids):

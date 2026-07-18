@@ -867,8 +867,13 @@ def create_app(config: Config | None = None) -> FastAPI:
             val = payload.get(key)
             if isinstance(val, list) and val:
                 params[key] = [str(v) for v in val]
-        if isinstance(payload.get("limit"), int):
-            params["limit"] = payload["limit"]
+        # start_row resumes an interrupted run at the row offset the last one reported;
+        # extract=False imports only, leaving the (resumable) extraction pass for later.
+        for key in ("limit", "start_row", "batch_size"):
+            if isinstance(payload.get(key), int):
+                params[key] = payload[key]
+        if isinstance(payload.get("extract"), bool):
+            params["extract"] = payload["extract"]
         return jobs.start("import-bailii-parquet", "Import BAILII parquet dump", params)
 
     # Westlaw RTF import — the sibling of the BAILII-page path, for the other big source

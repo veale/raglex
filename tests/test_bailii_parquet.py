@@ -121,12 +121,12 @@ def facade(tmp_path) -> Facade:
 def _ingest(facade, parsed: ParsedRow, raw="<div>x</div>"):
     st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0, "enriched": 0,
           "stub": 0, "skipped": 0, "aliases": 0}
-    files, to_extract = [], []
+    files = []
     with facade._open() as (cat, rs, ts):
         facade._ingest_bailii_row(cat, rs, ts, parsed=parsed, raw_bytes=raw.encode(),
-                                  st=st, files=files, to_extract=to_extract)
+                                  st=st, files=files)
         cat.commit()
-    return st, files, to_extract
+    return st, files
 
 
 def _uk_parsed(**over) -> ParsedRow:
@@ -144,7 +144,7 @@ def _uk_parsed(**over) -> ParsedRow:
 def test_new_case_persists_text_and_report_alias(facade):
     """The bulk-import text-persistence trap: a slug-keyed case with no raw file must still
     store its text so the reader serves it (payload_hash falls back to hashing text)."""
-    st, _files, to_extract = _ingest(facade, _uk_parsed())
+    st, _files = _ingest(facade, _uk_parsed())
     assert st["imported"] == 1
     body = facade.document_body("ukhl/2009/6")
     assert body["text"] and "First paragraph" in body["text"]
@@ -152,12 +152,11 @@ def test_new_case_persists_text_and_report_alias(facade):
         assert cat.get_document("ukhl/2009/6")["has_text"] == 1
         # the parallel-report citation resolves to the case
         assert cat.get_alias("[2009] 1 wlr 348") == "ukhl/2009/6"
-    assert "ukhl/2009/6" in to_extract
 
 
 def test_reimport_same_text_only_tops_up_aliases(facade):
     _ingest(facade, _uk_parsed())
-    st, _f, _t = _ingest(facade, _uk_parsed())
+    st, _f = _ingest(facade, _uk_parsed())
     assert st["imported"] == 0 and st["skipped"] == 1
 
 
@@ -186,7 +185,7 @@ def test_echr_case_enriches_held_ecli_via_appno(facade):
         title="DEMSKI v. POLAND", decision_date=date(2008, 11, 4), appno="22695/03",
         self_citations=("[2008] ECHR 1230",),
         text="1. BAILII English rendition.\n\n2. Second.\n\n3. Third.", segments=[])
-    st, _files, _to = _ingest(facade, parsed)
+    st, _files = _ingest(facade, parsed)
 
     assert st["enriched"] == 1 and st["imported"] == 0
     with facade._open() as (cat, _rs, _ts):
@@ -202,9 +201,32 @@ def test_thin_stub_keeps_identity_without_storing_junk(facade):
                         title="Zulema", self_citations=("[1809] UKPC 3",),
                         text="", segments=[], pdf_only=True,
                         pdf_url="https://www.bailii.org/uk/cases/UKPC/1809/1809_3.pdf")
-    st, _f, _t = _ingest(facade, parsed)
+    st, _f = _ingest(facade, parsed)
     assert st["stub"] == 1
     with facade._open() as (cat, _rs, _ts):
         assert cat.get_document("ukpc/1809/1809_3")["has_text"] == 0
         # the [1809] UKPC 3 neutral citation still resolves to the stub (identity kept)
         assert cat.get_alias("ukpc/1809/3") == "ukpc/1809/1809_3"
+
+
+def test_only_unextracted_selects_just_the_backlog(facade):
+    """The resume set after an interrupted bulk import: documents that have text but no
+    citation rows. Without this, picking up a killed 200k-document run means re-extracting
+    the whole source from scratch — and the documents the crash orphaned (queued in memory,
+    never extracted) would never be reached at all."""
+    _ingest(facade, _uk_parsed())                                   # ukhl/2009/6
+    _ingest(facade, _uk_parsed(slug="uksc/2020/1", primary_id="uksc/2020/1",
+                               title="A v B", self_citations=("[2020] UKSC 1",)))
+    with facade._open() as (cat, _rs, _ts):
+        all_ids = cat.text_document_ids(doc_types=["judgment"])
+        assert set(all_ids) == {"ukhl/2009/6", "uksc/2020/1"}
+        # nothing extracted yet → the whole set is the backlog
+        assert set(cat.text_document_ids(doc_types=["judgment"],
+                                         only_unextracted=True)) == set(all_ids)
+        # once one has citation rows it drops out of the backlog
+        cat.conn.execute(
+            "INSERT INTO citations (src_id, raw, created_at) VALUES (?,?,?)",
+            ("ukhl/2009/6", "[2000] UKHL 57", "2026-07-18T00:00:00Z"))
+        cat.commit()
+        assert cat.text_document_ids(doc_types=["judgment"],
+                                     only_unextracted=True) == ["uksc/2020/1"]
