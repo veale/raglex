@@ -1443,16 +1443,22 @@ class Catalogue:
         ).fetchall()
 
     def text_document_ids(self, *, limit: int | None = None,
-                          doc_types: list[str] | None = None) -> list[str]:
+                          doc_types: list[str] | None = None,
+                          source: str | None = None) -> list[str]:
         """Document ids that have extractable text, in id order — the target set for a
         re-extraction. ``doc_types`` scopes it (e.g. ``['judgment']`` to skip the 122k
-        legislation docs, which mostly cite only other legislation). A single cheap
+        legislation docs, which mostly cite only other legislation); ``source`` scopes it
+        to one adapter (e.g. re-extract just the freshly-imported ``ca-caselaw`` after a
+        new grammar lands, instead of the whole 700k-doc corpus). A single cheap
         single-column scan (no row bodies), so it streams 200k+ ids without their metadata."""
         sql = "SELECT stable_id FROM documents WHERE has_text = 1"
         params: list = []
         if doc_types:
             sql += f" AND doc_type IN ({','.join('?' * len(doc_types))})"
             params.extend(doc_types)
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
         sql += " ORDER BY stable_id"
         if limit:
             sql += " LIMIT ?"

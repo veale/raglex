@@ -245,3 +245,50 @@ def test_commonwealth_registers_route_out_of_other_unrouted(
     tax = classify_document(source=source, stable_id=stable_id)
     assert tax.category == category
     assert tax.subtype_label == subtype_label
+
+
+# -- Canadian legislation citations -----------------------------------------
+
+def test_canadian_consolidated_statute_resolves_to_its_chapter_code():
+    """R.S.C. chapter codes ARE the consolidated id — "R.S.C. 1985, c. C-46" is the
+    Criminal Code, held as ca/act/c-46."""
+    assert candidates("under the Criminal Code, R.S.C. 1985, c. C-46")[
+        "R.S.C. 1985, c. C-46"] == "ca/act/c-46"
+    assert candidates("R.S., c. I-23")["R.S., c. I-23"] == "ca/act/i-23"
+
+
+def test_canadian_statute_pinpoint_is_captured():
+    cites = {c.raw.strip(): c for c in extract_citations(
+        "s. 8 of the Privacy Act, R.S.C., 1985, c. P-21")}
+    c = next(iter(cites.values()))
+    assert c.candidate_id == "ca/act/p-21" and c.pinpoint == "s. 8"
+
+
+def test_canadian_annual_statute_is_candidateless_pending_its_alias():
+    """The annual chapter number ("c. 18") is not the consolidated id, so it resolves
+    only via the alias the ca-federal import mints — candidate-less at extraction."""
+    got = candidates("enacted by S.C. 2019, c. 18, s. 2")
+    assert "S.C. 2019, c. 18" in got and got["S.C. 2019, c. 18"] is None
+
+
+def test_canadian_regulations_resolve_including_the_french_series_names():
+    assert candidates("made under SOR/2018-69")["SOR/2018-69"] == "ca/regulation/sor-2018-69"
+    # DORS/TR are the French names for SOR/SI — the same instrument
+    assert candidates("DORS/2002-227")["DORS/2002-227"] == "ca/regulation/sor-2002-227"
+    assert candidates("SI/2005-91")["SI/2005-91"] == "ca/regulation/si-2005-91"
+
+
+def test_provincial_and_reporter_lookalikes_are_not_matched_as_federal_statutes():
+    """"R.S.O. 1990, c. P.33" is Ontario (letter-DOT chapter), and "1999 S.C. 583" is
+    Session Cases — neither is a federal statute citation."""
+    assert candidates("R.S.O. 1990, c. P.33").get("R.S.O. 1990, c. P.33") is None
+    # the S.C. reporter has no ", c. N", so the annual grammar can't grab it
+    got = candidates("Brown v Gray 1999 S.C. 583")
+    assert all(not (v or "").startswith("ca/act") for v in got.values())
+
+
+def test_ca_federal_mints_annual_citation_aliases():
+    from raglex.adapters.ca_legislation import _annual_aliases
+    assert _annual_aliases("2019, c. 10") == ["S.C. 2019, c. 10", "L.C. 2019, c. 10"]
+    assert _annual_aliases("A-1") == []          # a consolidated code, not an annual number
+    assert _annual_aliases("") == []

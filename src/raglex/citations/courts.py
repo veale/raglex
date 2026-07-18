@@ -88,9 +88,23 @@ COURTS: tuple[Court, ...] = (
     # UK courts/tribunals recognised but not yet harvestable (on BAILII, not Find Case
     # Law) — classified so they leave the "unknown court" noise and carry a jurisdiction.
     Court("UKEAT", "Employment Appeal Tribunal (pre-2022)", "GB"),
+    Court("UKET", "Employment Tribunal", "GB"),
     Court("UKAIT", "Asylum & Immigration Tribunal", "GB"),
     Court("UKIAT", "Immigration Appeal Tribunal", "GB"),
+    Court("UKAITUR", "Immigration & Asylum Chamber (BAILII UTIAC dump)", "GB"),
     Court("CAT", "Competition Appeal Tribunal", "GB"),
+    Court("SIAC", "Special Immigration Appeals Commission", "GB"),
+    # BAILII case-token heads for tribunals kept under their own slug prefix (the slug's
+    # first segment) rather than a UKFTT/UKUT chamber path.
+    Court("UKVAT", "VAT & Duties Tribunal (pre-2009)", "GB"),
+    Court("UKSPC", "Special Commissioners of Income Tax", "GB"),
+    Court("UKFSM", "Financial Services & Markets Tribunal", "GB"),
+    Court("UKIT", "Information Tribunal", "GB"),
+    Court("DRS", "Nominet .uk Domain Dispute Resolution Service", "GB"),
+    Court("PBRA", "Parole Board (reconsideration assessments)", "GB"),
+    Court("EWCST", "Care Standards Tribunal (England & Wales)", "GB"),
+    Court("EWLands", "Lands Tribunal (England & Wales)", "GB"),
+    Court("EWPCC", "Patents County Court (England & Wales)", "GB"),
     # Northern Ireland (BAILII)
     Court("NIQB", "NI High Court, Queen's Bench", "GB"),
     Court("NIKB", "NI High Court, King's Bench", "GB"),
@@ -107,6 +121,13 @@ COURTS: tuple[Court, ...] = (
     Court("SAC", "Sheriff Appeal Court", "GB"),
     Court("ScotCS", "Court of Session (BAILII legacy code)", "GB"),
     Court("ScotHC", "High Court of Justiciary (BAILII legacy code)", "GB"),
+    Court("ScotSAC", "Sheriff Appeal Court (BAILII code)", "GB"),
+    Court("ScotSC", "Sheriff Court (BAILII code)", "GB"),
+    # NI High Court (BAILII keys its divisions under a NIHC slug head: nihc/qb, nihc/ch…)
+    Court("NIHC", "NI High Court", "GB"),
+    Court("NIIT", "NI Industrial Tribunal", "GB"),
+    Court("NIFET", "NI Fair Employment Tribunal", "GB"),
+    Court("NISSCSC", "NI Social Security & Child Support Commissioners", "GB"),
 
     # ---- Ireland ----------------------------------------------------------
     # BAILII holds them; imported via the BAILII zip/file paths, keyed iehc/2008/56
@@ -119,6 +140,29 @@ COURTS: tuple[Court, ...] = (
     Court("IECC", "Circuit Court of Ireland", "IE"),
     Court("IEDC", "District Court of Ireland", "IE"),
     Court("IEIC", "Information Commissioner (Ireland)", "IE"),
+    Court("IECompA", "Competition Authority (Ireland)", "IE"),
+    Court("IEDPC", "Data Protection Commission (Ireland)", "IE"),
+
+    # ---- Crown Dependencies (BAILII /je/, /gg/, /im/) ---------------------
+    # BAILII keys Jersey judgments by the source rather than the court: "UR" is the
+    # unreported Royal Court series and "JLR" the Jersey Law Reports — the judgment's own
+    # citation (JRC / JCA) is recovered from its text and minted as an alias.
+    Court("JRC", "Royal Court of Jersey", "JE"),
+    Court("JCA", "Jersey Court of Appeal", "JE"),
+    Court("UR", "Jersey judgments (Royal Court, BAILII unreported series)", "JE"),
+    Court("JLR", "Jersey Law Reports (BAILII series)", "JE"),
+    Court("GLR", "Guernsey Law Reports (BAILII series)", "GG"),
+    Court("GRC", "Royal Court of Guernsey", "GG"),
+
+    # ---- Offshore & international commercial courts (BAILII /ky/, /ae/, /qa/, /sh/, /io/) --
+    Court("GCCI", "Grand Court of the Cayman Islands", "KY"),
+    Court("DIFC", "Dubai International Financial Centre Courts", "AE"),
+    Court("ADGMCFI", "Abu Dhabi Global Market Courts, Court of First Instance", "AE"),
+    Court("ADGMCA", "Abu Dhabi Global Market Courts, Court of Appeal", "AE"),
+    Court("QIC", "Qatar International Court", "QA"),
+    Court("SHSC", "Supreme Court of St Helena", "SH"),
+    Court("SHCA", "Court of Appeal of St Helena", "SH"),
+    Court("BIOT", "Court of the British Indian Ocean Territory", "IO"),
 
     # ---- Australia --------------------------------------------------------
     # Neutral citation adopted 1998–2010; AustLII additionally assigned RETROSPECTIVE
@@ -238,6 +282,7 @@ COURTS: tuple[Court, ...] = (
     Court("SGDC", "Singapore District Court", "SG"),
     Court("SGMC", "Singapore Magistrates' Court", "SG"),
     Court("SGFC", "Singapore Family Court", "SG"),
+    Court("SICC", "Singapore International Commercial Court (BAILII slug head)", "SG"),
 
     # ---- Hong Kong (neutral citation from 2018, per Practice Direction 5.5) --
     # Pre-2018 HK cases are cited by REGISTRY CASE NUMBER ("FACV 1/2018"), which is a

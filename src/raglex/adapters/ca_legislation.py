@@ -301,6 +301,7 @@ class CanadaFederalAdapter(BaseAdapter):
                        "path": str(file), "lims_id": entry.lims_id,
                        "regulation_ids": entry.regulation_ids,
                        "other_language_id": entry.other_language_id,
+                       "official_number": entry.official_number,
                        "watermark": stamp},
             )
             count += 1
@@ -434,11 +435,20 @@ class CanadaFederalAdapter(BaseAdapter):
         other = self._other_language(stub, lang)
         pit = meta.get("pit_date")
 
+        # The annual-statute citation ("S.C. 2019, c. 18") is how a judgment cites an Act
+        # whose *consolidated* code (a-0.6) it never names, so mint it as a resolution
+        # alias onto this Act's id. The manifest's OfficialNumber IS the annual chapter
+        # ("2019, c. 10"); minted in both official-language spellings (S.C./L.C.). The
+        # R.S.C. and SOR forms need no alias — the citation grammar resolves those
+        # directly, because their chapter code already IS the id.
+        aliases = _annual_aliases(stub.hints.get("official_number"))
+
         extra = {
             "jurisdiction": "ca",
             "kind": meta.get("kind"),
             "code": meta.get("code"),
             "format": "lims-xml",
+            "aliases": aliases or None,
             "long_title": meta.get("long_title"),
             "regulation_type": meta.get("regulation_type"),
             "bill_origin": meta.get("bill_origin"),
@@ -485,6 +495,22 @@ class CanadaFederalAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in extra.items() if v is not None},
         )
+
+
+_ANNUAL_ALIAS_RE = re.compile(r"^\d{4},\s*c\.\s*\d+")
+
+
+def _annual_aliases(official_number: str | None) -> list[str]:
+    """``"2019, c. 10"`` → the annual-citation alias spellings that should resolve to
+    this Act: ``"S.C. 2019, c. 10"`` (English) and ``"L.C. 2019, c. 10"`` (French).
+
+    Only the annual chapter form gets an alias — a consolidated code ("A-1") is already
+    the id, and a supplement/other OfficialNumber shape isn't a citable annual number.
+    """
+    on = " ".join((official_number or "").split())
+    if not on or not _ANNUAL_ALIAS_RE.match(on):
+        return []
+    return [f"S.C. {on}", f"L.C. {on}"]
 
 
 def _iso_str(value: date | None) -> str | None:

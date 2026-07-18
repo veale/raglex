@@ -2887,6 +2887,272 @@ class Facade:
         except OSError:
             return 0
 
+    # -- BAILII parquet-dump import (§1.9, the bulk sibling of the saved-page path) ----
+    def import_bailii_parquet(self, *, dir_path: str, databases: list[str] | None = None,
+                              exclude_databases: list[str] | None = None,
+                              limit: int | None = None,
+                              on_progress=None, cancel_check=None) -> dict:
+        """Import a *BAILII parquet dump* — a bulk Scrapy crawl of bailii.org exported as
+        Parquet shards (the ``bailii_260505`` dataset: ~551k rows, columns ``path`` /
+        ``title`` / ``citation`` / ``date`` / ``court`` / ``html_content`` …). It is the
+        columnar counterpart of :meth:`import_bailii_zip`: same synthesis against the
+        corpus (import / supersede / secondary), but fed from parquet rows instead of
+        saved pages, because this crawl kept no ``Cite as:`` header to parse.
+
+        What this route adds over the saved-page one:
+
+        * **reporter equivalence at scale** — each case's ICLR parallel-report citations
+          (``[2009] 1 WLR 348``) survive as in-body links, decoded and minted as
+          self-aliases so report-only references resolve to the neutral-citation case;
+        * **identity reconciliation** — an EU judgment's ``ECLI`` (from its ``<meta>``)
+          and an ECtHR case's application number are used to attach the BAILII page (often
+          an English text of an otherwise French/originating judgment) to the case RAGLex
+          already holds under its ECLI, rather than minting a slug-keyed duplicate;
+        * **the tribunal long tail** Find Case Law never carried — UKAITUR/UKEAT/UKET, the
+          tax tribunals, the Scottish/NI courts, and the Crown-Dependency / offshore
+          commercial courts (Jersey, Cayman, DIFC/ADGM, Qatar, St Helena, the SICC).
+
+        ``databases`` / ``exclude_databases`` filter by the dump's ``database_name`` column
+        (e.g. ``exclude_databases=["UKAITUR"]`` to skip the asylum-tribunal bulk). Only
+        ``/…/cases/…`` rows are imported; legislation and treaty rows are ignored (RAGLex
+        sources legislation natively). Extraction + one resolve pass run once at the end."""
+        import glob
+        import os
+        import pyarrow.parquet as pq
+
+        from .adapters.bailii_parquet import parse_parquet_row
+
+        shards = sorted(glob.glob(os.path.join(dir_path, "**", "*.parquet"), recursive=True))
+        if not shards:
+            return {"total": 0, "error": f"no .parquet shards under {dir_path}"}
+        include = {d.lower() for d in databases} if databases else None
+        exclude = {d.lower() for d in (exclude_databases or [])}
+        total = sum(pq.ParquetFile(s).metadata.num_rows for s in shards)
+
+        cols = ["path", "title", "citation", "date", "court", "database_name", "html_content"]
+        st = {"total": 0, "rows": 0, "imported": 0, "superseded": 0, "secondary": 0,
+              "enriched": 0, "stub": 0, "skipped": 0, "unparseable": 0, "aliases": 0,
+              "extracted": 0}
+        files: list[dict] = []
+        with self._open() as (cat, rs, ts):
+            to_extract: list[str] = []
+            seen = 0
+            for shard in shards:
+                if cancel_check and cancel_check():
+                    break
+                pf = pq.ParquetFile(shard)
+                for batch in pf.iter_batches(batch_size=2000, columns=cols):
+                    if cancel_check and cancel_check():
+                        break
+                    d = batch.to_pydict()
+                    for i in range(len(d["path"])):
+                        seen += 1
+                        if seen % 500 == 0:
+                            _progress(on_progress, stage="importing", done=seen,
+                                      total=total, item=d["path"][i])
+                        db = (d["database_name"][i] or "").lower()
+                        if (include is not None and db not in include) or db in exclude:
+                            continue
+                        row = {c: d[c][i] for c in cols}
+                        try:
+                            parsed = parse_parquet_row(row)
+                        except Exception as exc:  # noqa: BLE001 — one bad row mustn't sink the batch
+                            parsed = None
+                            if len(files) < 500:
+                                files.append({"path": row["path"], "disposition": "error",
+                                              "error": str(exc)})
+                        if parsed is None:
+                            continue
+                        st["total"] += 1
+                        self._ingest_bailii_row(
+                            cat, rs, ts, parsed=parsed,
+                            raw_bytes=(row["html_content"] or "").encode("utf-8"),
+                            st=st, files=files, to_extract=to_extract)
+                        if st["total"] % 200 == 0:
+                            cat.commit()
+                        if limit and st["total"] >= limit:
+                            break
+                    if limit and st["total"] >= limit:
+                        break
+                if limit and st["total"] >= limit:
+                    break
+            cat.commit()
+            for i, sid in enumerate(to_extract):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="extracting citations",
+                          done=i + 1, total=len(to_extract), item=sid)
+                try:
+                    self._extract_one(cat, ts, sid)
+                    st["extracted"] += 1
+                except Exception:  # noqa: BLE001
+                    pass
+                if i % 100 == 0:
+                    cat.commit()
+            cat.commit()
+            _progress(on_progress, stage="resolving citations", done=0, total=0)
+            resolved = Resolver(cat).run()
+        st["resolved_edges"] = resolved.resolved
+        st["files"] = files
+        self._invalidate_caches()
+        return st
+
+    @staticmethod
+    def _extract_one(cat, ts, sid: str) -> None:
+        from .citations import extract_document
+        extract_document(cat, ts, sid)
+
+    def _ingest_bailii_row(self, cat, rs, ts, *, parsed, raw_bytes: bytes,
+                           st: dict, files: list, to_extract: list) -> None:
+        """Synthesise one parsed parquet row against the corpus. Mirrors the saved-page
+        importer's disposition ladder (import / supersede / secondary / stub) but keys by
+        the row's reconciled identity: an EU case under its ECLI, an ECtHR case matched via
+        its application number to the already-held ECLI, everything else by slug."""
+        from .adapters.uk_caselaw import court_from_slug
+        from .citations import extract_citations
+        from .citations.name_variants import name_variants
+        from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
+        from .core.text import fold
+        from .pipeline.runner import _chamberless_alias
+        from .resolve.matchers import first_candidate
+
+        slug, title = parsed.slug, parsed.title
+
+        # -- reconcile identity: is this case already held under another id? --------
+        target = parsed.primary_id
+        existing = cat.get_document(target)
+        if existing is None and target != slug:
+            existing = cat.get_document(slug)
+            if existing is not None:
+                target = slug
+        # ECHR pages carry no ECLI, but their application number bridges to the held
+        # ECLI:CE:ECHR:… case (the echr adapter mints appno→id aliases).
+        if existing is None and parsed.source == "echr" and parsed.appno:
+            dst = cat.get_alias(parsed.appno)
+            if dst and dst != slug:
+                held = cat.get_document(dst)
+                if held is not None:
+                    target, existing = dst, held
+
+        # -- alias ladder: distinctive name variants + self-citations + chamberless -
+        alias_pairs: list[tuple[str, str]] = []
+        for v, kind in name_variants(title or ""):
+            if kind not in self._BAILII_ALIAS_KINDS:
+                continue
+            key = fold(v)
+            if key and key != target:
+                alias_pairs.append((key, f"bailii-name:{kind}"))
+        for c in parsed.self_citations:
+            cand = first_candidate(c)
+            key = fold(cand.value) if cand else fold(c)
+            if key and key != target:
+                alias_pairs.append((key, "bailii-report-alias"))
+        if parsed.appno:
+            alias_pairs.append((parsed.appno, "bailii-echr-appno"))
+        for extra_id in (slug, parsed.ecli):
+            if extra_id and extra_id != target:
+                alias_pairs.append((fold(extra_id), "bailii-id"))
+        bare = _chamberless_alias(slug)
+        if bare and bare != slug and bare != target:
+            alias_pairs.append((bare, "chamber-alias"))
+
+        def _mint(dst_id: str) -> None:
+            for key, source in alias_pairs:
+                cat.put_alias(key, dst_id, source=source, commit=False)
+                st["aliases"] += 1
+
+        new_meta = {"imported": "bailii-parquet", "bailii_url": parsed.bailii_url,
+                    "bailii_citations": list(parsed.self_citations),
+                    "bailii_court": parsed.court_label}
+
+        # -- stub (no transcript): keep identity + aliases, never store junk as text --
+        if parsed.pdf_only or not parsed.text.strip():
+            if existing is not None and existing["has_text"]:
+                meta = cat.document_meta(target)
+                if parsed.pdf_url:
+                    meta.setdefault("bailii_pdf_url", parsed.pdf_url)
+                cat.set_document_meta(target, meta, commit=False)
+                disp = "stub-skipped"
+            else:
+                stub_meta = {**(cat.document_meta(target) if existing is not None else {}),
+                             **new_meta, "needs_pdf": bool(parsed.pdf_url),
+                             "bailii_pdf_url": parsed.pdf_url}
+                rec = Record(
+                    source=parsed.source, stable_id=target, doc_type=DocType.JUDGMENT,
+                    title=title or (existing["title"] if existing is not None else None) or target,
+                    court=court_from_slug(slug), decision_date=parsed.decision_date,
+                    language="en", source_language="en", landing_url=parsed.bailii_url,
+                    raw_bytes=raw_bytes, raw_ext="html", payload_hash=sha256_bytes(raw_bytes),
+                    text=None, segments=[], extracted_via=ExtractedVia.SCRAPE,
+                    added_by=AddedBy.USER, extra=stub_meta)
+                raw_path = str(rs.path_for(rs.put(raw_bytes, ext="html"), "html"))
+                cat.upsert_document(rec, raw_path=raw_path, text_path=None)
+                disp = "stub"
+            st["stub"] += 1
+            _mint(target)
+            if len(files) < 500:
+                files.append({"path": parsed.bailii_url, "stable_id": target,
+                              "title": title, "disposition": disp})
+            return
+
+        payload_hash = sha256_bytes(parsed.text.encode("utf-8"))
+        old_meta = cat.document_meta(target) if existing is not None else {}
+
+        # already exactly this text — just top up aliases.
+        if existing is not None and existing["payload_hash"] == payload_hash:
+            _mint(target)
+            st["skipped"] += 1
+            return
+
+        if existing is None or self._bailii_html_supersedes(
+                existing, old_meta, len(parsed.text),
+                self._text_len(ts, existing) if existing is not None else 0):
+            meta = {**old_meta, **new_meta}
+            if existing is not None and existing["has_text"] and \
+                    existing["payload_hash"] != payload_hash:
+                alts = meta.get("alt_texts", [])
+                if not any(a.get("payload_hash") == existing["payload_hash"] for a in alts):
+                    alts.append({"source": existing["source"],
+                                 "payload_hash": existing["payload_hash"],
+                                 "text_path": existing["text_path"]})
+                meta["alt_texts"] = alts
+            rec = Record(
+                source=(existing["source"] if existing is not None else parsed.source),
+                stable_id=target, doc_type=DocType.JUDGMENT,
+                title=title or (existing["title"] if existing is not None else None) or target,
+                court=court_from_slug(slug), decision_date=parsed.decision_date,
+                language="en", source_language="en", landing_url=parsed.bailii_url,
+                raw_bytes=raw_bytes, raw_ext="html", payload_hash=payload_hash,
+                text=parsed.text, segments=parsed.segments,
+                extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER, extra=meta)
+            raw_path = str(rs.path_for(rs.put(raw_bytes, ext="html"), "html"))
+            text_path = str(ts.put(payload_hash, parsed.text))
+            ts.put_segments(payload_hash, parsed.segments)
+            cat.upsert_document(rec, raw_path=raw_path, text_path=text_path)
+            to_extract.append(target)
+            disp = "imported" if existing is None else "superseded"
+            st["imported" if existing is None else "superseded"] += 1
+        else:
+            # held authoritatively (Find Case Law XML, eu-cellar, echr) — attach the BAILII
+            # text as a secondary rendition (often the English text of an EU/ECHR case) and
+            # merge metadata; the identity + report aliases still land.
+            text_path = str(ts.put(payload_hash, parsed.text))
+            alts = old_meta.get("alt_texts", [])
+            if not any(a.get("payload_hash") == payload_hash for a in alts):
+                alts.append({"source": "bailii-parquet", "payload_hash": payload_hash,
+                             "text_path": text_path, "chars": len(parsed.text)})
+            old_meta["alt_texts"] = alts
+            for k, v in new_meta.items():
+                old_meta.setdefault(k, v)
+            cat.set_document_meta(target, old_meta, title_if_empty=title, commit=False)
+            disp = "enriched" if target != slug else "secondary"
+            st["enriched" if target != slug else "secondary"] += 1
+
+        _mint(target)
+        if len(files) < 500:
+            files.append({"path": parsed.bailii_url, "stable_id": target, "title": title,
+                          "citations": list(parsed.self_citations), "disposition": disp})
+
     # -- Westlaw RTF import (§1.9, sibling of the BAILII-page path) ---------
     def import_westlaw_zip(self, *, zip_path: str, limit: int | None = None,
                            on_progress=None, cancel_check=None) -> dict:
@@ -4283,7 +4549,8 @@ class Facade:
                 "aliased": aliased, "resolved_edges": resolved.resolved}
 
     def rescan(self, *, limit: int | None = None, coref: bool = True, parallel: bool = True,
-               doc_types: list[str] | None = None, on_progress=None, cancel_check=None) -> dict:
+               doc_types: list[str] | None = None, source: str | None = None,
+               on_progress=None, cancel_check=None) -> dict:
         """Full fresh relink of the corpus: re-extract every text document with the current
         grammars, then run the whole resolution chain — so every fix (statute-name grammar,
         carry-forward cue/kind, the enlarged case pool, name/EHRR/EU matchers, parallel
@@ -4293,7 +4560,12 @@ class Facade:
         the user-alias map is loaded once, ids stream from a single-column scan, writes are
         per-document durable (idempotent → the run is restartable), and progress/cancel are
         honoured. Order matters — extraction first (regenerates edges), then the matchers
-        that alias name-only references to what's held, then parallel mining last."""
+        that alias name-only references to what's held, then parallel mining last.
+
+        ``source`` scopes the re-extraction to one adapter's documents — e.g. re-extract
+        just a freshly-imported corpus after a new grammar lands, rather than re-running
+        the whole 700k-doc corpus. The relink chain afterwards still operates corpus-wide
+        on the pending references (that's where the new edges get resolved)."""
         from .citations import extract_document
 
         report: dict = {}
@@ -4303,7 +4575,7 @@ class Facade:
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()          # user shorthand rules — loaded ONCE
-            ids = cat.text_document_ids(limit=limit, doc_types=doc_types)
+            ids = cat.text_document_ids(limit=limit, doc_types=doc_types, source=source)
             total = len(ids)
             docs = cites = 0
             for i, sid in enumerate(ids):

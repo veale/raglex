@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 
+from ..formats.lims_xml import ca_id
 from .grammars import DROP, Grammar, Normalised, register
 
 # Hong Kong registry case-number prefixes → the court they belong to. Pre-2018 HK cases
@@ -164,3 +165,66 @@ def hk_registry_court(case_number: str) -> str | None:
     """``"FACV 1/2018"`` → ``"HKCFA"`` — the court a registry case number belongs to."""
     m = re.match(rf"\s*({_HK_PREFIX_ALT})", (case_number or "").upper())
     return HK_REGISTRY_PREFIXES.get(m.group(1)) if m else None
+
+
+# -- Canadian legislation ---------------------------------------------------
+# Canadian judgments cite statutes by three formal, unambiguous forms, and each of these
+# identifies a *federal* instrument that the Justice Laws import holds. Only the
+# chapter-coded forms are handled here: a bare "the Patent Act" is ambiguous between the
+# federal Act and a provincial one of the same name, so it is left to the held-title
+# resolver (facade.match_named_legislation), which links a name only when exactly one
+# held Act carries it.
+#
+# The pinpoint ("s. 8 of …") is captured where it leads the citation so the edge lands on
+# the exact provision, matching how the UK statute grammars record section anchors.
+_CA_PINPOINT = (r"(?:s(?:ection|s|\.)?\.?\s*(?P<sec>\d+[\w.()]*)"
+                r"(?:\s+of\s+(?:the\s+)?[A-Z][^,;.]{0,60}?)?,?\s*)?")
+
+
+def _ca_section(m: "re.Match[str]", cid: str | None) -> Normalised:
+    sec = m.groupdict().get("sec")
+    return cid, (f"s. {sec}" if sec else None), "act"
+
+
+# Consolidated: "R.S.C. 1985, c. C-46", "R.S.C., 1985, c. A-1", "R.S., c. C-46" (pre-1985).
+# The letter-dashed chapter code (C-46) IS the consolidated id, so this resolves directly
+# to ca/act/c-46. Requiring the letter-dash form is what separates federal R.S.C. chapters
+# from provincial "R.S.O. 1990, c. P.33" (letter-DOT) and from the annual number-only form.
+def _ca_rsc(m: "re.Match[str]") -> Normalised:
+    return _ca_section(m, ca_id("act", m.group("code")))
+
+
+register(Grammar(
+    "ca_statute_consolidated", "act",
+    re.compile(
+        _CA_PINPOINT +
+        r"R\.?S\.?C?\.?(?:,?\s*\d{4})?,?\s*c\.?\s*(?P<code>[A-Z]{1,2}-[\d.]+)\b"
+    ),
+    _ca_rsc,
+))
+
+# Annual: "S.C. 2019, c. 18" (English), "L.C. 2019, ch. 18" (French). The annual chapter
+# number is NOT the consolidated id, so this stays candidate-less and resolves via the
+# annual→consolidated alias the ca-federal import mints. The trailing ", c. N" is what
+# separates it from "1999 S.C. 583" (Session Cases, a Scottish reporter).
+register(Grammar(
+    "ca_statute_annual", "act",
+    re.compile(_CA_PINPOINT + r"(?:S\.?C\.?|L\.?C\.?)\s*\d{4},?\s*(?:c|ch)\.?\s*\d+\b"),
+    lambda m: _ca_section(m, None),
+))
+
+# Regulations: "SOR/2018-69", "DORS/2018-69" (French), "SI/2005-91", "TR/2005-91". SOR/SI
+# are the English series, DORS/TR the French names for the same instruments.
+_CA_REG_SERIES = {"sor": "SOR", "dors": "SOR", "si": "SI", "tr": "SI"}
+
+
+def _ca_reg(m: "re.Match[str]") -> Normalised:
+    series = _CA_REG_SERIES[m.group("series").lower()]
+    return ca_id("regulation", f"{series}/{m.group('num')}"), None, "regulation"
+
+
+register(Grammar(
+    "ca_regulation", "regulation",
+    re.compile(r"\b(?P<series>SOR|DORS|SI|TR)/(?P<num>\d{2,4}-\d+)\b"),
+    _ca_reg,
+))

@@ -23,8 +23,16 @@ from urllib.parse import urlparse
 # ── path → stable_id ─────────────────────────────────────────────────────────
 
 # The juris segment BAILII puts before ``/cases/`` (ew, uk, scot, nie, ie). We drop it —
-# the FCL stable_id is ``court[/division]/year/num`` with no jurisdiction prefix.
-_JURIS_PREFIXES = frozenset({"ew", "uk", "scot", "nie", "ie", "eu"})
+# the FCL stable_id is ``court[/division]/year/num`` with no jurisdiction prefix. Beyond
+# the UK/Ireland/EU cores, BAILII also republishes the Crown Dependencies and a handful of
+# offshore/international common-law courts (Jersey ``/je/``, Cayman ``/ky/``, the UAE
+# ``/ae/`` DIFC & ADGM, Qatar ``/qa/``, St Helena ``/sh/``, the BIOT ``/io/`` and the
+# Singapore International Commercial Court ``/sg/``). Their court tokens don't collide with
+# the UK ones, so dropping the juris prefix still yields a unique ``court/year/num`` slug.
+_JURIS_PREFIXES = frozenset({
+    "ew", "uk", "scot", "nie", "ie", "eu",
+    "je", "gg", "im", "ky", "ae", "qa", "sh", "io", "sg", "bm", "gi",
+})
 
 
 def bailii_path_to_slug(path: str | None) -> str | None:
@@ -77,7 +85,8 @@ def bailii_path_to_slug(path: str | None) -> str | None:
     # alphanumeric-with-underscore run that carries at least one digit. The long
     # constructed tribunal ids ("LON_LV_NFE_00AY_0100") also pass, which is fine: those
     # judgments simply aren't in this corpus.
-    if not (len(year) == 4 and year.isdigit() and re.fullmatch(r"[0-9A-Za-z_]*\d[0-9A-Za-z_]*", num)):
+    # (hyphens appear in the older Scottish digest ids — "Mor35TACK-005" under ScotCS/1798)
+    if not (len(year) == 4 and year.isdigit() and re.fullmatch(r"[0-9A-Za-z_-]*\d[0-9A-Za-z_-]*", num)):
         return None
     slug = "/".join(rest).rsplit(".", 1)[0].lower()
     return slug

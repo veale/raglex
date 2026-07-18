@@ -47,6 +47,8 @@ CATEGORY_LABELS: dict[str, str] = {
     "africa-caselaw": "African case-law (other)",
     "caribbean-caselaw": "Caribbean case-law",
     "pacific-caselaw": "Pacific case-law",
+    "ci-caselaw": "Channel Islands case-law",
+    "offshore-caselaw": "Offshore & int'l commercial courts",
     "ca-legislation": "Canadian legislation (federal)",
     "au-legislation": "Australian legislation",
     "nz-legislation": "New Zealand legislation",
@@ -58,6 +60,7 @@ CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation"
                   "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw",
                   "sg-caselaw", "hk-caselaw", "za-caselaw", "my-caselaw",
                   "africa-caselaw", "caribbean-caselaw", "pacific-caselaw",
+                  "ci-caselaw", "offshore-caselaw",
                   "ca-legislation", "au-legislation", "nz-legislation", "hk-legislation",
                   "other"]
 
@@ -72,6 +75,9 @@ JURISDICTION_CATEGORY: dict[str, str] = {
     # tail is grouped by region, because ~30 one-case rows would bury the map while
     # "African case-law: 214 pending" is a signal worth acting on.
     "SG": "sg-caselaw", "HK": "hk-caselaw", "ZA": "za-caselaw", "MY": "my-caselaw",
+    # Crown Dependencies and the offshore/international commercial courts BAILII carries.
+    **{j: "ci-caselaw" for j in ("JE", "GG", "IM")},
+    **{j: "offshore-caselaw" for j in ("KY", "AE", "QA", "SH", "IO", "BM", "GI")},
     **{j: "africa-caselaw" for j in
        ("KE", "GH", "TZ", "UG", "NG", "ZM", "MW", "ZW", "NA", "SZ", "BW", "MU", "SC",
         "AFRICA", "EAC")},

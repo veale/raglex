@@ -250,8 +250,10 @@ def create_app(config: Config | None = None) -> FastAPI:
         run the whole resolution chain (legislation-name, report, EHRR and parallel/ECR
         matchers). One progress-tracked job; ``no_parallel`` skips the heavy mining pass."""
         p = payload or {}
-        params = {k: v for k, v in p.items() if k in ("limit", "parallel", "coref", "doc_types")}
-        scope = "judgments" if params.get("doc_types") == ["judgment"] else "all docs"
+        params = {k: v for k, v in p.items()
+                  if k in ("limit", "parallel", "coref", "doc_types", "source")}
+        scope = params.get("source") or (
+            "judgments" if params.get("doc_types") == ["judgment"] else "all docs")
         return _start_job("rescan", f"full fresh relink ({scope}) — re-extract + match everything", params)
 
     @app.post("/jobs/harvest-echr")
@@ -848,6 +850,26 @@ def create_app(config: Config | None = None) -> FastAPI:
         return jobs.start("import-bailii-dir",
                           f"Import BAILII folder ({staged} files)",
                           {"dir_path": str(d)})
+
+    @app.post("/import/bailii-parquet")
+    def import_bailii_parquet_ep(payload: dict = Body(...)) -> dict:
+        """Launch an import of a **server-side BAILII parquet dump** (a bulk Scrapy crawl
+        exported as Parquet shards, mounted on the host — e.g. under ``/corpora/…``). Unlike
+        the upload paths this reads a directory already on the box, so it takes a
+        ``dir_path`` plus optional ``databases`` / ``exclude_databases`` filters (on the
+        dump's ``database_name`` column, e.g. exclude ``UKAITUR`` to skip the asylum bulk).
+        Runs as one cancellable background job."""
+        dir_path = (payload.get("dir_path") or "").strip()
+        if not dir_path or not os.path.isdir(dir_path):
+            return JSONResponse({"error": f"not a directory: {dir_path!r}"}, status_code=400)
+        params: dict = {"dir_path": dir_path}
+        for key in ("databases", "exclude_databases"):
+            val = payload.get(key)
+            if isinstance(val, list) and val:
+                params[key] = [str(v) for v in val]
+        if isinstance(payload.get("limit"), int):
+            params["limit"] = payload["limit"]
+        return jobs.start("import-bailii-parquet", "Import BAILII parquet dump", params)
 
     # Westlaw RTF import — the sibling of the BAILII-page path, for the other big source
     # of older UK (and UK-reported EU) judgments. Same zip + batched-folder shape.

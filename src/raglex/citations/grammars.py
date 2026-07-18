@@ -404,12 +404,14 @@ from .reporters import (  # noqa: E402
 # Fold every report-series token into the set the neutral-citation grammars use to reject
 # a court, so "1999 SC 583" (Session Cases) is never minted as a fake sc/1999/583 slug.
 #
-# Registered court codes are held back from that fold. A token listed in BOTH tables is a
-# data error, and letting the reporter side win silently suppresses a whole court's
-# citations: "SGCA" was catalogued as a series, so every "[2011] SGCA 9" was rejected as a
-# report and the Singapore Court of Appeal minted no candidates at all. Courts win.
+# Registered court codes are held back from the whole set — both the hand-listed literal
+# above and the folded additions. A token in BOTH tables (SGCA the Singapore court and a
+# "series"; JLR the Jersey court and the Jersey Law Reports) must resolve as the court, or
+# the neutral grammar rejects "[2011] SGCA 9" as a report and the court mints no candidate
+# at all. Courts always win — pruning the final set makes that hold no matter which table
+# introduced the collision.
 _REPORT_TOKENS = {re.sub(r"[.\s'’&]", "", s).upper() for s in _ALL_REPORT_SERIES}
-REPORT_SERIES |= _REPORT_TOKENS - set(COURTS_BY_CODE)
+REPORT_SERIES = (REPORT_SERIES | _REPORT_TOKENS) - set(COURTS_BY_CODE)
 
 
 def _law_report(m: "re.Match[str]") -> Normalised:
