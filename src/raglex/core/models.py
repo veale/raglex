@@ -215,9 +215,24 @@ class Record:
 
     def ensure_payload_hash(self) -> str | None:
         """Content-hash dedup (§5): hash raw bytes so a feed bumping 'last
-        modified' without changing a byte short-circuits before extraction."""
-        if self.payload_hash is None and self.raw_bytes is not None:
-            self.payload_hash = sha256_bytes(self.raw_bytes)
+        modified' without changing a byte short-circuits before extraction.
+
+        Local bulk-import adapters (the A2AJ Canadian parquet corpus, the Open
+        Australian Legal Corpus JSONL…) hand over already-extracted ``text`` with no
+        ``raw_bytes`` at all — there is no original file to hash. Without a fallback,
+        ``payload_hash`` stays ``None`` forever, which silently breaks two things
+        downstream: the pipeline only writes ``text`` into the TextStore when a
+        ``payload_hash`` is present (§1.2), and the reader only serves text when the
+        document row carries one — so the document is stored (title, court, citation
+        edges all resolve) but its text is never persisted and the UI shows
+        "No extracted text". Hash ``text`` itself in that case so these adapters get
+        the same dedup + storage behaviour as byte-fetching ones.
+        """
+        if self.payload_hash is None:
+            if self.raw_bytes is not None:
+                self.payload_hash = sha256_bytes(self.raw_bytes)
+            elif self.text:
+                self.payload_hash = sha256_bytes(self.text.encode("utf-8"))
         return self.payload_hash
 
 

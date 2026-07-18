@@ -128,6 +128,18 @@ def test_au_importer_builds_a_judgment_record(au_corpus):
     assert record.extra["is_authoritative"] is False
 
 
+def test_au_importer_record_hashes_to_a_payload_hash_from_text(au_corpus):
+    """These bulk imports carry no ``raw_bytes`` (there is no original file — the JSONL
+    row IS the text). ``ensure_payload_hash`` must still fall back to hashing ``text``,
+    or the pipeline never writes it into the TextStore and the reader shows the document
+    with no text at all, despite its citation edges resolving fine."""
+    adapter = AustralianCaseLawAdapter(path=au_corpus)
+    stub = next(s for s in adapter.discover(None) if s.stable_id == "nswsc/2020/1")
+    record = adapter.fetch(stub)
+    assert record.raw_bytes is None
+    assert record.ensure_payload_hash() is not None
+
+
 def test_au_report_only_decision_gets_a_surrogate_id_and_an_alias(au_corpus):
     """Its own id can never be cited, so the reporter citation is the only route to it."""
     adapter = AustralianCaseLawAdapter(path=au_corpus)
@@ -241,3 +253,11 @@ def test_ca_rows_without_text_are_skipped():
 def test_ca_min_year_filters_the_backfill():
     _, stub, _ = _record(dict(ROW, document_date_en="1995-01-01"), min_year=2000)
     assert stub is None
+
+
+def test_ca_record_hashes_to_a_payload_hash_from_text():
+    """Same fallback as the Australian importer (§ above): no ``raw_bytes``, so
+    ``ensure_payload_hash`` must hash ``text`` or the pipeline never persists it."""
+    _, _, record = _record(ROW)
+    assert record.raw_bytes is None
+    assert record.ensure_payload_hash() is not None
