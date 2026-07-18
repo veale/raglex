@@ -109,6 +109,11 @@ services:
       db: {condition: service_healthy}
     volumes:
       - /mnt/nextcloud_data/docker-binds/raglex-data/app:/data
+      # Bulk source corpora for the local-import adapters (the A2AJ Canadian
+      # case-law parquet dataset, the Open Australian Legal Corpus JSONL, the
+      # Justice Laws XML clone, the HK e-Legislation drop). Read-only: these are
+      # inputs the importers read, never anything the app writes.
+      - /mnt/nextcloud_data/tmp:/corpora:ro
     environment: *app-env
     networks: [default, scrapling]
     restart: unless-stopped
@@ -123,6 +128,11 @@ services:
       db: {condition: service_healthy}
     volumes:
       - /mnt/nextcloud_data/docker-binds/raglex-data/app:/data
+      # Bulk source corpora for the local-import adapters (the A2AJ Canadian
+      # case-law parquet dataset, the Open Australian Legal Corpus JSONL, the
+      # Justice Laws XML clone, the HK e-Legislation drop). Read-only: these are
+      # inputs the importers read, never anything the app writes.
+      - /mnt/nextcloud_data/tmp:/corpora:ro
     environment:
       <<: *app-env
       PYTHONUNBUFFERED: "1"
