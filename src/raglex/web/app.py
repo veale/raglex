@@ -251,7 +251,9 @@ def create_app(config: Config | None = None) -> FastAPI:
         matchers). One progress-tracked job; ``no_parallel`` skips the heavy mining pass."""
         p = payload or {}
         params = {k: v for k, v in p.items()
-                  if k in ("limit", "parallel", "coref", "doc_types", "source")}
+                  if k in ("limit", "parallel", "coref", "doc_types", "source",
+                           # resume rather than redo: only documents with no edges yet
+                           "only_unextracted")}
         scope = params.get("source") or (
             "judgments" if params.get("doc_types") == ["judgment"] else "all docs")
         return _start_job("rescan", f"full fresh relink ({scope}) — re-extract + match everything", params)
