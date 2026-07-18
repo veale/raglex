@@ -33,6 +33,10 @@ import = [
     "pymupdf>=1.24",
     "striprtf>=0.0.26",
 ]
+# Bulk local corpus imports (§5) — the A2AJ Canadian case-law dataset ships as
+# parquet, so pyarrow is needed to read it. Only the bulk importers touch this;
+# the JSONL corpora need nothing extra.
+bulk = ["pyarrow>=16"]
 # OCR fallback for scanned PDFs (§5c) — the EDPB one-stop-shop register in
 # particular holds decision scans with no text layer. Needs the tesseract
 # binary on the host/image; without it the harvest flags needs_ocr instead.

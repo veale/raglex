@@ -295,3 +295,22 @@ def series_jurisdiction(series: str | None) -> str:
     can't retrieve an Irish or Commonwealth report, so exporting one just burns a
     slot in the 100-citation batch."""
     return _SERIES_TO_JURISDICTION.get(series or "", "uk")
+
+
+def report_citations(raw: str | None) -> list[str]:
+    """Every law-report citation appearing in a string, as matched.
+
+    Used by the bulk case-law importers to mint resolution aliases. A dataset gives a
+    case's citation as a whole style-of-cause ("Mabo v Queensland (No 2) (1992) 175 CLR
+    1"), but the extractor records only the report citation itself ("(1992) 175 CLR 1")
+    as the edge's folded raw string — and an alias fires on an exact folded match. So
+    the alias has to be the *matched substring*, produced by these same patterns, or it
+    would never join to anything.
+    """
+    out: list[str] = []
+    for pattern in _ALL_REPORT_RES:
+        for m in pattern.finditer(raw or ""):
+            text = " ".join(m.group(0).split())
+            if text and text not in out:
+                out.append(text)
+    return out

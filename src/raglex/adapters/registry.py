@@ -14,6 +14,8 @@ from ..scraping.recipes import RECIPES
 from ..scraping.scrape_adapter import RecipeScrapeAdapter
 from .a29wp import A29WPAdapter
 from .au_legislation import CommonwealthAdapter, LawMakerAdapter
+from .au_caselaw import AustralianCaseLawAdapter
+from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_legislation import CanadaFederalAdapter
 from .dma import DMACasesAdapter
 from .hk_legislation import HKLegislationAdapter
@@ -88,6 +90,13 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # justicecanada/laws-lois-xml. Version-controlled primary law: the repo IS the
     # distribution channel, so enumeration and change detection are both offline.
     "ca-federal": CanadaFederalAdapter,
+    # Canadian case law — the A2AJ bulk parquet corpus (~223k decisions, 26 courts).
+    # Neutral-citation slugs match the extractor's, so importing resolves the Canadian
+    # citations the corpus already holds pending; law-report citations become aliases.
+    "ca-caselaw": CanadianCaseLawAdapter,
+    # Australian case law — the Open Australian Legal Corpus JSONL. Decisions only by
+    # default: the statutes are better served by the live registers (au-cth et al).
+    "au-caselaw": AustralianCaseLawAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -336,6 +345,35 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("include_repealed", "Include repealed laws", "true | false (default)"),
          SourceOption("pull", "git pull before run", "true | false (default)")),
         ("chapter code (C-46)", "instrument number (SOR/2018-69)", "ca/act/c-46"),
+    ),
+    "ca-caselaw": SourceInfo(
+        "ca-caselaw", "Canadian case law (A2AJ bulk corpus)", "caselaw", "CA", False,
+        "~223k full-text decisions from 26 Canadian courts and tribunals, imported from "
+        "the A2AJ parquet dataset on disk (one folder per court). Neutral-citation ids "
+        "match the citation extractor's, so importing RESOLVES the Canadian citations "
+        "already pending in the corpus; law-report citations ([1999] 2 SCR 817) are "
+        "minted as aliases so they resolve too. Ships its own citation network, so "
+        "cites edges land at import. A2AJ is a secondary source — flagged as such.",
+        (SourceOption("path", "Path to the A2AJ dataset", "/data/corpora/canadian-case-law"),
+         SourceOption("courts", "Limit to these courts", "SCC,FCA,ONCA"),
+         SourceOption("min_year", "Earliest decision year", "2000"),
+         SourceOption("language", "Preferred text language", "en (default) | fr")),
+        ("neutral citation (2011 SCC 10)", "scc/2011/10"),
+    ),
+    "au-caselaw": SourceInfo(
+        "au-caselaw", "Australian case law (Open Australian Legal Corpus)", "caselaw",
+        "AU", False,
+        "Australian decisions from Isaacus' Open Australian Legal Corpus — a single "
+        "large JSONL file on disk, streamed. Imports decisions only by default: the "
+        "corpus also carries statutes, but the live registers (au-cth, au-nsw…) give "
+        "point-in-time compilations and an amendment graph a flat dump cannot. "
+        "Neutral-citation ids match the extractor's, so this resolves the Australian "
+        "citations already pending. Secondary source — flagged as such.",
+        (SourceOption("path", "Path to corpus.jsonl", "/data/corpora/au-corpus.jsonl"),
+         SourceOption("types", "Document types", "decision (default) | primary_legislation"),
+         SourceOption("jurisdictions", "Limit to jurisdictions", "new_south_wales,commonwealth"),
+         SourceOption("min_year", "Earliest decision year", "2000")),
+        ("neutral citation ([2020] NSWSC 1)", "nswsc/2020/1"),
     ),
     "hk-legislation": SourceInfo(
         "hk-legislation", "Hong Kong legislation (e-Legislation bulk XML)", "legislation",

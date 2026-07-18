@@ -23,9 +23,9 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY schema ./schema
-# Install with web + import + postgres + scrape + ocr extras (FastAPI, MCP, pypdf,
+# Install with web + import + postgres + scrape + ocr + bulk extras (FastAPI, MCP, pypdf,
 # psycopg, BeautifulSoup — bs4 is needed by the EUR-Lex HTML and BWB parsers).
-RUN uv pip install --system ".[web,import,postgres,scrape,ocr]"
+RUN uv pip install --system ".[web,import,postgres,scrape,ocr,bulk]"
 
 # Bundle the built UI; the API serves it when RAGLEX_FRONTEND_DIST points here.
 COPY --from=ui /ui/dist /app/frontend/dist
