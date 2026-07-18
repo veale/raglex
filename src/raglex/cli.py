@@ -278,6 +278,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_counts = 0.0
         last_gazetteer = 0.0
         last_au_repair = 0.0
+        last_resolve = 0.0
         eurlex_broken_until = 0.0
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
@@ -315,6 +316,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print("[watch] auto-embed: previous tick still running; skipping")
                     elif started.get("error"):
                         print(f"[watch] auto-embed: {started['error']}")
+                # Link whatever has become linkable since the last tick. Resolution is a
+                # set-based SQL pass — ~9s to flip 64k edges — but it only ran at the END
+                # of a job, so during a multi-hour extraction every freshly-extracted
+                # citation sat pending even when its target was already held. That is why
+                # ECHR judgments could hold 67k unresolved references to each other and to
+                # Convention articles the corpus had all along. Cheap enough to just do
+                # regularly, which keeps the graph live rather than back-filled in lumps.
+                if time.time() - last_resolve >= 300:
+                    last_resolve = time.time()
+                    try:
+                        res = f.resolve()
+                        if res.get("resolved"):
+                            print(f"[watch] resolve: linked {res['resolved']} edge(s)")
+                    except Exception as exc:  # noqa: BLE001 — never kill the tick loop
+                        print(f"[watch] resolve failed: {exc}")
                 # Self-healing repair drain for the Commonwealth register: re-fetch bodies
                 # an older adapter's route couldn't reach, and mint canonical year/number
                 # citation aliases. Deliberately a recurring bounded drain rather than a
