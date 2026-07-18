@@ -1,5 +1,5 @@
 import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useRef, useState } from "react";
-import { api, Hit, Setting } from "./api";
+import { api, Hit, LIIScope, LIITarget, Setting } from "./api";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -948,6 +948,39 @@ function DocNav({ segs, text, oscola, title, landingUrl, id }:
 }
 
 // --- Structured reader (legislation hierarchy / judgment paragraphs) -------
+// Where to read a case the corpus can't show. The AustLII-family institutes name their
+// files deterministically, so the URL is constructed locally from the citation rather
+// than looked up — see citations/lii.py. Nothing is fetched on the user's behalf: these
+// are links a person follows, which is what those (largely charity-funded) sites expect.
+const LII_CERTAINTY: Record<string, string> = {
+  recorded: "the exact URL this record was imported from",
+  derived: "built from the citation — this institute's filenames are deterministic",
+  probable: "this institute assigns its own numbering, so the link may miss",
+};
+
+function LiiLinks({ id }: { id: string }) {
+  const [data, err] = useAsync(() => api.liiLinks(id), [id]);
+  if (err || !data || !data.links.length) return null;
+  return (
+    <div className="lii-links">
+      <h4>Read this case elsewhere</h4>
+      <ul>
+        {data.links.map((l, i) => (
+          <li key={i}>
+            <a href={l.url} target="_blank" rel="noopener noreferrer">{l.site_name} ↗</a>
+            {l.certainty !== "recorded" && (
+              <span className={`lii-tag lii-${l.certainty}`} title={LII_CERTAINTY[l.certainty]}>
+                {l.certainty}
+              </span>
+            )}
+            <div className="muted lii-url">{l.url}</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   { id: string; incoming: any[]; pinpoint?: string | null; oscola?: OscolaCite | null; landingUrl?: string; title?: string }) {
   const [body] = useAsync(() => api.documentBody(id), [id]);
@@ -991,6 +1024,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
         </div>
       )}
       <p className="muted">No extracted text (metadata-only, or not yet extracted).</p>
+      <LiiLinks id={id} />
     </div>
   );
   const segs = body.segments as { label: string; kind: string; level: number; char_start: number; char_end: number }[];
@@ -1765,9 +1799,76 @@ export function ImportView({ open }: { open?: (id: string) => void }) {
         }}>Import file</button></p>
       </div>
       <CaseLawImportPanel />
+      <LiiWorklistPanel />
       <ZoteroPanel show={show} />
       <GuidanceRulesPanel />
       {msg && <div className="panel"><pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{msg}</pre></div>}
+    </div>
+  );
+}
+
+// The LII fetch worklist: cases the corpus cites or lists but cannot show, paired with a
+// constructed link to the institute that publishes each one. Deliberately a *manual*
+// round-trip — you work down the list in a browser and save the pages — because these are
+// small charity-run services that shouldn't be crawled, and because a real browser session
+// is what gets past their bot-walls anyway. Saving each page under the `filename` column
+// is what lets the importer recover a document's identity from the filename alone.
+function LiiWorklistPanel() {
+  const [scope, setScope] = useState<LIIScope>("unheld");
+  const [rows, setRows] = useState<LIITarget[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const load = async (s: LIIScope) => {
+    setBusy(true); setErr("");
+    try { setRows((await api.liiLinkTargets(s, 200)).links); }
+    catch (e: any) { setErr(String(e)); setRows(null); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="panel">
+      <h3>Missing full text — LII links</h3>
+      <p className="muted">
+        Cases the corpus cites but can’t display, with a link to the institute that publishes
+        each. URLs are constructed locally from the citation — nothing is fetched from the
+        LIIs on your behalf. Work down the list in a browser, saving each page under the
+        <b> filename</b> shown, then import that folder.
+      </p>
+      <div className="row">
+        <select value={scope} onChange={(e) => { const s = e.target.value as LIIScope; setScope(s); setRows(null); }}>
+          <option value="unheld">Cited but not held</option>
+          <option value="textless">Held, but no full text</option>
+          <option value="both">Both</option>
+        </select>
+        <button onClick={() => load(scope)} disabled={busy} style={{ flex: "0 0 auto" }}>
+          {busy ? "Loading…" : "Preview (top 200)"}
+        </button>
+        <button className="primary" style={{ flex: "0 0 auto" }}
+          onClick={async () => {
+            setErr("");
+            try { await api.downloadLiiLinksCsv(scope); } catch (e: any) { setErr(String(e)); }
+          }}>⭳ Download full list (CSV)</button>
+      </div>
+      {err && <p className="err">{err}</p>}
+      {rows && rows.length === 0 && <p className="muted">Nothing to fetch for this scope.</p>}
+      {rows && rows.length > 0 && (
+        <>
+          <p className="muted">Most-cited first — the cases the corpus leans on hardest.</p>
+          <table className="lii-table"><thead><tr>
+            <th>Citation</th><th>Cited by</th><th>Site</th><th>Link</th><th>Save as</th>
+          </tr></thead><tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td>{r.citation || r.stable_id}{r.title && <div className="muted">{r.title}</div>}</td>
+                <td>{r.citing_count}</td>
+                <td>{r.site_name}
+                  {r.certainty === "probable" && <span className="lii-tag lii-probable" title={LII_CERTAINTY.probable}>probable</span>}</td>
+                <td><a href={r.url} target="_blank" rel="noopener noreferrer">open ↗</a></td>
+                <td><code>{r.filename}</code></td>
+              </tr>
+            ))}
+          </tbody></table>
+        </>
+      )}
     </div>
   );
 }

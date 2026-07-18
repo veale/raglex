@@ -44,6 +44,17 @@ export interface SourceHealth {
   watermark: string | null; last_yield_at: string | null;
 }
 export interface Alert { code: string; severity: string; subject: string; message: string; }
+// A constructed link to the institute that publishes a case. `certainty` is "recorded"
+// when the URL is one the importer actually stored, "derived" when every path segment was
+// built from the citation, and "probable" where the institute assigns its own numbering.
+export interface LIILink {
+  site: string; site_name: string; url: string; certainty: "recorded" | "derived" | "probable";
+}
+export type LIIScope = "unheld" | "textless" | "both";
+export interface LIITarget extends LIILink {
+  stable_id: string; title: string | null; citation: string | null;
+  status: "unheld" | "held-no-text"; citing_count: number; filename: string;
+}
 export interface Setting {
   key: string; label: string; secret: boolean; group: string; placeholder: string;
   set: boolean; source: string; display: string;
@@ -77,6 +88,26 @@ export const api = {
     req<any>("/guidance/field", { method: "POST", body: JSON.stringify({ stable_id, field, value }) }),
   classifyGuidanceJob: () => req<any>("/jobs/classify-guidance", { method: "POST", body: "{}" }),
   documentBody: (id: string) => req<any>(`/document-body?id=${encodeURIComponent(id)}`),
+  // Outbound links to the LII that publishes a case we can't show in full.
+  liiLinks: (id: string) =>
+    req<{ stable_id: string; links: LIILink[] }>(`/document-lii-links?id=${encodeURIComponent(id)}`),
+  liiLinkTargets: (scope: LIIScope, limit = 500, sites?: string) =>
+    req<{ scope: string; count: number; links: LIITarget[] }>(
+      `/lii-links?scope=${scope}&limit=${limit}${sites ? `&sites=${encodeURIComponent(sites)}` : ""}`),
+  // Download the CSV through fetch (so it carries the auth header — a plain <a download>
+  // can't, and putting the token in the URL would leak it into logs and history), then
+  // hand the browser a blob URL to save.
+  downloadLiiLinksCsv: async (scope: LIIScope, limit = 20000, sites?: string) => {
+    const res = await fetch(
+      `${BASE}/lii-links.csv?scope=${scope}&limit=${limit}${sites ? `&sites=${encodeURIComponent(sites)}` : ""}`,
+      { headers: authHeaders() });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url; a.download = `lii-links-${scope}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  },
   mentions: (id: string, anchor?: string) =>
     req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`),
   citationsOut: (id: string, family: "cases" | "statute") =>

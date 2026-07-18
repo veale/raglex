@@ -563,3 +563,21 @@ mark.pdfcite:hover { filter: brightness(1.25); }
 .pdf-stub-banner { border: 1px solid var(--line); background: var(--inset);
   padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
 .pdf-stub-banner a { font-weight: 600; }
+
+/* --- outbound LII links (a case we can't show, but someone else publishes) ---- */
+.lii-links { border: 1px solid var(--line); background: var(--inset); padding: 10px 14px;
+  margin-top: 12px; font-size: 13px; }
+.lii-links h4 { margin: 0 0 8px; font-size: 13px; }
+.lii-links ul { margin: 0; padding: 0; list-style: none; }
+.lii-links li + li { margin-top: 8px; }
+.lii-links a { font-weight: 600; }
+.lii-url { font-size: 11px; word-break: break-all; }
+/* certainty of a constructed URL: derived = every segment came from the citation,
+   probable = the institute assigns its own numbering, so it may miss */
+.lii-tag { border: 1px solid var(--line); padding: 0 5px; margin-left: 6px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .04em; cursor: help; }
+.lii-tag.lii-probable { border-color: var(--warn); color: var(--warn); }
+.lii-table { width: 100%; font-size: 12px; }
+.lii-table th { text-align: left; font-weight: 600; border-bottom: 1px solid var(--line); }
+.lii-table td { vertical-align: top; padding: 4px 6px 4px 0; }
+.lii-table code { font-size: 11px; word-break: break-all; }

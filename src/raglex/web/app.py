@@ -851,12 +851,16 @@ def create_app(config: Config | None = None) -> FastAPI:
                           f"Import BAILII folder ({staged} files)",
                           {"dir_path": str(d)})
 
-    @app.get("/documents/{stable_id:path}/lii-links")
-    def document_lii_links_ep(stable_id: str) -> dict:
+    @app.get("/document-lii-links")
+    def document_lii_links_ep(id: str) -> dict:
         """Outbound LII links for one document — what the reader shows when a case is a
         name-only record with no judgment text, so the text can be fetched from the
-        institute that publishes it."""
-        return {"stable_id": stable_id, "links": facade.lii_links_for(stable_id)}
+        institute that publishes it.
+
+        Keyed by query param, not a path segment: stable_ids contain slashes, so a
+        ``/documents/{id:path}/lii-links`` route is swallowed whole by the generic
+        document route (the same reason ``/document-body?id=`` is shaped this way)."""
+        return {"stable_id": id, "links": facade.lii_links_for(id)}
 
     @app.get("/lii-links")
     def lii_links_ep(scope: str = "unheld", limit: int = 2000,

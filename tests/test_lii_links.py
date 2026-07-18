@@ -131,3 +131,32 @@ def test_recorded_landing_url_is_preferred_over_a_constructed_one(facade):
     links = facade.lii_links_for("jlr/1998/jlr98n013a")
     assert links[0]["url"] == exact
     assert links[0]["certainty"] == "recorded"
+
+
+def test_endpoints_serve_links_worklist_and_csv(tmp_path):
+    """The per-document route is keyed by query param, not a path segment: stable_ids
+    contain slashes, so ``/documents/{id:path}/lii-links`` is swallowed whole by the
+    generic document route and never reaches this handler."""
+    from fastapi.testclient import TestClient
+    from raglex.web.app import create_app
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json",
+                 embed_provider="local-hashing", embed_model=None)
+    facade = Facade(cfg)
+    _hold(facade, "nzhc/2012/2551", text="", title="Smith v Jones", source="nz-caselaw")
+
+    client = TestClient(create_app(cfg))
+    one = client.get("/document-lii-links", params={"id": "nzhc/2012/2551"})
+    assert one.status_code == 200
+    assert one.json()["links"][0]["url"] == "https://www.nzlii.org/nz/cases/NZHC/2012/2551.html"
+
+    listing = client.get("/lii-links", params={"scope": "textless"})
+    assert listing.status_code == 200 and listing.json()["count"] == 1
+
+    csv_res = client.get("/lii-links.csv", params={"scope": "textless"})
+    assert csv_res.status_code == 200
+    assert csv_res.headers["content-type"].startswith("text/csv")
+    assert "attachment" in csv_res.headers["content-disposition"]
+    assert "nzhc_2012_2551.html" in csv_res.text   # the round-trip filename
