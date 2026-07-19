@@ -84,6 +84,7 @@ class SearchEngine:
             [c.doc_id for c in vec] + [c.doc_id for c in lex])
         auth = _authority_ranked(vec, lex, auth_scores)
         fused = rrf_fuse(vec, lex, auth, limit=candidate_pool)
+        fused = _contain(fused)
 
         # 3) rerank → precision top-k
         top = self.reranker.rerank(query, fused)[:k]
@@ -133,6 +134,19 @@ class SearchEngine:
             decision_date=str(doc["decision_date"]) if doc and doc["decision_date"] else None,
             neighbours=neighbours,
         )
+
+
+def _contain(candidates: list[Candidate]) -> list[Candidate]:
+    """Containment rule (design §2.2): a document-level summary vector
+    (chunk_id = DOC_CHUNK_ID) exists to answer "which case is about this" — but
+    when one of the SAME document's leaf chunks also survived fusion, the leaf
+    is the better citation target and the doc-level row would be a duplicate
+    card. Keep the doc-level hit only when it's the document's sole appearance."""
+    from ..embeddings.chunking import DOC_CHUNK_ID
+
+    docs_with_leaf = {c.doc_id for c in candidates if c.chunk_id != DOC_CHUNK_ID}
+    return [c for c in candidates
+            if c.chunk_id != DOC_CHUNK_ID or c.doc_id not in docs_with_leaf]
 
 
 def _authority_ranked(

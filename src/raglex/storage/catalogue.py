@@ -2390,6 +2390,21 @@ class Catalogue:
         )
         self.conn.commit()
 
+    def embedded_docs_in_family(self, doc_ids: list[str], provider: str, model: str,
+                                model_version: str) -> set[str]:
+        """Which of these docs already hold vectors in the family — the offline
+        importer's skip-what's-done check, so re-running an import is cheap."""
+        out: set[str] = set()
+        for i in range(0, len(doc_ids), 200):
+            chunk = doc_ids[i:i + 200]
+            qs = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT doc_id FROM embeddings WHERE doc_id IN ({qs}) "
+                "AND provider = ? AND model = ? AND model_version = ?",
+                (*chunk, provider, model, model_version)).fetchall()
+            out.update(r["doc_id"] for r in rows)
+        return out
+
     def vector_rows(
         self, provider: str, model: str, model_version: str, filters: dict | None = None
     ) -> list[sqlite3.Row]:

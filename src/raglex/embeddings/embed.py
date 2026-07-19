@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..storage.catalogue import Catalogue
 from ..storage.textstore import TextStore
-from .chunking import ChunkConfig, chunk_document
+from .chunking import ChunkConfig, chunk_document, doc_proxy_chunk
 from .provider import EmbeddingProvider
 
 log = logging.getLogger("raglex.embeddings")
@@ -51,6 +51,9 @@ def _doc_meta(row) -> dict:
         "court": row["court"],
         "year": year,
         "tags": tags,
+        # the header now carries the title + ancestor path (design §2.1), so an
+        # enumerated leaf embeds with the hierarchy that gives it meaning
+        "title": row["title"],
     }
 
 
@@ -104,6 +107,12 @@ class EmbedStage:
             if not chunks:
                 stats.skipped_no_text += 1
                 continue
+            # document-level summary vector (design §2.2) — "which case is about
+            # this" queries; retrieval's containment rule stops it duplicating
+            # results when its own leaf chunks also hit
+            doc_row = doc_proxy_chunk(row["stable_id"], text, meta=_doc_meta(row))
+            if doc_row is not None:
+                chunks.append(doc_row)
             # fresh family for this doc (re-derivable projection, §1.2)
             self.catalogue.clear_embeddings(row["stable_id"], p.name, p.model, p.model_version)
             self._embed_and_store(row, chunks, stats)

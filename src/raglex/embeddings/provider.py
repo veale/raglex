@@ -156,11 +156,25 @@ def _mcp_provider(**kwargs):
     return MCPEmbeddingProvider(**kwargs)
 
 
+def _tei_provider(**kwargs):
+    """Open-weight model behind any OpenAI-compatible server (TEI/vLLM/llama.cpp).
+    Family label is the canonical ("hf", model, revision, dims) — shared with the
+    offline HPC pipeline, so served queries hit the cluster-computed vectors."""
+    from .tei import TEIEmbeddingProvider
+
+    dims = os.environ.get("RAGLEX_EMBED_DIMENSIONS")
+    if dims and "dimensions" not in kwargs:
+        kwargs["dimensions"] = int(dims)
+    return TEIEmbeddingProvider(**kwargs)
+
+
 # Provider registry — config, not code (Appendix B embedding_providers).
 _PROVIDERS = {
     "local-hashing": HashingEmbeddingProvider,
     "openrouter": OpenRouterEmbeddingProvider,
     "mcp": _mcp_provider,
+    "tei": _tei_provider,
+    "hf": _tei_provider,  # alias: the family label doubles as a registry key
 }
 
 
@@ -174,13 +188,18 @@ def get_provider(name: str = "local-hashing", **kwargs) -> EmbeddingProvider:
 
 
 def get_reranker(name: str | None = None):
-    """The §6c precision stage. ``mcp`` routes to the sidecar's cross-encoder; anything
-    else (or nothing configured) keeps the fused RRF order."""
+    """The §6c precision stage. ``mcp`` routes to the MCP sidecar's cross-encoder;
+    ``tei`` to a text-embeddings-inference /rerank endpoint (bge-reranker-v2-m3);
+    anything else (or nothing configured) keeps the fused RRF order."""
     name = name or os.environ.get("RAGLEX_RERANKER") or "identity"
     if name == "mcp":
         from .remote import MCPReranker
 
         return MCPReranker()
+    if name == "tei":
+        from .tei import TEIReranker
+
+        return TEIReranker()
     from ..retrieval.hybrid import IdentityReranker
 
     return IdentityReranker()

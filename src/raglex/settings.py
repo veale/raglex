@@ -31,15 +31,25 @@ class SettingSpec:
 
 # The known settings the UI renders. Adding a credentialed source = one row here.
 KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
-    SettingSpec("RAGLEX_EMBED_PROVIDER", "Embedding provider", False, "Embeddings", "local-hashing | openrouter | mcp"),
-    SettingSpec("RAGLEX_EMBED_MODEL", "Embedding model", False, "Embeddings", "openai/text-embedding-3-small | bge-m3"),
+    SettingSpec("RAGLEX_EMBED_PROVIDER", "Embedding provider", False, "Embeddings",
+                "local-hashing | tei (open weights via TEI/vLLM) | openrouter | mcp"),
+    SettingSpec("RAGLEX_EMBED_MODEL", "Embedding model", False, "Embeddings",
+                "Qwen/Qwen3-Embedding-0.6B | BAAI/bge-m3 | openai/text-embedding-3-small"),
     SettingSpec("RAGLEX_EMBED_DIMENSIONS", "Embedding dimensions", False, "Embeddings",
                 "must match the model; changing it starts a NEW vector family and re-embeds"),
+    SettingSpec("RAGLEX_EMBED_MODEL_VERSION", "Embedding model revision", False, "Embeddings",
+                "pin the HF revision so a silent weight update can't split the family"),
+    SettingSpec("RAGLEX_EMBED_INSTRUCTION", "Query instruction", False, "Embeddings",
+                "task prefix for instruction-tuned embedders; blank = legal default for Qwen3"),
+    SettingSpec("RAGLEX_TEI_URL", "Embedding server URL", False, "Embeddings",
+                "http://raglex-tei:8080 — any OpenAI-compatible /v1/embeddings server"),
     SettingSpec("RAGLEX_ML_URL", "ML sidecar MCP URL", False, "Embeddings",
                 "http://raglex-ml:9000/mcp — serves embed + rerank"),
     SettingSpec("RAGLEX_ML_TOKEN", "ML sidecar token", True, "Embeddings"),
-    SettingSpec("RAGLEX_RERANKER", "Reranker", False, "Embeddings", "identity | mcp"),
+    SettingSpec("RAGLEX_RERANKER", "Reranker", False, "Embeddings", "identity | tei | mcp"),
     SettingSpec("RAGLEX_RERANK_MODEL", "Reranker model", False, "Embeddings", "bge-reranker-v2-m3"),
+    SettingSpec("RAGLEX_RERANK_URL", "Reranker server URL", False, "Embeddings",
+                "TEI /rerank endpoint; blank = same as embedding server"),
     SettingSpec("OPENROUTER_API_KEY", "OpenRouter API key", True, "Embeddings"),
     SettingSpec("VOYAGE_API_KEY", "Voyage API key", True, "Embeddings"),
     # LLM passes (citation extraction + treatment classification, §5). Any

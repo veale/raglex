@@ -34,6 +34,9 @@ x-app-env: &app-env
   RAGLEX_SCRAPER: ${RAGLEX_SCRAPER:-httpx}
   RAGLEX_SCRAPLING_MCP_URL: ${RAGLEX_SCRAPLING_MCP_URL:-}
   RAGLEX_SCRAPLING_MCP_KEY: ${RAGLEX_SCRAPLING_MCP_KEY:-}
+  # query-time embedding server (the optional `ml` profile service below, or any
+  # OpenAI-compatible endpoint on the LAN). Provider/model/dims are Settings rows.
+  RAGLEX_TEI_URL: ${RAGLEX_TEI_URL:-http://raglex-tei:80}
 
 # The scrapling-MCP service runs in its own compose project; join its network so the
 # api/scheduler can reach it by name. `external: true` — we don't manage it here.
@@ -120,6 +123,33 @@ services:
 
   # NB: the MCP server is now served by raglex-api at http://<host>:8200/mcp (same origin),
   # so there is no separate raglex-mcp service / port any more.
+
+  # -- optional: query-time embedding server (profile: ml) --------------------
+  # Serves the SAME open-weight model the HPC bulk pass used (hpc/README.md), so
+  # live queries land in the cluster-computed vector family. Query traffic is
+  # light — CPU inference of a 0.6B embedder is milliseconds per query.
+  #
+  # The provider only needs an OpenAI-compatible /v1/embeddings endpoint, so the
+  # image is swappable:
+  #  - x86_64 hosts: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+  #    (also serves /rerank for bge-reranker-v2-m3 → RAGLEX_RERANKER=tei)
+  #  - THIS BOX is aarch64: TEI ships no arm64 image — use llama.cpp's server
+  #    (multi-arch) with a GGUF of the model, e.g.
+  #      RAGLEX_TEI_IMAGE=ghcr.io/ggml-org/llama.cpp:server
+  #      RAGLEX_TEI_ARGS=-hf Qwen/Qwen3-Embedding-0.6B-GGUF --embedding --port 80
+  #    or run `infinity_emb` / vLLM anywhere else on the LAN and just point
+  #    RAGLEX_TEI_URL at it.
+  # Start with:  docker compose -f docker-compose.asahi.yml --profile ml up -d
+  # Then set RAGLEX_EMBED_PROVIDER=tei (+ model/dimensions to match the family).
+  raglex-tei:
+    profiles: ["ml"]
+    image: ${RAGLEX_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-latest}
+    command: ${RAGLEX_TEI_ARGS:---model-id Qwen/Qwen3-Embedding-0.6B --port 80}
+    volumes:
+      - /mnt/nextcloud_data/docker-binds/raglex-data/hf-cache:/data
+    environment:
+      HF_HOME: /data
+    restart: unless-stopped
 
   raglex-scheduler:
     image: ${RAGLEX_IMAGE:-ghcr.io/veale/raglex:latest}

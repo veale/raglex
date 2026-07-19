@@ -76,40 +76,68 @@ def _split_sentences(text: str) -> list[str]:
 
 def _structural_units(
     text: str, segments: list[Segment] | None = None
-) -> list[tuple[str, int, int]]:
-    """Return (label, char_start, char_end) units on the document's own seams.
+) -> list[tuple[str, tuple[str, ...], int, int]]:
+    """Return (label, ancestor_path, char_start, char_end) units on the document's
+    own seams.
 
     Structure-first (§6b, mirroring academic-mcp): if the adapter handed us
     ``segments`` — the source's native units (numbered paragraphs, Formex
-    sections, France's zones) — chunk on *those*. Otherwise derive units from the
-    flat text's paragraph breaks. Either way char offsets index back into ``text``.
-    """
+    sections, France's zones) — chunk on *those*, and derive each unit's
+    **ancestor path** (Part › Chapter › …) from the segment levels, so the
+    contextual header can carry the hierarchy the multi-level literature says a
+    provision's meaning depends on. Otherwise derive units from the flat text's
+    paragraph breaks (empty paths). Either way char offsets index back into
+    ``text``."""
     if segments:
-        return [(s.label or s.kind, s.char_start, s.char_end) for s in segments]
-    units: list[tuple[str, int, int]] = []
+        units: list[tuple[str, tuple[str, ...], int, int]] = []
+        # stack of (level, label) — the open ancestors at this point in the walk
+        stack: list[tuple[int, str]] = []
+        for s in segments:
+            level = s.level or 0
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            path = tuple(lbl for _lvl, lbl in stack)
+            units.append((s.label or s.kind, path, s.char_start, s.char_end))
+            if s.label:
+                stack.append((level, s.label))
+        return units
+    units = []
     pos = 0
     for block in re.split(r"(\n\s*\n)", text):
         if not block or block.isspace():
             pos += len(block)
             continue
         start = pos
-        units.append(("paragraph", start, start + len(block)))
+        units.append(("paragraph", (), start, start + len(block)))
         pos += len(block)
     if not units:
-        units.append(("block", 0, len(text)))
+        units.append(("block", (), 0, len(text)))
     return units
 
 
-def _header(meta: dict | None, unit: str) -> str:
+def _header(meta: dict | None, unit: str, path: tuple[str, ...] = ()) -> str:
+    """The contextual header prepended to the *embedding input only* (§6b.4).
+
+    Now carries the document title and the structural ancestor path — e.g.
+    ``[UK · uksc · 2024 · Data Protection Act 2018 · Part 2 › Chapter 2 · s.45]``
+    — so an enumerated leaf embeds with the hierarchy that gives it meaning
+    (design §2.1). Kept compact: title truncated, path capped at 3 levels."""
+    title = (meta or {}).get("title") or ""
+    if len(title) > 80:
+        title = title[:77] + "…"
+    crumb = " › ".join(path[-3:]) if path else None
     if not meta:
-        return f"[{unit}] "
-    bits = [
-        meta.get("jurisdiction") or meta.get("source"),
-        meta.get("court"),
-        str(meta["year"]) if meta.get("year") else None,
-        ",".join(meta["tags"]) if meta.get("tags") else None,
-        unit,
-    ]
+        bits = [crumb, unit]
+    else:
+        bits = [
+            meta.get("jurisdiction") or meta.get("source"),
+            meta.get("court"),
+            str(meta["year"]) if meta.get("year") else None,
+            ",".join(meta["tags"]) if meta.get("tags") else None,
+            title or None,
+            crumb,
+            unit,
+        ]
     return "[" + " · ".join(b for b in bits if b) + "] "
 
 
@@ -133,25 +161,25 @@ def chunk_document(
     # 1) structural split — on the source's own units when the adapter gave them
     raw_units = _structural_units(text, segments)
 
-    # 2) merge tiny adjacent units up to the token floor
-    merged: list[tuple[str, int, int]] = []
-    for unit, start, end in raw_units:
+    # 2) merge tiny adjacent units up to the token floor (the first unit's path wins)
+    merged: list[tuple[str, tuple[str, ...], int, int]] = []
+    for unit, path, start, end in raw_units:
         if merged:
-            plabel, pstart, pend = merged[-1]
+            plabel, ppath, pstart, pend = merged[-1]
             if _approx_tokens(text[pstart:pend]) < cfg.min_tokens:
-                merged[-1] = (plabel, pstart, end)  # absorb into previous
+                merged[-1] = (plabel, ppath, pstart, end)  # absorb into previous
                 continue
-        merged.append((unit, start, end))
+        merged.append((unit, path, start, end))
 
     # 3) split oversized units at sentence boundaries up to the ceiling, with a
     #    small sentence-level overlap (clamped below the target so it can't stall)
     chunks: list[Chunk] = []
     cid = 0
     eff_overlap = min(cfg.overlap_tokens, max(1, cfg.target_tokens // 3))
-    for unit, start, end in merged:
+    for unit, path, start, end in merged:
         body = text[start:end]
         if _approx_tokens(body) <= cfg.max_tokens:
-            cid = _emit(chunks, doc_id, cid, body, unit, start, meta)
+            cid = _emit(chunks, doc_id, cid, body, unit, start, meta, path)
             continue
         sentences = _split_sentences(body)
         spans = _sentence_spans(body, sentences)
@@ -162,7 +190,7 @@ def chunk_document(
                 toks += _approx_tokens(sentences[j])
                 j += 1
             seg = " ".join(sentences[i:j])
-            cid = _emit(chunks, doc_id, cid, seg, unit, start + spans[i][0], meta)
+            cid = _emit(chunks, doc_id, cid, seg, unit, start + spans[i][0], meta, path)
             if j >= len(sentences):
                 break
             # step back a few sentences for overlap, but always make progress
@@ -172,6 +200,41 @@ def chunk_document(
                 otoks += _approx_tokens(sentences[k])
             i = max(k, i + 1)
     return chunks
+
+
+# The reserved chunk id for a document-LEVEL vector (design §2.2). Lives in the
+# same embeddings table/family as the leaf chunks; retrieval's containment rule
+# keeps it from duplicating results when its own leaves also hit.
+DOC_CHUNK_ID = -1
+
+
+def doc_proxy_chunk(doc_id: str, text: str, *, meta: dict | None = None) -> Chunk | None:
+    """One document-level chunk answering "which case/instrument is about this" —
+    a *synthetic proxy*, never the raw document (mean-pooling 400 paragraphs is
+    vector soup): title + the opening (facts/subject are front-loaded) + the tail
+    (judgments put the holding/dispositif at the end). When a real headnote or an
+    LLM summary exists upstream, callers can pass it via ``meta['summary']`` and
+    it wins outright."""
+    if not text or not text.strip():
+        return None
+    summary = (meta or {}).get("summary")
+    if summary:
+        proxy = summary
+    else:
+        head = text[:1400].strip()
+        tail = text[-900:].strip() if len(text) > 2600 else ""
+        title = (meta or {}).get("title") or ""
+        proxy = "\n".join(p for p in (title, head, "…", tail) if p) if tail \
+            else "\n".join(p for p in (title, head) if p)
+    return Chunk(
+        doc_id=doc_id,
+        chunk_id=DOC_CHUNK_ID,
+        text=proxy,
+        embed_input=_header(meta, "doc") + proxy,
+        structural_unit="doc",
+        char_start=0,
+        char_end=min(len(text), 1400),
+    )
 
 
 def _sentence_spans(body: str, sentences: list[str]) -> list[tuple[int, int]]:
@@ -186,7 +249,7 @@ def _sentence_spans(body: str, sentences: list[str]) -> list[tuple[int, int]]:
     return spans
 
 
-def _emit(chunks, doc_id, cid, body, unit, char_start, meta) -> int:
+def _emit(chunks, doc_id, cid, body, unit, char_start, meta, path=()) -> int:
     body = body.strip()
     if not body:
         return cid
@@ -195,7 +258,7 @@ def _emit(chunks, doc_id, cid, body, unit, char_start, meta) -> int:
             doc_id=doc_id,
             chunk_id=cid,
             text=body,
-            embed_input=_header(meta, unit) + body,  # header in embedding input only
+            embed_input=_header(meta, unit, path) + body,  # header in embedding input only
             structural_unit=unit,
             char_start=char_start,
             char_end=char_start + len(body),

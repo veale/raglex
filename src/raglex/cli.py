@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 from .adapters.registry import ADAPTERS, get_adapter
 from .config import Config
@@ -599,6 +600,79 @@ def cmd_embed(args: argparse.Namespace) -> int:
         catalogue.close()
 
 
+def cmd_embed_export(args: argparse.Namespace) -> int:
+    """Export chunk shards for the offline (HPC) embed pass — see hpc/README.md."""
+    from .embeddings.offline import export_shards
+
+    config = Config.from_env()
+    catalogue, _rawstore, textstore = _open(config)
+    try:
+        stats = export_shards(
+            catalogue, textstore, args.out,
+            model=args.model, model_version=args.revision, dimensions=args.dimensions,
+            chunks_per_shard=args.shard_size, limit=args.limit,
+            include_doc_text=not args.no_doc_text, doc_vector=not args.no_doc_vector,
+            on_progress=lambda **p: print(
+                f"\r  {p.get('stage')} {p.get('done')}/{p.get('total')}", end="", flush=True),
+        )
+        print(f"\nexported {stats.documents} docs / {stats.chunks} chunks "
+              f"into {stats.shards} shards at {args.out}"
+              + (f" (skipped {stats.skipped_no_text} with no text)" if stats.skipped_no_text else ""))
+        print("next: rsync the directory to the cluster and run the array job — see hpc/README.md")
+        return 0
+    finally:
+        catalogue.close()
+
+
+def cmd_embed_import(args: argparse.Namespace) -> int:
+    """Import vector shards produced on the cluster back into the catalogue."""
+    from .embeddings.offline import import_shards
+
+    config = Config.from_env()
+    catalogue, *_ = _open(config)
+    try:
+        stats = import_shards(
+            catalogue, args.dir,
+            on_progress=lambda **p: print(
+                f"\r  {p.get('stage')} {p.get('done')}/{p.get('total')} {p.get('item', '')}",
+                end="", flush=True),
+        )
+        print(f"\nimported {stats.shards_imported} shards "
+              f"({stats.documents} docs / {stats.chunks} chunks); "
+              f"skipped {stats.shards_skipped} already-imported; "
+              f"{stats.shards_missing_vectors} still awaiting vectors")
+        if stats.shards_imported and not stats.shards_missing_vectors:
+            print("all shards in. Now: set RAGLEX_EMBED_PROVIDER=tei (+ model/dims to match), "
+                  "start the serving container, and run `raglex index` to build the HNSW index.")
+        return 0
+    finally:
+        catalogue.close()
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    """Known-item retrieval benchmark from the corpus's own citations (design §5)."""
+    from .retrieval.bench import run_bench
+
+    config = Config.from_env()
+    catalogue, _rawstore, textstore = _open(config)
+    try:
+        provider = config.make_provider()
+        if not provider.health():
+            print(f"embedding provider {provider.name!r} is not healthy")
+            return 1
+        report = run_bench(catalogue, textstore, provider,
+                           queries=args.queries, k=args.k, seed=args.seed)
+        print(json.dumps(report, indent=2))
+        out_dir = Path(config.data_dir) / "bench"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = report["family"].replace("/", "_") + "-" + report["ran_at"][:19].replace(":", "")
+        (out_dir / f"{stamp}.json").write_text(json.dumps(report, indent=2))
+        print(f"saved to {out_dir / (stamp + '.json')}")
+        return 0
+    finally:
+        catalogue.close()
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     from .retrieval import SearchEngine
 
@@ -724,6 +798,36 @@ def build_parser() -> argparse.ArgumentParser:
     emb = sub.add_parser("embed", help="embed documents with text (§6)")
     emb.add_argument("--limit", type=int, default=None, help="max documents this run")
     emb.set_defaults(func=cmd_embed)
+
+    exp = sub.add_parser("embed-export",
+                         help="export chunk shards for the offline/HPC embed pass (hpc/README.md)")
+    exp.add_argument("--out", required=True, help="output directory for shards + manifest")
+    exp.add_argument("--model", default="Qwen/Qwen3-Embedding-0.6B",
+                     help="HF model id the shards will be embedded with (stamps the family)")
+    exp.add_argument("--revision", default="1",
+                     help="model revision/version label for the family key")
+    exp.add_argument("--dimensions", type=int, default=1024,
+                     help="vector width the cluster job will emit (Matryoshka truncation allowed)")
+    exp.add_argument("--shard-size", type=int, default=25000, help="chunks per shard")
+    exp.add_argument("--limit", type=int, default=None, help="max documents (a pilot export)")
+    exp.add_argument("--no-doc-text", action="store_true",
+                     help="omit per-document full-text records (smaller shards, but a later "
+                          "late-chunking run would need a full re-export)")
+    exp.add_argument("--no-doc-vector", action="store_true",
+                     help="omit the document-level summary-proxy chunk (chunk_id=-1)")
+    exp.set_defaults(func=cmd_embed_export)
+
+    impv = sub.add_parser("embed-import",
+                          help="import cluster-computed vector shards into the catalogue")
+    impv.add_argument("--dir", required=True, help="the export directory, now containing .vec.bin shards")
+    impv.set_defaults(func=cmd_embed_import)
+
+    ben = sub.add_parser("bench",
+                         help="known-item retrieval benchmark from the corpus's own citations (§5)")
+    ben.add_argument("--queries", type=int, default=200, help="number of eval queries to sample")
+    ben.add_argument("--k", type=int, default=10, help="evaluate recall@k")
+    ben.add_argument("--seed", type=int, default=7, help="sampling seed (fix it to compare runs)")
+    ben.set_defaults(func=cmd_bench)
 
     idx = sub.add_parser("index", help="build the pgvector HNSW index (Postgres, §7)")
     idx.set_defaults(func=cmd_index)
