@@ -73,6 +73,39 @@ def _row_meta(row) -> dict:
         return {}
 
 
+def _match_segment(segs, anchor: str) -> int:
+    """Index of the segment a citable label names — the server-side twin of the
+    reader's ``matchSegIndex``: paragraph pinpoints ("para 80", "[80]") match by
+    number; legislation pinpoints ("Article 17", "s. 45") by normalised label,
+    exact before substring (so "Article 4" prefers "Article 4" over "Article 40")."""
+    import re as _re
+
+    if not anchor or not segs:
+        return -1
+    para = _re.search(r"para\.?\s*(\d+)|^\[?(\d+)\]?$", anchor.strip(), _re.IGNORECASE)
+    num = para and (para.group(1) or para.group(2))
+    if num:
+        pat = _re.compile(rf"^\[?{num}[.\]]?\b")
+        for i, s in enumerate(segs):
+            if pat.match((s.label or "").strip()):
+                return i
+
+    def norm(x: str) -> str:
+        return _re.sub(r"[^a-z0-9]+", "", (x or "").lower())
+
+    a = norm(anchor)
+    if not a:
+        return -1
+    for i, s in enumerate(segs):
+        if norm(s.label) == a:
+            return i
+    if len(a) > 2:
+        for i, s in enumerate(segs):
+            if a in norm(s.label):
+                return i
+    return -1
+
+
 def _doc_type(value: str | None, default: DocType) -> DocType:
     if not value:
         return default
@@ -429,18 +462,23 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             engine = SearchEngine(cat, self._provider(), reranker=self._reranker())
             hits = engine.search(query, k=k, filters=filters or None)
-            return [
-                {
+            out = []
+            for h in hits:
+                doc = cat.get_document(h.doc_id)
+                out.append({
                     "doc_id": h.doc_id, "ecli": h.ecli, "title": h.title, "court": h.court,
-                    "source": h.source, "score": h.score, "structural_unit": h.structural_unit,
+                    "source": h.source, "doc_type": h.doc_type, "decision_date": h.decision_date,
+                    "score": h.score, "structural_unit": h.structural_unit,
                     "char_start": h.char_start, "char_end": h.char_end, "chunk_text": h.chunk_text,
+                    "oscola": _oscola_cite(doc, _row_meta(doc)) if doc else None,
+                    "signals": h.signals,
                     "neighbours": [
-                        {"id": n.dst_id, "relationship_type": n.relationship_type, "direction": n.direction}
+                        {"id": n.dst_id, "relationship_type": n.relationship_type,
+                         "direction": n.direction, "title": n.title, "authority": n.authority}
                         for n in (h.neighbours.neighbours if h.neighbours else [])
                     ],
-                }
-                for h in hits
-            ]
+                })
+            return out
 
     def get_document(self, stable_id: str) -> dict:
         with self._open() as (cat, _rs, _ts):
@@ -802,17 +840,174 @@ class Facade:
 
     def graph(self, stable_id: str, *, rel: list[str] | None = None) -> dict:
         with self._open() as (cat, _rs, _ts):
-            exp = expand(cat, stable_id, relationship_types=rel)
+            exp = expand(cat, stable_id, relationship_types=rel, limit=25)
             return {
                 "focus": stable_id,
                 "neighbours": [
                     {"id": n.dst_id, "relationship_type": n.relationship_type,
                      "direction": n.direction, "title": n.title, "court": n.court,
                      "src_anchor": n.src_anchor, "dst_anchor": n.dst_anchor,
-                     "extracted_via": n.extracted_via}
+                     "extracted_via": n.extracted_via, "authority": n.authority}
                     for n in exp.neighbours
                 ],
             }
+
+    # -- citation-network statistics (design §3: the mentions-only graph) ----
+    def rebuild_authority(self, *, on_progress=None, cancel_check=None) -> dict:
+        """Recompute the PageRank authority roll-up (raw + age-decayed + percentile)
+        over the resolved, non-inferred citation graph. Treatment types are NOT
+        weighted — they aren't reliable yet. A batch job, like the citation-count
+        rebuild; search fusion, ranked neighbours, the citator and 'sort by
+        authority' all read the resulting ``doc_authority`` table."""
+        with self._open() as (cat, _rs, _ts):
+            n = cat.rebuild_authority(on_progress=on_progress)
+        self._invalidate_caches()
+        return {"documents": n}
+
+    def related_documents(self, stable_id: str, *, limit: int = 12) -> dict:
+        """"Related" via the citation network, not vectors (design §3b): documents
+        most often cited *together with* this one (co-citation), and documents that
+        rely on the same authorities (bibliographic coupling). Both are honest,
+        cheap graph statistics; each row is labelled with why it's related."""
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                doc = cat.get_document(stable_id)
+                ids = [stable_id] + ([doc["ecli"]] if doc and doc["ecli"] else [])
+                out = {"co_cited": cat.co_cited_with(ids, limit=limit),
+                       "coupled": cat.coupled_with(stable_id, limit=limit)}
+                # enrich with titles/OSCOLA for display (bounded: 2×limit lookups)
+                for rows in out.values():
+                    for r in rows:
+                        d = cat.get_document(r["id"]) or (
+                            cat.get_document(cat.find_document_id(r["id"]) or "") if r["id"] else None)
+                        r["title"] = d["title"] if d else None
+                        r["court"] = d["court"] if d else None
+                        r["date"] = str(d["decision_date"])[:10] if d and d["decision_date"] else None
+                        r["oscola"] = _oscola_cite(d, _row_meta(d)) if d else None
+                return out
+        return self._cached(f"related:{stable_id}:{limit}", 300, _compute)
+
+    def citator(self, stable_id: str) -> dict:
+        """The "how does this authority stand" report an agent or the UI asks for
+        first: citation volume + recency, network-authority percentile, the most
+        significant citing documents, and (for legislation) version/effects state.
+        Treatment counts are deliberately ABSENT — the classifier isn't reliable
+        enough to present Shepard's-style signals yet (design §6c caveat)."""
+        with self._open() as (cat, _rs, _ts):
+            doc = cat.get_document(stable_id)
+            if doc is None:
+                return {"error": "not found", "stable_id": stable_id}
+            ids = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
+            stats = cat.cited_by_stats(ids)
+            auth = cat.authority_for([stable_id]).get(stable_id)
+            citors = cat.top_citors(ids, limit=8)
+            for c in citors:
+                d = cat.get_document(c["id"])
+                c["title"] = d["title"] if d else None
+                c["oscola"] = _oscola_cite(d, _row_meta(d)) if d else None
+                c["date"] = str(d["decision_date"])[:10] if d and d["decision_date"] else None
+            out = {
+                "stable_id": stable_id,
+                "cited_by": stats,
+                "authority": {
+                    "pagerank": auth["pagerank"] if auth else 0.0,
+                    "pagerank_decayed": auth["pagerank_decayed"] if auth else 0.0,
+                    "percentile": auth["percentile"] if auth else None,
+                    "in_degree": auth["in_degree"] if auth else 0,
+                } if auth else None,
+                "most_significant_citors": citors,
+                "treatments": None,  # joins when the treatment classifier is trustworthy
+            }
+            if doc["doc_type"] == "legislation":
+                out["versions"] = [
+                    {"version": v["version"], "archived_at": v["archived_at"]}
+                    for v in cat.list_versions(stable_id)]
+            return out
+
+    def get_provision(self, stable_id: str, *, label: str | None = None,
+                      char_start: int | None = None, char_end: int | None = None,
+                      context: int = 1) -> dict:
+        """ONE provision/paragraph of a document by its citable label ("Article 17",
+        "s. 45", "[42]") or by a char span (a search hit), with ``context``
+        neighbouring segments either side and the structural ancestor path
+        (heading breadcrumb). The agent's most common need — quote one provision
+        exactly — without shipping the whole document body; also the backend of
+        the search UI's show-context expander."""
+        with self._open() as (cat, _rs, ts):
+            doc = cat.get_document(stable_id)
+            if doc is None or not doc["payload_hash"]:
+                return {"error": "not found or no text", "stable_id": stable_id}
+            try:
+                text = ts.get(doc["payload_hash"])
+            except OSError:
+                return {"error": "text unavailable", "stable_id": stable_id}
+            segs = ts.get_segments(doc["payload_hash"])
+            idx = -1
+            if label:
+                idx = _match_segment(segs, label)
+            elif char_start is not None:
+                for i, s in enumerate(segs):
+                    if s.char_start <= char_start < s.char_end:
+                        idx = i
+                        break
+                else:
+                    # offset in a gap between segments → the last segment starting before it
+                    for i in range(len(segs) - 1, -1, -1):
+                        if segs[i].char_start <= char_start:
+                            idx = i
+                            break
+            if idx < 0 and segs:
+                return {"error": "no matching segment", "stable_id": stable_id,
+                        "labels_sample": [s.label for s in segs[:40] if s.label]}
+            if not segs:
+                lo = max(0, (char_start or 0) - 400)
+                hi = min(len(text), (char_end or len(text)) + 400)
+                return {"stable_id": stable_id, "title": doc["title"], "segments": [
+                    {"label": None, "kind": "block", "level": 0, "focus": True,
+                     "char_start": lo, "char_end": hi, "text": text[lo:hi]}], "path": []}
+            lo, hi = max(0, idx - context), min(len(segs), idx + context + 1)
+            out_segs = []
+            for i in range(lo, hi):
+                s = segs[i]
+                out_segs.append({
+                    "label": s.label, "kind": s.kind, "level": s.level,
+                    "char_start": s.char_start, "char_end": s.char_end,
+                    "focus": i == idx, "text": text[s.char_start:s.char_end].strip(),
+                })
+            # ancestor path: nearest preceding segments of strictly shallower level
+            path: list[str] = []
+            level = segs[idx].level
+            for i in range(idx - 1, -1, -1):
+                if segs[i].level < level and segs[i].label:
+                    path.append(segs[i].label)
+                    level = segs[i].level
+                if level == 0:
+                    break
+            return {"stable_id": stable_id, "title": doc["title"],
+                    "oscola": _oscola_cite(doc, _row_meta(doc)),
+                    "segments": out_segs, "path": list(reversed(path))}
+
+    def decide_suggestions(self, *, items: list[dict]) -> dict:
+        """Bulk tick/cross over near-miss suggestions — each item
+        ``{ref, suggested_id, accept}``. Decides every row with the resolver pass
+        deferred, then resolves ONCE at the end (the whole point of batching)."""
+        decided = 0
+        accepted = 0
+        errors: list[dict] = []
+        for it in items:
+            try:
+                r = self.decide_suggestion(ref=it["ref"], suggested_id=it["suggested_id"],
+                                           accept=bool(it.get("accept", True)), resolve=False)
+                decided += r.get("updated", 0)
+                if it.get("accept", True):
+                    accepted += 1
+            except Exception as exc:  # noqa: BLE001 — one bad row mustn't kill the batch
+                errors.append({"ref": it.get("ref"), "error": str(exc)})
+        out: dict = {"decided": decided, "accepted": accepted, "errors": errors}
+        if accepted:
+            out["resolved_edges"] = self.resolve().get("resolved")
+        self._invalidate_caches()
+        return out
 
     def stats(self) -> dict:
         def _compute():
@@ -5566,6 +5761,36 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             return {"total": cat.count_pending_suggestions(),
                     "suggestions": cat.pending_suggestions(limit=limit)}
+
+    def reference_context(self, ref: str, *, limit: int = 5) -> dict:
+        """The passages where the corpus actually cites a hanging reference — the
+        evidence a human needs to judge a near-miss suggestion. Each snippet is the
+        citing sentence-neighbourhood (from the edge's stored context span) with
+        the citing document's citation form."""
+        from .core.text import fold
+
+        with self._open() as (cat, _rs, ts):
+            out: list[dict] = []
+            for occ in cat.reference_occurrences(ref, fold(ref), limit=limit):
+                sdoc = cat.get_document(occ["src_id"])
+                snippet = None
+                cs, ce = occ["context_start"], occ["context_end"]
+                if sdoc and sdoc["payload_hash"] and cs is not None:
+                    try:
+                        text = ts.get(sdoc["payload_hash"])
+                        a = max(0, cs - 140)
+                        b = min(len(text), (ce or cs) + 240)
+                        snippet = text[a:b].strip()
+                    except OSError:
+                        snippet = None
+                out.append({
+                    "src_id": occ["src_id"],
+                    "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)) if sdoc else None,
+                    "src_title": sdoc["title"] if sdoc else None,
+                    "raw": occ["raw_citation_string"],
+                    "snippet": snippet,
+                })
+            return {"ref": ref, "occurrences": out}
 
     # -- refinement flags (reader passages flagged for linking-logic review) --
     def flag_refinement(self, *, doc_id: str, selected_text: str, anchor: str | None = None,

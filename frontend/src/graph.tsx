@@ -23,6 +23,8 @@ function buildStyle(): any[] {
         "background-color": node, "label": "data(label)", "color": text,
         "font-size": 9, "text-wrap": "wrap", "text-max-width": "120px", "width": 16, "height": 16,
         "text-valign": "center", "text-halign": "right", "text-margin-x": 3 } },
+    // authority-sized nodes (PageRank): bigger = more load-bearing in the network
+    { selector: "node[size]", style: { "width": "data(size)", "height": "data(size)" } },
     { selector: "node.focus", style: { "background-color": accent, "width": 22, "height": 22 } },
     { selector: "node.legislation", style: { "background-color": ok, "shape": "round-rectangle" } },
     { selector: "edge", style: {
@@ -55,9 +57,14 @@ export function GraphView({ focusId, open }: { focusId: string; open: (id: strin
       const add: ElementDefinition[] = [];
       if (cy.getElementById(id).empty())
         add.push({ data: { id, label: id }, classes: isFocus ? "focus" : "" });
+      // node size encodes network authority (PageRank): landmarks read at a glance
+      const maxAuth = Math.max(1e-12, ...g.neighbours.map((n: any) => n.authority || 0));
       for (const n of g.neighbours) {
-        if (cy.getElementById(n.id).empty())
-          add.push({ data: { id: n.id, label: n.title || n.id }, classes: n.id.match(/R\d|L\d|ukpga|uksi/) ? "legislation" : "" });
+        if (cy.getElementById(n.id).empty()) {
+          const size = 14 + Math.round(14 * Math.sqrt((n.authority || 0) / maxAuth));
+          add.push({ data: { id: n.id, label: n.title || n.id, size },
+            classes: n.id.match(/R\d|L\d|ukpga|uksi/) ? "legislation" : "" });
+        }
         const [s, t] = n.direction === "out" ? [id, n.id] : [n.id, id];
         const eid = `${s}->${t}:${n.relationship_type}`;
         if (cy.getElementById(eid).empty()) {

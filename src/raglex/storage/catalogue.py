@@ -104,6 +104,20 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 CREATE INDEX IF NOT EXISTS citation_counts_cand_idx ON citation_counts (candidate_id);
 
+-- Per-document citation-network statistics (PageRank over the resolved mentions
+-- graph — treatment types deliberately NOT weighted, they aren't reliable yet).
+-- Rebuilt wholesale by rebuild_authority() on a cadence, like citation_counts.
+CREATE TABLE IF NOT EXISTS doc_authority (
+    doc_id           TEXT PRIMARY KEY,
+    pagerank         REAL NOT NULL DEFAULT 0,
+    pagerank_decayed REAL NOT NULL DEFAULT 0,   -- citing-doc age discounted (half-life)
+    percentile       REAL,                      -- 0..100 among cited documents
+    in_degree        INTEGER NOT NULL DEFAULT 0,
+    out_degree       INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS doc_authority_pr_idx ON doc_authority (pagerank DESC);
+
 -- Extracted citations (§5): the raw *observations* (one per occurrence) with
 -- entity kind, candidate, pinpoint, char span (the context window for treatment
 -- classification §1.3a), method + confidence. These feed the `relations` graph —
@@ -1149,6 +1163,180 @@ class Catalogue:
             f"WHERE candidate_id IN ({qs}) GROUP BY candidate_id", ids).fetchall()
         return {r["candidate_id"]: r["occ"] for r in rows}
 
+    # -- citation-network statistics (the authority prior; design §3) --------
+    # The ranking graph is the resolved, non-inferred, non-suppressed edge set.
+    # Treatment types are deliberately NOT weighted — the classifier isn't
+    # reliable yet, so every edge counts as a plain mention.
+    _GRAPH_EDGE_SQL = (
+        "SELECT DISTINCT src_id, dst_id FROM relations "
+        "WHERE resolution_status = 'resolved' AND dst_id IS NOT NULL "
+        "AND extracted_via <> 'inferred' AND relationship_type <> 'suppressed'"
+    )
+
+    def rebuild_authority(self, *, on_progress=None) -> int:
+        """Recompute the ``doc_authority`` roll-up (PageRank raw + age-decayed,
+        degrees, percentile) over the whole resolved graph. A scheduled batch job,
+        like ``rebuild_citation_counts`` — pure Python, no extra dependencies."""
+        from datetime import date
+
+        from ..retrieval.authority import compute_authority
+
+        if on_progress:
+            on_progress(stage="loading edges")
+        edges = [(r["src_id"], r["dst_id"]) for r in self.conn.execute(self._GRAPH_EDGE_SQL)]
+        years: dict[str, int] = {}
+        for r in self.conn.execute(
+                "SELECT stable_id, decision_date FROM documents WHERE decision_date IS NOT NULL"):
+            try:
+                years[r["stable_id"]] = int(str(r["decision_date"])[:4])
+            except (ValueError, TypeError):
+                continue
+        if on_progress:
+            on_progress(stage="pagerank", total=len(edges))
+        rows = compute_authority(edges, years, now_year=date.today().year)
+        if on_progress:
+            on_progress(stage="writing", total=len(rows))
+        now = _now()
+        with self._atomic():
+            self.conn.execute("DELETE FROM doc_authority")
+            chunk = 500
+            for i in range(0, len(rows), chunk):
+                batch = rows[i:i + chunk]
+                ph = ",".join(["(?,?,?,?,?,?,?)"] * len(batch))
+                params: list = []
+                for doc_id, pr, prd, pct, ind, outd in batch:
+                    params.extend((doc_id, pr, prd, pct, ind, outd, now))
+                self.conn.execute(
+                    "INSERT INTO doc_authority (doc_id, pagerank, pagerank_decayed, "
+                    "percentile, in_degree, out_degree, rebuilt_at) VALUES " + ph, params)
+        return len(rows)
+
+    def authority_for(self, ids: list[str]) -> dict[str, dict]:
+        """Authority rows for a set of document ids (missing → absent)."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT * FROM doc_authority WHERE doc_id IN ({qs})", ids).fetchall()
+        return {r["doc_id"]: dict(r) for r in rows}
+
+    def neighbours_out(self, doc_id: str, *, limit: int = 200,
+                       include_inferred: bool = False) -> list[sqlite3.Row]:
+        """Bounded outgoing resolved edges — unlike ``relations_for`` this never
+        returns an unbounded set, so it's safe on any node."""
+        extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
+        return self.conn.execute(
+            "SELECT * FROM relations WHERE src_id = ? AND resolution_status = 'resolved' "
+            f"AND dst_id IS NOT NULL {extra}LIMIT ?", (doc_id, limit)).fetchall()
+
+    def neighbours_in(self, doc_id: str, *, limit: int = 200,
+                      include_inferred: bool = False) -> list[sqlite3.Row]:
+        """Bounded incoming resolved edges (a heavily-cited authority has 100k+)."""
+        extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
+        return self.conn.execute(
+            "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
+            f"{extra}LIMIT ?", (doc_id, limit)).fetchall()
+
+    def co_cited_with(self, ids: list[str], *, limit: int = 15,
+                      max_citers: int = 500) -> list[dict]:
+        """Documents most often cited *together with* this one (in the same citing
+        document) — the classic "related cases" signal. Bounded: at most
+        ``max_citers`` citing documents are sampled, so a GDPR-scale node can't
+        explode the join."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return []
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT r.dst_id AS id, COUNT(DISTINCT r.src_id) AS n
+            FROM relations r
+            JOIN (SELECT DISTINCT src_id FROM relations
+                  WHERE dst_id IN ({qs}) AND resolution_status = 'resolved'
+                    AND extracted_via <> 'inferred' LIMIT ?) citers
+              ON r.src_id = citers.src_id
+            WHERE r.dst_id IS NOT NULL AND r.dst_id NOT IN ({qs})
+              AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred'
+            GROUP BY r.dst_id ORDER BY n DESC LIMIT ?
+            """,
+            (*ids, max_citers, *ids, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def coupled_with(self, doc_id: str, *, limit: int = 15,
+                     max_target_citers: int = 1500) -> list[dict]:
+        """Documents that rely on the same authorities as this one (bibliographic
+        coupling). Ubiquitous targets (cited by more than ``max_target_citers``
+        documents — the GDPR problem) carry no discriminating signal and would
+        blow up the join, so they're dropped before aggregating."""
+        outs = [r["dst_id"] for r in self.conn.execute(
+            "SELECT DISTINCT dst_id FROM relations WHERE src_id = ? "
+            "AND resolution_status = 'resolved' AND dst_id IS NOT NULL "
+            "AND extracted_via <> 'inferred'", (doc_id,)).fetchall()]
+        if not outs:
+            return []
+        qs = ",".join("?" * len(outs))
+        counts = self.conn.execute(
+            f"SELECT dst_id, COUNT(DISTINCT src_id) AS n FROM relations "
+            f"WHERE dst_id IN ({qs}) AND resolution_status = 'resolved' "
+            f"GROUP BY dst_id", outs).fetchall()
+        keep = [r["dst_id"] for r in counts if r["n"] <= max_target_citers][:100]
+        if not keep:
+            return []
+        kqs = ",".join("?" * len(keep))
+        rows = self.conn.execute(
+            f"""
+            SELECT r.src_id AS id, COUNT(DISTINCT r.dst_id) AS n
+            FROM relations r
+            WHERE r.dst_id IN ({kqs}) AND r.src_id <> ?
+              AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred'
+            GROUP BY r.src_id ORDER BY n DESC LIMIT ?
+            """,
+            (*keep, doc_id, limit),
+        ).fetchall()
+        return [{**dict(r), "of": len(keep)} for r in rows]
+
+    def cited_by_stats(self, ids: list[str], *, recent_years: int = 5) -> dict:
+        """Aggregate cited-by numbers for the citator: distinct citing documents,
+        total occurrences, and how many of those citers decided in the last N
+        years (SQL aggregates — never materialises the row set in Python)."""
+        from datetime import date
+
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {"documents": 0, "recent_documents": 0, "recent_years": recent_years}
+        qs = ",".join("?" * len(ids))
+        base = (f"FROM relations r WHERE r.dst_id IN ({qs}) "
+                "AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred'")
+        total = self.conn.execute(
+            f"SELECT COUNT(DISTINCT r.src_id) AS n {base}", ids).fetchone()["n"]
+        cutoff = f"{date.today().year - recent_years:04d}-01-01"
+        recent = self.conn.execute(
+            f"SELECT COUNT(DISTINCT r.src_id) AS n {base} "
+            "AND EXISTS (SELECT 1 FROM documents d WHERE d.stable_id = r.src_id "
+            "AND d.decision_date >= ?)", (*ids, cutoff)).fetchone()["n"]
+        return {"documents": total, "recent_documents": recent, "recent_years": recent_years}
+
+    def top_citors(self, ids: list[str], *, limit: int = 8) -> list[dict]:
+        """The most authoritative documents citing this one (by their own PageRank),
+        for the citator's "most significant citing documents" list."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return []
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT r.src_id AS id, COALESCE(MAX(a.pagerank), 0) AS pagerank, COUNT(*) AS n
+            FROM relations r LEFT JOIN doc_authority a ON a.doc_id = r.src_id
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.extracted_via <> 'inferred'
+            GROUP BY r.src_id ORDER BY pagerank DESC LIMIT ?
+            """,
+            (*ids, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # -- entity resolution (§5b) -------------------------------------------
     def find_document_id(self, candidate: str) -> str | None:
         """Confirm a candidate exists as a node, by stable_id, ECLI, or an alias
@@ -1748,6 +1936,16 @@ class Catalogue:
                     chunk):
                 out.setdefault(r["ref"], []).append(dict(r))
         return out
+
+    def reference_occurrences(self, ref: str, ref_fold: str, *, limit: int = 6) -> list[dict]:
+        """Where the corpus cites a hanging reference — src doc + the stored context
+        span, for the suggestion-review popover ("show me the sentences that cite
+        this before I confirm the match")."""
+        rows = self.conn.execute(
+            "SELECT src_id, raw_citation_string, context_start, context_end FROM relations "
+            "WHERE (candidate_id = ? OR raw_fold = ?) AND resolution_status = 'pending' "
+            "LIMIT ?", (ref, ref_fold, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def set_suggestion_status(self, ref: str, suggested_id: str, status: str) -> int:
         cur = self.conn.execute(
@@ -2446,6 +2644,9 @@ class Catalogue:
         "date_asc": "d.decision_date ASC NULLS LAST, d.stable_id",
         "title": "lower(d.title), d.stable_id",
         "cited": "cited_by DESC, d.decision_date DESC",
+        # network authority (PageRank roll-up); raw = landmark, decayed = currently live
+        "authority": "authority DESC, cited_by DESC, d.decision_date DESC",
+        "authority_recent": "authority_decayed DESC, cited_by DESC, d.decision_date DESC",
     }
 
     def _sort_clause(self, sort: str | None) -> str:
@@ -2499,7 +2700,12 @@ class Catalogue:
         # GROUP BY — defeated the candidate_id index on Postgres and ran for minutes, piling up
         # on every autocomplete keystroke until the connection pool starved.
         sql = ("SELECT d.*, COALESCE((SELECT MAX(cc.occurrences) FROM citation_counts cc "
-               "WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by FROM documents d")
+               "WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by, "
+               # authority prior (PageRank roll-up) — same per-row PK-probe pattern
+               "COALESCE((SELECT a.pagerank FROM doc_authority a WHERE a.doc_id = d.stable_id), 0) AS authority, "
+               "COALESCE((SELECT a.pagerank_decayed FROM doc_authority a WHERE a.doc_id = d.stable_id), 0) AS authority_decayed, "
+               "(SELECT a.percentile FROM doc_authority a WHERE a.doc_id = d.stable_id) AS authority_percentile "
+               "FROM documents d")
         params: list[object] = []
         if tag:
             clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t WHERE t.doc_id = d.stable_id AND t.tag = ?)")

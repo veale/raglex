@@ -37,6 +37,8 @@ class Neighbour:
     src_anchor: str | None = None
     dst_anchor: str | None = None
     extracted_via: str | None = None
+    # network authority of the neighbour (PageRank roll-up) — what ranked it in
+    authority: float = 0.0
 
 
 @dataclass(slots=True)
@@ -51,49 +53,56 @@ def expand(
     *,
     relationship_types: list[str] | None = None,
     limit: int = 10,
+    pool: int = 200,
 ) -> Expansion:
     """1-hop typed-neighbour expansion around one document (resolved edges only,
-    so every neighbour is a real node). Optionally restrict by relationship type."""
+    so every neighbour is a real node). Optionally restrict by relationship type.
+
+    Ranked, not first-come (design §3c): up to ``pool`` candidate edges per
+    direction are gathered through the *bounded* neighbour queries (safe on a
+    100k-citation node, where the old unbounded scan wasn't), then the ``limit``
+    slots go to the neighbours with the highest network authority (PageRank
+    roll-up) — so a provision's landmark interpreting case beats its fortieth
+    trivial mentioner. With an empty roll-up every authority is 0 and the order
+    degrades to the old arrival order."""
     exp = Expansion(doc_id=doc_id)
     rt_filter = set(relationship_types) if relationship_types else None
 
-    # outgoing: this document's authorities / what it engages
-    for row in catalogue.relations_for(doc_id):
-        if row["resolution_status"] != "resolved" or not row["dst_id"]:
-            continue
+    half = max(1, pool // 2)
+    rows: list[tuple] = []  # (neighbour_id, direction, row)
+    for row in catalogue.neighbours_out(doc_id, limit=half):
         if rt_filter and row["relationship_type"] not in rt_filter:
             continue
-        nb = catalogue.get_document(row["dst_id"])
+        rows.append((row["dst_id"], "out", row))
+    for row in catalogue.neighbours_in(doc_id, limit=half):
+        if rt_filter and row["relationship_type"] not in rt_filter:
+            continue
+        rows.append((row["src_id"], "in", row))
+
+    auth = catalogue.authority_for([nid for nid, _d, _r in rows])
+
+    def _rank(item) -> float:
+        arow = auth.get(item[0])
+        return arow["pagerank"] if arow else 0.0
+
+    seen: set[tuple[str, str]] = set()  # (neighbour, relationship) — dedupe repeat edges
+    for nid, direction, row in sorted(rows, key=_rank, reverse=True):
+        key = (nid, row["relationship_type"])
+        if key in seen:
+            continue
+        seen.add(key)
+        nb = catalogue.get_document(nid)
         exp.neighbours.append(
             Neighbour(
-                dst_id=row["dst_id"],
+                dst_id=nid,
                 relationship_type=row["relationship_type"],
-                direction="out",
+                direction=direction,
                 title=nb["title"] if nb else None,
                 court=nb["court"] if nb else None,
                 src_anchor=_col(row, "src_anchor"),
                 dst_anchor=_col(row, "dst_anchor"),
                 extracted_via=_col(row, "extracted_via"),
-            )
-        )
-        if len(exp.neighbours) >= limit:
-            return exp
-
-    # incoming: what cites/treats this document (citing cases, commentary)
-    for row in catalogue.relations_to(doc_id):
-        if rt_filter and row["relationship_type"] not in rt_filter:
-            continue
-        src = catalogue.get_document(row["src_id"])
-        exp.neighbours.append(
-            Neighbour(
-                dst_id=row["src_id"],
-                relationship_type=row["relationship_type"],
-                direction="in",
-                title=src["title"] if src else None,
-                court=src["court"] if src else None,
-                src_anchor=_col(row, "src_anchor"),
-                dst_anchor=_col(row, "dst_anchor"),
-                extracted_via=_col(row, "extracted_via"),
+                authority=_rank((nid, direction, row)),
             )
         )
         if len(exp.neighbours) >= limit:

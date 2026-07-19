@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
+import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
@@ -118,6 +118,8 @@ export function App() {
     <TrayStack open={open} />
     <EscapeCloser />
     <JobsPanel />
+    <CommandPalette open={open} />
+    <CiteHoverLayer />
     </TrayProvider>
     </PeekProvider>
   );

@@ -65,9 +65,43 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.document_body(stable_id)
 
     @mcp.tool()
+    def get_provision(stable_id: str, label: Optional[str] = None,
+                      char_start: Optional[int] = None, context: int = 1) -> dict:
+        """ONE provision/paragraph of a document by its citable label ("Article 17",
+        "s. 45", "[42]") — or by char offset — with N context segments either side and
+        the heading breadcrumb. Prefer this over get_document_body when you need to
+        quote a single provision exactly: it's pinpoint-accurate and token-cheap."""
+        return facade.get_provision(stable_id, label=label, char_start=char_start,
+                                    context=context)
+
+    @mcp.tool()
     def graph_neighbours(stable_id: str, relationship_types: Optional[list[str]] = None) -> dict:
-        """1-hop typed citation/commentary neighbourhood of a document."""
+        """1-hop typed citation/commentary neighbourhood of a document, most
+        authoritative neighbours first (PageRank-ranked, design §3c)."""
         return facade.graph(stable_id, rel=relationship_types)
+
+    @mcp.tool()
+    def related_documents(stable_id: str, limit: int = 12) -> dict:
+        """Related documents via the citation network (not vector similarity):
+        ``co_cited`` = most often cited together with this one in the same citing
+        document; ``coupled`` = relies on the same authorities (bibliographic
+        coupling). The practical "cases like this one" for legal research."""
+        return facade.related_documents(stable_id, limit=limit)
+
+    @mcp.tool()
+    def citator(stable_id: str) -> dict:
+        """How this authority currently stands: citation volume, how many citing
+        documents are recent, its network-authority percentile (PageRank), and the
+        most significant documents citing it. NOTE: treatment classifications
+        (followed/overruled) are deliberately absent — not yet reliable — so do not
+        infer 'still good law' from this alone; read the significant citors."""
+        return facade.citator(stable_id)
+
+    @mcp.tool()
+    def rebuild_authority() -> dict:
+        """Recompute the citation-network PageRank roll-up (batch; run after large
+        imports or resolution sweeps so ranking/citator/related stay current)."""
+        return facade.rebuild_authority()
 
     @mcp.tool()
     def corpus_stats() -> dict:

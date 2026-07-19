@@ -296,6 +296,18 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Refresh the snowball's citation-frequency roll-up."""
         return _start_job("rebuild-citation-counts", "rebuild citation frequency roll-up")
 
+    @app.post("/jobs/rebuild-authority")
+    def job_rebuild_authority_ep() -> dict:
+        """Recompute the PageRank authority roll-up over the citation graph (design §3a) —
+        feeds search fusion, ranked neighbours, the citator, and 'sort by authority'."""
+        return _start_job("rebuild-authority", "rebuild citation-network authority (PageRank)")
+
+    @app.post("/suggestions/decide-bulk")
+    def decide_suggestions_bulk_ep(payload: dict = Body(...)) -> dict:
+        """Decide MANY suggestions in one call — items: [{ref, suggested_id, accept}].
+        Resolves once at the end rather than per row."""
+        return facade.decide_suggestions(items=payload.get("items") or [])
+
     @app.post("/jobs/suggest-matches")
     def job_suggest_matches_ep(payload: dict = Body(default={})) -> dict:
         """Populate the human-confirmable "Possibly: …?" match suggestions (nested/year-slip
@@ -317,6 +329,12 @@ def create_app(config: Config | None = None) -> FastAPI:
     def pending_suggestions_ep(limit: int = 500) -> dict:
         """All pending naming-candidate suggestions, best score first — the bulk list."""
         return facade.list_pending_suggestions(limit=limit)
+
+    @app.get("/reference-context")
+    def reference_context_ep(ref: str, limit: int = 5) -> dict:
+        """The passages where the corpus cites a hanging reference — the judgement
+        evidence behind a near-miss suggestion."""
+        return facade.reference_context(ref, limit=limit)
 
     @app.post("/refinement-flags")
     def add_refinement_flag_ep(payload: dict = Body(...)) -> dict:
@@ -665,6 +683,26 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Recognise + resolve citations in arbitrary text — the PDF viewer sends each
         rendered page's text layer through this to linkify it like the text reader."""
         return {"citations": facade.scan_citations(text=payload.get("text") or "")}
+
+    @app.get("/related")
+    def related_ep(id: str, limit: int = 12) -> dict:
+        """Related documents via the citation network: co-citation ("often cited together")
+        + bibliographic coupling ("relies on the same authorities")."""
+        return facade.related_documents(id, limit=limit)
+
+    @app.get("/citator")
+    def citator_ep(id: str) -> dict:
+        """How this authority stands: citation volume + recency, authority percentile,
+        most significant citors. (No treatment counts — not reliable yet.)"""
+        return facade.citator(id)
+
+    @app.get("/provision")
+    def provision_ep(id: str, label: str | None = None, start: int | None = None,
+                     end: int | None = None, n: int = 1) -> dict:
+        """One provision/paragraph by citable label OR char span, with ±n context
+        segments and the heading breadcrumb — the search 'show context' expander
+        and the MCP get_provision tool."""
+        return facade.get_provision(id, label=label, char_start=start, char_end=end, context=n)
 
     @app.get("/documents/{stable_id:path}")
     def document(stable_id: str) -> dict:

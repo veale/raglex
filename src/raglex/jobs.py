@@ -36,7 +36,7 @@ log = logging.getLogger("raglex.jobs")
 # radiate, expand-citing) is keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
-    "rebuild-citation-counts", "auto-drain", "harvest-hol", "match-reports",
+    "rebuild-citation-counts", "rebuild-authority", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
     # only ever one indexing pass: two would race over the same pending_embedding queue
@@ -96,6 +96,7 @@ RUNNERS: dict[str, Callable] = {
     "backfill-metadata": lambda f, p, cb, cancel: f.backfill_document_metadata(on_progress=cb),
     "backfill-edge-keys": lambda f, p, cb, cancel: f.backfill_edge_keys(on_progress=cb, cancel_check=cancel),
     "rebuild-citation-counts": lambda f, p, cb, cancel: f.rebuild_citation_counts(),
+    "rebuild-authority": lambda f, p, cb, cancel: f.rebuild_authority(on_progress=cb, cancel_check=cancel),
     "pull-ag-opinions": lambda f, p, cb, cancel: f.pull_ag_opinions(on_progress=cb, cancel_check=cancel),
     "harvest-all": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),
     "auto-drain": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),

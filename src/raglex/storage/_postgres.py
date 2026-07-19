@@ -183,6 +183,19 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 );
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 
+-- Per-document citation-network statistics (PageRank over the resolved mentions
+-- graph; treatments deliberately unweighted — not reliable yet). Rebuilt wholesale.
+CREATE TABLE IF NOT EXISTS doc_authority (
+    doc_id           TEXT PRIMARY KEY,
+    pagerank         REAL NOT NULL DEFAULT 0,
+    pagerank_decayed REAL NOT NULL DEFAULT 0,
+    percentile       REAL,
+    in_degree        INTEGER NOT NULL DEFAULT 0,
+    out_degree       INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS doc_authority_pr_idx ON doc_authority (pagerank DESC);
+
 -- Background jobs (§8). In-process dicts died with the process, so a deploy erased a
 -- running harvest's history and the scheduler's own work was invisible to the UI.
 CREATE TABLE IF NOT EXISTS jobs (

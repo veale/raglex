@@ -133,6 +133,22 @@ CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrenc
 -- per-row probe degrades to a filter scan of the whole roll-up
 CREATE INDEX IF NOT EXISTS citation_counts_cand_idx ON citation_counts (candidate_id);
 
+-- Per-document citation-network statistics: PageRank over the resolved, non-inferred
+-- mentions graph (treatment types are NOT weighted — the classifier isn't reliable yet).
+-- `pagerank_decayed` discounts each citation by the citing document's age (half-life),
+-- so raw = "landmark", decayed = "currently load-bearing". Rebuilt wholesale by
+-- rebuild_authority() on a cadence; a third RRF list in hybrid search reads it.
+CREATE TABLE IF NOT EXISTS doc_authority (
+    doc_id           TEXT PRIMARY KEY,
+    pagerank         REAL NOT NULL DEFAULT 0,
+    pagerank_decayed REAL NOT NULL DEFAULT 0,
+    percentile       REAL,                      -- 0..100 among cited documents
+    in_degree        INTEGER NOT NULL DEFAULT 0,
+    out_degree       INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS doc_authority_pr_idx ON doc_authority (pagerank DESC);
+
 -- Version history (§1.4): a document is a series of versions. The `documents` row is
 -- "latest"; prior versions are archived here before it advances. Raw + text are
 -- content-addressed and immutable, so the old pointers stay valid.

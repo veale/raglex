@@ -265,7 +265,8 @@ type Filters = {
 };
 const PAGE = 50;
 const FACET_LABEL: Record<string, string> = { source: "Source", doc_type: "Type", court: "Court" };
-const SORTS: [string, string][] = [["date", "Newest"], ["date_asc", "Oldest"], ["title", "Title A–Z"], ["cited", "Most cited"]];
+const SORTS: [string, string][] = [["date", "Newest"], ["date_asc", "Oldest"], ["title", "Title A–Z"], ["cited", "Most cited"],
+  ["authority", "Most authoritative"], ["authority_recent", "Authority (recent)"]];
 const GROUPS: [string, string][] = [["none", "No grouping"], ["source", "Source"], ["doc_type", "Type"], ["court", "Court"], ["decade", "Decade"]];
 
 const activeFilters = (f: Filters): Record<string, string> => {
@@ -556,7 +557,8 @@ function FacetSidebar({ facets, filters, patch }:
   return (
     <aside className="facets panel">
       <YearHistogram year={facets.year || {}} from={filters.year_from} to={filters.year_to}
-        onPick={(y) => patch({ year_from: y, year_to: y })} onClear={() => patch({ year_from: undefined, year_to: undefined })} />
+        onRange={(a, b) => patch({ year_from: a, year_to: b })}
+        onClear={() => patch({ year_from: undefined, year_to: undefined })} />
       {(["source", "doc_type", "court"] as const).map((dim) => (
         <FacetGroup key={dim} title={FACET_LABEL[dim]} values={facets[dim] || []}
           active={(filters as any)[dim]} onPick={(k) => patch({ [dim]: (filters as any)[dim] === k ? undefined : k } as any)} />
@@ -585,26 +587,66 @@ function FacetGroup({ title, values, active, onPick }:
   );
 }
 
-// A compact year-distribution histogram; click a bar to filter to that year.
-function YearHistogram({ year, from, to, onPick, onClear }:
-  { year: Record<string, number>; from?: string; to?: string; onPick: (y: string) => void; onClear: () => void }) {
+// A compact, brushable year-distribution histogram: click a bar for one year, or
+// drag across bars to select a range (the "filter to 2016–2021 with one gesture"
+// interaction). Bars inside the active filter render highlighted; a live label
+// shows the range while dragging.
+function YearHistogram({ year, from, to, onRange, onClear }:
+  { year: Record<string, number>; from?: string; to?: string;
+    onRange: (from: string, to: string) => void; onClear: () => void }) {
+  const [drag, setDrag] = useState<{ a: string; b: string } | null>(null);
+  const dragRef = useRef<typeof drag>(null);
+  dragRef.current = drag;
   const years = Object.keys(year).filter((y) => /^\d{4}$/.test(y)).sort();
+  // release outside the histogram still commits the brush
+  useEffect(() => {
+    if (!drag) return;
+    const up = () => {
+      const d = dragRef.current;
+      if (d) {
+        const [a, b] = [d.a, d.b].sort();
+        onRange(a, b);
+      }
+      setDrag(null);
+    };
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, [!drag]);
   if (years.length < 2) return null;
   const max = Math.max(...years.map((y) => year[y]));
   const lo = years[0], hi = years[years.length - 1];
+  const inSel = (y: string) => {
+    if (drag) { const [a, b] = [drag.a, drag.b].sort(); return y >= a && y <= b; }
+    return !!(from || to) && y >= (from || "0000") && y <= (to || "9999");
+  };
+  const label = drag ? [drag.a, drag.b].sort().join("–")
+    : (from || to) ? `${from || lo}–${to || hi}` : null;
   return (
     <div className="facet-group">
-      <div className="facet-title">Year {(from || to) && <a className="facet-more" onClick={onClear}>clear</a>}</div>
-      <div className="histo" title="click a bar to filter to that year">
-        {years.map((y) => {
-          const on = from === to && from === y;
-          return <div key={y} className={`histo-bar${on ? " on" : ""}`} style={{ height: `${Math.max(3, (year[y] / max) * 40)}px` }}
-            title={`${y}: ${year[y].toLocaleString()}`} onClick={() => onPick(y)} />;
-        })}
+      <div className="facet-title">Year
+        {label && <span className="histo-range">{label}</span>}
+        {(from || to) && !drag && <a className="facet-more" onClick={onClear}>clear</a>}
+      </div>
+      <div className="histo" title="click a year, or drag to select a range">
+        {years.map((y) => (
+          <div key={y} className={`histo-bar${inSel(y) ? " on" : ""}`}
+            style={{ height: `${Math.max(3, (year[y] / max) * 40)}px` }}
+            title={`${y}: ${year[y].toLocaleString()}`}
+            onMouseDown={(e) => { e.preventDefault(); setDrag({ a: y, b: y }); }}
+            onMouseEnter={() => setDrag((d) => (d ? { ...d, b: y } : d))} />
+        ))}
       </div>
       <div className="histo-axis"><span>{lo}</span><span>{hi}</span></div>
     </div>
   );
+}
+
+// "top N%" authority chip — only shown when the document is in the upper reaches of
+// the citation network (a low percentile is noise, not information).
+function AuthorityBadge({ pct }: { pct?: number | null }) {
+  if (pct == null || pct < 80) return null;
+  const top = Math.max(1, Math.round(100 - pct));
+  return <span className="auth-badge" title={`network authority (PageRank): higher than ${pct.toFixed(0)}% of cited documents`}> · top {top}%</span>;
 }
 
 // One results list, optionally grouped, each row an OSCOLA citation + metadata.
@@ -625,6 +667,7 @@ function ResultsList({ items, group, open }: { items: any[]; group: string; open
         {d.court && <span> · {d.court}</span>}
         {d.decision_date && <span> · {String(d.decision_date).slice(0, 10)}</span>}
         {d.cited_by > 0 && <span> · cited by {d.cited_by.toLocaleString()}</span>}
+        <AuthorityBadge pct={d.authority_percentile} />
         {d.source && <span> · {d.source}</span>}
       </div>
     </div>
@@ -644,23 +687,84 @@ function ResultsList({ items, group, open }: { items: any[]; group: string; open
   );
 }
 
-// Semantic (full-text) hits — meaning-based; kept from the old hybrid search.
-function SemanticResults({ hits, open }: { hits: Hit[]; open: (id: string) => void }) {
+// "Why is this here" chips: which retrieval signals placed the hit — exact words
+// (keyword), meaning (semantic), and the citation network (authority). Teaches the
+// system's behaviour instead of presenting an opaque score.
+function WhyChips({ s }: { s: Hit["signals"] }) {
+  if (!s) return null;
+  const chips: { t: string; title: string }[] = [];
+  if (s.lexical_rank != null) chips.push({ t: `keyword #${s.lexical_rank}`, title: "matched the exact words (full-text rank)" });
+  if (s.semantic_rank != null) chips.push({ t: `semantic #${s.semantic_rank}`, title: "matched by meaning (vector rank)" });
+  if (s.authority_percentile != null && s.authority_percentile >= 80)
+    chips.push({ t: `authority top ${Math.max(1, Math.round(100 - s.authority_percentile))}%`,
+      title: "highly cited in the citation network (PageRank)" });
+  if (!chips.length) return null;
+  return <span className="why-chips">{chips.map((c, i) =>
+    <span key={i} className="why-chip" title={c.title}>{c.t}</span>)}</span>;
+}
+
+// One semantic hit with a KWIC-style expander: "show context" pulls the enclosing
+// segment ± neighbours (exact char spans, via /provision) and the heading breadcrumb,
+// so you judge the passage without leaving the results page.
+function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => void }) {
+  const [ctx, setCtx] = useState<any | null>(null);
+  const [busy, setBusy] = useState(false);
+  const expand = async () => {
+    if (ctx) { setCtx(null); return; }
+    setBusy(true);
+    try { setCtx(await api.provision(h.doc_id, { start: h.char_start ?? 0, end: h.char_end ?? undefined, n: 2 })); }
+    catch { setCtx({ error: true }); }
+    setBusy(false);
+  };
+  const focusLabel = ctx?.segments?.find((s: any) => s.focus)?.label;
+  return (
+    <div className="hit">
+      <div>
+        <a className="hit-title" onClick={() => open(h.doc_id, h.structural_unit || undefined)}>
+          <Oscola c={h.oscola} fallback={h.title || h.ecli || h.doc_id} /></a>{" "}
+        <span className="muted">
+          {h.court ? h.court : h.source}
+          {h.decision_date ? ` · ${String(h.decision_date).slice(0, 10)}` : ""}
+          {h.structural_unit ? ` · ${h.structural_unit}` : ""}
+        </span>
+        <WhyChips s={h.signals} />
+      </div>
+      {ctx?.path?.length > 0 && (
+        <div className="hit-crumb muted">{ctx.path.map((p: string, i: number) => (
+          <Fragment key={i}>{i > 0 && " › "}<a onClick={() => open(h.doc_id, p)}>{p}</a></Fragment>
+        ))}{focusLabel ? <> › <b>{focusLabel}</b></> : null}</div>
+      )}
+      {!ctx && <div className="snippet">{h.chunk_text.slice(0, 320)}{h.chunk_text.length > 320 ? "…" : ""}</div>}
+      {ctx && !ctx.error && (
+        <div className="hit-context">
+          {(ctx.segments || []).map((s: any, i: number) => (
+            <div key={i} className={`ctx-seg${s.focus ? " focus" : ""}`}>
+              {s.label && <span className="seg-label">{s.label}</span>}
+              <span>{s.text.length > 900 && !s.focus ? s.text.slice(0, 900) + "…" : s.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="hit-actions">
+        <a className="mini-link" onClick={expand}>{busy ? "…" : ctx ? "hide context" : "⌄ show context"}</a>
+        <a className="mini-link" onClick={() => open(h.doc_id, h.structural_unit || undefined)}>open at this passage ↗</a>
+        {h.neighbours.length > 0 && (
+          <span className="nbr">graph: {h.neighbours.slice(0, 3).map((n, j) =>
+            <span key={j}>{n.direction === "out" ? "→" : "←"} {n.relationship_type}{" "}
+              <a onClick={() => open(n.id)} title={n.title || n.id}>{n.title ? (n.title.length > 40 ? n.title.slice(0, 40) + "…" : n.title) : n.id}</a>; </span>)}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Semantic (full-text) hits — hybrid keyword + vector + authority, fused (RRF).
+function SemanticResults({ hits, open }: { hits: Hit[]; open: (id: string, a?: string) => void }) {
   return (
     <div className="panel">
-      <p className="muted">{hits.length} result{hits.length === 1 ? "" : "s"} · keyword + semantic, fused (RRF), with graph neighbours</p>
+      <p className="muted">{hits.length} result{hits.length === 1 ? "" : "s"} · keyword + semantic + authority, fused (RRF), with graph neighbours</p>
       {hits.length === 0 && <p className="muted">No matches. Try fewer filters, or embed first (Dashboard → Embed pending).</p>}
-      {hits.map((h, i) => (
-        <div className="hit" key={i}>
-          <div><a onClick={() => open(h.doc_id)}>{h.ecli || h.title || h.doc_id}</a>{" "}
-            <span className="muted">· {h.source}/{h.court} · {h.structural_unit} · score {h.score.toFixed(4)}</span></div>
-          <div className="snippet">{h.chunk_text.slice(0, 300)}</div>
-          {h.neighbours.length > 0 && (
-            <div className="nbr">graph: {h.neighbours.slice(0, 3).map((n, j) =>
-              <span key={j}>{n.direction === "out" ? "→" : "←"} {n.relationship_type} <a onClick={() => open(n.id)}>{n.id}</a>; </span>)}</div>
-          )}
-        </div>
-      ))}
+      {hits.map((h, i) => <SemanticHit key={i} h={h} open={open} />)}
     </div>
   );
 }
@@ -714,7 +818,11 @@ function renderCited(text: string, segStart: number, segEnd: number, cites: any[
       : state === "resolved" ? `${c.entity_kind}${c.pinpoint ? " · " + c.pinpoint : ""} → ${c.resolved_id}`
       : state === "pending" ? `${c.entity_kind}: ${c.candidate_id} — not in the corpus yet (click to fetch)`
       : `${c.entity_kind} reference — not resolvable automatically (click to search)`;
-    nodes.push(<a key={k} className={`cite cite-${state}${guess ? " cite-inferred" : ""}`} title={title} onClick={() => onCite(c)}>{label}</a>);
+    // resolved links get a rich hover card (CiteHoverLayer) instead of the native tooltip
+    nodes.push(<a key={k} className={`cite cite-${state}${guess ? " cite-inferred" : ""}`}
+      title={state === "resolved" && !guess ? undefined : title}
+      data-doc={state === "resolved" ? c.resolved_id : undefined} data-pin={c.pinpoint || undefined}
+      onClick={() => onCite(c)}>{label}</a>);
     cursor = c.char_end;
   });
   if (cursor < segEnd) nodes.push(renderRun(text.slice(cursor, segEnd), "tail", paraSet, onPara));
@@ -922,6 +1030,19 @@ function DocNav({ segs, text, oscola, title, landingUrl, id }:
     setAt(n); jump(matches[n]);
   };
   useEffect(() => { setAt(0); if (matches.length) jump(matches[0]); /* eslint-disable-next-line */ }, [query]);
+  // n / p step through find-matches from anywhere in the document (not while typing)
+  useEffect(() => {
+    if (!query) return;
+    const down = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "n") { e.preventDefault(); step(1); }
+      else if (e.key === "p") { e.preventDefault(); step(-1); }
+    };
+    window.addEventListener("keydown", down);
+    return () => window.removeEventListener("keydown", down);
+  });
   return (
     <nav className="doc-nav">
       <div className="doc-nav-title" title={title}><Oscola c={oscola} fallback={title || id} /></div>
@@ -931,7 +1052,8 @@ function DocNav({ segs, text, oscola, title, landingUrl, id }:
           onKeyDown={(e) => { if (e.key === "Enter") step(e.shiftKey ? -1 : 1); }} />
         {query && <div className="doc-nav-find-n">
           {matches.length ? <>{at + 1}/{matches.length}
-            <a onClick={() => step(-1)} title="previous"> ‹</a><a onClick={() => step(1)} title="next"> ›</a></>
+            <a onClick={() => step(-1)} title="previous (p)"> ‹</a><a onClick={() => step(1)} title="next (n)"> ›</a>
+            <span className="muted" style={{ marginLeft: 4 }}>n/p</span></>
             : "no matches"}</div>}
       </div>
       {headings.length > 0 && (
@@ -1004,6 +1126,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   }
   const mentionsFor = (label: string) => { const ck = anchorKey(label); return ck ? byAnchor[ck] : undefined; };
   const peek = usePeek();
+  const readerRef = useRef<HTMLDivElement>(null);   // minimap measures this
   const onCite = (c: any) => peek.push(citePeek(c));
   const onPara = (n: string) => scrollToSeg(segId(n + "."));   // jump to paragraph n
   const paraSet = paraNumbers(body?.segments || []);
@@ -1077,11 +1200,18 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
         {rawKind === "pdf" ? <PdfPane id={id} onCite={onCite} /> : <HtmlPane id={id} />}
       </Suspense>
     : content;
+  const mentionAnchors = new Set(
+    (segs || []).filter((s) => { const mb = mentionsFor(s.label); return mb && mb.list.length > 0; })
+      .map((s) => s.label));
   return (
     <SelectionShorthand docId={id}>
       <div className="doc-layout">
         <DocNav segs={segs || []} text={body.text || ""} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
-        <div className="doc-main">{chips}{pdfBanner}{tabs}{main}</div>
+        <div className="doc-main" ref={readerRef}>{chips}{pdfBanner}{tabs}{main}</div>
+        {view === "text" && body.text && (
+          <Minimap containerRef={readerRef} segs={segs || []} cites={cites}
+            mentionAnchors={mentionAnchors} textLen={body.text.length} />
+        )}
       </div>
     </SelectionShorthand>
   );
@@ -1352,6 +1482,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           <a className="summary-stat" title="Distinct statutory material this document cites"
             onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "statute", label: "Statutory material cited" })}>Statutory material cited <b>{doc.statute_cited_count ?? 0}</b></a>
         </div>
+        <CitatorStrip id={d.stable_id} />
         {(doc.also_cited_as || []).length > 0 && (
           <p className="also-cited muted" title="Alternative citation forms linked to this document (parallel-citation mining, report matching, your confirmations)">
             Also cited as {doc.also_cited_as.map((a: string, i: number) =>
@@ -1387,6 +1518,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
       </div>
+      <RelatedPanel id={d.stable_id} open={open} />
       {d.doc_type === "legislation" && <EffectsBanner id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <ChangesPanel id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <VersionPanel id={d.stable_id} open={open} />}
@@ -2282,6 +2414,8 @@ function KeepCurrentPanel() {
       </table>
       <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
         <button onClick={() => runNow("rebuild-citation-counts", "rebuild counts")}>↻ Rebuild citation counts</button>
+        <button onClick={() => runNow("rebuild-authority", "rebuild authority")}
+          title="Recompute the PageRank authority roll-up over the citation graph — feeds 'most authoritative' sort, search ranking, the citator strip, related documents, and graph node sizing. Run after large imports or resolution sweeps.">◆ Rebuild authority (PageRank)</button>
         <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
         <button disabled={busy} onClick={async () => {
           setBusy(true); setMsg("EU case names: running…");
@@ -3127,10 +3261,43 @@ function Info({ t }: { t: string }) {
 // rejecting records the decision so it's never suggested again. Decisions apply IN PLACE —
 // no list reload, so you can sweep down the page confirming one after another without the
 // rows re-ranking under your cursor.
+// The judgement evidence behind a near-miss: the actual passages where the corpus
+// cites the hanging reference (citing doc + sentence neighbourhood). Fetched lazily —
+// only when a human asks "show me the context" before deciding.
+function RefContext({ refKey }: { refKey: string }) {
+  const [data, err, , loading] = useAsync(() => api.referenceContext(refKey), [refKey]);
+  const peek = usePeek();
+  if (loading) return <div className="refctx muted">loading citing passages…</div>;
+  if (err || !data?.occurrences?.length)
+    return <div className="refctx muted">no stored context spans for this reference</div>;
+  return (
+    <div className="refctx">
+      {data.occurrences.map((o: any, i: number) => (
+        <div className="refctx-row" key={i}>
+          <a className="refctx-src" onClick={() => peek.push({ kind: "doc", id: o.src_id })}>
+            <Oscola c={o.src_oscola} fallback={o.src_title || o.src_id} /></a>
+          {o.snippet
+            ? <div className="refctx-snippet">…{highlightSub(o.snippet, o.raw)}…</div>
+            : <div className="refctx-snippet muted">(no snippet — cited as “{o.raw}”)</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// mark the cited string inside its context snippet
+function highlightSub(text: string, sub?: string) {
+  if (!sub) return text;
+  const i = text.toLowerCase().indexOf(sub.toLowerCase());
+  if (i < 0) return text;
+  return <>{text.slice(0, i)}<mark>{text.slice(i, i + sub.length)}</mark>{text.slice(i + sub.length)}</>;
+}
+
 function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [decided, setDecided] = useState<null | "accepted" | "rejected">(null);
   const [msg, setMsg] = useState("");
+  const [showCtx, setShowCtx] = useState(false);
   const decide = async (accept: boolean) => {
     setBusy(true); setMsg(accept ? "linking…" : "");
     try {
@@ -3153,6 +3320,8 @@ function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
       <span className="muted"> — {s.reason}</span>
       {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}
       {" "}
+      <a className="mini-link" title="show the passages where the corpus cites this reference"
+        onClick={() => setShowCtx((v) => !v)}>{showCtx ? "hide context" : "◎ context"}</a>{" "}
       {!decided && <>
         <button className="mini sug-yes" disabled={busy} title="yes — link every citation of this reference to it"
           onClick={() => decide(true)}>✓</button>{" "}
@@ -3160,6 +3329,7 @@ function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
           onClick={() => decide(false)}>✗</button>
       </>}
       {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {msg}</span>}
+      {showCtx && <RefContext refKey={s.ref} />}
     </div>
   );
 }
@@ -3207,14 +3377,61 @@ function AllSuggestionsPanel() {
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
+  // multi-select: tick rows (or select-all), then dispose of them in ONE call —
+  // the server decides every row and runs a single resolver pass at the end.
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [ctxFor, setCtxFor] = useState<string | null>(null);   // row whose context is expanded
+  const toggleSel = (k: string) => setSel((s0) => {
+    const s1 = new Set(s0); s1.has(k) ? s1.delete(k) : s1.add(k); return s1;
+  });
+  const selPending = pendingRows.filter((s) => sel.has(key(s)));
+  async function decideSelected(accept: boolean) {
+    if (!selPending.length) return;
+    setSweeping(true);
+    const items = selPending.map((s) => ({ ref: s.ref, suggested_id: s.suggested_id, accept }));
+    setState((st) => {
+      const n = { ...st };
+      for (const s of selPending) n[key(s)] = { s: "busy" };
+      return n;
+    });
+    try {
+      const r = await api.decideSuggestionsBulk(items);
+      const note = accept
+        ? `✓${r.resolved_edges ? ` (${r.resolved_edges} edges resolved in one pass)` : ""}`
+        : "✗ dismissed";
+      setState((st) => {
+        const n = { ...st };
+        for (const s of selPending) n[key(s)] = { s: accept ? "accepted" : "rejected", note };
+        return n;
+      });
+      setSel(new Set());
+    } catch (e: any) {
+      setState((st) => {
+        const n = { ...st };
+        for (const s of selPending) n[key(s)] = { s: "pending", note: "error: " + (e.message || e) };
+        return n;
+      });
+    }
+    setSweeping(false);
+  }
+
   if (err || !rows.length) return null;
+  const allSelected = pendingRows.length > 0 && pendingRows.every((s) => sel.has(key(s)));
   return (
     <div className="panel">
       <div className="row" style={{ alignItems: "baseline" }}>
         <h3 style={{ marginTop: 0, flex: 1 }}>Naming candidates
-          <span className="muted"> — every pending “Possibly: …?” suggestion. Ticks apply in place (nothing reloads); sweep the list, then the graph resolves.</span>
+          <span className="muted"> — every pending “Possibly: …?” suggestion. Tick rows (or select all) and dispose of them together; ◎ shows the citing passages so you can judge before deciding.</span>
           {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
         </h3>
+        {sel.size > 0 && !sweeping && <>
+          <button className="mini sug-yes" style={{ flex: "0 0 auto" }}
+            title="accept every selected suggestion — one call, one resolver pass"
+            onClick={() => decideSelected(true)}>✓ accept {selPending.length} selected</button>{" "}
+          <button className="mini sug-no" style={{ flex: "0 0 auto" }}
+            title="reject every selected suggestion — never suggested again"
+            onClick={() => decideSelected(false)}>✗ reject {selPending.length}</button>
+        </>}
         {!sweeping
           ? <button className="mini" style={{ flex: "0 0 auto" }} disabled={pendingRows.length === 0}
               title="Accept every remaining suggestion below, then run one resolve pass"
@@ -3222,17 +3439,27 @@ function AllSuggestionsPanel() {
           : <button className="mini" style={{ flex: "0 0 auto" }} onClick={() => { stopRef.current = true; }}>■ stop</button>}
       </div>
       <table className="grid">
-        <thead><tr><th>reference</th><th>suggested match</th><th>why</th><th style={{ whiteSpace: "nowrap" }}>decide</th></tr></thead>
+        <thead><tr>
+          <th style={{ width: 24 }}><input type="checkbox" style={{ width: "auto" }} checked={allSelected}
+            title="select every pending row"
+            onChange={() => setSel(allSelected ? new Set() : new Set(pendingRows.map(key)))} /></th>
+          <th>reference</th><th>suggested match</th><th>why</th><th style={{ whiteSpace: "nowrap" }}>decide</th></tr></thead>
         <tbody>
           {rows.map((s) => {
-            const st = state[key(s)];
+            const k = key(s);
+            const st = state[k];
             const done = st && (st.s === "accepted" || st.s === "rejected");
             return (
-              <tr key={key(s)} style={st?.s === "rejected" ? { opacity: 0.5 } : undefined}>
+              <Fragment key={k}>
+              <tr style={st?.s === "rejected" ? { opacity: 0.5 } : undefined}>
+                <td>{!done && <input type="checkbox" style={{ width: "auto" }} checked={sel.has(k)}
+                  disabled={sweeping} onChange={() => toggleSel(k)} />}</td>
                 <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }}>{s.ref}</td>
                 <td><b>{s.context || s.suggested_id}</b>
                   {!s.held && <span className="muted"> · not held — accepting fetches it</span>}
-                  {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}</td>
+                  {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}
+                  {" "}<a className="mini-link" title="the passages where the corpus cites this reference — judge before deciding"
+                    onClick={() => setCtxFor(ctxFor === k ? null : k)}>{ctxFor === k ? "hide" : "◎"}</a></td>
                 <td className="muted" style={{ fontSize: 12 }}>{s.reason}{s.score != null && ` · ${Number(s.score).toFixed(2)}`}</td>
                 <td style={{ whiteSpace: "nowrap" }}>
                   {!done && <>
@@ -3247,6 +3474,8 @@ function AllSuggestionsPanel() {
                   {st?.note && <span className={st.note.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {st.note}</span>}
                 </td>
               </tr>
+              {ctxFor === k && <tr><td /><td colSpan={4}><RefContext refKey={s.ref} /></td></tr>}
+              </Fragment>
             );
           })}
         </tbody>
@@ -3693,6 +3922,296 @@ export function VersionPanel({ id, open }: { id: string; open: (id: string, a?: 
       {versions.length > 0 && <p className="muted" style={{ marginTop: 6 }}>held versions: {versions.map((v: any) => (
         <a key={v.stable_id} onClick={() => open(v.stable_id)} style={{ cursor: "pointer", marginRight: 10 }}>{v.version_date || v.stable_id}</a>
       ))}</p>}
+    </div>
+  );
+}
+
+// --- ⌘K citation jump palette ----------------------------------------------
+// Paste or type ANY citation form — "[2020] UKSC 5", "C-311/18", "ECLI:EU:C:2020:559",
+// "DPA 2018 s. 45" — or a case/act name. Citations are grammar-recognised and resolved
+// server-side (the same ladder the reader uses); names go through the corpus
+// autocomplete. Enter opens the document at the pinpoint. The fastest navigation
+// primitive in the app.
+export function CommandPalette({ open }: { open: (id: string, a?: string) => void }) {
+  const [show, setShow] = useState(false);
+  const [q, setQ] = useState("");
+  const [cites, setCites] = useState<any[]>([]);
+  const [docs, setDocs] = useState<any[]>([]);
+  const [hi, setHi] = useState(0);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault(); setShow((s) => !s); setQ(""); setCites([]); setDocs([]); setHi(0);
+      } else if (e.key === "Escape") setShow(false);
+    };
+    window.addEventListener("keydown", down);
+    return () => window.removeEventListener("keydown", down);
+  }, []);
+  useEffect(() => {
+    if (!show) return;
+    const text = q.trim();
+    if (text.length < 3) { setCites([]); setDocs([]); return; }
+    let live = true;
+    setBusy(true);
+    const t = setTimeout(async () => {
+      try {
+        const [scan, corpus] = await Promise.all([
+          api.scanCitations(text).catch(() => ({ citations: [] })),
+          api.searchCorpus({ query: text, limit: "6", facets: "false" }).catch(() => ({ items: [] })),
+        ]);
+        if (!live) return;
+        // dedupe recognised citations by target; resolved first
+        const seen = new Set<string>();
+        const cs = (scan.citations || []).filter((c: any) => {
+          const k = c.resolved_id || c.candidate_id || c.raw;
+          if (!k || seen.has(k)) return false;
+          seen.add(k); return true;
+        }).sort((a: any, b: any) => (a.resolved_id ? 0 : 1) - (b.resolved_id ? 0 : 1)).slice(0, 5);
+        setCites(cs); setDocs(corpus.items || []); setHi(0);
+      } finally { if (live) setBusy(false); }
+    }, 180);
+    return () => { live = false; clearTimeout(t); };
+  }, [q, show]);
+  if (!show) return null;
+  const options: { kind: "cite" | "doc"; c?: any; d?: any }[] = [
+    ...cites.map((c) => ({ kind: "cite" as const, c })),
+    ...docs.map((d) => ({ kind: "doc" as const, d })),
+  ];
+  const pick = (o: (typeof options)[number]) => {
+    if (!o) return;
+    if (o.kind === "doc") { open(o.d.stable_id); setShow(false); return; }
+    const c = o.c;
+    if (c.resolved_id) { open(c.resolved_id, c.pinpoint || undefined); setShow(false); }
+  };
+  return (
+    <div className="palette-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setShow(false); }}>
+      <div className="palette" role="dialog" aria-label="jump to citation">
+        <input autoFocus value={q} placeholder="Jump to… a citation ([2020] UKSC 5, C-311/18, DPA 2018 s 45) or a name"
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, options.length - 1)); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
+            else if (e.key === "Enter") { e.preventDefault(); pick(options[hi]); }
+          }} />
+        {busy && <div className="palette-note muted">searching…</div>}
+        {!busy && q.trim().length >= 3 && options.length === 0 && (
+          <div className="palette-note muted">nothing recognised — try a citation or more of the name</div>)}
+        {cites.length > 0 && <div className="palette-sect muted">citations recognised</div>}
+        {cites.map((c, i) => (
+          <div key={"c" + i} className={`palette-opt${hi === i ? " hi" : ""}`}
+            onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(options[i]); }}>
+            <b>{c.raw}</b>
+            {c.pinpoint && <span className="muted"> · {c.pinpoint}</span>}
+            {c.resolved_id
+              ? <span className="palette-go"> → open{c.pinpoint ? " at pinpoint" : ""}</span>
+              : <span className="muted"> · not held{c.candidate_id ? ` (${c.candidate_id})` : ""}</span>}
+          </div>
+        ))}
+        {docs.length > 0 && <div className="palette-sect muted">documents</div>}
+        {docs.map((d, i) => {
+          const oi = cites.length + i;
+          return (
+            <div key={"d" + i} className={`palette-opt${hi === oi ? " hi" : ""}`}
+              onMouseEnter={() => setHi(oi)} onMouseDown={(e) => { e.preventDefault(); pick(options[oi]); }}>
+              <Oscola c={d.oscola} fallback={d.title || d.stable_id} />
+              <span className="muted"> · {d.doc_type}{d.court ? " · " + d.court : ""}{d.decision_date ? " · " + String(d.decision_date).slice(0, 4) : ""}</span>
+            </div>
+          );
+        })}
+        <div className="palette-hint muted">↑↓ choose · Enter open · Esc close</div>
+      </div>
+    </div>
+  );
+}
+
+// --- Citation hover cards ---------------------------------------------------
+// Event-delegated: ONE document-level listener serves every resolved citation link
+// (a.cite[data-doc]) in any reader/peek/tray. 300ms intent delay, metadata cached
+// per target, card follows the link. Answers "do I care about this authority?" in
+// under a second, without opening anything.
+const _hoverCache = new Map<string, any>();
+export function CiteHoverLayer() {
+  const [card, setCard] = useState<{ id: string; pin?: string; x: number; y: number; d?: any } | null>(null);
+  const timer = useRef<number>(0);
+  useEffect(() => {
+    const over = (e: MouseEvent) => {
+      const a = (e.target as HTMLElement)?.closest?.("a.cite[data-doc]") as HTMLElement | null;
+      window.clearTimeout(timer.current);
+      if (!a) { setCard(null); return; }
+      const id = a.getAttribute("data-doc")!;
+      const pin = a.getAttribute("data-pin") || undefined;
+      const rect = a.getBoundingClientRect();
+      timer.current = window.setTimeout(async () => {
+        const x = Math.min(rect.left, window.innerWidth - 380);
+        const y = rect.bottom + 6;
+        setCard({ id, pin, x, y, d: _hoverCache.get(id) });
+        if (!_hoverCache.has(id)) {
+          try {
+            const d = await api.document(id);
+            _hoverCache.set(id, d);
+            setCard((c) => (c && c.id === id ? { ...c, d } : c));
+          } catch { /* leave the skeleton */ }
+        }
+      }, 280);
+    };
+    const out = () => { window.clearTimeout(timer.current); };
+    const scroll = () => setCard(null);
+    document.addEventListener("mouseover", over);
+    document.addEventListener("mouseout", out);
+    window.addEventListener("scroll", scroll, true);
+    return () => {
+      document.removeEventListener("mouseover", over);
+      document.removeEventListener("mouseout", out);
+      window.removeEventListener("scroll", scroll, true);
+    };
+  }, []);
+  if (!card) return null;
+  const d = card.d?.document;
+  return (
+    <div className="cite-card" style={{ left: card.x, top: Math.min(card.y, window.innerHeight - 150) }}>
+      {!card.d && <div className="muted">…</div>}
+      {card.d && (
+        <>
+          <div className="cite-card-title"><Oscola c={card.d.oscola} fallback={d?.title || card.id} /></div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {d?.court || d?.source}{d?.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
+            {d?.doc_type ? ` · ${d.doc_type}` : ""}
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {card.d.cited_by_count ? `cited by ${card.d.cited_by_count.toLocaleString()}` : "not yet cited in the corpus"}
+            {card.pin ? ` · pinpoint: ${card.pin}` : ""}
+          </div>
+          <div className="cite-card-hint muted">click the citation to preview</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// --- Reader minimap ----------------------------------------------------------
+// A thin document-length strip beside the reader (VS Code's overview ruler for
+// judgments): every recognised citation is a tick (coloured by state), headings are
+// wider marks, and paragraphs other documents cite are accent marks. The viewport
+// is a draggable window; click anywhere to jump. Indispensable at 400 paragraphs.
+function Minimap({ containerRef, segs, cites, mentionAnchors, textLen }:
+  { containerRef: any; segs: any[]; cites: any[]; mentionAnchors: Set<string>; textLen: number }) {
+  const [view, setView] = useState<{ top: number; h: number }>({ top: 0, h: 100 });
+  const stripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let raf = 0;
+    const measure = () => {
+      const el = containerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const total = rect.height || 1;
+      const visTop = Math.max(0, -rect.top);
+      const visPx = Math.max(0, Math.min(window.innerHeight, rect.bottom) - Math.max(0, rect.top));
+      setView({ top: (visTop / total) * 100, h: Math.max(4, (visPx / total) * 100) });
+    };
+    const onScroll = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(measure); };
+    measure();
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => { window.removeEventListener("scroll", onScroll, true); window.removeEventListener("resize", onScroll); cancelAnimationFrame(raf); };
+  }, [containerRef, textLen]);
+  if (!textLen || !segs?.length || segs.length < 25) return null;
+  const pct = (chr: number) => Math.min(100, (chr / textLen) * 100);
+  const jump = (e: any) => {
+    const rect = stripRef.current!.getBoundingClientRect();
+    const frac = (e.clientY - rect.top) / rect.height;
+    const chr = frac * textLen;
+    // nearest segment at/after that char offset
+    let best = segs[0];
+    for (const s of segs) { if (s.char_start <= chr) best = s; else break; }
+    scrollToSeg(segId(best.label));
+  };
+  return (
+    <div className="minimap" ref={stripRef} onMouseDown={jump} title="document overview — click to jump">
+      {segs.filter((s) => isHeading(s)).map((s, i) => (
+        <div key={"h" + i} className="mm-heading" style={{ top: `${pct(s.char_start)}%` }} />
+      ))}
+      {cites.map((c, i) => (
+        <div key={"c" + i} className={`mm-cite mm-${c.state || (c.resolved_id ? "resolved" : "maybe")}`}
+          style={{ top: `${pct(c.char_start)}%` }} />
+      ))}
+      {segs.filter((s) => mentionAnchors.has(s.label)).map((s, i) => (
+        <div key={"m" + i} className="mm-mention" style={{ top: `${pct(s.char_start)}%` }}
+          title="other documents cite this paragraph" />
+      ))}
+      <div className="mm-view" style={{ top: `${view.top}%`, height: `${view.h}%` }} />
+    </div>
+  );
+}
+
+// --- Citation-network panels (design §3) -------------------------------------
+// The citator strip: how this authority stands in the network — citation volume,
+// recency, PageRank percentile, and the most significant citing documents.
+// Deliberately NO treatment claims (followed/overruled) — not reliable yet.
+export function CitatorStrip({ id }: { id: string }) {
+  const [c] = useAsync(() => api.citator(id), [id]);
+  const peek = usePeek();
+  if (!c || c.error) return null;
+  const cb = c.cited_by || {};
+  const auth = c.authority;
+  if (!cb.documents && !auth) return null;
+  return (
+    <div className="citator-strip">
+      {auth?.percentile != null && auth.percentile >= 50 && (
+        <span className="cit-stat" title={`PageRank over the citation network — above ${auth.percentile.toFixed(0)}% of cited documents`}>
+          ◆ authority top {Math.max(1, Math.round(100 - auth.percentile))}%</span>
+      )}
+      {cb.documents > 0 && (
+        <span className="cit-stat" title="distinct documents citing this one (excluding heuristic carry-forwards)">
+          cited by {cb.documents.toLocaleString()}
+          {cb.recent_documents > 0 && <span className="muted"> · {cb.recent_documents.toLocaleString()} in the last {cb.recent_years}y</span>}
+          {cb.documents > 3 && cb.recent_documents === 0 && <span className="cit-quiet" title="no citations from recent documents — check whether it is still relied on"> · quiet recently</span>}
+        </span>
+      )}
+      {(c.most_significant_citors || []).length > 0 && (
+        <span className="cit-stat">
+          <span className="muted">most significant citor:</span>{" "}
+          <a onClick={() => peek.push({ kind: "doc", id: c.most_significant_citors[0].id })}>
+            <Oscola c={c.most_significant_citors[0].oscola} fallback={c.most_significant_citors[0].title || c.most_significant_citors[0].id} /></a>
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Related documents via the citation network — co-citation ("often cited together")
+// and bibliographic coupling ("relies on the same authorities"). Honest labels: each
+// list says WHY it's related; neither claims semantic similarity.
+export function RelatedPanel({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
+  const [data] = useAsync(() => api.related(id), [id]);
+  if (!data || (!data.co_cited?.length && !data.coupled?.length)) return null;
+  const List = ({ rows, why }: { rows: any[]; why: (r: any) => string }) => (
+    <ul className="related-list">
+      {rows.slice(0, 8).map((r: any, i: number) => (
+        <li key={i}>
+          <a onClick={() => open(r.id)}><Oscola c={r.oscola} fallback={r.title || r.id} /></a>
+          <span className="muted"> · {why(r)}{r.date ? ` · ${r.date.slice(0, 4)}` : ""}</span>
+        </li>
+      ))}
+    </ul>
+  );
+  return (
+    <div className="panel">
+      <h3>Related in the citation network <span className="muted">— by citation behaviour, not text similarity</span></h3>
+      <div className="grid2">
+        {data.co_cited?.length > 0 && (
+          <div>
+            <h4 className="related-h" title="documents that citing documents tend to cite in the same breath as this one">Often cited together</h4>
+            <List rows={data.co_cited} why={(r) => `together in ${r.n} citing doc${r.n === 1 ? "" : "s"}`} />
+          </div>
+        )}
+        {data.coupled?.length > 0 && (
+          <div>
+            <h4 className="related-h" title="documents whose own citations overlap this one's — they rely on the same authorities">Relies on the same authorities</h4>
+            <List rows={data.coupled} why={(r) => `${r.n} shared authorit${r.n === 1 ? "y" : "ies"}`} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

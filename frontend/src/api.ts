@@ -35,9 +35,15 @@ async function postForm(path: string, fd: FormData): Promise<any> {
 
 export interface Hit {
   doc_id: string; ecli: string | null; title: string | null; court: string | null;
-  source: string | null; score: number; structural_unit: string | null;
+  source: string | null; doc_type?: string | null; decision_date?: string | null;
+  score: number; structural_unit: string | null;
   char_start: number | null; char_end: number | null; chunk_text: string;
-  neighbours: { id: string; relationship_type: string; direction: string }[];
+  oscola?: any;
+  // why-ranked: 1-based rank in each signal (null = didn't appear in that list)
+  signals?: { semantic_rank: number | null; lexical_rank: number | null;
+    authority_rank: number | null; authority_percentile: number | null } | null;
+  neighbours: { id: string; relationship_type: string; direction: string;
+    title?: string | null; authority?: number }[];
 }
 export interface SourceHealth {
   key: string; documents: number; consecutive_failures: number;
@@ -297,6 +303,25 @@ export const api = {
   importCaselawFilesStart: (upload_id: string) =>
     req<{ job_id?: string; error?: string }>("/import/caselaw-files/start", { method: "POST", body: JSON.stringify({ upload_id }) }),
   pendingSuggestions: (limit = 500) => req<any>(`/suggestions/pending?limit=${limit}`),
+  // bulk near-miss decisions: one POST, one resolver pass at the end
+  decideSuggestionsBulk: (items: { ref: string; suggested_id: string; accept: boolean }[]) =>
+    req<any>("/suggestions/decide-bulk", { method: "POST", body: JSON.stringify({ items }) }),
+  // the passages where the corpus cites a hanging reference (suggestion-review evidence)
+  referenceContext: (ref: string, limit = 5) =>
+    req<any>(`/reference-context?ref=${encodeURIComponent(ref)}&limit=${limit}`),
+  // citation-network intelligence (design §3): related docs, citator, authority rebuild
+  related: (id: string, limit = 12) =>
+    req<any>(`/related?id=${encodeURIComponent(id)}&limit=${limit}`),
+  citator: (id: string) => req<any>(`/citator?id=${encodeURIComponent(id)}`),
+  provision: (id: string, opts: { label?: string; start?: number; end?: number; n?: number } = {}) => {
+    const p = new URLSearchParams({ id });
+    if (opts.label) p.set("label", opts.label);
+    if (opts.start != null) p.set("start", String(opts.start));
+    if (opts.end != null) p.set("end", String(opts.end));
+    if (opts.n != null) p.set("n", String(opts.n));
+    return req<any>(`/provision?${p}`);
+  },
+  rebuildAuthority: () => req<any>("/jobs/rebuild-authority", { method: "POST", body: "{}" }),
   exportRetrievalCitations: (p: { min_citing?: number; batch_size?: number; include_names?: boolean; separator?: string; series?: string; jurisdictions?: string } = {}) =>
     req<any>(`/export/retrieval-citations?${new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]))}`),
   embed: () => req<any>("/embed", { method: "POST", body: "{}" }),

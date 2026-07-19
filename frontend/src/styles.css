@@ -581,3 +581,88 @@ mark.pdfcite:hover { filter: brightness(1.25); }
 .lii-table th { text-align: left; font-weight: 600; border-bottom: 1px solid var(--line); }
 .lii-table td { vertical-align: top; padding: 4px 6px 4px 0; }
 .lii-table code { font-size: 11px; word-break: break-all; }
+
+/* --- citation-network & navigation additions (design §3 / §7) --------------- */
+
+/* authority badge on result rows */
+.auth-badge { color: var(--accent); font-weight: 600; }
+
+/* year histogram range label */
+.histo-range { margin-left: 6px; font-weight: 600; color: var(--accent); text-transform: none; letter-spacing: 0; }
+.histo { user-select: none; }
+
+/* why-ranked chips on semantic hits */
+.why-chips { margin-left: 8px; display: inline-flex; gap: 4px; vertical-align: middle; }
+.why-chip { font-size: .68rem; padding: 1px 6px; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--subtext); background: var(--surface-1); white-space: nowrap; }
+
+/* semantic hit cards: breadcrumb, inline context, actions */
+.hit-title { font-weight: 600; cursor: pointer; }
+.hit-crumb { font-size: .75rem; margin-top: 2px; }
+.hit-crumb a { cursor: pointer; }
+.hit-context { margin-top: var(--sp-3); border-left: 2px solid var(--line); padding-left: var(--sp-4); }
+.ctx-seg { margin-bottom: var(--sp-3); color: var(--subtext); font-size: .85rem; }
+.ctx-seg.focus { color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 4px; padding: 2px 4px; }
+.ctx-seg .seg-label { font-weight: 700; margin-right: 6px; }
+.hit-actions { margin-top: var(--sp-2); display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; }
+.mini-link { font-size: .75rem; color: var(--accent); cursor: pointer; white-space: nowrap; }
+
+/* ⌘K command palette */
+.palette-backdrop { position: fixed; inset: 0; background: color-mix(in srgb, var(--base, #000) 45%, transparent);
+  z-index: 90; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+.palette { width: min(640px, calc(100vw - 32px)); background: var(--surface-0, var(--panel-bg, #fff));
+  border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 50px rgba(0,0,0,.35);
+  padding: var(--sp-3); max-height: 60vh; overflow-y: auto; }
+.palette input { width: 100%; font-size: 1rem; padding: var(--sp-3) var(--sp-4); }
+.palette-sect { font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; margin: var(--sp-3) var(--sp-2) 2px; }
+.palette-opt { padding: var(--sp-2) var(--sp-3); border-radius: 6px; cursor: pointer; font-size: .9rem; }
+.palette-opt.hi { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.palette-go { color: var(--ok); font-size: .8rem; }
+.palette-note { padding: var(--sp-3); font-size: .85rem; }
+.palette-hint { margin-top: var(--sp-2); padding: 0 var(--sp-2); font-size: .7rem; }
+
+/* citation hover card */
+.cite-card { position: fixed; z-index: 80; width: 360px; max-width: calc(100vw - 24px);
+  background: var(--surface-0, var(--panel-bg, #fff)); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.28); padding: var(--sp-3) var(--sp-4); pointer-events: none;
+  animation: cite-card-in .12s ease-out; }
+@keyframes cite-card-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; } }
+.cite-card-title { font-weight: 600; font-size: .9rem; }
+.cite-card-title i { font-style: italic; }
+.cite-card-hint { font-size: .68rem; margin-top: 3px; }
+
+/* reader minimap (overview ruler) */
+.minimap { position: sticky; top: var(--sp-4); flex: 0 0 14px; height: 78vh; border: 1px solid var(--line);
+  border-radius: 4px; background: var(--surface-1); cursor: pointer; overflow: hidden; }
+.minimap > div { position: absolute; left: 0; right: 0; pointer-events: none; }
+.mm-heading { height: 2px; background: var(--subtext); opacity: .8; }
+.mm-cite { height: 1px; right: 50% !important; background: var(--accent); opacity: .55; }
+.mm-cite.mm-pending { background: var(--warn, #ffb454); }
+.mm-cite.mm-maybe { background: var(--faint); }
+.mm-mention { height: 2px; left: 55% !important; background: var(--ok, #7ee787); }
+.mm-view { background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 2px; }
+@media (max-width: 900px) { .minimap { display: none; } }
+
+/* citator strip under the document summary */
+.citator-strip { display: flex; flex-wrap: wrap; gap: 14px; align-items: baseline;
+  margin-top: var(--sp-2); font-size: .8rem; color: var(--subtext); }
+.cit-stat b { color: var(--text); }
+.cit-stat a { cursor: pointer; }
+.citator-strip .cit-stat:first-child { color: var(--accent); font-weight: 600; }
+.cit-quiet { color: var(--warn, #ffb454); }
+
+/* related-in-the-network panel */
+.related-h { margin: 0 0 var(--sp-2); font-size: .8rem; }
+.related-list { list-style: none; margin: 0; padding: 0; }
+.related-list li { margin-bottom: var(--sp-2); font-size: .85rem; }
+.related-list a { cursor: pointer; }
+
+/* suggestion-review context (the citing passages) */
+.refctx { margin-top: var(--sp-2); border-left: 2px solid var(--line); padding: var(--sp-2) var(--sp-4); }
+.refctx-row { margin-bottom: var(--sp-3); }
+.refctx-src { font-size: .8rem; font-weight: 600; cursor: pointer; }
+.refctx-snippet { font-size: .8rem; color: var(--subtext); margin-top: 2px; }
+.refctx-snippet mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--text);
+  border-radius: 2px; padding: 0 1px; }
