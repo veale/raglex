@@ -181,3 +181,143 @@ def test_detect_citations_from_pasted_text(config):
     assert "ukpga/2018/12" in cands  # the Act, by name
     assert "ECLI:EU:C:2020:559" in cands
     assert all("in_corpus" in c for c in r["citations"])
+
+
+# -- outbound link labels ---------------------------------------------------
+# An external link is labelled by where it POINTS, not by the adapter that
+# ingested the document. The two diverge for most of the corpus: 272k judgments
+# carry source "uk-caselaw" (the Find Case Law adapter) but a landing_url on
+# bailii.org, because FCL holds no copy and the adapter fell back to BAILII.
+def test_link_label_follows_the_host_not_the_source(config):
+    f = Facade(config)
+
+    # the big one: a Find Case Law-sourced doc whose URL is really BAILII
+    assert f.link_label("https://www.bailii.org/ew/cases/EWCA/Civ/2002/1642.html",
+                        "uk-caselaw") == "BAILII"
+    # ...and a genuine TNA scrape keeps the National Archives label
+    assert f.link_label("https://caselaw.nationalarchives.gov.uk/ewca/civ/2002/1642",
+                        "uk-caselaw") == "National Archives"
+
+
+def test_link_label_names_each_lii_and_tolerates_subdomains(config):
+    f = Facade(config)
+
+    assert f.link_label("http://www.austlii.edu.au/au/cases/cth/HCA/2019/1.html") == "AustLII"
+    assert f.link_label("https://www.canlii.org/en/ca/scc/doc/2019/2019scc1/", "ca-caselaw") == "CanLII"
+    # other adapters that fell back to BAILII are labelled BAILII too
+    assert f.link_label("https://www.bailii.org/eu/cases/EUECJ/1994/C35992.html", "eu-cellar") == "BAILII"
+    assert f.link_label("https://www.bailii.org/ie/cases/IEHC/2019/H1.html", "ie-caselaw") == "BAILII"
+
+
+def test_link_label_falls_back_to_source_without_a_url(config):
+    f = Facade(config)
+
+    assert f.link_label(None, "uk-legislation") == "legislation.gov.uk"
+    assert f.link_label("", "edpb") == "EDPB"
+    # an unmapped host is reported honestly as itself, never guessed
+    assert f.link_label("https://example.gov/x", "uk-caselaw") == "example.gov"
+
+
+def test_mention_snippets_anchor_the_citing_document_not_the_cited(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>1. The rule. 2. The exception.</p>", filename="t2.html",
+                            doc_type="judgment", title="Target v Authority")["stable_id"]
+    a = f.import_bytes(data=b"<p>citing a</p>", filename="a2.html",
+                       doc_type="judgment", title="A v B")["stable_id"]
+    f.link(src_id=a, dst_id=target, relationship="applies", src_anchor="12", dst_anchor="1.")
+
+    # the user reached this tray by clicking paragraph "1." of the TARGET, so
+    # labelling the snippet "1." tells them only what they already know — the
+    # useful anchor is where the passage sits in the CITING judgment ("12")
+    g = f.document_mentions(target, anchor="1.")["groups"][0]
+    for s in g["snippets"]:
+        assert s["anchor"] != "1."
+        assert s["anchor"] in (None, "12")
+
+
+def test_mention_groups_name_the_citing_court_and_jurisdiction(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>1. The rule.</p>", filename="t3.html",
+                            doc_type="judgment", title="Target")["stable_id"]
+    a = f.import_bytes(data=b"<p>citing</p>", filename="a3.html",
+                       doc_type="judgment", title="A v B")["stable_id"]
+    f.link(src_id=a, dst_id=target, relationship="applies")
+
+    g = f.document_mentions(target)["groups"][0]
+    # the tray renders names, never raw slugs — both keys must be present even
+    # when the court is unknown, so the UI never falls back to showing "ewca"
+    assert "src_court_label" in g and "src_jurisdiction" in g
+
+
+def test_mention_sort_modes_are_offered_and_validated(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>1. The rule.</p>", filename="t4.html",
+                            doc_type="judgment", title="Target")["stable_id"]
+    old = f.import_bytes(data=b"<p>old</p>", filename="o.html", doc_type="judgment",
+                         title="Old v Case")["stable_id"]
+    new = f.import_bytes(data=b"<p>new</p>", filename="n.html", doc_type="judgment",
+                         title="New v Case")["stable_id"]
+    # decision_date is deliberately outside update_document_fields' allowlist
+    # (it isn't user-correctable metadata), so set it directly for the fixture
+    with f._open() as (cat, _rs, _ts):
+        for sid, when in ((old, "1990-01-01"), (new, "2020-01-01")):
+            cat.conn.execute("UPDATE documents SET decision_date = ? WHERE stable_id = ?",
+                             (when, sid))
+        cat.conn.commit()
+    f.link(src_id=old, dst_id=target, relationship="applies")
+    f.link(src_id=new, dst_id=target, relationship="applies")
+
+    m = f.document_mentions(target)
+    assert m["sort"] == "pagerank"                 # authority, not raw popularity
+    assert set(m["sorts"]) >= {"pagerank", "cited", "newest", "oldest", "passages"}
+
+    assert [g["src_id"] for g in f.document_mentions(target, sort="newest")["groups"]] == [new, old]
+    assert [g["src_id"] for g in f.document_mentions(target, sort="oldest")["groups"]] == [old, new]
+    # an unrecognised sort falls back to the default rather than erroring
+    assert f.document_mentions(target, sort="nonsense")["sort"] == "pagerank"
+
+
+def test_mention_snippets_mark_the_citation_that_made_the_edge(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>1. The rule.</p>", filename="t5.html",
+                            doc_type="legislation", title="Arbitration Act 1996")["stable_id"]
+    citing = f.import_bytes(
+        data=b"<p>The tribunal considered whether the Arbitration Act s 7 applied "
+             b"to the dispute, and concluded that it did not.</p>",
+        filename="c5.html", doc_type="judgment", title="A v B")["stable_id"]
+
+    with f._open() as (cat, _rs, ts):
+        text = ts.get(cat.get_document(citing)["payload_hash"])
+    lo = text.index("Arbitration Act s 7")
+    hi = lo + len("Arbitration Act s 7")
+    f.link(src_id=citing, dst_id=target, relationship="mentions")
+    with f._open() as (cat, _rs, _ts):
+        cat.conn.execute(
+            "UPDATE relations SET context_start = ?, context_end = ?, "
+            "raw_citation_string = ? WHERE src_id = ? AND dst_id = ?",
+            (lo, hi, "Arbitration Act s 7", citing, target))
+        cat.conn.commit()
+
+    snip = f.document_mentions(target)["groups"][0]["snippets"][0]
+    ms, me = snip["mark"]
+    # the marked span must land exactly on the citation, even though the snippet
+    # was windowed out of the middle of the text and then stripped
+    assert snip["text"][ms:me] == "Arbitration Act s 7"
+    assert snip["raw"] == "Arbitration Act s 7"
+
+
+def test_incoming_edges_carry_jurisdiction_and_kind_for_faceting(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>1. The rule.</p>", filename="t6.html",
+                            doc_type="legislation", title="Target Act")["stable_id"]
+    citer = f.import_bytes(data=b"<p>citing</p>", filename="c6.html",
+                           doc_type="judgment", title="A v B")["stable_id"]
+    f.link(src_id=citer, dst_id=target, relationship="mentions")
+
+    inc = f.get_document(target)["incoming"]
+    assert inc, "expected the citing judgment on the incoming edge list"
+    # the cited-by panel slices on jurisdiction × kind ("UK cases 7"), so both
+    # must ride along on every incoming row
+    row = inc[0]
+    assert row["src_kind"] == "cases"
+    assert row["src_jurisdiction"]

@@ -114,8 +114,9 @@ export const api = {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   },
-  mentions: (id: string, anchor?: string) =>
-    req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`),
+  mentions: (id: string, anchor?: string, sort?: string) =>
+    req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`
+      + (sort ? `&sort=${encodeURIComponent(sort)}` : "")),
   citationsOut: (id: string, family: "cases" | "statute") =>
     req<any>(`/citations-out?id=${encodeURIComponent(id)}&family=${family}`),
   countDocuments: (filters: Record<string, string> = {}) =>

@@ -263,6 +263,89 @@ def is_report_citation(raw: str | None) -> bool:
     return report_series(raw) is not None
 
 
+# Case-insensitive twins of the report shapes, for restoring capitalisation to a
+# citation that has been through fold(). Aliases are STORED casefolded so they
+# compare reliably, which means the case-sensitive matchers above never fire on
+# them — anything that wants to *display* a stored alias has to re-case it here.
+_REPORT_RE_CI = re.compile(REPORT_RE.pattern, re.IGNORECASE)
+_SCOTS_BARE_RE_CI = re.compile(SCOTS_BARE_RE.pattern, re.IGNORECASE)
+_ENGLISH_REPORTS_RE_CI = re.compile(ENGLISH_REPORTS_RE.pattern, re.IGNORECASE)
+_OLD_LAW_REPORTS_RE_CI = re.compile(OLD_LAW_REPORTS_RE.pattern, re.IGNORECASE)
+
+# "[2002] ewca civ 1642" — court code uppercases, division takes its registry casing.
+_NEUTRAL_CI = re.compile(
+    r"(?P<pre>\[(?:1[5-9]|20)\d{2}\]\s+)(?P<court>[A-Za-z]{2,10})"
+    r"(?P<mid>\s+)(?P<div>[A-Za-z]{2,12})?(?P<post>\s*)(?P<num>\d+)",
+    re.IGNORECASE,
+)
+
+
+def _canonical_series(matched: str) -> str:
+    """The canonical spelling of a series token however it was punctuated/cased
+    ("all e.r. (comm)" → "All ER (Comm)")."""
+    key = re.sub(r"[.\s'’]", "", matched).upper()
+    for s in REPORT_SERIES:
+        if re.sub(r"[.\s'’]", "", s).upper() == key:
+            return s
+    return matched
+
+
+def display_citation(raw: str | None) -> str:
+    """Restore conventional capitalisation to a folded citation string, so stored
+    aliases read as lawyers write them: "[2003] 1 all e.r. (comm) 140" becomes
+    "[2003] 1 All ER (Comm) 140", "[2002] ewca civ 1642" becomes
+    "[2002] EWCA Civ 1642". Punctuation variants collapse to the canonical series
+    spelling; anything unrecognised is returned untouched rather than guessed at."""
+    if not raw:
+        return raw or ""
+    out = raw
+
+    # report series — rewrite just the matched series span, so the surrounding
+    # year/volume/page survive exactly as stored
+    for rx, group in ((_REPORT_RE_CI, "series"), (_SCOTS_BARE_RE_CI, "series"),
+                      (_OLD_LAW_REPORTS_RE_CI, "court")):
+        m = rx.search(out)
+        if m and m.group(group):
+            s, e = m.span(group)
+            out = out[:s] + _canonical_series(m.group(group)) + out[e:]
+    m = _ENGLISH_REPORTS_RE_CI.search(out)
+    if m:
+        out = re.sub(r"(?<=\d\s)e\.?\s?r\.?(?=\s\d)", "ER", out, flags=re.IGNORECASE)
+
+    # neutral citation — "ewca civ" → "EWCA Civ" (division casing from the registry)
+    def _neutral_case(m: re.Match) -> str:
+        from .courts import DIVISIONS
+
+        div = m.group("div") or ""
+        if div:
+            canon = next((d for d in DIVISIONS if d.upper() == div.upper()), None)
+            if canon is None:      # not a division: leave the tail alone entirely
+                return m.group(0)
+            div = canon
+        return (m.group("pre") + m.group("court").upper() + m.group("mid")
+                + div + m.group("post") + m.group("num"))
+
+    out = _NEUTRAL_CI.sub(_neutral_case, out, count=1)
+
+    # trailing chamber/division parenthetical — "[2012] UKUT 440 (aac)" → "(AAC)",
+    # "[2019] EWHC 22 (admin)" → "(Admin)". Chambers are initialisms, divisions are
+    # words; the registry decides which, and anything else is left alone.
+    def _chamber_case(m: re.Match) -> str:
+        from .courts import DIVISIONS
+
+        tok = m.group(1)
+        canon = next((d for d in DIVISIONS if d.upper() == tok.upper()), None)
+        return f"({canon or tok.upper()})"
+
+    out = re.sub(r"(?<=\d\s)\(([A-Za-z]{2,12})\)\s*$", _chamber_case, out)
+
+    # bare series labels that carry no page shape of their own
+    for pat, label in _LABEL_ONLY:
+        ci = re.compile(pat.pattern, re.IGNORECASE)
+        out = ci.sub(label, out)
+    return out
+
+
 # ── which subscription holds a series ───────────────────────────────────────
 # Westlaw UK / Lexis+ UK hold the UK series; the Irish and Commonwealth series
 # largely need the respective national services. Grouped coarsely — the point is

@@ -142,3 +142,61 @@ def test_series_jurisdiction_buckets():
     assert series_jurisdiction("NZLR") == "commonwealth"
     assert series_jurisdiction("CMLR") == "eu"
     assert series_jurisdiction(None) == "uk"           # non-report shapes default UK
+
+
+# ── display casing of stored (folded) aliases ───────────────────────────────
+# Aliases live in citation_aliases casefolded so they compare reliably, which is
+# why the case-SENSITIVE report matchers never fire on them. display_citation is
+# what puts a stored alias back into the form a lawyer writes.
+def test_display_citation_restores_report_series_casing():
+    from raglex.citations.reporters import display_citation
+
+    assert display_citation("[2002] 1 wlr 577") == "[2002] 1 WLR 577"
+    assert display_citation("[2003] 1 w.l.r. 577") == "[2003] 1 WLR 577"
+    assert display_citation("[2008] icr 114") == "[2008] ICR 114"
+
+
+def test_display_citation_collapses_punctuation_variants():
+    from raglex.citations.reporters import display_citation
+
+    # the three spellings the corpus actually stores for one citation all
+    # converge, so the "Also cited as" list stops showing it three times
+    for raw in ("[2003] 1 all e r(comm) 140",
+                "[2003] 1 all e.r. (comm) 140",
+                "[2003] 1 all er (comm) 140"):
+        assert display_citation(raw) == "[2003] 1 All ER (Comm) 140"
+
+
+def test_display_citation_handles_apostrophe_series():
+    from raglex.citations.reporters import display_citation
+
+    assert display_citation("[2003] 1 lloyd's rep ir 131") == "[2003] 1 Lloyd's Rep IR 131"
+    assert display_citation("[2003] lloyd’s rep ir 131") == "[2003] Lloyd's Rep IR 131"
+
+
+def test_display_citation_cases_neutral_citations():
+    from raglex.citations.reporters import display_citation
+
+    assert display_citation("[2002] ewca civ 1642") == "[2002] EWCA Civ 1642"
+    assert display_citation("[2024] uksc 12") == "[2024] UKSC 12"
+    # trailing chamber/division parenthetical
+    assert display_citation("[2012] ukut 440 (aac)") == "[2012] UKUT 440 (AAC)"
+    assert display_citation("[2019] ewhc 22 (admin)") == "[2019] EWHC 22 (Admin)"
+
+
+def test_display_citation_leaves_non_citations_alone():
+    from raglex.citations.reporters import display_citation
+
+    # a case name must not be mangled by the neutral-citation caser
+    name = "assicurazioni generali spa v arab insurance group (bsc)"
+    assert display_citation(name) == name
+    assert display_citation("") == ""
+    assert display_citation(None) == ""
+
+
+def test_display_citation_english_and_old_law_reports():
+    from raglex.citations.reporters import display_citation
+
+    assert display_citation("150 e.r. 1030") == "150 ER 1030"
+    assert display_citation("(1868) lr 7 qb 339") == "(1868) LR 7 QB 339"
+    assert display_citation("1999 sc 583") == "1999 SC 583"

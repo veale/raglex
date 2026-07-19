@@ -540,6 +540,13 @@ class Facade:
                                  "src_court": src["court"] if src else None,
                                  "src_date": src["decision_date"] if src else None,
                                  "src_authority": r.get("src_pagerank") or 0.0,
+                                 # jurisdiction × kind, so the cited-by list can be
+                                 # sliced the way a lawyer actually reads it
+                                 # ("UK cases", "EU legislation")
+                                 "src_jurisdiction": self._doc_bucket(
+                                     src["source"], src["court"]) if src else None,
+                                 "src_kind": self._doc_kind(
+                                     src["source"], src["doc_type"], src["court"]) if src else None,
                                  "src_oscola": src_oscola})
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
             inferred_total = cat.inferred_citer_count(ids_self)
@@ -567,19 +574,24 @@ class Facade:
                 if al.casefold() in own or not _recite.search(
                         r"[\[(](?:1[6-9]|20)\d{2}[\])]|^\d{1,5}/\d{2}$", al):
                     continue
-                # aliases are stored folded — restore the series' canonical casing for display
-                from .citations.reporters import report_series
-                series = report_series(al)
-                disp = al
-                if series:
-                    disp = _recite.sub(_recite.escape(series), series, al, flags=_recite.IGNORECASE)
-                elif _recite.fullmatch(r"\d{1,5}/\d{2}", al):
+                # aliases are stored folded — restore conventional capitalisation
+                # for display ("[2003] 1 all e.r. (comm) 140" → "… All ER (Comm) …")
+                from .citations.reporters import display_citation
+                if _recite.fullmatch(r"\d{1,5}/\d{2}", al):
                     disp = f"app no {al}"
+                else:
+                    disp = display_citation(al)
                 if disp not in also_cited:
                     also_cited.append(disp)
             return {
                 "document": dict(doc),
                 "oscola": _oscola_cite(doc, meta),  # this document's own OSCOLA citation
+                # the reader shows names, never slugs: "Court of Appeal (Civil
+                # Division)" + "England & Wales", not "ewca"
+                "court_label": self.court_label(doc["court"]) if doc["court"] else None,
+                "jurisdiction": self._doc_bucket(doc["source"], doc["court"]),
+                "source_label": self.source_label(doc["source"]),
+                "link_label": self.link_label(doc["landing_url"], doc["source"]),
                 "also_cited_as": also_cited[:10],
                 "meta": meta,
                 "cases_cited_count": len(cases_cited),
@@ -697,10 +709,25 @@ class Facade:
                 "source_url": doc["landing_url"] or meta.get("bailii_url"),
             }
 
+    # How the "See all mentions" tray orders citing documents. PageRank is the
+    # default because raw citation counts flatter the merely-popular: a much-cited
+    # first-instance decision outranks the Supreme Court judgment that settled the
+    # point. The rest are there because the right order depends on the question —
+    # "what's the leading authority" wants pagerank, "is this still live" wants
+    # newest, "who engages with it most" wants passages.
+    MENTION_SORTS = {
+        "pagerank": "most authoritative",
+        "cited": "most cited",
+        "newest": "newest first",
+        "oldest": "oldest first",
+        "passages": "most passages",
+    }
+
     def document_mentions(self, stable_id: str, *, anchor: str | None = None,
-                          snippet_docs: int = 40, max_groups: int = 120) -> dict:
+                          snippet_docs: int = 40, max_groups: int = 120,
+                          sort: str = "pagerank") -> dict:
         """Who mentions this document (and, optionally, one paragraph of it), grouped by the
-        citing document and ranked by that citer's own authority (most-cited first).
+        citing document and ranked by ``sort`` (default: the citer's own PageRank).
 
         Powers the reader's per-paragraph "Mentioned by …" line (``by_anchor``) and the
         "See all mentions" tray (``groups`` — each citing document with the passages, drawn
@@ -722,9 +749,17 @@ class Facade:
                 if sdoc and sdoc["ecli"]:
                     auth_ids.append(sdoc["ecli"])
             auth = cat.authority_counts(auth_ids)
+            # PageRank for the same set, so the tray can rank by standing in the
+            # citation network rather than by raw popularity
+            pr_rows = cat.authority_for(auth_ids)
 
             def _authority(sid: str, sdoc) -> int:
                 return max(auth.get(sid, 0), auth.get((sdoc["ecli"] or "") if sdoc else "", 0))
+
+            def _pagerank(sid: str, sdoc) -> float:
+                ecli = (sdoc["ecli"] or "") if sdoc else ""
+                return max(float((pr_rows.get(sid) or {}).get("pagerank", 0.0) or 0.0),
+                           float((pr_rows.get(ecli) or {}).get("pagerank", 0.0) or 0.0))
 
             groups = []
             for sid, rs in by_src.items():
@@ -736,10 +771,32 @@ class Facade:
                     "src_id": sid,
                     "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)),
                     "src_court": sdoc["court"], "src_date": sdoc["decision_date"],
+                    # name the citing court and its jurisdiction, as the explorer does
+                    "src_court_label": self.court_label(sdoc["court"]) if sdoc["court"] else None,
+                    "src_jurisdiction": self._doc_bucket(sdoc["source"], sdoc["court"]),
                     "authority": _authority(sid, sdoc), "count": len(rs),
+                    "pagerank": _pagerank(sid, sdoc),
                     "anchors": anchors, "_rels": rs,
                 })
-            groups.sort(key=lambda g: (-g["authority"], -g["count"], g["src_id"]))
+
+            # ties always fall back to authority then count, so a sort key that is
+            # absent for most rows (an undated document under "newest") degrades to
+            # the default order rather than to arbitrary id order
+            sort = sort if sort in self.MENTION_SORTS else "pagerank"
+
+            def _year(g) -> int:
+                d = str(g["src_date"] or "")[:4]
+                return int(d) if d.isdigit() else 0
+
+            _tie = lambda g: (-g["authority"], -g["count"], g["src_id"])  # noqa: E731
+            keys = {
+                "pagerank": lambda g: (-g["pagerank"], *_tie(g)),
+                "cited": lambda g: _tie(g),
+                "newest": lambda g: (-_year(g), *_tie(g)),
+                "oldest": lambda g: (_year(g) or 9999, *_tie(g)),
+                "passages": lambda g: (-g["count"], *_tie(g)),
+            }
+            groups.sort(key=keys[sort])
 
             # snippets (the passages where the top citers cite this) — from the citation's
             # stored context span, so we read each citer's text at most once.
@@ -759,8 +816,24 @@ class Facade:
                             continue
                         a = max(0, cs - 90)
                         b = min(len(text), (ce or cs) + 200)
-                        snippets.append({"anchor": r["src_anchor"] or r["dst_anchor"],
-                                         "text": text[a:b].strip(), "start": cs})
+                        # offsets of the citation itself within the snippet, so the
+                        # tray can mark the words that actually made the connection
+                        # ("Arbitration Act s 7"). context_start/end is the matched
+                        # citation's own span, not a wider window.
+                        window = text[a:b]
+                        lead = len(window) - len(window.lstrip())
+                        body = window.strip()
+                        ms = min(max(0, cs - a - lead), len(body))
+                        me = min(max(ms, (ce or cs) - a - lead), len(body))
+                        # the anchor labels WHERE IN THE CITING DOCUMENT the passage
+                        # sits, so the reader can place the quote. Never fall back to
+                        # dst_anchor: that is the paragraph of the *cited* document the
+                        # user just clicked, so every snippet would be labelled with
+                        # the thing they already know.
+                        snippets.append({"anchor": r["src_anchor"], "text": body,
+                                         "start": cs,
+                                         "mark": [ms, me] if me > ms else None,
+                                         "raw": r["raw_citation_string"]})
                 g["snippets"] = snippets[:8]
             for g in groups:
                 g.pop("_rels", None)
@@ -784,6 +857,7 @@ class Facade:
                          for lab, v in by_anchor.items()}
             return {"target": stable_id, "anchor": anchor,
                     "total": len(groups), "groups": groups[:max_groups],
+                    "sort": sort, "sorts": dict(self.MENTION_SORTS),
                     "by_anchor": by_anchor}
 
     _STATUTE_KINDS = {"act", "regulation", "directive", "treaty", "eu_instrument"}
@@ -1097,6 +1171,79 @@ class Facade:
         words = (source or "").replace("_", "-").split("-")
         return " ".join(w.upper() if w.lower() in self._ACRONYM_TOKENS or len(w) <= 2
                         else w.capitalize() for w in words if w)
+
+    # An external link is labelled by WHERE IT POINTS, never by the source that
+    # ingested the document. The two diverge constantly: 272k judgments carry
+    # source "uk-caselaw" (the Find Case Law adapter) but a landing_url on
+    # bailii.org, because FCL holds no copy and the adapter fell back to BAILII.
+    # Labelling those "Find Case Law" sends the reader to the wrong service, and
+    # in particular claims a National Archives provenance the text doesn't have.
+    # Host wins; source is only the fallback when there is no URL to read.
+    _HOST_LABELS = {
+        # the LIIs — labelled as the LII, not as whatever adapter reached them
+        "bailii.org": "BAILII", "austlii.edu.au": "AustLII",
+        "canlii.org": "CanLII", "nzlii.org": "NZLII",
+        "worldlii.org": "WorldLII", "commonlii.org": "CommonLII",
+        "paclii.org": "PacLII", "saflii.org": "SAFLII", "asianlii.org": "AsianLII",
+        # TNA: only ever a genuine Find Case Law scrape reaches this host
+        "caselaw.nationalarchives.gov.uk": "National Archives",
+        "legislation.gov.uk": "legislation.gov.uk",
+        "publications.parliament.uk": "UK Parliament",
+        "ofcom.org.uk": "Ofcom",
+        "eur-lex.europa.eu": "EUR-Lex",
+        "digital-markets-act-cases.ec.europa.eu": "DMA case register",
+        "edpb.europa.eu": "EDPB", "ec.europa.eu": "European Commission",
+        "hudoc.echr.coe.int": "HUDOC", "echr.coe.int": "HUDOC",
+        "uitspraken.rechtspraak.nl": "Rechtspraak.nl",
+        # Australia
+        "caselaw.nsw.gov.au": "NSW Caselaw",
+        "judgments.fedcourt.gov.au": "Federal Court of Australia",
+        "eresources.hcourt.gov.au": "High Court of Australia",
+        "legislation.gov.au": "Federal Register of Legislation",
+        "legislation.tas.gov.au": "Tasmanian Legislation",
+        "legislation.qld.gov.au": "Queensland Legislation",
+        # Canada
+        "bccourts.ca": "BC Courts", "courts.gov.bc.ca": "BC Courts",
+        "decisions.scc-csc.ca": "Supreme Court of Canada",
+        "decisions.fct-cf.gc.ca": "Federal Court of Canada",
+        "decisions.fca-caf.gc.ca": "Federal Court of Appeal (Canada)",
+        "coadecisions.ontariocourts.ca": "Ontario Court of Appeal",
+        "decision.tcc-cci.gc.ca": "Tax Court of Canada",
+        "decisions.sst-tss.gc.ca": "Social Security Tribunal (Canada)",
+        "decisions.citt-tcce.gc.ca": "Trade Tribunal (Canada)",
+        "decisions.fpslreb-crtespf.gc.ca": "Labour Board (Canada)",
+        "decisions.chrt-tcdp.gc.ca": "Human Rights Tribunal (Canada)",
+        "decisions.ct-tc.gc.ca": "Competition Tribunal (Canada)",
+        "decisions.cmac-cacm.ca": "Court Martial Appeal Court (Canada)",
+        "decisions.psdpt-tpfd.gc.ca": "Disclosure Protection Tribunal (Canada)",
+        "oic-ci.gc.ca": "Information Commissioner (Canada)",
+        "laws-lois.justice.gc.ca": "Justice Laws (Canada)",
+        "decisia.lexum.com": "Lexum", "norma.lexum.com": "Lexum",
+        "refugeelab.ca": "Refugee Law Lab",
+        # rest of world
+        "courtsofnz.govt.nz": "Courts of New Zealand",
+        "elegislation.gov.hk": "HK e-Legislation",
+        "sso.agc.gov.sg": "Singapore Statutes Online",
+        "indian-supreme-court-judgments.s3.amazonaws.com": "Supreme Court of India",
+    }
+
+    def link_label(self, url: str | None, source: str | None = None) -> str | None:
+        """Label for an outbound link, resolved from the URL's host so the reader
+        is told which service they are actually being sent to. Falls back to the
+        ingest source's label only when there is no URL host to read."""
+        import re as _re
+
+        m = _re.match(r"https?://([^/:]+)", (url or "").strip(), _re.I)
+        if not m:
+            return self.source_label(source) if source else None
+        host = m.group(1).lower().removeprefix("www.")
+        if host in self._HOST_LABELS:
+            return self._HOST_LABELS[host]
+        # match a registered parent domain ("bailii.org" covers any subdomain)
+        for known, label in self._HOST_LABELS.items():
+            if host.endswith("." + known):
+                return label
+        return host
 
     # registry annotations that are for citation-matching, not for humans
     _COURT_NOTE_RE = None
@@ -1503,7 +1650,7 @@ class Facade:
                     "has_text": bool(r["has_text"]),
                     "pdf": raw_path.rsplit(".", 1)[-1].lower() == "pdf" if "." in raw_path else False,
                     "url": r["landing_url"],
-                    "source_label": self.source_label(r["source"]),
+                    "source_label": self.link_label(r["landing_url"], r["source"]),
                 }
                 if r["doc_type"] == "legislation":
                     item["hanging"] = hanging.get(r["stable_id"], {})

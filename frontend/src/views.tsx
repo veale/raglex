@@ -93,16 +93,45 @@ function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => v
   return <MentionsTray target={t.target} anchor={t.anchor} open={open} />;
 }
 
+// A mention snippet with the citation that produced the edge marked out — the reader
+// can see *which words* linked the two documents ("Arbitration Act s 7") rather than
+// having to hunt for them in the surrounding prose. `mark` is a [start, end] offset
+// pair into `text`; without it the snippet renders plain.
+function SnipText({ s }: { s: any }) {
+  const m: [number, number] | null = s.mark || null;
+  if (!m || m[1] <= m[0] || m[1] > (s.text?.length ?? 0)) return <>{s.text}</>;
+  return (
+    <>
+      {s.text.slice(0, m[0])}
+      <mark className="msnip-cite" title={s.raw ? `matched: ${s.raw}` : undefined}>
+        {s.text.slice(m[0], m[1])}</mark>
+      {s.text.slice(m[1])}
+    </>
+  );
+}
+
 // Grouped-by-citer mentions of a document (or one of its paragraphs), most-authoritative
 // first — with the passages where each cites it, and a jump to the full citing document.
 function MentionsTray({ target, anchor, open }: { target: string; anchor?: string; open: (id: string, a?: string) => void }) {
   const { push } = useTray();
-  const [data] = useAsync(() => api.mentions(target, anchor), [target, anchor]);
+  // PageRank by default — raw citation counts flatter the merely-popular over the
+  // judgment that actually settled the point
+  const [sort, setSort] = useState("pagerank");
+  const [data] = useAsync(() => api.mentions(target, anchor, sort), [target, anchor, sort]);
   if (!data) return <p className="muted loading-pulse">Loading mentions…</p>;
   const groups: any[] = data.groups || [];
-  if (!groups.length) return <p className="muted">Nothing mentions this yet.</p>;
+  const sorts: Record<string, string> = data.sorts || {};
+  const sorter = Object.keys(sorts).length > 0 && (
+    <div className="tray-sort">
+      <select value={sort} onChange={(e) => setSort(e.target.value)} title="order these citing documents by…">
+        {Object.entries(sorts).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>
+    </div>
+  );
+  if (!groups.length) return <><p className="muted">Nothing mentions this yet.</p></>;
   return (
     <div>
+      {sorter}
       {data.total > groups.length && <p className="muted" style={{ fontSize: 12 }}>{data.total} citing documents · showing {groups.length}</p>}
       {groups.map((g, i) => (
         <div className="mgroup" key={i}>
@@ -112,9 +141,17 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
               <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
             <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
           </div>
+          <div className="mgroup-meta muted">
+            {[g.src_court_label || g.src_court, g.src_jurisdiction].filter(Boolean).join(" · ")}
+            {g.src_date ? ` · ${String(g.src_date).slice(0, 4)}` : ""}
+            {g.count > 1 ? ` · ${g.count} passages` : ""}
+          </div>
+          {/* the anchor places the quote WITHIN THE CITING document; with only one
+              passage there is nothing to disambiguate, so it just adds noise */}
           {g.snippets.map((s: any, j: number) => (
-            <div className="msnip" key={j}>{s.anchor && <span className="msnip-anchor">{s.anchor}</span>}
-              <span className="msnip-text">…{s.text}…</span></div>
+            <div className="msnip" key={j}>
+              {s.anchor && g.snippets.length > 1 && <span className="msnip-anchor">{s.anchor}</span>}
+              <span className="msnip-text">…<SnipText s={s} />…</span></div>
           ))}
         </div>
       ))}
@@ -956,7 +993,10 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
     <div>
       <div className="peek-doc-head">
         <b><Oscola c={(doc as any)?.oscola} fallback={d?.title || id} /></b>
-        <div className="muted" style={{ fontSize: 12 }}>{d?.court}{d?.decision_date ? " · " + String(d.decision_date).slice(0, 10) : ""}
+        <div className="muted" style={{ fontSize: 12 }}>
+          {/* name the court and its jurisdiction — never the raw slug ("ewca") */}
+          {[doc?.court_label || d?.court, doc?.jurisdiction].filter(Boolean).join(" · ")}
+          {d?.decision_date ? " · " + String(d.decision_date).slice(0, 10) : ""}
           {doc?.cited_by_count ? ` · cited by ${doc.cited_by_count}` : ""}{anchor ? ` · ${anchor}` : ""}</div>
         <button style={{ marginTop: 4 }} onClick={() => openFull(id, anchor)}>open full ↗</button>
       </div>
@@ -1370,8 +1410,19 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
   const [mode, setMode] = useState<"menu" | "link" | "flag">("menu");
   const [note, setNote] = useState("");
   const [msg, setMsg] = useState("");
+  // Whether the current click STARTED inside the popover. Testing the mouseup
+  // target is not enough: picking an autocomplete suggestion fires on mousedown,
+  // which re-renders the popover and unmounts the row that was clicked, so by
+  // mouseup `e.target` is detached and `closest(".sel-pop")` finds nothing —
+  // the guard fell through and dismissed the popover mid-task. Recorded in the
+  // capture phase, before React can unmount anything.
+  const downInPop = useRef(false);
   useEffect(() => {
+    function onDown(e: MouseEvent) {
+      downInPop.current = !!(e.target as HTMLElement)?.closest?.(".sel-pop");
+    }
     function onUp(e: MouseEvent) {
+      if (downInPop.current) { downInPop.current = false; return; }
       if ((e.target as HTMLElement)?.closest?.(".sel-pop")) return;  // clicking inside our popover
       const s = window.getSelection();
       const text = s?.toString().trim() || "";
@@ -1394,8 +1445,12 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
                context: (seg?.textContent || "").slice(0, 600), links });
       setMode("menu"); setMsg(""); setNote("");
     }
+    document.addEventListener("mousedown", onDown, true);
     document.addEventListener("mouseup", onUp);
-    return () => document.removeEventListener("mouseup", onUp);
+    return () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("mouseup", onUp);
+    };
   }, []);
   const dismiss = (delay = 2400) =>
     setTimeout(() => { setSel(null); setMsg(""); setMode("menu"); window.getSelection()?.removeAllRanges(); }, delay);
@@ -1491,6 +1546,16 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
     <div>
       <div className="panel">
         <h2 className="doc-title" style={{ marginTop: 0 }}><Oscola c={doc.oscola} fallback={d.title || d.stable_id} /></h2>
+        {/* who decided this, and where — "Court of Appeal (Civil Division) ·
+            England & Wales", matching the typology the explorer uses */}
+        <div className="doc-provenance muted">
+          {[doc.court_label || d.court, doc.jurisdiction].filter(Boolean).join(" · ")}
+          {d.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
+          {d.landing_url && (
+            <> · <a href={d.landing_url} target="_blank" rel="noopener noreferrer"
+                    title={`open at ${doc.link_label}`}>{doc.link_label} ↗</a></>
+          )}
+        </div>
         <div className="doc-summary">
           <a className="summary-stat" title="Later documents that cite this one — the full list is at the foot of the page"
             onClick={() => {
@@ -1581,7 +1646,31 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   const [sort, setSort] = useState<"authority" | "newest" | "oldest">("authority");
   const [page, setPage] = useState(0);
   const PER = 50;
-  const shown = [...incoming].sort((a, b) =>
+
+  // Cross-section tokens — "UK cases 7 | EU legislation 35". A citing body reads
+  // very differently depending on where it comes from and what kind of instrument
+  // it is, so let the reader slice on both at once. Facets are computed over the
+  // WHOLE incoming set, so counts stay honest while a filter is applied.
+  const KIND_LABEL: Record<string, string> = {
+    cases: "cases", legislation: "legislation", guidance: "guidance",
+    administrative: "admin decisions", other: "other",
+  };
+  const [slice, setSlice] = useState<string | null>(null);
+  const facets = new Map<string, { jur: string; kind: string; n: number }>();
+  for (const r of incoming) {
+    const jur = r.src_jurisdiction, kind = r.src_kind;
+    if (!jur || !kind) continue;
+    const key = `${jur}|${kind}`;
+    const f = facets.get(key) || { jur, kind, n: 0 };
+    f.n++; facets.set(key, f);
+  }
+  // biggest cross-sections first — the long tail of one-offs stays out of the way
+  const tokens = [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
+  const filtered = slice
+    ? incoming.filter((r) => `${r.src_jurisdiction}|${r.src_kind}` === slice)
+    : incoming;
+
+  const shown = [...filtered].sort((a, b) =>
     sort === "authority" ? (b.src_authority || 0) - (a.src_authority || 0)
     : sort === "newest" ? String(b.src_date || "").localeCompare(String(a.src_date || ""))
     : String(a.src_date || "9999").localeCompare(String(b.src_date || "9999")));
@@ -1599,7 +1688,8 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
         <option value="newest">newest first</option>
         <option value="oldest">oldest first</option>
       </select>
-      <h3>Cited by <span className="muted">({count ?? incoming.length}) — later documents that cite this one, and how</span>
+      <h3>Cited by <span className="muted">({count ?? incoming.length})
+        {slice ? ` — ${shown.length} in this slice` : " — later documents that cite this one, and how"}</span>
         {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" "}
           <Info t={`Plus ${inferred} inferred link${inferred === 1 ? "" : "s"} — heuristic carry-forwards (a bare "Section 12" pinned to the last-named Act), not citations anyone made. Excluded from the count above so they don't inflate it.`} />
           {" +"}{inferred} inferred</span> : null}</h3>
@@ -1609,6 +1699,20 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
             {byType[t]} {treat(t)}</span>
         ))}
       </div>
+      {tokens.length > 1 && (
+        <div className="active-chips cited-by-facets" style={{ marginBottom: 8 }}>
+          {tokens.map(([key, f]) => (
+            <button key={key} className={`tag tag-btn${slice === key ? " on" : ""}`}
+              title={`Show only ${f.jur} ${KIND_LABEL[f.kind] || f.kind} citing this`}
+              onClick={() => { setSlice(slice === key ? null : key); setPage(0); }}>
+              {f.jur} {KIND_LABEL[f.kind] || f.kind} <b>{f.n}</b></button>
+          ))}
+          {slice && (
+            <button className="tag tag-btn tag-clear" onClick={() => { setSlice(null); setPage(0); }}
+              title="Show every citing document again">clear ✕</button>
+          )}
+        </div>
+      )}
       <table><tbody>
         {shown.slice(page * PER, (page + 1) * PER).map((r, i) => (
           <tr key={i}>
@@ -4182,7 +4286,9 @@ export function CiteHoverLayer() {
         <>
           <div className="cite-card-title"><Oscola c={card.d.oscola} fallback={d?.title || card.id} /></div>
           <div className="muted" style={{ fontSize: 12 }}>
-            {d?.court || d?.source}{d?.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
+            {card.d.court_label || d?.court || card.d.source_label || d?.source}
+            {card.d.jurisdiction ? ` · ${card.d.jurisdiction}` : ""}
+            {d?.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
             {d?.doc_type ? ` · ${d.doc_type}` : ""}
           </div>
           <div className="muted" style={{ fontSize: 12 }}>

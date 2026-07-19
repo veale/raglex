@@ -124,6 +124,11 @@ header h1 {
   text-transform: lowercase;
 }
 header h1::after { content: ""; }
+/* back to wherever this document was opened from — subtle until you want it */
+.back-arrow { background: transparent; border: none; cursor: pointer; padding: 0 var(--sp-2) 0 0;
+  color: var(--subtext); font-size: 1.25rem; line-height: 1; align-self: center;
+  margin-right: calc(-1 * var(--sp-3)); transition: color .12s, transform .12s; }
+.back-arrow:hover { color: var(--accent); transform: translateX(-2px); }
 nav { display: flex; gap: 0; flex-wrap: wrap; margin-left: auto; }
 nav button {
   background: transparent; color: var(--subtext); border: none; border-bottom: 2px solid transparent;
@@ -197,6 +202,16 @@ button.mini:hover { color: var(--text); }
   border-radius: var(--radius); padding: 1px var(--sp-3); font-size: .75rem;
   color: var(--subtext); margin: 2px var(--sp-2) 2px 0;
 }
+/* a .tag that filters when clicked — same token look, plus affordance and an
+   "on" state so the active cross-section is unmistakable */
+.tag-btn { cursor: pointer; font: inherit; font-size: .75rem; line-height: 1.5;
+  transition: border-color .12s, color .12s, background .12s; }
+.tag-btn:hover { border-color: var(--accent); color: var(--text); }
+.tag-btn b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.tag-btn.on { border-color: var(--accent); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.tag-btn.on b { color: var(--accent); }
+.tag-clear { color: var(--subtext); }
 
 /* --- tables (Swiss data) --------------------------------------------------- */
 table { width: 100%; border-collapse: collapse; }
@@ -291,6 +306,10 @@ tbody tr:hover { background: var(--surface-2); }
 /* --- OSCOLA title + summary line ------------------------------------------- */
 .doc-title { font-size: 1.6rem; line-height: 1.25; font-weight: 600; }
 .doc-title i { font-style: italic; }
+/* deciding court, jurisdiction, date and the outbound source link */
+.doc-provenance { font-size: .8125rem; margin-top: var(--sp-2); }
+.doc-provenance a { color: var(--subtext); }
+.doc-provenance a:hover { color: var(--accent); }
 .doc-summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3);
   margin: var(--sp-3) 0 var(--sp-2); font-size: .875rem; }
 .doc-summary .summary-stat { color: var(--subtext); cursor: pointer; }
@@ -325,6 +344,16 @@ tbody tr:hover { background: var(--surface-2); }
 .msnip { font-size: .8125rem; color: var(--subtext); margin: var(--sp-2) 0; padding-left: var(--sp-3);
   border-left: 2px solid var(--line); line-height: 1.5; }
 .msnip-anchor { display: inline-block; font-weight: 700; color: var(--info); margin-right: var(--sp-2); }
+/* the citation that actually made the connection, inside a mention snippet */
+.msnip-cite { background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text); font-weight: 600; border-radius: 2px; padding: 0 1px; }
+/* subtle re-order control, sitting just under the tray's close button */
+.tray-sort { display: flex; justify-content: flex-end; margin: calc(-1 * var(--sp-2)) 0 var(--sp-2); }
+.tray-sort select { width: auto; padding: 0 var(--sp-2); font-size: .75rem;
+  color: var(--subtext); background: transparent; border: none; cursor: pointer; }
+.tray-sort select:hover { color: var(--accent); }
+/* court · jurisdiction · year for the citing document, under its title */
+.mgroup-meta { font-size: .75rem; margin: calc(-1 * var(--sp-1)) 0 var(--sp-2); }
 .msnip-text { }
 /* cites rows */
 .crow { display: flex; align-items: baseline; gap: var(--sp-3); padding: var(--sp-2) 0;

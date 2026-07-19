@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
 import { ExploreView } from "./explore";
 import { GraphView } from "./graph";
@@ -86,20 +86,63 @@ function AdminView({ open, navigate }:
   );
 }
 
+// Where the reader was before the current view — enough to put them back exactly
+// where they left off, including how far down the page they had scrolled.
+type ViewState = { tab: Tab; docId: string | null; graphId: string | null;
+                   pinpoint: string | null; scrollY: number };
+
 export function App() {
   const [tab, setTab] = useState<Tab>("explore");
   const [docId, setDocId] = useState<string | null>(null);
   const [graphId, setGraphId] = useState<string | null>(null);
   const [pinpoint, setPinpoint] = useState<string | null>(null);
+
+  // A back stack, because navigation here is tab state rather than real routing:
+  // opening a document from a search result would otherwise strand the reader with
+  // no way back to the list they were working through.
+  const [back, setBack] = useState<ViewState[]>([]);
+  const [restoreTo, setRestoreTo] = useState<number | null>(null);
+  const pushBack = () => setBack((b) =>
+    [...b.slice(-19), { tab, docId, graphId, pinpoint, scrollY: window.scrollY }]);
+  const goBack = () => {
+    setBack((b) => {
+      const prev = b[b.length - 1];
+      if (!prev) return b;
+      setTab(prev.tab); setDocId(prev.docId);
+      setGraphId(prev.graphId); setPinpoint(prev.pinpoint);
+      setRestoreTo(prev.scrollY);
+      return b.slice(0, -1);
+    });
+  };
+  // restore scroll only once the restored view has painted
+  useEffect(() => {
+    if (restoreTo === null) return;
+    const y = restoreTo;
+    setRestoreTo(null);
+    requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo(0, y)));
+  }, [restoreTo]);
+
   // open a document, optionally deep-linking to a pinpointed section (JADE-style)
   const open = (id: string, anchor?: string) => {
-    if (!id) return; setDocId(id); setPinpoint(anchor || null); setTab("document");
+    if (!id) return;
+    pushBack();
+    setDocId(id); setPinpoint(anchor || null); setTab("document");
   };
-  const openGraph = (id: string) => { if (!id) return; setGraphId(id); setTab("graph"); };
+  const openGraph = (id: string) => {
+    if (!id) return;
+    pushBack(); setGraphId(id); setTab("graph");
+  };
   // jump to Search pre-filtered (Corpus Map "see this list") — nonce forces re-adopt
   const [corpusFilter, setCorpusFilter] = useState<Record<string, string>>({});
-  const navigateCorpus = (f: Record<string, string>) => { setCorpusFilter({ ...f, _n: String(Date.now()) }); setTab("search"); };
+  const navigateCorpus = (f: Record<string, string>) => {
+    pushBack();
+    setCorpusFilter({ ...f, _n: String(Date.now()) }); setTab("search");
+  };
   const goSearch = (q?: string) => navigateCorpus(q ? { query: q } : {});
+
+  // which browse surfaces have been opened at least once (see the render below)
+  const visited = useRef<Set<Tab>>(new Set(["explore"]));
+  visited.current.add(tab);
 
   // Shareable deep links: #/article/{id}[/section/{anchor}] ↔ the open document.
   useEffect(() => {
@@ -130,6 +173,11 @@ export function App() {
     <TrayProvider>
     <div className="app">
       <header>
+        {back.length > 0 && (
+          <button className="back-arrow" onClick={goBack}
+            title={`Back to ${back[back.length - 1].tab === "document" ? "the previous document" : back[back.length - 1].tab}`}
+            aria-label="Back">←</button>
+        )}
         <h1 onClick={() => setTab("explore")} style={{ cursor: "pointer" }} title="Explore">RagLex</h1>
         <ApiStatus />
         <nav>
@@ -143,8 +191,19 @@ export function App() {
         </nav>
         <ThemeSwitch />
       </header>
-      {tab === "explore" && <ExploreView open={open} goSearch={goSearch} />}
-      {tab === "search" && <SearchView open={open} initialFilter={corpusFilter} />}
+      {/* Explore and Search stay MOUNTED once visited, merely hidden — their
+          results and facet state are local, so unmounting them would mean "back"
+          returned to an empty search box instead of the list you were reading. */}
+      {(tab === "explore" || visited.current.has("explore")) && (
+        <div style={{ display: tab === "explore" ? undefined : "none" }}>
+          <ExploreView open={open} goSearch={goSearch} />
+        </div>
+      )}
+      {(tab === "search" || visited.current.has("search")) && (
+        <div style={{ display: tab === "search" ? undefined : "none" }}>
+          <SearchView open={open} initialFilter={corpusFilter} />
+        </div>
+      )}
       {tab === "admin" && <AdminView open={open} navigate={navigateCorpus} />}
       {tab === "settings" && <SettingsView />}
       {tab === "document" && docId && <DocumentView id={docId} open={open} openGraph={openGraph} pinpoint={pinpoint} />}
