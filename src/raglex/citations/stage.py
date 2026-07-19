@@ -132,6 +132,17 @@ def extract_document(
     if doc["doc_type"] == str(DocType.LEGISLATION):
         cites = [c for c in cites if c.method != "carry_forward"]
 
+    # Inside a JUDGMENT, a bare "paragraph N" refers to the judgment's own
+    # numbered paragraphs ("in paragraph 77 above") or a cited case's — never to
+    # legislation, whose paragraphs are cited literally ("para 2 of Schedule 1",
+    # caught by the full grammar). The adjacency guard in the extractor catches
+    # the case-citation form; this drops the rest of the class at the doc level
+    # (the 2026-07 probe residue: 385k judgment-source para edges). Section /
+    # Article carry-forwards — the heuristic's real purpose — are unaffected.
+    if doc["doc_type"] in (str(DocType.JUDGMENT), str(DocType.DECISION), str(DocType.OPINION)):
+        cites = [c for c in cites
+                 if not (c.method == "carry_forward" and c.raw.lower().startswith("para"))]
+
     # CJEU precision guard: a UK statute *name* ("<Title> Act <year>", "DPA 1998 s.5")
     # only resolves to UK legislation inside a CJEU judgment that was a UK-referred
     # preliminary ruling. Elsewhere in CJEU text an "X Act YYYY" shape is usually foreign

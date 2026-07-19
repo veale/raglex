@@ -96,6 +96,28 @@ def probe_para_pinpoint_on_eu_instrument(cat) -> ProbeResult:
         "warn", n, samples, repairable=True)
 
 
+# para-cue carry-forwards whose SOURCE is a judgment/decision — regardless of
+# host kind or case adjacency. In a judgment a bare "paragraph N" is an internal
+# or case reference, never a legislation provision (those are cited literally).
+_JUDGMENT_PARA_CF = """
+FROM citations c JOIN documents d ON d.stable_id = c.src_id
+WHERE c.method = 'carry_forward' AND LOWER(c.raw) LIKE ?
+  AND d.doc_type IN ('judgment', 'decision', 'opinion')
+"""
+
+
+def probe_judgment_paragraph_carry_forward(cat) -> ProbeResult:
+    n = _one(cat, f"SELECT COUNT(*) AS n {_JUDGMENT_PARA_CF}", _PARA_PAT)
+    samples = _rows(cat, f"SELECT c.src_id, c.raw, c.candidate_id, c.pinpoint "
+                         f"{_JUDGMENT_PARA_CF} LIMIT {SAMPLE}", _PARA_PAT)
+    return ProbeResult(
+        "judgment_paragraph_carry_forward",
+        "para-cue carry-forwards sourced in judgments — internal/case paragraph "
+        "references mis-pinned to legislation (the extraction stage now drops "
+        "this whole class; these are pre-fix residue)",
+        "warn", n, samples, repairable=True)
+
+
 def probe_self_citation(cat) -> ProbeResult:
     # Two very different populations share the src==dst shape (the live run
     # proved it): STRUCTURED self-edges are an instrument's own internal
@@ -226,6 +248,7 @@ def probe_duplicate_spans(cat) -> ProbeResult:
 
 PROBES = (
     probe_case_paragraph_carry_forward,
+    probe_judgment_paragraph_carry_forward,
     probe_para_pinpoint_on_eu_instrument,
     probe_self_citation,
     probe_year_pinpoint,
@@ -255,16 +278,10 @@ def run_probes(cat, *, only: list[str] | None = None) -> list[ProbeResult]:
 # Repairs — targeted, deletion-bounded, and matched 1:1 to a probe.
 # --------------------------------------------------------------------------
 
-def repair_case_paragraph_carry_forward(cat) -> dict:
-    """Remove the phantom legislation edges the C-604/22 bug minted: the
-    poisoned ``carry_forward`` citation rows (para-cue, ≤10 chars after a case
-    citation) and the ``inferred`` relations built from them. Bounded strictly
-    to rows matching the probe's own join — nothing else is touched. Re-runnable.
-
-    After repair, run rebuild-citation-counts (the roll-up still carries the
-    phantom occurrences until rebuilt)."""
-    poisoned = _rows(cat, f"SELECT c2.citation_id, c2.src_id, c2.candidate_id, c2.pinpoint "
-                          f"{_CASE_PARA_CF}", _PARA_PAT)
+def _delete_citations_and_inferred_edges(cat, poisoned: list[dict]) -> dict:
+    """Shared repair core: delete the given citation rows, then the ``inferred``
+    relations they minted — matched on the exact (src, host-candidate,
+    pinpoint-anchor) triple, inferred provenance only. Bounded and re-runnable."""
     deleted_edges = 0
     with cat._atomic():
         for i in range(0, len(poisoned), 500):
@@ -273,8 +290,6 @@ def repair_case_paragraph_carry_forward(cat) -> dict:
             cat.conn.execute(
                 f"DELETE FROM citations WHERE citation_id IN ({qs})",
                 [p["citation_id"] for p in batch])
-        # drop the inferred edges those citations minted: match on the exact
-        # (src, host-candidate, pinpoint-anchor) triple, inferred provenance only
         seen: set[tuple] = set()
         for p in poisoned:
             key = (p["src_id"], p["candidate_id"], p["pinpoint"])
@@ -287,6 +302,27 @@ def repair_case_paragraph_carry_forward(cat) -> dict:
                 (p["src_id"], p["pinpoint"], p["candidate_id"], p["candidate_id"]))
             deleted_edges += cur.rowcount
     return {"citations_deleted": len(poisoned), "inferred_edges_deleted": deleted_edges}
+
+
+def repair_case_paragraph_carry_forward(cat) -> dict:
+    """Remove the phantom legislation edges the C-604/22 bug minted: the
+    poisoned ``carry_forward`` citation rows (para-cue, ≤10 chars after a case
+    citation) and the ``inferred`` relations built from them. Bounded strictly
+    to rows matching the probe's own join — nothing else is touched. Re-runnable.
+
+    After repair, run rebuild-citation-counts (the roll-up still carries the
+    phantom occurrences until rebuilt)."""
+    poisoned = _rows(cat, f"SELECT c2.citation_id, c2.src_id, c2.candidate_id, c2.pinpoint "
+                          f"{_CASE_PARA_CF}", _PARA_PAT)
+    return _delete_citations_and_inferred_edges(cat, poisoned)
+
+
+def repair_judgment_paragraph_carry_forward(cat) -> dict:
+    """Remove ALL para-cue carry-forwards sourced in judgments/decisions (the
+    class the extraction stage now refuses to mint) + their inferred edges."""
+    poisoned = _rows(cat, f"SELECT c.citation_id, c.src_id, c.candidate_id, c.pinpoint "
+                          f"{_JUDGMENT_PARA_CF}", _PARA_PAT)
+    return _delete_citations_and_inferred_edges(cat, poisoned)
 
 
 def repair_self_citation(cat) -> dict:
@@ -303,6 +339,7 @@ def repair_self_citation(cat) -> dict:
 
 REPAIRS = {
     "case_paragraph_carry_forward": repair_case_paragraph_carry_forward,
+    "judgment_paragraph_carry_forward": repair_judgment_paragraph_carry_forward,
     # the para-on-EU-instrument probe is the same disease seen from the other
     # side; the carry-forward repair clears the adjacent cases, and what remains
     # deserves eyes before deletion — so no blind repair for it.

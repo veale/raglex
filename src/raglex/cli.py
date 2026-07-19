@@ -278,6 +278,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_effects = 0.0
         last_counts = 0.0
         last_gazetteer = 0.0
+        # start the daily authority rebuild ~1h in, not at boot (it scans the whole
+        # relations table; let the restart settle first)
+        last_authority = time.time() - 86400 + 3600
         last_au_repair = 0.0
         last_resolve = 0.0
         eurlex_broken_until = 0.0
@@ -383,6 +386,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     last_counts = time.time()
                     cc = f.rebuild_citation_counts()
                     print(f"[watch] citation counts: {cc['candidates']} distinct candidates")
+                # Daily: recompute the PageRank authority roll-up (design §3a) —
+                # search fusion, the citator, related docs, and 'most authoritative'
+                # sort all read it, and it must track the graph as rescans land.
+                if time.time() - last_authority >= 86400:
+                    last_authority = time.time()
+                    au = f.rebuild_authority()
+                    print(f"[watch] authority (PageRank): {au['documents']} documents ranked")
                 # Weekly: top up the statute gazetteer from legislation.gov.uk, so acts
                 # passed after the vendored lists were cut still confirm by name.
                 if time.time() - last_gazetteer >= 7 * 86400:
