@@ -279,8 +279,11 @@ register(Grammar(
 # inferred, name-based match → routed to the echr adapter). The captured name is also
 # what tags an otherwise-bare EHRR citation as ECHR.
 _ECHR_CASE_NAME = (
+    # applicant-name run bounded {0,7}: unbounded, it has the same failure mode as the
+    # statute-title grammar — every capitalised word starts a scan across any long run of
+    # capitalised tokens hunting for a " v " that never comes (tables of names, headings).
     r"(?P<name>[A-Z][A-Za-z.'’-]+(?:\s+(?:and\s+Others|and\s+[A-Z][A-Za-z.'’-]+|"
-    r"[A-Z][A-Za-z.'’-]+))*?\s+v\.?\s+(?:the\s+)?[A-Z][A-Za-z.'’-]+(?:\s+[A-Z][A-Za-z.'’-]+){0,3})"
+    r"[A-Z][A-Za-z.'’-]+)){0,7}?\s+v\.?\s+(?:the\s+)?[A-Z][A-Za-z.'’-]+(?:\s+[A-Z][A-Za-z.'’-]+){0,3})"
 )
 
 
@@ -651,11 +654,16 @@ register(Grammar(
     # "Police, Crime, Sentencing and Courts Act 2022" — so a comma is allowed between title
     # tokens (``,?\s+``), or the first clause is lost. Over-capture is harmless: a candidate
     # is only minted when the gazetteer confirms the exact title+year.
+    # The token run is BOUNDED ({0,11}): an unbounded ``*?`` here meant every capitalised
+    # word in the text started a scan that could chew through an arbitrarily long run of
+    # capitalised tokens hunting for an "Act <year>" that never comes — a tabular annexure
+    # of names froze a rescan for hours (fca/2016/1034, 2026-07). No real short title has
+    # more than ~8 tokens, so the bound only cuts the pathological scans.
     re.compile(
         r"(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\(\d+[A-Za-z]?\))*)\s+of\s+)?"
         r"(?:the\s+)?"
         r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
-        r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\)))*?"
+        r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\))){0,11}?"
         r"\s+(?:Act|Measure))\s+(?P<year>(?:1[6-9]|20)\d{2})\b"
     ),
     _resolve_named_statute,

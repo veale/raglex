@@ -364,11 +364,14 @@ class Facade:
         self._cache: dict[str, tuple[float, dict]] = {}
         self._refreshing: set[str] = set()
 
-    def _cached(self, key: str, ttl: float, fn, *, placeholder: dict | None = None):
-        """Stale-while-revalidate cache. With a ``placeholder``, a request NEVER blocks:
-        the first cold call kicks off a background compute and returns ``{_warming}`` (the
-        UI polls until it's ready); a stale entry is served instantly and refreshed behind
-        the scenes. Without a placeholder the first call computes synchronously."""
+    def _cached(self, key: str, ttl: float, fn, *, placeholder: dict | None = None,
+                sync_wait: float = 0.0):
+        """Stale-while-revalidate cache. With a ``placeholder``, a request NEVER blocks
+        beyond ``sync_wait``: the first cold call kicks off a background compute and —
+        after giving it ``sync_wait`` seconds to finish (so cheap slices still answer
+        in one round trip) — returns ``{_warming}`` for the UI to poll; a stale entry
+        is served instantly and refreshed behind the scenes. Without a placeholder the
+        first call computes synchronously."""
         import threading
         import time as _t
 
@@ -394,13 +397,19 @@ class Facade:
         if placeholder is not None:
             if key not in self._refreshing:
                 _compute_async()
+            deadline = _t.time() + sync_wait
+            while _t.time() < deadline:
+                done = self._cache.get(key)
+                if done is not None:
+                    return {**done[1], "_cached": True, "_stale": False}
+                _t.sleep(0.02)
             return {**placeholder, "_warming": True}
         val = fn()  # synchronous (used for the cheap aggregates)
         self._cache[key] = (_t.time(), val)
         return val
 
     _VOLATILE_CACHE_PREFIXES = ("coverage", "stats", "corpus_map", "queues", "worklist",
-                                "snowball", "unfetchable")
+                                "snowball", "unfetchable", "drill")
 
     def _invalidate_caches(self) -> None:
         """Drop the cached dashboard aggregates after an op that changes the citation
@@ -415,6 +424,7 @@ class Facade:
         """Pre-compute the heavy dashboard aggregates in the background (called on app
         startup) so the first page load after a restart is instant, not a cold scan."""
         import threading
+        import time as _t
 
         def _warm():
             for fn in (self.coverage, self.stats, self.corpus_map):
@@ -422,6 +432,21 @@ class Facade:
                     fn()
                 except Exception:  # noqa: BLE001
                     pass
+            # Explore: the shape table, then every jurisdiction's default drill
+            # slices (all-time, authority sort, each kind toggle) — sequential, so
+            # a restart doesn't stampede the pool; each also warms PG's buffers,
+            # which is most of a cold drill's cost (16s cold vs 0.3s warm).
+            try:
+                self._cache["corpus-shape"] = (_t.time(), self._corpus_shape_uncached())
+                for row in self._cache["corpus-shape"][1].get("jurisdictions", []):
+                    for kind in (None, "cases", "legislation", "guidance", "administrative"):
+                        key = self._drill_key(row["jurisdiction"], None, kind, None,
+                                              "authority", 25)
+                        if key not in self._cache:
+                            self._cache[key] = (_t.time(), self._drill_uncached(
+                                row["jurisdiction"], kind=kind))
+            except Exception:  # noqa: BLE001 — warming is best-effort
+                pass
         threading.Thread(target=_warm, daemon=True).start()
 
     @contextmanager
@@ -1093,7 +1118,10 @@ class Facade:
         if low == "euecj":
             return "Court of Justice (BAILII archive)"
         if low.startswith("dpa-"):
-            country = self._DPA_COUNTRY.get(low[4:])
+            cc = low[4:]
+            if cc in self._DPA_PROPER_NAME:
+                return self._DPA_PROPER_NAME[cc]
+            country = self._DPA_COUNTRY.get(cc)
             return f"Data protection authority · {country}" if country \
                 else "Data protection authority"
         c = lookup((code or "").upper()) or classify((code or "").upper())
@@ -1124,6 +1152,12 @@ class Facade:
     # case law and not guidance. Extend as bodies join (Scottish Information
     # Commissioner, Irish DPC's pre-GDPR decisions, state privacy commissioners…).
     _ADMIN_SOURCES = {"edpb-oss", "ofcom-enforcement", "ico"}
+
+    # A DPA the corpus knows by its proper name — shown instead of the generic
+    # "Data protection authority · <country>". The `iedpc` court code (BAILII's
+    # Irish DPC case studies) is canonicalised to `dpa-ie` at write time
+    # (Catalogue._COURT_CANON), so this one label covers both intake paths.
+    _DPA_PROPER_NAME = {"ie": "Data Protection Commission (Ireland)"}
 
     def _doc_bucket(self, source: str, court: str | None) -> str:
         c = (court or "").lower()
@@ -1312,6 +1346,11 @@ class Facade:
     # never masquerade as case law.
     _ADMIN_CLAUSE = "(d.court LIKE 'dpa-%' OR d.source IN ('edpb-oss', 'ofcom-enforcement', 'ico'))"
 
+    @staticmethod
+    def _drill_key(jurisdiction: str, court: str | None, kind: str | None,
+                   leg: str | None, sort: str, limit: int) -> str:
+        return f"drill:{jurisdiction}|{court or ''}|{kind or ''}|{leg or ''}|{sort}|{limit}"
+
     def jurisdiction_drill(self, jurisdiction: str, *, court: str | None = None,
                            kind: str | None = None, year_from: str | None = None,
                            year_to: str | None = None, cites: str | None = None,
@@ -1323,7 +1362,32 @@ class Facade:
         legislation, what hangs off each instrument. ``cites`` flips the panel to
         the documents CITING that target (the clickable cited-by drill), same
         facets and sorts. Each item carries availability (text/pdf) and its
-        source's public link + label for the external-link affordance."""
+        source's public link + label for the external-link affordance.
+
+        All-time slices (no year brush, no cited-by target) are what every Explore
+        click lands on first, and their answer only changes when the corpus does —
+        so they are served stale-while-revalidate (the UI polls ``_warming`` on a
+        cold key) and pre-warmed at startup. A year-brushed or cited-by drill
+        stays a live query: the year filter narrows the scan, and the key space
+        (any doc × any range) is far too big to cache usefully."""
+        if not cites and not year_from and not year_to:
+            key = self._drill_key(jurisdiction, court, kind, leg, sort, limit)
+            return self._cached(
+                key, 3600,
+                lambda: self._drill_uncached(jurisdiction, court=court, kind=kind,
+                                             leg=leg, sort=sort, limit=limit),
+                placeholder={"jurisdiction": jurisdiction, "court": court,
+                             "kind": kind, "sort": sort, "items": []},
+                sync_wait=2.0)
+        return self._drill_uncached(jurisdiction, court=court, kind=kind,
+                                    year_from=year_from, year_to=year_to,
+                                    cites=cites, leg=leg, sort=sort, limit=limit)
+
+    def _drill_uncached(self, jurisdiction: str, *, court: str | None = None,
+                        kind: str | None = None, year_from: str | None = None,
+                        year_to: str | None = None, cites: str | None = None,
+                        leg: str | None = None,
+                        sort: str = "authority", limit: int = 25) -> dict:
         sources = [s for s in self._all_sources() if self._jurisdiction_of(s) == jurisdiction] \
             if jurisdiction else []
         # a DPA-country bucket (Sweden, France…) has no sources of its own: its
@@ -1422,6 +1486,9 @@ class Facade:
                 ORDER BY {order}
                 LIMIT ?
                 """, (*params, limit)).fetchall()
+            # one batched aggregate for every legislation row's "what hangs off it"
+            hanging = cat.cited_by_types_by_id(
+                [r["stable_id"] for r in rows if r["doc_type"] == "legislation"])
             items = []
             for r in rows:
                 raw_path = r["raw_path"] or ""
@@ -1439,7 +1506,7 @@ class Facade:
                     "source_label": self.source_label(r["source"]),
                 }
                 if r["doc_type"] == "legislation":
-                    item["hanging"] = cat.cited_by_types([r["stable_id"]])
+                    item["hanging"] = hanging.get(r["stable_id"], {})
                 items.append(item)
             out: dict = {"jurisdiction": jurisdiction, "court": court, "kind": kind,
                          "sort": sort, "items": items}
@@ -6028,7 +6095,7 @@ class Facade:
         extractor's HUDOC docname search."""
         import re as _re
 
-        from .citations.report_match import score_candidate, surnames
+        from .citations.report_match import score_echr_candidate, surnames
         from .core.text import fold
 
         def _year(d):
@@ -6055,15 +6122,16 @@ class Facade:
                 ry = _report_year(raw)
                 # the case name is carried in the "echr:<name>" candidate the grammar set
                 name = cand[5:] if cand and cand.lower().startswith("echr:") else raw
-                ntok = surnames(name)  # applicant + normalised respondent state
-                if ry is None or len(ntok) < 2:
+                if ry is None or not surnames(name):
                     continue
                 best = second = 0.0
                 pick = None
                 for p in pool:
                     if p["year"] is None or not (ry - 3 <= p["year"] <= ry + 1):
                         continue
-                    s = score_candidate(ntok, p["title"], p["year"], ry)
+                    # respondent-neutral scorer: "HL v UK" must not auto-alias to
+                    # whichever single UK case sits in the year window
+                    s = score_echr_candidate(name, p["title"], p["year"], ry)
                     if s > best:
                         best, second, pick = s, best, p
                     elif s > second:
@@ -6113,7 +6181,8 @@ class Facade:
         import re as _re
 
         from .citations.report_match import (
-            extract_name_candidates, match_report, score_candidate, surnames,
+            extract_name_candidates, match_report, score_candidate, score_echr_candidate,
+            surnames,
         )
         from .citations.statute_gazetteer import _index as _gz_index, reference_key, normalise_title
         from .core.text import fold
@@ -6187,11 +6256,21 @@ class Facade:
 
             # ---- report citations: extracted parties vs held judgments --------
             pool = [{"stable_id": r["stable_id"], "title": r["title"],
-                     "year": _year(r["decision_date"])} for r in cat.judgment_pool()]
+                     "year": _year(r["decision_date"]),
+                     "jur": self._jurisdiction_of(r["source"])} for r in cat.judgment_pool()]
             pool_by_year: dict[int, list] = {}
             for p in pool:
                 if p["year"] is not None:
                     pool_by_year.setdefault(p["year"], []).append(p)
+            # a report series that names its jurisdiction (ALR → Australia, NZLR → NZ,
+            # SCR → Canada…) must only score against that jurisdiction's candidates —
+            # an "(1997) 145 ALR 169" was being offered an Irish High Court case
+            # because one party surname coincided. Ambiguous/travelling series get no
+            # gate (jurisdiction honestly unknown), and are flagged at review instead.
+            from .citations.reporters import report_series as _series_name, reporter_jurisdiction
+            _REPORTER_LABEL = {"AU": "Australia", "CA": "Canada", "NZ": "New Zealand",
+                               "SG": "Singapore", "HK": "Hong Kong", "IN": "India",
+                               "IE": "Ireland"}
 
             from collections import defaultdict
             by_raw: dict[str, list[tuple[str, int]]] = defaultdict(list)
@@ -6218,8 +6297,11 @@ class Facade:
                 if on_progress and i % 100 == 0:
                     _progress(on_progress, stage="suggesting report matches", done=i, total=len(raws))
                 ref_key = raw  # the worklist's group key for candidate-less rows
-                if cat.get_alias(fold(raw)):
-                    continue
+                if "\n" in raw or cat.get_alias(fold(raw)):
+                    continue  # a raw with a newline is a mis-parsed span, not a citation
+                series = _series_name(raw)
+                if series is None:
+                    continue  # "[1976]" alone etc. — nothing to match on
                 ry = _report_year(raw)
                 if ry is None:
                     continue
@@ -6233,6 +6315,12 @@ class Facade:
                 if not names:
                     continue
                 window = [p for y in (ry - 2, ry - 1, ry, ry + 1) for p in pool_by_year.get(y, [])]
+                rj = reporter_jurisdiction(series)
+                if rj is not None:
+                    label = _REPORTER_LABEL.get(rj)
+                    window = [p for p in window if p["jur"] == label] if label else []
+                    if not window:
+                        continue  # the right jurisdiction isn't held — better silent than wrong
                 # a confident, unambiguous match found here is acted on, not just suggested
                 hit = match_report(raw, names[0], window, confirm_text=False)
                 if hit:
@@ -6287,14 +6375,14 @@ class Facade:
                     continue
                 ry = _report_year(raw)
                 name = cand[5:] if cand and cand.lower().startswith("echr:") else raw
-                ntok = surnames(name)
-                if ry is None or not ntok:
+                if ry is None or not surnames(name):
                     continue
                 scored = []
                 for p in epool:
                     if p["year"] is None or not (ry - 3 <= p["year"] <= ry + 1):
                         continue
-                    s = score_candidate(ntok, p["title"], p["year"], ry)
+                    # respondent-neutral: only the applicant side identifies the case
+                    s = score_echr_candidate(name, p["title"], p["year"], ry)
                     if s >= 0.3:
                         scored.append((s, p))
                 scored.sort(key=lambda t: -t[0])
@@ -6339,13 +6427,128 @@ class Facade:
         self._invalidate_caches()
         return out
 
+    # reporter-jurisdiction code → the Explore jurisdiction label (only codes whose
+    # corpora can actually be held; the rest simply produce no gate/label)
+    _REPORTER_JUR_LABEL = {"AU": "Australia", "CA": "Canada", "NZ": "New Zealand",
+                           "SG": "Singapore", "HK": "Hong Kong", "IN": "India",
+                           "IE": "Ireland", "ZA": "South Africa", "MY": "Malaysia",
+                           "KE": "Kenya", "GH": "Ghana", "NG": "Nigeria"}
+
     def list_pending_suggestions(self, *, limit: int = 500) -> dict:
-        """Every pending "Possibly: …?" naming candidate, best score first — the
-        bulk-confirmation list (with accept-all) shown at the bottom of the
-        unfetchable page."""
+        """Every pending "Possibly: …?" naming candidate, best score first, ENRICHED
+        with what a reviewer needs to judge each one in context:
+
+        - ``target``: the suggested document's title / court / date / jurisdiction;
+        - ``occurrences`` + ``citing_jurisdictions``: how often (and from where) the
+          corpus actually cites the hanging reference — the impact of accepting;
+        - ``flags``: red/amber warnings computed from the systematic error classes
+          seen in the wild — a report series that names a different jurisdiction
+          than the match (ALR is Australian, the match is Irish), legislation cited
+          mostly from another jurisdiction's documents (an Irish judgment's
+          "Companies Act 1990" is the Irish Act, not the UK's 1989 one), report-year
+          vs decision-year disagreement, and initials-only extracted names whose
+          token matches are unreliable.
+
+        Flags are computed here at read time, so they apply to suggestions minted
+        before the flagging existed."""
+        import re as _re
+
+        from .citations.report_match import surnames
+        from .citations.reporters import report_series, reporter_jurisdiction
+        from .core.text import fold
+
+        def _yr(s: str | None) -> int | None:
+            m = _re.search(r"[\[(](1[6-9]\d{2}|20\d{2})[\])]", s or "")
+            if m:
+                return int(m.group(1))
+            m = _re.search(r"\bEHRR (\d{4})\b", s or "")
+            return int(m.group(1)) if m else None
+
         with self._open() as (cat, _rs, _ts):
-            return {"total": cat.count_pending_suggestions(),
-                    "suggestions": cat.pending_suggestions(limit=limit)}
+            rows = [dict(r) for r in cat.pending_suggestions(limit=limit)]
+            total = cat.count_pending_suggestions()
+
+            ids = sorted({r["suggested_id"] for r in rows if r["suggested_id"]})
+            targets: dict[str, dict] = {}
+            if ids:
+                qs = ",".join("?" * len(ids))
+                for d in cat.conn.execute(
+                        "SELECT stable_id, title, court, decision_date, doc_type, source "
+                        f"FROM documents WHERE stable_id IN ({qs})", ids).fetchall():
+                    targets[d["stable_id"]] = dict(d)
+
+            refs = sorted({r["ref"] for r in rows if r["ref"]})
+            fold_of = {ref: fold(ref) for ref in refs}
+            by_fold: dict[str, str] = {}
+            for ref in refs:
+                by_fold.setdefault(fold_of[ref], ref)
+            evidence: dict[str, dict] = {ref: {"n": 0, "jurs": {}} for ref in refs}
+            if refs:
+                qs = ",".join("?" * len(refs))
+                for row in cat.conn.execute(
+                        "SELECT r.candidate_id AS cand, r.raw_fold AS rf, d.source AS src, "
+                        "COUNT(*) AS n FROM relations r "
+                        "JOIN documents d ON d.stable_id = r.src_id "
+                        "WHERE r.resolution_status = 'pending' "
+                        f"AND (r.candidate_id IN ({qs}) OR r.raw_fold IN ({qs})) "
+                        "GROUP BY r.candidate_id, r.raw_fold, d.source",
+                        (*refs, *[fold_of[r] for r in refs])).fetchall():
+                    ref = row["cand"] if row["cand"] in evidence else by_fold.get(row["rf"])
+                    if ref is None:
+                        continue
+                    ev = evidence[ref]
+                    ev["n"] += row["n"]
+                    jur = self._jurisdiction_of(row["src"])
+                    ev["jurs"][jur] = ev["jurs"].get(jur, 0) + row["n"]
+
+            for r in rows:
+                kind = r.get("kind") or ""
+                t = targets.get(r["suggested_id"])
+                tj = self._doc_bucket(t["source"], t["court"]) if t else None
+                ty = int(str(t["decision_date"])[:4]) if t and t["decision_date"] \
+                    and str(t["decision_date"])[:4].isdigit() else None
+                if t:
+                    r["target"] = {
+                        "title": t["title"], "court": t["court"],
+                        "court_label": self.court_label(t["court"]) if t["court"] else None,
+                        "date": str(t["decision_date"])[:10] if t["decision_date"] else None,
+                        "doc_type": t["doc_type"], "jurisdiction": tj,
+                        "source_label": self.source_label(t["source"]),
+                    }
+                ev = evidence.get(r["ref"]) or {"n": 0, "jurs": {}}
+                r["occurrences"] = ev["n"]
+                r["citing_jurisdictions"] = ev["jurs"]
+
+                flags: list[dict] = []
+                if kind == "case-name":
+                    series = report_series(r["ref"])
+                    sj = reporter_jurisdiction(series) if series else None
+                    sj_label = self._REPORTER_JUR_LABEL.get(sj) if sj else None
+                    if sj_label and tj and sj_label != tj:
+                        flags.append({"id": "series-jurisdiction", "level": "red",
+                                      "note": f"{series} is a {sj_label} report series, "
+                                              f"but the suggested match is {tj}"})
+                if kind.startswith("legislation") and ev["jurs"] and tj:
+                    top_j, top_n = max(ev["jurs"].items(), key=lambda kv: kv[1])
+                    if top_j != tj and top_n >= 2 and top_n / sum(ev["jurs"].values()) >= 0.6:
+                        flags.append({"id": "citing-jurisdiction", "level": "red",
+                                      "note": f"cited almost only by {top_j} documents, but the "
+                                              f"suggested match is {tj} legislation — same-name "
+                                              f"acts exist across jurisdictions"})
+                if kind in ("case-name", "echr-name"):
+                    ry = _yr(r["ref"]) or _yr(r.get("reason"))
+                    if ry and ty and not (ry - 3 <= ty <= ry + 1):
+                        flags.append({"id": "year", "level": "amber",
+                                      "note": f"reported {ry} but the match was decided {ty} — "
+                                              f"outside the reporting-lag window"})
+                    parties = (r.get("extracted_parties") or "").strip()
+                    applicant = _re.split(r"\s+v\.?\s+", parties, maxsplit=1)[0] if parties else ""
+                    if applicant and not surnames(applicant):
+                        flags.append({"id": "weak-name", "level": "amber",
+                                      "note": "the extracted name is initials-only — name-token "
+                                              "matching is unreliable, check the context"})
+                r["flags"] = flags
+            return {"total": total, "suggestions": rows}
 
     def reference_context(self, ref: str, *, limit: int = 5) -> dict:
         """The passages where the corpus actually cites a hanging reference — the

@@ -1,4 +1,4 @@
-import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useRef, useState } from "react";
+import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, Hit, LIIScope, LIITarget, Setting } from "./api";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
@@ -3393,21 +3393,87 @@ function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
 // The full sweep-through list of every pending naming candidate, at the bottom of the
 // page: tick/cross applies in place (no reload, no re-ranking), and "accept all" walks
 // the whole list — deferring the resolver to ONE pass at the end.
+// One flag chip with its explanation on hover. Red = strong evidence the match is
+// wrong (cross-jurisdiction); amber = judge with care (year slip, initials-only name).
+function FlagChip({ f }: { f: { id: string; level: string; note: string } }) {
+  const LABEL: Record<string, string> = {
+    "series-jurisdiction": "wrong jurisdiction?", "citing-jurisdiction": "wrong jurisdiction?",
+    year: "year mismatch", "weak-name": "initials-only name",
+  };
+  return <span className={`sug-flag sug-flag-${f.level}`} title={f.note}>{LABEL[f.id] || f.id}</span>;
+}
+
+const SUG_KIND_LABEL: Record<string, string> = {
+  "legislation-nested": "shorthand title", "legislation-year": "year slip",
+  "case-name": "case name", "echr-name": "ECtHR name",
+};
+
 function AllSuggestionsPanel() {
   const [data, err] = useAsync(() => api.pendingSuggestions(500), []);
   // decision state lives HERE, keyed per suggestion, so deciding never re-fetches the list
   const [state, setState] = useState<Record<string, { s: string; note?: string }>>({});
-  const [sweeping, setSweeping] = useState(false);
-  const stopRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [kindFilter, setKindFilter] = useState("");
+  const [hideFlagged, setHideFlagged] = useState(false);
+  const [ctxFor, setCtxFor] = useState<string | null>(null);   // row whose context is expanded
   const rows: any[] = data?.suggestions || [];
-  const key = (s: any) => `${s.ref} ${s.suggested_id}`;
-  const pendingRows = rows.filter((s) => !state[key(s)] || state[key(s)].s === "pending");
+  const key = (s: any) => `${s.ref} ${s.suggested_id}`;
+  const isRed = (s: any) => (s.flags || []).some((f: any) => f.level === "red");
+  const isPending = (s: any) => !state[key(s)] || state[key(s)].s === "pending";
 
-  async function decideOne(s: any, accept: boolean, resolve = true) {
+  // group by suggested target: reviewing "37 refs, all → Income and Corporation
+  // Taxes Act 1988" is one decision, not 37. Groups ranked by how much of the
+  // corpus each would resolve (occurrences × best score).
+  const groups = useMemo(() => {
+    const by: Record<string, any[]> = {};
+    for (const s of rows) {
+      if (kindFilter && s.kind !== kindFilter) continue;
+      if (hideFlagged && isRed(s)) continue;
+      (by[s.suggested_id || s.ref] ||= []).push(s);
+    }
+    const gs = Object.entries(by).map(([gid, members]) => ({
+      gid, members,
+      impact: members.reduce((a, s) => a + (s.occurrences || 1) * (s.score ?? 0.5), 0),
+      target: members.find((s) => s.target)?.target,
+    }));
+    gs.sort((a, b) => b.impact - a.impact);
+    return gs;
+  }, [rows, kindFilter, hideFlagged]);
+
+  async function decideMany(items: any[], accept: boolean) {
+    if (!items.length) return;
+    setBusy(true);
+    setState((st) => {
+      const n = { ...st };
+      for (const s of items) n[key(s)] = { s: "busy" };
+      return n;
+    });
+    try {
+      const r = await api.decideSuggestionsBulk(
+        items.map((s) => ({ ref: s.ref, suggested_id: s.suggested_id, accept })));
+      const note = accept
+        ? `✓${r.resolved_edges ? ` (${r.resolved_edges} edges resolved)` : ""}`
+        : "✗ dismissed";
+      setState((st) => {
+        const n = { ...st };
+        for (const s of items) n[key(s)] = { s: accept ? "accepted" : "rejected", note };
+        return n;
+      });
+    } catch (e: any) {
+      setState((st) => {
+        const n = { ...st };
+        for (const s of items) n[key(s)] = { s: "pending", note: "error: " + (e.message || e) };
+        return n;
+      });
+    }
+    setBusy(false);
+  }
+
+  async function decideOne(s: any, accept: boolean) {
     const k = key(s);
     setState((st) => ({ ...st, [k]: { s: "busy" } }));
     try {
-      const r = await api.decideSuggestion(s.ref, s.suggested_id, accept, resolve);
+      const r = await api.decideSuggestion(s.ref, s.suggested_id, accept);
       const note = accept
         ? `✓${r.resolved_edges ? ` resolved ${r.resolved_edges}` : " linked"}` +
           (r.harvest ? (r.harvest.stored ? " · fetched" : r.harvest.error ? ` · fetch failed` : "") : "")
@@ -3418,124 +3484,109 @@ function AllSuggestionsPanel() {
     }
   }
 
-  async function acceptAll() {
-    setSweeping(true); stopRef.current = false;
-    for (const s of rows) {
-      if (stopRef.current) break;
-      const k = key(s);
-      // eslint-disable-next-line no-await-in-loop
-      if (!stateRef.current[k] || stateRef.current[k].s === "pending") await decideOne(s, true, false);
-    }
-    try { await api.resolve(); } catch { /* the sweep already linked; resolve is a top-up */ }
-    setSweeping(false);
-  }
-  // acceptAll reads decision state across awaits — a ref tracks the latest without re-renders
-  const stateRef = useRef(state);
-  useEffect(() => { stateRef.current = state; }, [state]);
-
-  // multi-select: tick rows (or select-all), then dispose of them in ONE call —
-  // the server decides every row and runs a single resolver pass at the end.
-  const [sel, setSel] = useState<Set<string>>(new Set());
-  const [ctxFor, setCtxFor] = useState<string | null>(null);   // row whose context is expanded
-  const toggleSel = (k: string) => setSel((s0) => {
-    const s1 = new Set(s0); s1.has(k) ? s1.delete(k) : s1.add(k); return s1;
-  });
-  const selPending = pendingRows.filter((s) => sel.has(key(s)));
-  async function decideSelected(accept: boolean) {
-    if (!selPending.length) return;
-    setSweeping(true);
-    const items = selPending.map((s) => ({ ref: s.ref, suggested_id: s.suggested_id, accept }));
-    setState((st) => {
-      const n = { ...st };
-      for (const s of selPending) n[key(s)] = { s: "busy" };
-      return n;
-    });
-    try {
-      const r = await api.decideSuggestionsBulk(items);
-      const note = accept
-        ? `✓${r.resolved_edges ? ` (${r.resolved_edges} edges resolved in one pass)` : ""}`
-        : "✗ dismissed";
-      setState((st) => {
-        const n = { ...st };
-        for (const s of selPending) n[key(s)] = { s: accept ? "accepted" : "rejected", note };
-        return n;
-      });
-      setSel(new Set());
-    } catch (e: any) {
-      setState((st) => {
-        const n = { ...st };
-        for (const s of selPending) n[key(s)] = { s: "pending", note: "error: " + (e.message || e) };
-        return n;
-      });
-    }
-    setSweeping(false);
-  }
-
   if (err || !rows.length) return null;
-  const allSelected = pendingRows.length > 0 && pendingRows.every((s) => sel.has(key(s)));
+  const visible = groups.flatMap((g) => g.members);
+  const safePending = visible.filter((s) => isPending(s) && !isRed(s));
+  const redPending = rows.filter((s) => isPending(s) && isRed(s));
+  const kinds = [...new Set(rows.map((s) => s.kind).filter(Boolean))] as string[];
   return (
     <div className="panel">
-      <div className="row" style={{ alignItems: "baseline" }}>
+      <div className="row" style={{ alignItems: "baseline", flexWrap: "wrap" }}>
         <h3 style={{ marginTop: 0, flex: 1 }}>Naming candidates
-          <span className="muted"> — every pending “Possibly: …?” suggestion. Tick rows (or select all) and dispose of them together; ◎ shows the citing passages so you can judge before deciding.</span>
+          <span className="muted"> — every pending “Possibly: …?” suggestion, grouped by the document it would link to. Red chips mean the evidence points the other way; ◎ shows the citing passages.</span>
           {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
         </h3>
-        {sel.size > 0 && !sweeping && <>
-          <button className="mini sug-yes" style={{ flex: "0 0 auto" }}
-            title="accept every selected suggestion — one call, one resolver pass"
-            onClick={() => decideSelected(true)}>✓ accept {selPending.length} selected</button>{" "}
-          <button className="mini sug-no" style={{ flex: "0 0 auto" }}
-            title="reject every selected suggestion — never suggested again"
-            onClick={() => decideSelected(false)}>✗ reject {selPending.length}</button>
-        </>}
-        {!sweeping
-          ? <button className="mini" style={{ flex: "0 0 auto" }} disabled={pendingRows.length === 0}
-              title="Accept every remaining suggestion below, then run one resolve pass"
-              onClick={acceptAll}>✓ accept all ({pendingRows.length})</button>
-          : <button className="mini" style={{ flex: "0 0 auto" }} onClick={() => { stopRef.current = true; }}>■ stop</button>}
+        <select className="theme-select" value={kindFilter} onChange={(e) => setKindFilter(e.target.value)}
+          title="filter by suggestion kind">
+          <option value="">all kinds</option>
+          {kinds.map((k) => <option key={k} value={k}>{SUG_KIND_LABEL[k] || k}</option>)}
+        </select>
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, flex: "0 0 auto" }}>
+          <input type="checkbox" style={{ width: "auto" }} checked={hideFlagged}
+            onChange={(e) => setHideFlagged(e.target.checked)} /> hide red-flagged
+        </label>
+        <button className="mini sug-yes" style={{ flex: "0 0 auto" }} disabled={busy || !safePending.length}
+          title="accept every visible suggestion WITHOUT a red flag — one call, one resolver pass"
+          onClick={() => decideMany(safePending, true)}>✓ accept all safe ({safePending.length})</button>
+        <button className="mini sug-no" style={{ flex: "0 0 auto" }} disabled={busy || !redPending.length}
+          title="reject every red-flagged suggestion (cross-jurisdiction evidence) — never suggested again"
+          onClick={() => decideMany(redPending, false)}>✗ reject all red-flagged ({redPending.length})</button>
       </div>
-      <table className="grid">
-        <thead><tr>
-          <th style={{ width: 24 }}><input type="checkbox" style={{ width: "auto" }} checked={allSelected}
-            title="select every pending row"
-            onChange={() => setSel(allSelected ? new Set() : new Set(pendingRows.map(key)))} /></th>
-          <th>reference</th><th>suggested match</th><th>why</th><th style={{ whiteSpace: "nowrap" }}>decide</th></tr></thead>
-        <tbody>
-          {rows.map((s) => {
-            const k = key(s);
-            const st = state[k];
-            const done = st && (st.s === "accepted" || st.s === "rejected");
-            return (
-              <Fragment key={k}>
-              <tr style={st?.s === "rejected" ? { opacity: 0.5 } : undefined}>
-                <td>{!done && <input type="checkbox" style={{ width: "auto" }} checked={sel.has(k)}
-                  disabled={sweeping} onChange={() => toggleSel(k)} />}</td>
-                <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }}>{s.ref}</td>
-                <td><b>{s.context || s.suggested_id}</b>
-                  {!s.held && <span className="muted"> · not held — accepting fetches it</span>}
-                  {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}
-                  {" "}<a className="mini-link" title="the passages where the corpus cites this reference — judge before deciding"
-                    onClick={() => setCtxFor(ctxFor === k ? null : k)}>{ctxFor === k ? "hide" : "◎"}</a></td>
-                <td className="muted" style={{ fontSize: 12 }}>{s.reason}{s.score != null && ` · ${Number(s.score).toFixed(2)}`}</td>
-                <td style={{ whiteSpace: "nowrap" }}>
-                  {!done && <>
-                    <button className="mini sug-yes" disabled={st?.s === "busy" || sweeping}
-                      title="yes — link every citation of this reference to it"
-                      onClick={() => decideOne(s, true)}>✓</button>{" "}
-                    <button className="mini sug-no" disabled={st?.s === "busy" || sweeping}
-                      title="no — never suggest this again"
-                      onClick={() => decideOne(s, false)}>✗</button>
-                  </>}
-                  {st?.s === "busy" && <span className="muted" style={{ fontSize: 12 }}> …</span>}
-                  {st?.note && <span className={st.note.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {st.note}</span>}
-                </td>
-              </tr>
-              {ctxFor === k && <tr><td /><td colSpan={4}><RefContext refKey={s.ref} /></td></tr>}
-              </Fragment>
-            );
-          })}
-        </tbody>
-      </table>
+      {groups.map((g) => {
+        const pend = g.members.filter(isPending);
+        const t = g.target;
+        const occ = g.members.reduce((a, s) => a + (s.occurrences || 0), 0);
+        return (
+          <div key={g.gid} className="sug-group">
+            <div className="row sug-group-head" style={{ alignItems: "baseline", flexWrap: "wrap" }}>
+              <b style={{ flex: 1 }}>
+                {t?.title || g.members[0].context || g.gid}
+                <span className="muted" style={{ fontWeight: 400 }}>
+                  {t?.jurisdiction && <> · {t.jurisdiction}</>}
+                  {t?.court_label && <> · {t.court_label}</>}
+                  {t?.date && <> · {t.date}</>}
+                  {t?.doc_type && <> · {t.doc_type}</>}
+                  {!g.members[0].held && <> · <i>not held — accepting fetches it</i></>}
+                </span>
+              </b>
+              <span className="muted" style={{ fontSize: 12, flex: "0 0 auto" }}>
+                {g.members.length > 1 ? `${g.members.length} refs · ` : ""}{occ ? `cited ${occ}×` : ""}
+              </span>
+              {g.members.length > 1 && pend.length > 0 && <>
+                <button className="mini sug-yes" disabled={busy} style={{ flex: "0 0 auto" }}
+                  title="accept every reference in this group"
+                  onClick={() => decideMany(pend, true)}>✓ all {pend.length}</button>
+                <button className="mini sug-no" disabled={busy} style={{ flex: "0 0 auto" }}
+                  title="reject every reference in this group"
+                  onClick={() => decideMany(pend, false)}>✗ all</button>
+              </>}
+            </div>
+            <table className="grid sug-table">
+              <tbody>
+                {g.members.map((s) => {
+                  const k = key(s);
+                  const st = state[k];
+                  const done = st && (st.s === "accepted" || st.s === "rejected");
+                  const jurs = Object.entries(s.citing_jurisdictions || {}) as [string, number][];
+                  return (
+                    <Fragment key={k}>
+                    <tr style={st?.s === "rejected" ? { opacity: 0.5 } : undefined}>
+                      <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12, width: "34%" }}>{s.ref}
+                        {s.occurrences > 0 && <span className="muted"
+                          title={`cited from: ${jurs.map(([j, n]) => `${j} ×${n}`).join(", ") || "?"}`}>
+                          {" "}×{s.occurrences}</span>}
+                      </td>
+                      <td className="muted" style={{ fontSize: 12 }}>{s.reason}
+                        {s.score != null && ` · ${Number(s.score).toFixed(2)}`}
+                        {s.extracted_parties && <Info t={`auto-extracted parties: ${s.extracted_parties}`} />}
+                        {" "}<a className="mini-link" title="the passages where the corpus cites this reference"
+                          onClick={() => setCtxFor(ctxFor === k ? null : k)}>{ctxFor === k ? "hide" : "◎"}</a>
+                      </td>
+                      <td style={{ width: 1, whiteSpace: "nowrap" }}>
+                        {(s.flags || []).map((f: any) => <FlagChip key={f.id} f={f} />)}
+                      </td>
+                      <td style={{ whiteSpace: "nowrap", width: 1 }}>
+                        {!done && <>
+                          <button className="mini sug-yes" disabled={st?.s === "busy" || busy}
+                            title="yes — link every citation of this reference to it"
+                            onClick={() => decideOne(s, true)}>✓</button>{" "}
+                          <button className="mini sug-no" disabled={st?.s === "busy" || busy}
+                            title="no — never suggest this again"
+                            onClick={() => decideOne(s, false)}>✗</button>
+                        </>}
+                        {st?.s === "busy" && <span className="muted" style={{ fontSize: 12 }}> …</span>}
+                        {st?.note && <span className={st.note.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {st.note}</span>}
+                      </td>
+                    </tr>
+                    {ctxFor === k && <tr><td colSpan={4}><RefContext refKey={s.ref} /></td></tr>}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -14,13 +14,107 @@ leaving structured (adapter) and manual edges untouched.
 
 from __future__ import annotations
 
+import logging
+import multiprocessing
+import os
 import re
+import threading
 from dataclasses import dataclass, replace
 
 from ..core.models import DocType, ExtractedVia, RelationshipType, ResolutionStatus, TypedRelation
 from ..storage.catalogue import Catalogue
 from ..storage.textstore import TextStore
 from .extractor import CitationExtractor, extract_citations
+
+log = logging.getLogger(__name__)
+
+
+# --- runaway-extraction guard -------------------------------------------------
+# Python's `re` holds the GIL for the whole of a single match attempt, so one
+# pathological document (a backtracking-prone grammar meeting adversarial text)
+# doesn't just stall its own job — it starves every thread in the process, the
+# API's event loop included (the 2026-07 outage: one 747KB annexure table of
+# names pinned the whole server for hours). The grammar pass therefore runs in a
+# persistent spawn'd worker process with a hard wall-clock budget: a runaway
+# document costs one killed worker and a warning, never the service. The worker
+# is reused across documents (spawn + grammar import are paid once per life).
+
+
+def _extract_worker(conn) -> None:  # pragma: no cover — exercised via the guard
+    from raglex.citations.extractor import extract_citations as _extract
+
+    while True:
+        try:
+            item = conn.recv()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if item is None:
+            return
+        text, aliases = item
+        try:
+            conn.send(("ok", _extract(text, aliases=aliases)))
+        except Exception as exc:  # surfaced to the caller as RuntimeError
+            conn.send(("err", f"{type(exc).__name__}: {exc}"))
+
+
+class _ExtractionGuard:
+    """One guarded worker per process, shared by every job thread (extraction was
+    GIL-serialised before, so funnelling through one worker loses no parallelism)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc = None
+        self._conn = None
+
+    @staticmethod
+    def timeout_s() -> float:
+        return float(os.environ.get("RAGLEX_EXTRACT_TIMEOUT_S") or 90)
+
+    def extract(self, text: str, aliases: dict[str, str] | None):
+        """``extract_citations`` under a wall-clock budget; None = budget blown."""
+        if os.environ.get("RAGLEX_EXTRACT_INPROC"):  # tests / debugging escape hatch
+            return extract_citations(text, aliases=aliases)
+        with self._lock:
+            try:
+                self._ensure()
+                self._conn.send((text, aliases))
+            except Exception:  # spawn unavailable / worker torn down mid-send
+                self._kill()
+                return extract_citations(text, aliases=aliases)
+            if not self._conn.poll(self.timeout_s()):
+                self._kill()
+                return None
+            try:
+                status, payload = self._conn.recv()
+            except (EOFError, OSError):
+                # worker CRASHED (broken spawn env, OOM…) — that's not the runaway
+                # case (a runaway hangs → timeout above), so run this document
+                # in-process rather than mis-report it as "exceeded budget".
+                self._kill()
+                log.warning("[cite-extract] worker died mid-document — extracting in-process")
+                return extract_citations(text, aliases=aliases)
+            if status == "err":
+                raise RuntimeError(f"extraction worker: {payload}")
+            return payload
+
+    def _ensure(self) -> None:
+        if self._proc is None or not self._proc.is_alive():
+            ctx = multiprocessing.get_context("spawn")  # fork is unsafe in a threaded server
+            self._conn, child = ctx.Pipe()
+            self._proc = ctx.Process(target=_extract_worker, args=(child,), daemon=True)
+            self._proc.start()
+            child.close()
+
+    def _kill(self) -> None:
+        if self._proc is not None and self._proc.is_alive():
+            self._proc.terminate()
+            self._proc.join(timeout=5)
+        if self._conn is not None:
+            self._conn.close()
+        self._proc = self._conn = None
+
+
+_GUARD = _ExtractionGuard()
 
 
 @dataclass(slots=True)
@@ -122,7 +216,17 @@ def extract_document(
         return 0
     if aliases is None:
         aliases = catalogue.named_alias_map()  # user shorthand rules (propagate)
-    cites = extract_citations(text, llm=llm, aliases=aliases)
+    if llm is None:
+        cites = _GUARD.extract(text, aliases)
+        if cites is None:
+            # budget blown: keep whatever rows a previous run left, stamp so
+            # staleness-scoped reruns converge instead of re-hitting the doc
+            log.warning("[cite-extract] %s: grammar pass exceeded %.0fs budget — skipped",
+                        stable_id, _GUARD.timeout_s())
+            catalogue.mark_extracted(stable_id)
+            return 0
+    else:  # the llm extractor is not picklable (and may call the network) — unguarded
+        cites = extract_citations(text, llm=llm, aliases=aliases)
 
     # Inside LEGISLATION, a bare "Article 3" / "paragraph 2" is almost always the
     # instrument referring to ITSELF, not to the directive it last named — the

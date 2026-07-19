@@ -197,6 +197,85 @@ def score_candidate(name_tokens: set[str], case_title: str, case_year: int | Non
     return round(0.5 * jaccard + 0.5 * coverage, 3)
 
 
+# ECtHR respondent states, as distinctive tokens. In "X v Turkey" the respondent
+# side is shared by EVERY Turkish case, so it must never count towards identity —
+# before this guard, "Er v Turkey" scored a perfect 1.0 against "Z.N.S. v Turkey"
+# ("er" is dropped as a short token, leaving only {turkey} on both sides) and
+# "HL v United Kingdom" matched any UK case in the year window.
+_ECHR_STATES = (
+    "Albania", "Andorra", "Armenia", "Austria", "Azerbaijan", "Belgium",
+    "Bosnia and Herzegovina", "Bulgaria", "Croatia", "Cyprus", "Czech Republic",
+    "Czechia", "Denmark", "Estonia", "Finland", "France", "Georgia", "Germany",
+    "Greece", "Hungary", "Iceland", "Ireland", "Italy", "Latvia", "Liechtenstein",
+    "Lithuania", "Luxembourg", "Malta", "Moldova", "Monaco", "Montenegro",
+    "Netherlands", "North Macedonia", "Macedonia", "Norway", "Poland", "Portugal",
+    "Romania", "Russia", "San Marino", "Serbia", "Slovakia", "Slovenia", "Spain",
+    "Sweden", "Switzerland", "Turkey", "Türkiye", "Ukraine", "United Kingdom",
+)
+
+
+def _state_tokens() -> frozenset[str]:
+    global _STATE_TOKENS
+    if _STATE_TOKENS is None:
+        toks: set[str] = set()
+        for s in _ECHR_STATES:
+            toks |= surnames(s)
+        _STATE_TOKENS = frozenset(toks)
+    return _STATE_TOKENS
+
+
+_STATE_TOKENS: frozenset[str] | None = None
+
+_V_SPLIT = re.compile(r"\s+v\.?\s+", re.IGNORECASE)
+
+
+def _initials_key(side: str) -> str | None:
+    """The applicant's initial sequence when the side is an initialised anonym —
+    "M.C." → "mc", "Z.N.S." → "zns", "HL" → "hl", "Er and Others" → "er". None when
+    the side carries a real (≥3-letter distinctive) name, which should token-match
+    instead."""
+    from ..core.text import fold
+
+    toks = [t for t in re.findall(r"[a-z]+", fold(side or ""))
+            if t not in _STOPWORDS]
+    if not toks or any(len(t) > 2 for t in toks):
+        return None
+    return "".join(toks)
+
+
+def score_echr_candidate(name: str, case_title: str, case_year: int | None,
+                         report_year: int | None) -> float:
+    """How well a held ECtHR case matches a cited name+EHRR year. Unlike
+    :func:`score_candidate`, the respondent state is identity-neutral: it must
+    AGREE (a Turkey citation can't match a Bulgaria case) but contributes nothing
+    to the score — only the applicant side identifies the case. Initialised
+    applicants ("M.C.", "Z.N.S.") match on their exact initial sequence, at a
+    deliberately sub-confident score (human confirmation territory)."""
+    if report_year is not None and case_year is not None:
+        if not (report_year - 3 <= case_year <= report_year + 1):
+            return 0.0
+    n_parts = _V_SPLIT.split(name or "", maxsplit=1)
+    t_parts = _V_SPLIT.split(case_title or "", maxsplit=1)
+    # respondent agreement, when both sides state one
+    if len(n_parts) == 2 and len(t_parts) == 2:
+        nr, tr = surnames(n_parts[1]), surnames(t_parts[1])
+        if nr and tr and not (nr & tr):
+            return 0.0
+    states = _state_tokens()
+    na = surnames(n_parts[0]) - states
+    ta = surnames(t_parts[0]) - states
+    if na and ta:
+        shared = na & ta
+        if shared:
+            return round(0.5 + 0.5 * (len(shared) / len(na | ta)), 3)
+        return 0.0
+    # both applicant sides are initials/anonymised → compare the initial sequences
+    ia, it = _initials_key(n_parts[0]), _initials_key(t_parts[0])
+    if ia and it and ia == it:
+        return 0.45
+    return 0.0
+
+
 def match_report(raw: str, name: str | None, cases: list, *,
                  min_score: float = 0.5, confirm_text: bool = True,
                  allow_single: bool = True) -> tuple[str, float, str] | None:

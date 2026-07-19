@@ -45,6 +45,13 @@ MUST_MATCH = [
     ("Golder v the United Kingdom, no. 4451/70, § 35", "4451/70"),
     # ECLI anywhere in prose
     ("see, to that effect, ECLI:EU:C:2020:559, paragraphs 168 and 177", "ECLI:EU:C:2020:559"),
+    # the longest comma'd short titles must survive the bounded title-token run
+    ("under the Local Government, Economic Development and Construction Act 2009 the",
+     "Local Government, Economic Development and Construction Act 2009"),
+    ("A New Tax System (Goods and Services Tax) Act 1999 (Cth) provides",
+     "A New Tax System (Goods and Services Tax) Act 1999"),
+    # multi-applicant ECtHR name must survive the bounded name run
+    ("Von Hannover and Others v Germany (2012) 55 EHRR 15 applied", "55 EHRR 15"),
 ]
 
 
@@ -111,6 +118,32 @@ def test_self_paragraph_reference_not_carried():
     para_cf = [c for c in cites if c.method == "carry_forward" and "43" in c.raw]
     # [43] alone must not be pinned to the Act as 'para 43'
     assert not para_cf, para_cf
+
+
+# -- pathological inputs must terminate fast (GIL-pinning outage tripwires) ---
+
+def test_tabular_capitalised_run_terminates_fast():
+    """fca/2016/1034 (2026-07 outage): annexure tables of capitalised names — no
+    "Act <year>" / " v " terminator anywhere — sent the unbounded title/name token
+    runs superlinear, pinning the GIL (and the whole API) for hours. The bounded
+    runs must chew through the same shape in linear time; the generous budget only
+    exists to keep slow CI green while still catching a quadratic regression."""
+    import time
+
+    rows = "".join(
+        f"{i:3d}   {first} {last:12s}          {award}\n"
+        for i, (first, last, award) in enumerate(
+            (("Tammy", f"May{i}", "Cleaning Services Award") if i % 3 == 0 else
+             ("Christine", f"Meager{i}", "Clerks Modern Award") if i % 3 == 1 else
+             ("Paul", f"Saint James{i}", "Award Free"))
+            for i in range(800)))
+    assert "Act 19" not in rows and "Act 20" not in rows
+    t0 = time.perf_counter()
+    cites = extract_citations(rows)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 5.0, f"pathological table took {elapsed:.1f}s — backtracking regression"
+    # and over-inclusion check: no statute/case matches exist in the table
+    assert not [c for c in cites if c.entity_kind == "act"], cites[:5]
 
 
 # -- the unconsumed-cue scanner finds seeded misses ---------------------------

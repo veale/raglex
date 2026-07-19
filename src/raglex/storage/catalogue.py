@@ -626,6 +626,13 @@ class Catalogue:
             self.conn.commit()
 
     # -- writes ------------------------------------------------------------
+    # One body, two codes → the canonical one, applied at write time so every future
+    # import converges (and a re-harvest can't resurrect the old code). IEDPC is
+    # BAILII's database code for the Irish Data Protection Commissioner's case
+    # studies — the same body the EDPB one-stop-shop register codes as ``dpa-ie``
+    # (labelled "Data Protection Commission (Ireland)"). Extend as merges arise.
+    _COURT_CANON = {"iedpc": "dpa-ie"}
+
     def upsert_document(
         self, record: Record, *, raw_path: str | None = None, text_path: str | None = None
     ) -> None:
@@ -671,7 +678,7 @@ class Catalogue:
                 record.source,
                 str(record.doc_type),
                 record.title,
-                record.court,
+                self._COURT_CANON.get((record.court or "").lower(), record.court),
                 _isodate(record.decision_date),
                 record.language,
                 record.source_language,
@@ -1373,6 +1380,27 @@ class Catalogue:
             """, ids).fetchall()
         return {r["doc_type"]: r["n"] for r in rows}
 
+    def cited_by_types_by_id(self, ids: list[str]) -> dict[str, dict[str, int]]:
+        """``cited_by_types`` for many targets in one indexed aggregate, keyed by
+        target id — the Explore drill batches its legislation rows through this
+        instead of one query per instrument."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT r.dst_id, d.doc_type, COUNT(DISTINCT r.src_id) AS n
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+            GROUP BY r.dst_id, d.doc_type
+            """, ids).fetchall()
+        out: dict[str, dict[str, int]] = {}
+        for r in rows:
+            out.setdefault(r["dst_id"], {})[r["doc_type"]] = r["n"]
+        return out
+
     def top_citors(self, ids: list[str], *, limit: int = 8) -> list[dict]:
         """The most authoritative documents citing this one (by their own PageRank),
         for the citator's "most significant citing documents" list."""
@@ -1744,10 +1772,11 @@ class Catalogue:
         ).fetchall()
 
     def judgment_pool(self) -> list[sqlite3.Row]:
-        """Harvested judgments as (stable_id, title, decision_date) — the candidate pool
-        the report matcher scores a "[1998] AC 1" against by name + year."""
+        """Harvested judgments as (stable_id, title, decision_date, source) — the candidate
+        pool the report matcher scores a "[1998] AC 1" against by name + year (source →
+        jurisdiction, so an ALR citation only scores against Australian candidates)."""
         return self.conn.execute(
-            "SELECT stable_id, title, decision_date FROM documents "
+            "SELECT stable_id, title, decision_date, source FROM documents "
             "WHERE doc_type = 'judgment' AND title IS NOT NULL"
         ).fetchall()
 

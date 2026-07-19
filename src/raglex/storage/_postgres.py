@@ -40,7 +40,13 @@ class PgConnShim:
         # With no params, pass None so psycopg skips placeholder processing —
         # otherwise a literal % in the SQL (LIKE 'para%') raises "only '%s' …
         # allowed as placeholders" even though nothing is being bound.
-        return self.raw.execute(sql.replace("?", "%s"), params or None)
+        if not params:
+            return self.raw.execute(sql, None)
+        # With params, psycopg DOES parse placeholders, so any literal % in the
+        # SQL (LIKE 'dpa-%') must be doubled or it raises the same error — the
+        # bug that 500'd every Explore drill with a kind filter. Escape first,
+        # then translate the catalogue's portable ? placeholders.
+        return self.raw.execute(sql.replace("%", "%%").replace("?", "%s"), params)
 
     def executescript(self, script: str) -> None:
         for stmt in script.split(";"):

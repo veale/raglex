@@ -168,6 +168,7 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     setBusy(true);
     const p: Record<string, string> = { jurisdiction, sort: f.sort };
     if (f.court) p.court = f.court;
@@ -175,9 +176,15 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
     if (f.kind === "legislation" && f.leg) p.leg = JSON.stringify(f.leg.filters);
     if (f.years) { p.year_from = f.years[0]; p.year_to = f.years[1]; }
     if (f.cites) p.cites = f.cites.id;
-    api.drill(p).then((d) => { if (live) setData(d); }).catch(() => live && setData({ items: [] }))
-      .finally(() => live && setBusy(false));
-    return () => { live = false; };
+    const load = () => api.drill(p).then((d) => {
+      if (!live) return;
+      setData(d);
+      // a cold cached slice answers instantly with _warming while the server
+      // computes it in the background — poll until the real rows arrive
+      if (d._warming) { timer = setTimeout(load, 1200); } else setBusy(false);
+    }).catch(() => { if (live) { setData({ items: [] }); setBusy(false); } });
+    load();
+    return () => { live = false; if (timer) clearTimeout(timer); };
   }, [jurisdiction, f.court, f.kind, f.sort, f.years?.[0], f.years?.[1], f.cites?.id, f.leg?.label]);
 
   const HANG: [string, string][] = [["judgment", "cases"], ["decision", "decisions"],
@@ -213,7 +220,7 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
           ))}
         </div>
       </div>
-      {busy && !data && <p className="muted drill-loading">Loading the slice…</p>}
+      {busy && !data?.items?.length && <p className="muted drill-loading">Loading the slice…</p>}
       <ol className={`drill-list${busy ? " stale" : ""}`}>
         {(data?.items || []).map((it: any, i: number) => (
           <li key={it.id}>

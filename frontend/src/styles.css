@@ -444,6 +444,23 @@ tbody tr:hover { background: var(--surface-2); }
 .also-cited { font-size: .8125rem; margin: 0 0 var(--sp-2); }
 .also-cited b { font-weight: 500; color: var(--text); }
 
+/* grouped suggestion review: one block per suggested target, flag chips per row */
+.sug-group { margin: var(--sp-3) 0; border: 1px solid var(--line); border-radius: var(--radius); }
+.sug-group-head { padding: var(--sp-2) var(--sp-3);
+  background: color-mix(in srgb, var(--note) 5%, transparent);
+  border-bottom: 1px solid var(--line); gap: 8px; }
+.sug-group .sug-table { margin: 0; }
+.sug-group button.sug-yes { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); }
+.sug-group button.sug-yes:hover { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.sug-group button.sug-no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.sug-group button.sug-no:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.sug-flag { display: inline-block; font-size: .68rem; padding: 0 var(--sp-2); margin-left: 4px;
+  border-radius: var(--radius); white-space: nowrap; cursor: help; border: 1px solid; }
+.sug-flag-red { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, var(--line));
+  background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.sug-flag-amber { color: var(--note); border-color: color-mix(in srgb, var(--note) 55%, var(--line));
+  background: color-mix(in srgb, var(--note) 10%, transparent); }
+
 /* --- Maintain: capability chips + gap status ------------------------------- */
 .cap-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .cap-chip { font-size: .7rem; padding: 1px var(--sp-3); border: 1px solid var(--line);

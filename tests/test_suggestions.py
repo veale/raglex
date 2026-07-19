@@ -9,6 +9,43 @@ from raglex.citations.extractor import extract_citations
 from raglex.citations.report_match import extract_name_candidates
 
 
+# -- ECtHR scoring: the respondent state must never carry a match -------------
+# (real wrong suggestions from the 2026-07 live queue, each at score 1.0 before)
+
+def test_echr_respondent_only_name_does_not_match():
+    from raglex.citations.report_match import score_echr_candidate
+
+    # "Er v Turkey": "er" is a short token, so the old scorer matched on {turkey}
+    # alone and gave Z.N.S. v Turkey a perfect score
+    assert score_echr_candidate("Er v Turkey", "Z.N.S. v. TURKEY", 2010, 2012) == 0.0
+    # "HL v United Kingdom" matched any UK case in the window
+    assert score_echr_candidate("HL v. United Kingdom",
+                                "E. AND OTHERS v. THE UNITED KINGDOM", 2002, 2004) == 0.0
+
+
+def test_echr_initials_match_at_subconfident_score():
+    from raglex.citations.report_match import score_echr_candidate
+
+    # correct initialised match: suggestion territory (0.45), never auto-alias (≥0.5)
+    s = score_echr_candidate("In MC v Bulgaria", "M.C. v. BULGARIA", 2003, 2005)
+    assert 0.3 <= s < 0.5
+    # and the initial sequences must actually agree
+    assert score_echr_candidate("Er v Turkey", "Z.N.S. v. TURKEY", 2010, 2010) == 0.0
+
+
+def test_echr_full_name_match_and_respondent_disagreement():
+    from raglex.citations.report_match import score_echr_candidate
+
+    assert score_echr_candidate("Soering v United Kingdom",
+                                "SOERING v. THE UNITED KINGDOM", 1989, 1989) >= 0.5
+    # right applicant, wrong respondent state → no match
+    assert score_echr_candidate("Soering v Germany",
+                                "SOERING v. THE UNITED KINGDOM", 1989, 1989) == 0.0
+    # year outside the reporting-lag window → no match
+    assert score_echr_candidate("Soering v United Kingdom",
+                                "SOERING v. THE UNITED KINGDOM", 1984, 1989) == 0.0
+
+
 # -- multi-candidate party extraction -----------------------------------------
 
 @pytest.mark.parametrize("ctx,expect_in", [
@@ -89,6 +126,47 @@ def test_nested_title_suggestion_and_accept(seeded_facade):
     assert out["resolved_edges"] >= 1
     assert not any("harassment" in (x["raw"] or "").lower()
                    for x in f.unresolved_references(limit=10))
+
+
+def test_pending_suggestions_enriched(seeded_facade):
+    """The review list carries target metadata, citing evidence and flags — here the
+    'Harassment Act 1997' ref cited by a UK judgment matching UK legislation: evidence
+    present, no jurisdiction flag."""
+    f = seeded_facade
+    f.suggest_matches(report_limit=0)
+    out = f.list_pending_suggestions()
+    s = next(x for x in out["suggestions"] if x["suggested_id"] == "ukpga/1997/40")
+    assert s["target"]["title"] == "Protection from Harassment Act 1997"
+    assert s["target"]["jurisdiction"] == "United Kingdom"
+    assert s["occurrences"] == 1
+    assert s["citing_jurisdictions"] == {"United Kingdom": 1}
+    assert s["flags"] == []
+
+
+def test_pending_suggestions_citing_jurisdiction_flag(seeded_facade):
+    """Legislation cited (almost) only from another jurisdiction's documents gets the
+    red citing-jurisdiction flag — the Irish 'Companies Act 1990' → UK act class."""
+    f = seeded_facade
+    with f._open() as (cat, _rs, _ts):
+        for i in (1, 2):
+            cat.conn.execute(
+                "INSERT INTO documents (stable_id, source, doc_type, title, decision_date, fetched_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (f"iehc/2001/{i}", "ie-caselaw", "judgment", f"Irish Case {i} v Somebody",
+                 "2001-05-01", "2026-01-01"))
+            cat.conn.execute(
+                "INSERT INTO relations (src_id, raw_citation_string, raw_fold, resolution_status, "
+                "relationship_type, extracted_via) VALUES (?,?,?,?,?,?)",
+                (f"iehc/2001/{i}", "the Harassment Act 1997", "the harassment act 1997",
+                 "pending", "mentions", "regex"))
+        # the UK citing edge from the base fixture is outvoted 2:1 → majority Irish
+        cat.conn.execute("DELETE FROM relations WHERE src_id = 'ewhc/qb/2001/12'")
+        cat.conn.commit()
+    f.suggest_matches(report_limit=0)
+    out = f.list_pending_suggestions()
+    s = next(x for x in out["suggestions"] if x["suggested_id"] == "ukpga/1997/40")
+    assert s["citing_jurisdictions"] == {"Ireland": 2}
+    assert any(fl["id"] == "citing-jurisdiction" and fl["level"] == "red" for fl in s["flags"])
 
 
 def test_rejected_suggestion_never_resurfaces(seeded_facade):
