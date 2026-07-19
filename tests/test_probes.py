@@ -1,0 +1,115 @@
+"""The C-604/22 class of defect: extractor regression tests + the corpus-
+integrity probe suite and its bounded repairs (ops/probes.py)."""
+
+from __future__ import annotations
+
+from raglex.citations import extract_citations
+from raglex.ops.probes import (
+    run_probes,
+    run_repair,
+)
+
+# the exact CJEU citation form from the live C-604/22 text (incl. the NBSP + the
+# spaced commas the Formex text projection produces)
+CJEU_FORM = (
+    "the Court’s case-law on that directive, Directive 95/46, is also applicable, "
+    "in principle, to that regulation (judgment of 17\xa0June 2021 , M.I.C.M ., "
+    "C‑597/19 , EU:C:2021:492 , paragraph 107 ).\n\n"
+    "34 It should also be borne in mind that Article 4(1) requires interpretation."
+)
+
+
+# -- extractor regression ----------------------------------------------------
+def test_case_paragraph_not_carried_to_legislation():
+    cites = extract_citations(CJEU_FORM)
+    ecli = [c for c in cites if c.method == "ecli"]
+    assert ecli and ecli[0].pinpoint == "para 107"  # the case keeps its pinpoint
+    # and NO carry-forward re-attributes that paragraph to the directive
+    cf = [c for c in cites if c.method == "carry_forward"]
+    assert not any(c.raw.lower().startswith("para") for c in cf), cf
+    # while a genuine bare Article still carries forward to the directive
+    assert any(c.raw.startswith("Article 4") and c.candidate_id == "31995L0046"
+               for c in cf), cf
+
+
+def test_distant_paragraph_still_carries_forward():
+    # a 'paragraph N of Schedule …' far from any case citation is legislation-speak
+    text = ("The Freedom of Information Act 2000 governs the request. "
+            "Its exemptions matter here, and paragraph 2 applies to the notice. " * 2)
+    cites = extract_citations(text)
+    cf = [c for c in cites if c.method == "carry_forward" and c.raw.lower().startswith("para")]
+    assert cf, "legislation paragraph carry-forward must survive the case guard"
+
+
+# -- probes over a seeded catalogue ------------------------------------------
+def _seed(catalogue):
+    for sid, dt in [("case/a", "judgment"), ("case/b", "judgment"), ("law/x", "legislation")]:
+        catalogue.conn.execute(
+            "INSERT INTO documents (stable_id, source, doc_type, title, version, is_latest, "
+            "has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+            "VALUES (?,?,?,?,1,1,1,0,'harvest','[]','live','2026-01-01')",
+            (sid, "t", dt, sid))
+    # the poisoned pattern: case citation at 100–113, para carry-forward at 116
+    catalogue.conn.execute(
+        "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, pinpoint, "
+        "char_start, char_end, method, created_at) VALUES "
+        "('case/a', 'EU:C:2021:492', 'case', 'case/b', 'para 107', 100, 113, 'ecli', '2026-01-01')")
+    catalogue.conn.execute(
+        "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, pinpoint, "
+        "char_start, char_end, method, created_at) VALUES "
+        "('case/a', 'paragraph 107', 'directive', 'law/x', 'para 107', 116, 129, "
+        "'carry_forward', '2026-01-01')")
+    # a LEGITIMATE carry-forward far from any case citation — must survive repair
+    catalogue.conn.execute(
+        "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, pinpoint, "
+        "char_start, char_end, method, created_at) VALUES "
+        "('case/a', 'Article 4', 'directive', 'law/x', 'Article 4', 900, 909, "
+        "'carry_forward', '2026-01-01')")
+    # the inferred edge the poisoned citation minted + a legit resolved edge + a self-edge
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, candidate_id, resolution_status, "
+        "relationship_type, extracted_via, dst_anchor) VALUES "
+        "('case/a', 'law/x', 'law/x', 'resolved', 'mentions', 'inferred', 'para 107')")
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, candidate_id, resolution_status, "
+        "relationship_type, extracted_via, dst_anchor) VALUES "
+        "('case/a', 'law/x', 'law/x', 'resolved', 'mentions', 'inferred', 'Article 4')")
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, resolution_status, relationship_type, "
+        "extracted_via) VALUES ('case/a', 'case/a', 'resolved', 'mentions', 'regex')")
+    catalogue.conn.commit()
+
+
+def test_probes_find_the_defects(catalogue):
+    _seed(catalogue)
+    by_name = {p.name: p for p in run_probes(catalogue)}
+    assert by_name["case_paragraph_carry_forward"].count == 1
+    assert by_name["case_paragraph_carry_forward"].samples[0]["candidate_id"] == "law/x"
+    assert by_name["para_pinpoint_on_eu_instrument"].count == 1
+    assert by_name["self_citation"].count == 1
+    assert by_name["resolved_dst_missing"].count == 0
+    # every probe ran (none swallowed by an exception)
+    assert all(p.count >= 0 for p in by_name.values())
+
+
+def test_repair_is_bounded_to_the_poisoned_rows(catalogue):
+    _seed(catalogue)
+    out = run_repair(catalogue, "case_paragraph_carry_forward")
+    assert out == {"citations_deleted": 1, "inferred_edges_deleted": 1}
+    # the phantom rows are gone; the legitimate Article edge + citation survive
+    rows = catalogue.conn.execute(
+        "SELECT raw FROM citations WHERE src_id = 'case/a' ORDER BY char_start").fetchall()
+    assert [r["raw"] for r in rows] == ["EU:C:2021:492", "Article 4"]
+    anchors = [r["dst_anchor"] for r in catalogue.conn.execute(
+        "SELECT dst_anchor FROM relations WHERE src_id = 'case/a' "
+        "AND extracted_via = 'inferred'").fetchall()]
+    assert anchors == ["Article 4"]
+    # probe now clean; repair is re-runnable and a no-op
+    assert run_probes(catalogue, only=["case_paragraph_carry_forward"])[0].count == 0
+    assert run_repair(catalogue, "case_paragraph_carry_forward")["citations_deleted"] == 0
+
+
+def test_self_citation_repair(catalogue):
+    _seed(catalogue)
+    assert run_repair(catalogue, "self_citation") == {"self_edges_deleted": 1}
+    assert run_probes(catalogue, only=["self_citation"])[0].count == 0

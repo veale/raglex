@@ -10,6 +10,7 @@ from .alerts import (
     default_notifier,
     push_alerts,
 )
+from .probes import ProbeResult, run_probes, run_repair
 from .views import (
     CorpusStats,
     SourceHealth,
@@ -28,6 +29,9 @@ __all__ = [
     "check_alerts",
     "default_notifier",
     "push_alerts",
+    "ProbeResult",
+    "run_probes",
+    "run_repair",
     "CorpusStats",
     "SourceHealth",
     "corpus_stats",

@@ -112,6 +112,8 @@ def _attach_carry_forward(text: str, kept: list[Citation]) -> list[Citation]:
     the resulting edge is flagged uncertain (provenance ``inferred``) for human review.
     Skips any bare reference already inside a fuller, literal citation."""
     occupied = sorted((c.char_start, c.char_end) for c in kept)
+    # every citation in document order — used to find what a bare reference FOLLOWS
+    all_sorted = sorted(kept, key=lambda c: c.char_start)
     # legislation antecedents in document order, with their candidate + kind
     antecedents = sorted(
         (c for c in kept if c.candidate_id and c.entity_kind in _LEG_KINDS),
@@ -124,6 +126,17 @@ def _attach_carry_forward(text: str, kept: list[Citation]) -> list[Citation]:
         s, e = m.start(), m.end()
         if any(os <= s and e <= oe for os, oe in occupied):
             continue  # already part of a literal citation ("s.5 of the FOIA 2000")
+        cue = m.group("cue").lower().rstrip(".")
+        # A "paragraph N" whose nearest preceding citation is a CASE is that
+        # judgment's pinpoint, not a provision of whatever instrument was last
+        # named — the CJEU's own citation form ends every case reference with
+        # ", C-597/19, EU:C:2021:492, paragraph 107". Attaching those to the
+        # last-named directive minted a phantom legislation edge per case cite
+        # (the 2026-07 C-604/22 bug). Paragraph cues defer to a nearby case.
+        if cue.startswith("para"):
+            prev = [c for c in all_sorted if c.char_end <= s and s - c.char_end <= 80]
+            if prev and prev[-1].entity_kind in ("case", "opinion"):
+                continue
         prior = [a for a in antecedents if a.char_end <= s
                  and _cue_allows(m.group("cue"), a.entity_kind)]
         if not prior:

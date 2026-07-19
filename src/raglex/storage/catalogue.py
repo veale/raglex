@@ -1170,7 +1170,10 @@ class Catalogue:
     _GRAPH_EDGE_SQL = (
         "SELECT DISTINCT src_id, dst_id FROM relations "
         "WHERE resolution_status = 'resolved' AND dst_id IS NOT NULL "
-        "AND extracted_via <> 'inferred' AND relationship_type <> 'suppressed'"
+        "AND extracted_via <> 'inferred' AND relationship_type <> 'suppressed' "
+        # self-loops excluded: an instrument's internal cross-references (429k
+        # structured src==dst edges live) must not feed its own PageRank
+        "AND src_id <> dst_id"
     )
 
     def rebuild_authority(self, *, on_progress=None) -> int:
@@ -1228,7 +1231,8 @@ class Catalogue:
         extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
         return self.conn.execute(
             "SELECT * FROM relations WHERE src_id = ? AND resolution_status = 'resolved' "
-            f"AND dst_id IS NOT NULL {extra}LIMIT ?", (doc_id, limit)).fetchall()
+            f"AND dst_id IS NOT NULL AND dst_id <> src_id {extra}LIMIT ?",
+            (doc_id, limit)).fetchall()
 
     def neighbours_in(self, doc_id: str, *, limit: int = 200,
                       include_inferred: bool = False) -> list[sqlite3.Row]:
@@ -1236,7 +1240,7 @@ class Catalogue:
         extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
         return self.conn.execute(
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
-            f"{extra}LIMIT ?", (doc_id, limit)).fetchall()
+            f"AND src_id <> dst_id {extra}LIMIT ?", (doc_id, limit)).fetchall()
 
     def co_cited_with(self, ids: list[str], *, limit: int = 15,
                       max_citers: int = 500) -> list[dict]:
@@ -1308,7 +1312,8 @@ class Catalogue:
             return {"documents": 0, "recent_documents": 0, "recent_years": recent_years}
         qs = ",".join("?" * len(ids))
         base = (f"FROM relations r WHERE r.dst_id IN ({qs}) "
-                "AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred'")
+                "AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred' "
+                "AND r.src_id <> r.dst_id")
         total = self.conn.execute(
             f"SELECT COUNT(DISTINCT r.src_id) AS n {base}", ids).fetchone()["n"]
         cutoff = f"{date.today().year - recent_years:04d}-01-01"

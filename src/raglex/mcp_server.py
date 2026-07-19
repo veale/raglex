@@ -98,6 +98,22 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.citator(stable_id)
 
     @mcp.tool()
+    def run_probes(only: Optional[str] = None) -> list[dict]:
+        """Corpus-integrity probes: invariant checks over the citation network
+        (mis-carried pinpoints, self-edges, kind mismatches, broken resolution
+        invariants), each with a count + violating samples. ``only``: comma-
+        separated probe names to run a subset."""
+        return facade.run_probes(only=only.split(",") if only else None)
+
+    @mcp.tool()
+    def repair_probe(name: str) -> dict:
+        """Run the bounded repair matched to a repairable probe (e.g.
+        'case_paragraph_carry_forward'). Inspect the probe's samples FIRST —
+        repairs delete the probe's matching rows. Re-runnable. After a repair
+        that touches citations, run rebuild_citation_counts."""
+        return facade.repair_probe(name)
+
+    @mcp.tool()
     def rebuild_authority() -> dict:
         """Recompute the citation-network PageRank roll-up (batch; run after large
         imports or resolution sweeps so ranking/citator/related stay current)."""

@@ -1009,6 +1009,26 @@ class Facade:
         self._invalidate_caches()
         return out
 
+    def run_probes(self, *, only: list[str] | None = None) -> list[dict]:
+        """Corpus-integrity probes (§8): invariant checks over the citation
+        network — mis-carried pinpoints, self-edges, kind mismatches, broken
+        resolution invariants — each with a count + violating samples."""
+        from .ops.probes import run_probes
+
+        with self._open() as (cat, _rs, _ts):
+            return [p.to_dict() for p in run_probes(cat, only=only)]
+
+    def repair_probe(self, name: str) -> dict:
+        """Run the targeted repair matched to a repairable probe. Read the
+        probe's samples first — repairs delete rows (bounded to the probe's own
+        matching set) and are re-runnable."""
+        from .ops.probes import run_repair
+
+        with self._open() as (cat, _rs, _ts):
+            out = run_repair(cat, name)
+        self._invalidate_caches()
+        return out
+
     def stats(self) -> dict:
         def _compute():
             with self._open() as (cat, _rs, _ts):

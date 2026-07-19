@@ -649,6 +649,64 @@ def cmd_embed_import(args: argparse.Namespace) -> int:
         catalogue.close()
 
 
+def cmd_probes(args: argparse.Namespace) -> int:
+    """Corpus-integrity probes (§8) — see ops/probes.py."""
+    from .ops.probes import run_probes, run_repair
+
+    config = Config.from_env()
+    catalogue, *_ = _open(config)
+    try:
+        if args.repair:
+            print(json.dumps(run_repair(catalogue, args.repair), indent=2))
+            print("NB: run rebuild-citation-counts if the repair touched citations.")
+            return 0
+        results = run_probes(catalogue, only=args.only.split(",") if args.only else None)
+        worst = 0
+        for p in results:
+            flag = {"critical": "✗", "warn": "!", "info": "·"}.get(p.severity, "?")
+            print(f"{flag} {p.name}: {p.count}  ({p.severity})"
+                  + ("  [repairable]" if p.repairable and p.count > 0 else ""))
+            if p.count > 0:
+                print(f"    {p.description}")
+                for s in p.samples:
+                    print(f"    e.g. {s}")
+            if p.count > 0 and p.severity == "critical":
+                worst = 1
+        return worst
+    finally:
+        catalogue.close()
+
+
+def cmd_audit_misses(args: argparse.Namespace) -> int:
+    """Unconsumed-cue scan: citation-shaped residue the grammars did NOT extract."""
+    from .citations.audit import audit_sample
+
+    config = Config.from_env()
+    catalogue, _rawstore, textstore = _open(config)
+    try:
+        report = audit_sample(catalogue, textstore, sample=args.sample,
+                              doc_type=args.doc_type, source=args.source, seed=args.seed)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        catalogue.close()
+
+
+def cmd_audit_recall(args: argparse.Namespace) -> int:
+    """Text-extraction recall against a source's structured (adapter-supplied) edges."""
+    from .citations.audit import audit_structured_recall
+
+    config = Config.from_env()
+    catalogue, *_ = _open(config)
+    try:
+        report = audit_structured_recall(catalogue, source=args.source,
+                                         sample=args.sample, seed=args.seed)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    finally:
+        catalogue.close()
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     """Known-item retrieval benchmark from the corpus's own citations (design §5)."""
     from .retrieval.bench import run_bench
@@ -821,6 +879,28 @@ def build_parser() -> argparse.ArgumentParser:
                           help="import cluster-computed vector shards into the catalogue")
     impv.add_argument("--dir", required=True, help="the export directory, now containing .vec.bin shards")
     impv.set_defaults(func=cmd_embed_import)
+
+    am = sub.add_parser("audit-misses",
+                        help="scan sampled documents for citation-shaped text the grammars missed")
+    am.add_argument("--sample", type=int, default=200)
+    am.add_argument("--doc-type", default=None)
+    am.add_argument("--source", default=None)
+    am.add_argument("--seed", type=int, default=7)
+    am.set_defaults(func=cmd_audit_misses)
+
+    ar = sub.add_parser("audit-recall",
+                        help="text-extraction recall vs a source's structured edges (ground truth)")
+    ar.add_argument("--source", required=True, help="e.g. eu-cellar, nl-rechtspraak")
+    ar.add_argument("--sample", type=int, default=300)
+    ar.add_argument("--seed", type=int, default=7)
+    ar.set_defaults(func=cmd_audit_recall)
+
+    prb = sub.add_parser("probes",
+                         help="corpus-integrity probes: invariant checks + targeted repairs")
+    prb.add_argument("--only", default=None, help="comma-separated probe names")
+    prb.add_argument("--repair", default=None,
+                     help="run the repair for this probe (inspect samples first)")
+    prb.set_defaults(func=cmd_probes)
 
     ben = sub.add_parser("bench",
                          help="known-item retrieval benchmark from the corpus's own citations (§5)")

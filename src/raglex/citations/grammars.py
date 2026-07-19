@@ -226,11 +226,19 @@ NON_CITATION_TOKENS = {
 _COURT_ALIASES = {"EWCH": "EWHC"}
 
 
+# Devolved-legislation series that the year-first shape sweeps up as "courts":
+# "2000 ASP 1" is the Public Finance and Accountability (Scotland) Act 2000, not
+# a case. The number IS the legislation.gov.uk slug, so mint it as an act.
+_LEGISLATION_SERIES = {"ASP": "asp", "ANAW": "anaw", "ASC": "asc", "NIA": "nia"}
+
+
 def _neutral(m: "re.Match[str]") -> Normalised:
     court = m.group("court")
     cu = court.upper()
     if cu in NON_CITATION_TOKENS:
         return None, None, DROP  # currency / ISBN / locator / structure word — not a citation
+    if cu in _LEGISLATION_SERIES:  # "2000 ASP 1" → asp/2000/1, an act not a case
+        return f"{_LEGISLATION_SERIES[cu]}/{m.group('year')}/{int(m.group('num'))}", None, "act"
     if cu in REPORT_SERIES or cu in STATUTE_ABBREVS:
         return None, None, "case"  # a report series / statute abbrev, not a court
     court = _COURT_ALIASES.get(cu, court)  # normalise typo'd court codes before minting the slug

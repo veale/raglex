@@ -296,6 +296,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Refresh the snowball's citation-frequency roll-up."""
         return _start_job("rebuild-citation-counts", "rebuild citation frequency roll-up")
 
+    @app.get("/probes")
+    def probes_ep(only: str | None = None) -> list[dict]:
+        """Corpus-integrity probes: invariant violations with counts + samples."""
+        return facade.run_probes(only=only.split(",") if only else None)
+
+    @app.post("/probes/repair")
+    def probes_repair_ep(payload: dict = Body(...)) -> dict:
+        """Run the targeted repair for one repairable probe (read samples first)."""
+        return facade.repair_probe(payload["name"])
+
     @app.post("/jobs/rebuild-authority")
     def job_rebuild_authority_ep() -> dict:
         """Recompute the PageRank authority roll-up over the citation graph (design §3a) —

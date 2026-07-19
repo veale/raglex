@@ -37,7 +37,10 @@ class PgConnShim:
         self._pool = pool
 
     def execute(self, sql: str, params=()):  # noqa: ANN001
-        return self.raw.execute(sql.replace("?", "%s"), params)
+        # With no params, pass None so psycopg skips placeholder processing —
+        # otherwise a literal % in the SQL (LIKE 'para%') raises "only '%s' …
+        # allowed as placeholders" even though nothing is being bound.
+        return self.raw.execute(sql.replace("?", "%s"), params or None)
 
     def executescript(self, script: str) -> None:
         for stmt in script.split(";"):
@@ -184,7 +187,9 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 
 -- Per-document citation-network statistics (PageRank over the resolved mentions
--- graph; treatments deliberately unweighted — not reliable yet). Rebuilt wholesale.
+-- graph, treatments deliberately unweighted — not reliable yet). Rebuilt wholesale.
+-- NB executescript splits this DDL on semicolons WITHOUT stripping comments, so
+-- comment text here must never contain one.
 CREATE TABLE IF NOT EXISTS doc_authority (
     doc_id           TEXT PRIMARY KEY,
     pagerank         REAL NOT NULL DEFAULT 0,

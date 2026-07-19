@@ -39,6 +39,21 @@ def test_decay_weight_halves_per_half_life():
     assert decay_weight(None, now_year=2026) < decay_weight(2026, now_year=2026)
 
 
+def test_pg_ddl_survives_the_semicolon_splitter():
+    """The Postgres shim's executescript splits PG_DDL on ';' WITHOUT stripping
+    comments — a semicolon inside a comment shears the script mid-sentence and
+    takes the whole API down at startup (it did, 2026-07). Guard the invariant."""
+    import re
+
+    from raglex.storage import _postgres
+
+    for line in _postgres.PG_DDL.splitlines():
+        assert not (line.strip().startswith("--") and ";" in line), line
+    for frag in _postgres.PG_DDL.split(";"):
+        body = re.sub(r"--[^\n]*", "", frag).strip()
+        assert not body or re.match(r"(?i)^(CREATE|ALTER|DROP|INSERT|SET)\b", body), body[:80]
+
+
 # -- catalogue round-trip ----------------------------------------------------
 def _doc(catalogue, ts, sid, text="text", dt=DocType.JUDGMENT, when=date(2024, 1, 1),
          relations=None):
