@@ -1323,6 +1323,24 @@ class Catalogue:
             "AND d.decision_date >= ?)", (*ids, cutoff)).fetchone()["n"]
         return {"documents": total, "recent_documents": recent, "recent_years": recent_years}
 
+    def cited_by_types(self, ids: list[str]) -> dict[str, int]:
+        """Who cites this document, broken down by the citing document's TYPE —
+        the Explore drill-down's "what hangs off this instrument" line (cases /
+        guidance / other legislation citing an act). One indexed aggregate."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT d.doc_type, COUNT(DISTINCT r.src_id) AS n
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+            GROUP BY d.doc_type
+            """, ids).fetchall()
+        return {r["doc_type"]: r["n"] for r in rows}
+
     def top_citors(self, ids: list[str], *, limit: int = 8) -> list[dict]:
         """The most authoritative documents citing this one (by their own PageRank),
         for the citator's "most significant citing documents" list."""

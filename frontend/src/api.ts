@@ -322,6 +322,9 @@ export const api = {
     return req<any>(`/provision?${p}`);
   },
   rebuildAuthority: () => req<any>("/jobs/rebuild-authority", { method: "POST", body: "{}" }),
+  // Explore homepage: the corpus's whole shape + in-place drill-down
+  corpusShape: () => req<any>("/corpus-shape"),
+  drill: (params: Record<string, string>) => req<any>(`/drill?${new URLSearchParams(params)}`),
   exportRetrievalCitations: (p: { min_citing?: number; batch_size?: number; include_names?: boolean; separator?: string; series?: string; jurisdictions?: string } = {}) =>
     req<any>(`/export/retrieval-citations?${new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== "").map(([k, v]) => [k, String(v)]))}`),
   embed: () => req<any>("/embed", { method: "POST", body: "{}" }),

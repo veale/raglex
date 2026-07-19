@@ -241,3 +241,39 @@ def test_reference_context_snippets(tmp_path):
         cat.conn.commit()
     out = f.reference_context("Foo v Bar [1999] 1 WLR 1")
     assert out["occurrences"] and "principle applies" in out["occurrences"][0]["snippet"]
+
+
+def test_corpus_shape_and_drill(tmp_path):
+    from datetime import date as _d
+
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        specs = [("uksc/2020/1", "uk-caselaw", "judgment", _d(2020, 1, 1)),
+                 ("ukpga/2018/12", "uk-legislation", "legislation", _d(2018, 5, 23)),
+                 ("ECLI:EU:C:2020:559", "eu-cellar", "judgment", _d(2020, 7, 16))]
+        from raglex.core.models import DocType, Record
+        for sid, src, dt, when in specs:
+            r = Record(source=src, stable_id=sid, doc_type=DocType(dt), title="T " + sid,
+                       court="ct", decision_date=when, language="en",
+                       text="x " * 40, raw_bytes=sid.encode())
+            r.ensure_payload_hash()
+            cat.upsert_document(r, text_path=str(ts.put(r.payload_hash, r.text)))
+        _edge(cat, "uksc/2020/1", "ukpga/2018/12")
+        cat.rebuild_authority()
+    shape = f._corpus_shape_uncached()
+    juris = {j["jurisdiction"]: j for j in shape["jurisdictions"]}
+    assert juris["United Kingdom"]["total"] == 2
+    assert juris["United Kingdom"]["cases"] == 1
+    assert juris["United Kingdom"]["legislation"] == 1
+    assert juris["European Union"]["total"] == 1
+    assert shape["total"] == 3
+    # top authority present with an OSCOLA rendering
+    assert juris["United Kingdom"]["top_authority"][0]["id"] == "ukpga/2018/12"
+
+    drill = f.jurisdiction_drill("United Kingdom", kind="legislation")
+    assert drill["items"][0]["id"] == "ukpga/2018/12"
+    # hanging groupings: what cites the act, by citing doc type
+    assert drill["items"][0]["hanging"] == {"judgment": 1}
+    # kind filter really filters
+    assert all(i["doc_type"] in ("judgment", "decision", "opinion")
+               for i in f.jurisdiction_drill("United Kingdom", kind="cases")["items"])

@@ -636,6 +636,21 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Values (+counts) for each advanced-search facet — sources, doc types, courts, tags."""
         return facade.corpus_facet_values()
 
+    @app.get("/corpus-shape")
+    def corpus_shape_ep() -> dict:
+        """The Explore homepage: the corpus's whole shape by jurisdiction — counts by
+        kind, year distributions, courts, density, top-authority documents."""
+        return facade.corpus_shape()
+
+    @app.get("/drill")
+    def drill_ep(jurisdiction: str, court: str | None = None, kind: str | None = None,
+                 year_from: str | None = None, year_to: str | None = None,
+                 limit: int = 25) -> dict:
+        """One Explore drill-down step: top documents of a slice, authority-ranked,
+        with hanging groupings for legislation."""
+        return facade.jurisdiction_drill(jurisdiction, court=court, kind=kind,
+                                         year_from=year_from, year_to=year_to, limit=limit)
+
     @app.get("/corpus-map")
     def corpus_map_ep() -> dict:
         """Held-vs-pending by legal category & sub-type — the dashboard coverage table."""

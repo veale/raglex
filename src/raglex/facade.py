@@ -909,6 +909,7 @@ class Facade:
             out = {
                 "stable_id": stable_id,
                 "cited_by": stats,
+                "cited_by_types": cat.cited_by_types(ids),
                 "authority": {
                     "pagerank": auth["pagerank"] if auth else 0.0,
                     "pagerank_decayed": auth["pagerank_decayed"] if auth else 0.0,
@@ -1008,6 +1009,175 @@ class Facade:
             out["resolved_edges"] = self.resolve().get("resolved")
         self._invalidate_caches()
         return out
+
+    # source-key prefix → jurisdiction bucket for the Explore shape view. Order
+    # matters (first match wins); anything unmatched lands in "Other".
+    _JURISDICTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("uk-", "bailii", "westlaw", "ofcom", "ico", "hol"), "United Kingdom"),
+        (("eu-", "edpb", "a29wp", "dma", "cellar", "eur-lex"), "European Union"),
+        (("echr",), "Council of Europe"),
+        (("nl-",), "Netherlands"),
+        (("ie-", "eisb"), "Ireland"),
+        (("au-",), "Australia"),
+        (("ca-",), "Canada"),
+        (("nz-",), "New Zealand"),
+        (("sg-",), "Singapore"),
+        (("hk-",), "Hong Kong"),
+        (("in-",), "India"),
+    )
+
+    def _jurisdiction_of(self, source: str) -> str:
+        s = (source or "").lower()
+        for prefixes, label in self._JURISDICTIONS:
+            if any(s.startswith(p) or s == p.rstrip("-") for p in prefixes):
+                return label
+        return "Other"
+
+    def corpus_shape(self) -> dict:
+        """The Explore homepage's data: the whole corpus's shape in one payload —
+        per JURISDICTION (bucketed from sources): document counts split by kind,
+        the year distribution (a sparkline per row), text/embedding coverage,
+        citation density, top courts, and the most authoritative documents
+        (PageRank). Drill-down targets are ids, not prefilled searches — the UI
+        expands in place. Heavy aggregates → stale-while-revalidate cached."""
+        return self._cached("corpus-shape", 600, self._corpus_shape_uncached,
+                            placeholder={"jurisdictions": [], "total": 0})
+
+    _CASE_TYPES = ("judgment", "decision", "opinion")
+
+    def _corpus_shape_uncached(self) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                "SELECT source, doc_type, substr(decision_date, 1, 4) AS yr, COUNT(*) AS n, "
+                "SUM(has_text) AS with_text, SUM(has_embedding) AS embedded "
+                "FROM documents GROUP BY source, doc_type, substr(decision_date, 1, 4)"
+            ).fetchall()
+            # resolved outgoing edges per source → citation density per document
+            dens = {r["source"]: r["n"] for r in cat.conn.execute(
+                "SELECT d.source, COUNT(*) AS n FROM relations r "
+                "JOIN documents d ON d.stable_id = r.src_id "
+                "WHERE r.resolution_status = 'resolved' AND r.src_id <> r.dst_id "
+                "GROUP BY d.source").fetchall()}
+            courts = cat.conn.execute(
+                "SELECT source, court, COUNT(*) AS n FROM documents "
+                "WHERE court IS NOT NULL AND court <> '' GROUP BY source, court").fetchall()
+
+            juris: dict[str, dict] = {}
+
+            def _bucket(source: str) -> dict:
+                j = self._jurisdiction_of(source)
+                return juris.setdefault(j, {
+                    "jurisdiction": j, "total": 0, "cases": 0, "legislation": 0,
+                    "guidance": 0, "other": 0, "with_text": 0, "embedded": 0,
+                    "years": {}, "sources": {}, "citations": 0, "courts": {}})
+
+            for r in rows:
+                b = _bucket(r["source"])
+                n = r["n"]
+                b["total"] += n
+                b["with_text"] += r["with_text"] or 0
+                b["embedded"] += r["embedded"] or 0
+                b["sources"][r["source"]] = b["sources"].get(r["source"], 0) + n
+                kind = ("cases" if r["doc_type"] in self._CASE_TYPES
+                        else "legislation" if r["doc_type"] == "legislation"
+                        else "guidance" if r["doc_type"] == "guidance"
+                        else "other")
+                b[kind] += n
+                yr = r["yr"]
+                if yr and yr.isdigit() and 1200 <= int(yr) <= 2100:
+                    b["years"][yr] = b["years"].get(yr, 0) + n
+            for src, n in dens.items():
+                _bucket(src)["citations"] += n
+            for r in courts:
+                b = _bucket(r["source"])
+                b["courts"][r["court"]] = b["courts"].get(r["court"], 0) + r["n"]
+
+            # top authority per jurisdiction: one indexed pass over the roll-up
+            top_auth = cat.conn.execute(
+                "SELECT d.*, a.pagerank, a.percentile "
+                "FROM doc_authority a JOIN documents d ON d.stable_id = a.doc_id "
+                "ORDER BY a.pagerank DESC LIMIT 400").fetchall()
+            for r in top_auth:
+                b = _bucket(r["source"])
+                lst = b.setdefault("top_authority", [])
+                if len(lst) < 5:
+                    lst.append({
+                        "id": r["stable_id"], "title": r["title"], "doc_type": r["doc_type"],
+                        "date": str(r["decision_date"])[:10] if r["decision_date"] else None,
+                        "percentile": r["percentile"],
+                        "oscola": _oscola_cite(r, _row_meta(r)),
+                    })
+
+            out = []
+            for b in sorted(juris.values(), key=lambda x: -x["total"]):
+                b["density"] = round(b["citations"] / b["total"], 1) if b["total"] else 0
+                b["courts"] = sorted(
+                    ({"court": c, "n": n} for c, n in b["courts"].items()),
+                    key=lambda x: -x["n"])[:12]
+                b["sources"] = sorted(
+                    ({"source": s, "n": n} for s, n in b["sources"].items()),
+                    key=lambda x: -x["n"])
+                b.setdefault("top_authority", [])
+                b.pop("citations", None)
+                out.append(b)
+            return {"jurisdictions": out, "total": sum(b["total"] for b in out)}
+
+    def jurisdiction_drill(self, jurisdiction: str, *, court: str | None = None,
+                           kind: str | None = None, year_from: str | None = None,
+                           year_to: str | None = None, limit: int = 25) -> dict:
+        """One drill-down step inside Explore: the top documents of a slice
+        (jurisdiction × optional court × kind × year range), ranked by network
+        authority with citation counts — plus, for legislation slices, what
+        hangs off each instrument (citing cases/guidance, sibling legislation)."""
+        sources = [s for s in self._all_sources() if self._jurisdiction_of(s) == jurisdiction]
+        with self._open() as (cat, _rs, _ts):
+            clauses = ["d.source IN (%s)" % ",".join("?" * len(sources))]
+            params: list = list(sources)
+            if court:
+                clauses.append("d.court = ?")
+                params.append(court)
+            if kind == "cases":
+                clauses.append("d.doc_type IN ('judgment', 'decision', 'opinion')")
+            elif kind:
+                clauses.append("d.doc_type = ?")
+                params.append(kind)
+            if year_from:
+                clauses.append("d.decision_date >= ?")
+                params.append(f"{year_from}-01-01")
+            if year_to:
+                clauses.append("d.decision_date <= ?")
+                params.append(f"{year_to}-12-31")
+            rows = cat.conn.execute(
+                f"""
+                SELECT d.*, COALESCE(a.pagerank, 0) AS pagerank, a.percentile,
+                       COALESCE((SELECT MAX(cc.occurrences) FROM citation_counts cc
+                                 WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by
+                FROM documents d LEFT JOIN doc_authority a ON a.doc_id = d.stable_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY pagerank DESC, cited_by DESC, d.decision_date DESC
+                LIMIT ?
+                """, (*params, limit)).fetchall()
+            items = []
+            for r in rows:
+                item = {
+                    "id": r["stable_id"], "title": r["title"], "doc_type": r["doc_type"],
+                    "court": r["court"],
+                    "date": str(r["decision_date"])[:10] if r["decision_date"] else None,
+                    "percentile": r["percentile"], "cited_by": r["cited_by"],
+                    "oscola": _oscola_cite(r, _row_meta(r)),
+                }
+                if r["doc_type"] == "legislation":
+                    item["hanging"] = cat.cited_by_types([r["stable_id"]])
+                items.append(item)
+            return {"jurisdiction": jurisdiction, "court": court, "kind": kind,
+                    "items": items}
+
+    def _all_sources(self) -> list[str]:
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                return {"sources": [r["k"] for r in cat.conn.execute(
+                    "SELECT DISTINCT source AS k FROM documents").fetchall()]}
+        return self._cached("all-sources", 600, _compute)["sources"]
 
     def run_probes(self, *, only: list[str] | None = None) -> list[dict]:
         """Corpus-integrity probes (§8): invariant checks over the citation
