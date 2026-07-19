@@ -214,6 +214,60 @@ def probe_alias_dangling(cat) -> ProbeResult:
         "info", n, samples)
 
 
+# The CELEX id embeds the instrument's year (3YYYY[LRD]NNNN) — so a document
+# decided BEFORE that year citing it is impossible by construction. The class
+# that made the LED (2016/680) the "top EU authority", cited by 1902 Canadian
+# headnotes, via an unboundaried acronym grammar.
+def _celex_year_expr(cat) -> str:
+    digits = ("substr(x, 2, 4) GLOB '[0-9][0-9][0-9][0-9]'" if cat.backend == "sqlite"
+              else "substr(x, 2, 4) ~ '^[0-9]{4}$'")
+    return digits
+
+
+def probe_anachronistic_eu_citation(cat) -> ProbeResult:
+    guard = _celex_year_expr(cat).replace("x", "r.dst_id")
+    sql = f"""
+    FROM relations r JOIN documents s ON s.stable_id = r.src_id
+    WHERE r.dst_id LIKE '3%' AND LENGTH(r.dst_id) BETWEEN 9 AND 11 AND {guard}
+      AND s.decision_date IS NOT NULL
+      AND s.decision_date < (substr(r.dst_id, 2, 4) || '-01-01')
+    """
+    n = _one(cat, f"SELECT COUNT(*) AS n {sql}")
+    samples = _rows(cat, f"SELECT r.src_id, s.decision_date, r.dst_id, "
+                         f"r.raw_citation_string {sql} LIMIT {SAMPLE}")
+    return ProbeResult(
+        "anachronistic_eu_citation",
+        "documents citing an EU instrument enacted AFTER they were decided — "
+        "impossible; an over-eager name/acronym grammar (the 'LED' class)",
+        "critical", n, samples, repairable=True)
+
+
+def repair_anachronistic_eu_citation(cat) -> dict:
+    """Delete relations (and their citations rows) pointing at a CELEX instrument
+    from documents decided before the instrument's CELEX year. Bounded by the
+    probe's own predicate; re-runnable."""
+    guard_r = _celex_year_expr(cat).replace("x", "r.dst_id")
+    guard_c = _celex_year_expr(cat).replace("x", "c.candidate_id")
+    with cat._atomic():
+        cur = cat.conn.execute(f"""
+            DELETE FROM relations WHERE relation_id IN (
+              SELECT r.relation_id FROM relations r
+              JOIN documents s ON s.stable_id = r.src_id
+              WHERE r.dst_id LIKE '3%' AND LENGTH(r.dst_id) BETWEEN 9 AND 11 AND {guard_r}
+                AND s.decision_date IS NOT NULL
+                AND s.decision_date < (substr(r.dst_id, 2, 4) || '-01-01'))""")
+        edges = cur.rowcount
+        cur = cat.conn.execute(f"""
+            DELETE FROM citations WHERE citation_id IN (
+              SELECT c.citation_id FROM citations c
+              JOIN documents s ON s.stable_id = c.src_id
+              WHERE c.candidate_id LIKE '3%' AND LENGTH(c.candidate_id) BETWEEN 9 AND 11
+                AND {guard_c} AND s.decision_date IS NOT NULL
+                AND s.decision_date < (substr(c.candidate_id, 2, 4) || '-01-01'))""")
+        cites = cur.rowcount
+    return {"edges_deleted": edges, "citations_deleted": cites}
+
+
 def probe_never_extracted(cat) -> ProbeResult:
     # the live audit found judgments with full text and ZERO citation rows —
     # extraction never ran (an import path that skipped it). By source, because
@@ -256,6 +310,7 @@ PROBES = (
     probe_resolved_dst_missing,
     probe_pending_but_held,
     probe_alias_dangling,
+    probe_anachronistic_eu_citation,
     probe_never_extracted,
     probe_duplicate_spans,
 )
@@ -340,6 +395,7 @@ def repair_self_citation(cat) -> dict:
 REPAIRS = {
     "case_paragraph_carry_forward": repair_case_paragraph_carry_forward,
     "judgment_paragraph_carry_forward": repair_judgment_paragraph_carry_forward,
+    "anachronistic_eu_citation": repair_anachronistic_eu_citation,
     # the para-on-EU-instrument probe is the same disease seen from the other
     # side; the carry-forward repair clears the adjacent cases, and what remains
     # deserves eyes before deletion — so no blind repair for it.

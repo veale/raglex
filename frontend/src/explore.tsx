@@ -1,10 +1,11 @@
 // Explore — the homepage. One screen that puts the corpus's SHAPE in your head:
-// a search bar, then a jurisdiction table (counts by kind as a proportional bar,
-// a year sparkline, citation density, coverage, the most authoritative document)
-// where every element drills DOWN IN PLACE — expanding to courts, kind filters, a
-// brushable timeline, and authority-ranked documents with their hanging groupings
-// (what cites a statute: cases / guidance / sibling legislation) — rather than
-// bouncing to a prefilled search page. PageRank does the ranking throughout.
+// a search bar, then a jurisdiction table (counts by kind as a labelled
+// proportional bar, a year sparkline with its span, citation density) where every
+// element drills DOWN IN PLACE. A row expands to a brushable timeline, a courts
+// rail, and a document panel whose every part is itself a facet control: click a
+// year → the timeline focuses; click a court → the rail scopes; click "cited by
+// N" → the panel flips to what cites that document. A natural-language line
+// always states exactly what the panel is showing. PageRank ranks throughout.
 import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Oscola } from "./views";
@@ -13,7 +14,7 @@ const FMT = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M"
   : n >= 10_000 ? Math.round(n / 1000) + "k"
   : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
 
-const KIND_COLOURS: [keyof ShapeRow, string, string][] = [
+const KIND_COLOURS: [string, string, string][] = [
   ["cases", "var(--exp-cases)", "case law"],
   ["legislation", "var(--exp-leg)", "legislation"],
   ["guidance", "var(--exp-guid)", "guidance"],
@@ -25,12 +26,20 @@ type ShapeRow = {
   guidance: number; other: number; with_text: number; embedded: number;
   density: number; years: Record<string, number>;
   courts: { court: string; n: number }[];
-  sources: { source: string; n: number }[];
-  top_authority: { id: string; title: string; doc_type: string; date: string | null;
-    percentile: number | null; oscola: any }[];
+  sources: { source: string; label: string; n: number }[];
 };
 
-// --- tiny SVG year sparkline (optionally brushable) --------------------------
+// wiki-style external-link glyph (little square with an arrow leaving it)
+function ExtIcon() {
+  return (
+    <svg className="ext-icon" viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+      <path d="M3.5 1.5H1.5v9h9V8.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M6 1.5h4.5V6M10.2 1.8 5.5 6.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+// --- SVG year sparkline with its span labelled at the ends -------------------
 function Spark({ years, height = 26, width = 132, brush, onBrush, active }:
   { years: Record<string, number>; height?: number; width?: number;
     brush?: boolean; onBrush?: (a: string, b: string) => void; active?: [string, string] | null }) {
@@ -44,7 +53,7 @@ function Spark({ years, height = 26, width = 132, brush, onBrush, active }:
   const x = (yr: number) => ((yr - lo) / span) * width;
   const idxAt = (clientX: number) => {
     const r = ref.current!.getBoundingClientRect();
-    return Math.round(lo + ((clientX - r.left) / r.width) * span);
+    return Math.max(lo, Math.min(hi, Math.round(lo + ((clientX - r.left) / r.width) * span)));
   };
   const commit = () => {
     if (drag && onBrush) {
@@ -56,77 +65,140 @@ function Spark({ years, height = 26, width = 132, brush, onBrush, active }:
   const sel: [number, number] | null = drag ? [Math.min(...drag), Math.max(...drag)]
     : active ? [+active[0], +active[1]] : null;
   return (
-    <svg ref={ref} className={`spark${brush ? " brushable" : ""}`} width={width} height={height}
-      viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none"
-      onMouseDown={brush ? (e) => { e.preventDefault(); const i = idxAt(e.clientX); setDrag([i, i]); } : undefined}
-      onMouseMove={brush ? (e) => drag && setDrag((d) => (d ? [d[0], idxAt(e.clientX)] : d)) : undefined}
-      onMouseUp={brush ? commit : undefined} onMouseLeave={brush ? () => drag && commit() : undefined}>
-      {sel && <rect x={x(sel[0])} y={0} width={Math.max(2, x(sel[1]) - x(sel[0]))} height={height}
-        className="spark-sel" />}
-      {ys.map((y) => (
-        <rect key={y} x={x(+y)} y={height - Math.max(1.5, (years[y] / max) * (height - 2))}
-          width={Math.max(1, width / span - 0.5)}
-          height={Math.max(1.5, (years[y] / max) * (height - 2))}
-          className="spark-bar">
-          <title>{y}: {years[y].toLocaleString()}</title>
-        </rect>
-      ))}
-    </svg>
+    <span className="sparkwrap">
+      <span className="spark-year">{lo}</span>
+      <svg ref={ref} className={`spark${brush ? " brushable" : ""}`} width={width} height={height}
+        viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none"
+        onMouseDown={brush ? (e) => { e.preventDefault(); const i = idxAt(e.clientX); setDrag([i, i]); } : undefined}
+        onMouseMove={brush ? (e) => drag && setDrag((d) => (d ? [d[0], idxAt(e.clientX)] : d)) : undefined}
+        onMouseUp={brush ? commit : undefined} onMouseLeave={brush ? () => drag && commit() : undefined}>
+        {sel && <rect x={x(sel[0])} y={0} width={Math.max(2, x(sel[1]) - x(sel[0]))} height={height}
+          className="spark-sel" />}
+        {ys.map((y) => (
+          <rect key={y} x={x(+y)} y={height - Math.max(1.5, (years[y] / max) * (height - 2))}
+            width={Math.max(1, width / span - 0.5)}
+            height={Math.max(1.5, (years[y] / max) * (height - 2))}
+            className="spark-bar">
+            <title>{y}: {years[y].toLocaleString()}</title>
+          </rect>
+        ))}
+      </svg>
+      <span className="spark-year">{hi}</span>
+    </span>
   );
 }
 
-// proportional kind bar — the row's at-a-glance composition
+// Proportional kind bar with IN-SITU labels: each segment wide enough to carry
+// its own name does so inside the segment (the standard treatment for stacked
+// bars); narrower segments keep the tooltip. No separate legend needed.
 function KindBar({ r }: { r: ShapeRow }) {
   return (
     <div className="kindbar" title={KIND_COLOURS.map(([k, , label]) =>
-      `${label}: ${(r[k] as number).toLocaleString()}`).join(" · ")}>
-      {KIND_COLOURS.map(([k, colour]) => {
-        const frac = (r[k] as number) / (r.total || 1);
-        return frac > 0.004 && <span key={k} style={{ width: `${frac * 100}%`, background: colour }} />;
+      `${label}: ${((r as any)[k] as number).toLocaleString()}`).join(" · ")}>
+      {KIND_COLOURS.map(([k, colour, label]) => {
+        const n = (r as any)[k] as number;
+        const frac = n / (r.total || 1);
+        if (frac <= 0.004) return null;
+        return (
+          <span key={k} className="kindseg" style={{ width: `${frac * 100}%`, background: colour }}>
+            {frac >= 0.18 && <i className="kindlabel">{label} {FMT(n)}</i>}
+          </span>
+        );
       })}
     </div>
   );
 }
 
-function Pct({ p }: { p: number | null }) {
-  if (p == null || p < 50) return null;
-  return <span className="auth-badge" title={`network authority: above ${p.toFixed(0)}% of cited documents`}>
-    top {Math.max(1, Math.round(100 - p))}%</span>;
+// availability + provenance chips for one document row
+function Availability({ it }: { it: any }) {
+  return (
+    <>
+      {it.has_text ? <span className="avail avail-text">text</span>
+        : it.pdf ? <span className="avail avail-pdf">pdf</span>
+        : <span className="avail avail-none">no full text</span>}
+      {it.url && (
+        <a className="src-link" href={it.url} target="_blank" rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()} title={`open at ${it.source_label}`}>
+          {it.source_label} <ExtIcon /></a>
+      )}
+    </>
+  );
 }
 
-// --- the drill panel: authority-ranked documents of a slice ------------------
-function DrillPanel({ jurisdiction, court, years, open }:
-  { jurisdiction: string; court: string | null; years: [string, string] | null;
+type Facets = {
+  kind: string; sort: string; court: string | null;
+  years: [string, string] | null;
+  cites: { id: string; label: any } | null;
+};
+
+const SORT_LABEL: Record<string, string> = {
+  authority: "most authoritative", cited: "most cited",
+  newest: "newest first", oldest: "oldest first",
+};
+const KIND_LABEL: Record<string, string> = {
+  "": "documents", cases: "case law", legislation: "legislation", guidance: "guidance",
+};
+
+// The always-true sentence describing what the panel currently shows.
+function describe(j: string, f: Facets): string {
+  const bits = [`The ${SORT_LABEL[f.sort]} ${KIND_LABEL[f.kind] ?? f.kind}`];
+  if (f.cites) bits.push("citing the document below");
+  if (f.court) bits.push(`in ${f.court}`);
+  if (f.years) bits.push(f.years[0] === f.years[1] ? `from ${f.years[0]}`
+    : `from ${f.years[0]}–${f.years[1]}`);
+  bits.push(f.cites ? "" : `— ${j}`);
+  return bits.filter(Boolean).join(" ");
+}
+
+// --- the drill panel: documents of the current facet slice -------------------
+function DrillPanel({ jurisdiction, f, setF, open }:
+  { jurisdiction: string; f: Facets; setF: (p: Partial<Facets>) => void;
     open: (id: string, a?: string) => void }) {
-  const [kind, setKind] = useState<string>("");
   const [data, setData] = useState<any | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
     setBusy(true);
-    const p: Record<string, string> = { jurisdiction };
-    if (court) p.court = court;
-    if (kind) p.kind = kind;
-    if (years) { p.year_from = years[0]; p.year_to = years[1]; }
+    const p: Record<string, string> = { jurisdiction, sort: f.sort };
+    if (f.court) p.court = f.court;
+    if (f.kind) p.kind = f.kind;
+    if (f.years) { p.year_from = f.years[0]; p.year_to = f.years[1]; }
+    if (f.cites) p.cites = f.cites.id;
     api.drill(p).then((d) => { if (live) setData(d); }).catch(() => live && setData({ items: [] }))
       .finally(() => live && setBusy(false));
     return () => { live = false; };
-  }, [jurisdiction, court, kind, years?.[0], years?.[1]]);
-  const HANG: [string, string, string][] = [
-    ["judgment", "⚖", "cases citing this"], ["decision", "⚖", "decisions citing this"],
-    ["guidance", "◈", "guidance citing this"], ["legislation", "§", "legislation citing this"],
-  ];
+  }, [jurisdiction, f.court, f.kind, f.sort, f.years?.[0], f.years?.[1], f.cites?.id]);
+
+  const HANG: [string, string][] = [["judgment", "cases"], ["decision", "decisions"],
+    ["opinion", "opinions"], ["guidance", "guidance"], ["legislation", "legislation"]];
   return (
     <div className="drill">
+      <div className="drill-desc">
+        <span>{describe(jurisdiction, f)}</span>
+        {busy && <span className="loading-chip">loading…</span>}
+      </div>
+      {f.cites && (
+        <div className="cites-crumb">
+          <a className="mini-link" onClick={() => setF({ cites: null })}>← back to {jurisdiction}</a>
+          <span className="cites-target">citing <b><Oscola c={f.cites.label?.oscola} fallback={f.cites.label?.title || f.cites.id} /></b></span>
+        </div>
+      )}
       <div className="drill-head">
         <div className="seg-toggle mini-toggle">
           {[["", "All"], ["cases", "Cases"], ["legislation", "Legislation"], ["guidance", "Guidance"]].map(([v, l]) => (
-            <button key={v} className={kind === v ? "on" : ""} onClick={() => setKind(v)}>{l}</button>
+            <button key={v} className={f.kind === v ? "on" : ""} onClick={() => setF({ kind: v })}>{l}</button>
           ))}
         </div>
-        {busy && <span className="muted drill-busy">…</span>}
+        <select className="sort-select" value={f.sort} onChange={(e) => setF({ sort: e.target.value })}
+          title="ordering">
+          <option value="authority">Most authoritative</option>
+          <option value="cited">Most cited</option>
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </select>
       </div>
-      <ol className="drill-list">
+      {busy && !data && <p className="muted drill-loading">Loading the slice…</p>}
+      <ol className={`drill-list${busy ? " stale" : ""}`}>
         {(data?.items || []).map((it: any, i: number) => (
           <li key={it.id}>
             <span className="drill-rank">{i + 1}</span>
@@ -134,16 +206,23 @@ function DrillPanel({ jurisdiction, court, years, open }:
               <a onClick={() => open(it.id)}><Oscola c={it.oscola} fallback={it.title || it.id} /></a>
               <div className="drill-meta muted">
                 <span className="tag">{it.doc_type}</span>
-                {it.court && <span>{it.court}</span>}
-                {it.date && <span>{it.date.slice(0, 4)}</span>}
-                {it.cited_by > 0 && <span>cited by {it.cited_by.toLocaleString()}</span>}
-                <Pct p={it.percentile} />
+                {it.court && <a className="facet-link" title={`focus on ${it.court}`}
+                  onClick={() => setF({ court: it.court, cites: null })}>{it.court}</a>}
+                {it.date && <a className="facet-link" title={`focus on ${it.date.slice(0, 4)}`}
+                  onClick={() => setF({ years: [it.date.slice(0, 4), it.date.slice(0, 4)], cites: null })}>{it.date.slice(0, 4)}</a>}
+                {it.cited_by > 0 && <a className="facet-link" title="see what cites this"
+                  onClick={() => setF({ cites: { id: it.id, label: it }, kind: "", court: null, years: null })}>
+                  cited by {it.cited_by.toLocaleString()}</a>}
+                <Availability it={it} />
               </div>
               {it.hanging && Object.keys(it.hanging).length > 0 && (
                 <div className="hanging">
-                  {HANG.filter(([k]) => it.hanging[k]).map(([k, icon, label]) => (
-                    <a key={k} className="hang-chip" title={label}
-                      onClick={() => open(it.id)}>{icon} {FMT(it.hanging[k])} {label.split(" ")[0]}</a>
+                  {HANG.filter(([k]) => it.hanging[k]).map(([k, label]) => (
+                    <a key={k} className="hang-chip" title={`${label} citing this — click to list them`}
+                      onClick={() => setF({ cites: { id: it.id, label: it },
+                        kind: k === "judgment" || k === "decision" || k === "opinion" ? "cases" : k,
+                        court: null, years: null })}>
+                      {FMT(it.hanging[k])} {label}</a>
                   ))}
                 </div>
               )}
@@ -151,29 +230,31 @@ function DrillPanel({ jurisdiction, court, years, open }:
           </li>
         ))}
       </ol>
-      {data && !data.items.length && !busy && <p className="muted">Nothing in this slice{kind ? " of that kind" : ""}.</p>}
+      {data && !data.items.length && !busy && <p className="muted">Nothing in this slice.</p>}
     </div>
   );
 }
 
-// --- one expanded jurisdiction: courts rail + timeline + drill ---------------
+// --- one expanded jurisdiction: rail (timeline, courts, sources) + drill -----
 function Expanded({ r, open }: { r: ShapeRow; open: (id: string, a?: string) => void }) {
-  const [court, setCourt] = useState<string | null>(null);
-  const [years, setYears] = useState<[string, string] | null>(null);
+  const [f, setFacets] = useState<Facets>({ kind: "", sort: "authority", court: null,
+    years: null, cites: null });
+  const setF = (p: Partial<Facets>) => setFacets((old) => ({ ...old, ...p }));
   return (
     <div className="exp-detail">
       <div className="exp-rail">
-        <div className="exp-rail-title">Timeline <span className="muted">drag to focus</span></div>
-        <Spark years={r.years} width={280} height={44} brush active={years}
-          onBrush={(a, b) => setYears(a === b ? [a, a] : [a, b])} />
-        {years && <a className="mini-link" onClick={() => setYears(null)}>clear {years[0]}–{years[1]} ✕</a>}
+        <div className="exp-rail-title">Timeline <span className="muted">— drag to focus</span></div>
+        <Spark years={r.years} width={240} height={44} brush active={f.years}
+          onBrush={(a, b) => setF({ years: [a, b], cites: null })} />
+        {f.years && <a className="mini-link" onClick={() => setF({ years: null })}>clear {f.years[0]}–{f.years[1]} ✕</a>}
         {r.courts.length > 0 && <>
-          <div className="exp-rail-title">Courts &amp; bodies</div>
+          <div className="exp-rail-title">Courts and bodies</div>
           <ul className="court-list">
-            <li><a className={!court ? "on" : ""} onClick={() => setCourt(null)}>all</a></li>
+            <li><a className={!f.court ? "on" : ""} onClick={() => setF({ court: null })}>all</a></li>
             {r.courts.map((c) => (
               <li key={c.court}>
-                <a className={court === c.court ? "on" : ""} onClick={() => setCourt(court === c.court ? null : c.court)}>
+                <a className={f.court === c.court ? "on" : ""}
+                  onClick={() => setF({ court: f.court === c.court ? null : c.court, cites: null })}>
                   <span className="court-name">{c.court}</span>
                   <span className="court-n">{FMT(c.n)}</span>
                 </a>
@@ -183,10 +264,11 @@ function Expanded({ r, open }: { r: ShapeRow; open: (id: string, a?: string) => 
         </>}
         <div className="exp-rail-title">Sources</div>
         <div className="src-chips">
-          {r.sources.map((s) => <span key={s.source} className="tag" title={`${s.n.toLocaleString()} documents`}>{s.source}</span>)}
+          {r.sources.map((s) => <span key={s.source} className="tag"
+            title={`${s.n.toLocaleString()} documents (${s.source})`}>{s.label}</span>)}
         </div>
       </div>
-      <DrillPanel jurisdiction={r.jurisdiction} court={court} years={years} open={open} />
+      <DrillPanel jurisdiction={r.jurisdiction} f={f} setF={setF} open={open} />
     </div>
   );
 }
@@ -226,7 +308,7 @@ export function ExploreView({ open, goSearch }:
     <div className="explore">
       <div className="hero">
         <h2 className="hero-title">{shape?.total ? `${shape.total.toLocaleString()} documents` : "RagLex"}
-          <span className="muted hero-sub"> — case law, legislation &amp; guidance across {rows.length || "…"} jurisdictions</span></h2>
+          <span className="muted hero-sub"> — case law, legislation and guidance across {rows.length || "…"} jurisdictions</span></h2>
         <div className="hero-search ac">
           <input value={q} autoFocus placeholder="Find a case, act or concept…  (⌘K jumps straight to a citation)"
             onChange={(e) => setQ(e.target.value)}
@@ -256,8 +338,7 @@ export function ExploreView({ open, goSearch }:
         <table className="shape-table">
           <thead>
             <tr><th /><th>Jurisdiction</th><th className="num">Documents</th><th>Composition</th>
-              <th>Timeline</th><th className="num" title="resolved citations per document">Density</th>
-              <th>Leading authority</th></tr>
+              <th>Timeline</th><th className="num" title="resolved citations per document">Density</th></tr>
           </thead>
           <tbody>
             {rows.map((r) => {
@@ -273,26 +354,15 @@ export function ExploreView({ open, goSearch }:
                     <td className="jbar"><KindBar r={r} /></td>
                     <td className="jspark"><Spark years={r.years} /></td>
                     <td className="num">{r.density ? `${r.density}×` : "—"}</td>
-                    <td className="jauth">
-                      {r.top_authority[0] && (
-                        <a onClick={(e) => { e.stopPropagation(); open(r.top_authority[0].id); }}>
-                          <Oscola c={r.top_authority[0].oscola}
-                            fallback={r.top_authority[0].title || r.top_authority[0].id} /></a>
-                      )}
-                    </td>
                   </tr>
-                  {on && <tr className="exp-row"><td colSpan={7}><Expanded r={r} open={open} /></td></tr>}
+                  {on && <tr className="exp-row"><td colSpan={6}><Expanded r={r} open={open} /></td></tr>}
                 </Fragment>
               );
             })}
           </tbody>
         </table>
-        <div className="kind-legend muted">
-          {KIND_COLOURS.map(([k, colour, label]) => (
-            <span key={k}><i style={{ background: colour }} />{label}</span>
-          ))}
-          <span className="legend-hint">click a row to drill in · everything ranks by network authority (PageRank)</span>
-        </div>
+        <div className="shape-foot muted">Click a row to drill in — every court, year and citation
+          count is itself a filter. Ranking uses citation-network authority.</div>
       </div>
     </div>
   );

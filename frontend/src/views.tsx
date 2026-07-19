@@ -1152,7 +1152,14 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   );
   const segs = body.segments as { label: string; kind: string; level: number; char_start: number; char_end: number }[];
   const cites = body.citations || [];
-  const pinned = (label: string) => (incoming || []).filter((r) => r.dst_anchor === label);
+  // The pinned line shows CURATED commentary links (analyses/summarises/annotations)
+  // anchored to this paragraph. Plain citation edges (mentions etc.) are excluded —
+  // the "Mentioned by" roll-up below already owns those, and showing both painted
+  // the same case twice on one paragraph ("mentions" and "mentioned by").
+  const CITE_TYPES = new Set(["mentions", "cites", "applies", "follows", "considers",
+    "distinguishes", "overrules", "interprets"]);
+  const pinned = (label: string) => (incoming || []).filter(
+    (r) => r.dst_anchor === label && !CITE_TYPES.has(r.relationship_type));
   const content = !body.text ? null : (!segs || segs.length === 0)
     ? <div className="reader"><div className="seg"><div className="seg-body">{renderCited(body.text, 0, body.text.length, cites, onCite, paraSet, onPara)}</div></div></div>
     : (

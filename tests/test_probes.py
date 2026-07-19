@@ -113,3 +113,41 @@ def test_self_citation_repair(catalogue):
     _seed(catalogue)
     assert run_repair(catalogue, "self_citation") == {"self_edges_deleted": 1}
     assert run_probes(catalogue, only=["self_citation"])[0].count == 0
+
+
+def test_anachronistic_eu_citation_probe_and_repair(catalogue):
+    for sid, when in [("old/1902", "1902-10-07"), ("new/2020", "2020-01-01")]:
+        catalogue.conn.execute(
+            "INSERT INTO documents (stable_id, source, doc_type, title, decision_date, "
+            "version, is_latest, has_text, has_embedding, added_by, topic_tags, "
+            "upstream_status, fetched_at) VALUES (?,?,?,?,?,1,1,1,0,'harvest','[]','live','2026-01-01')",
+            (sid, "t", "judgment", sid, when))
+    for src in ("old/1902", "new/2020"):
+        catalogue.conn.execute(
+            "INSERT INTO relations (src_id, dst_id, resolution_status, relationship_type, "
+            "extracted_via) VALUES (?, '32016L0680', 'resolved', 'mentions', 'regex')", (src,))
+        catalogue.conn.execute(
+            "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, method, created_at) "
+            "VALUES (?, 'LED', 'named', '32016L0680', 'eu_named', '2026-01-01')", (src,))
+    catalogue.conn.commit()
+    from raglex.ops.probes import run_probes, run_repair
+
+    p = run_probes(catalogue, only=["anachronistic_eu_citation"])[0]
+    assert p.count == 1 and p.samples[0]["src_id"] == "old/1902"
+    out = run_repair(catalogue, "anachronistic_eu_citation")
+    assert out == {"edges_deleted": 1, "citations_deleted": 1}
+    # the legitimate 2020 citation survives; probe now clean
+    left = catalogue.conn.execute(
+        "SELECT src_id FROM relations WHERE dst_id = '32016L0680'").fetchall()
+    assert [r["src_id"] for r in left] == ["new/2020"]
+    assert run_probes(catalogue, only=["anachronistic_eu_citation"])[0].count == 0
+
+
+def test_led_acronym_guard():
+    from raglex.citations import extract_citations
+
+    noise = "JUDGMENT APPEALED FROM AFFIRMED. THE EVIDENCE LED AT TRIAL WAS RULED OUT."
+    assert not [c for c in extract_citations(noise) if c.candidate_id == "32016L0680"]
+    real = "the processing falls under Article 4 of the LED and the LED generally"
+    hits = [c for c in extract_citations(real) if c.candidate_id == "32016L0680"]
+    assert len(hits) == 2 and hits[0].pinpoint == "Article 4"

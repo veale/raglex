@@ -495,17 +495,28 @@ register(Grammar(
 
 # "Article 17 GDPR" / "Art. 22 of the GDPR" / "Article 6 of the DMA" / "Digital
 # Services Act". Acronym form (uppercase) and spelled-out form (any case).
+def _eu_acronym(m: "re.Match[str]") -> Normalised:
+    name = m.group("name")
+    # "LED" is also an English word — in ALL-CAPS Commonwealth headnotes
+    # ("EVIDENCE LED AT TRIAL") a bare uppercase LED is prose, not the Law
+    # Enforcement Directive. Require the citation-shaped context the real usage
+    # always has: an Article pinpoint, or a preceding "the/of the". (This bug
+    # once made the LED the corpus's top EU authority, cited by 1902 cases.)
+    if name == "LED" and not m.group("art"):
+        pre = m.string[max(0, m.start("name") - 12):m.start("name")]
+        if not re.search(r"(?i)\b(?:the|of)\s+$", pre):
+            return None, None, DROP
+    return (_name_to_celex(name),
+            f"Article {m.group('art')}" if m.group("art") else None, None)
+
+
 register(Grammar(
     "eu_named", "regulation",
-    # The whole grammar is case-sensitive so the acronym (GDPR/DMA/DSA/LED) stays
-    # uppercase-only, but the "Article" prefix must still match lowercase "article 17
-    # GDPR" — otherwise the pinpoint is dropped. Make only the prefix case-insensitive.
-    re.compile(rf"(?:(?i:art(?:icle|\.)?)\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?i:of\s+(?:the\s+)?)?)?(?P<name>{_EU_ACRONYMS})\b"),
-    lambda m: (
-        _name_to_celex(m.group("name")),
-        f"Article {m.group('art')}" if m.group("art") else None,
-        None,
-    ),
+    # Case-sensitive so the acronym (GDPR/DMA/DSA/LED) stays uppercase-only, with
+    # the "Article" prefix case-insensitive. The leading \b is load-bearing:
+    # without it "APPEALED"/"RULED"/"MISLED" match their final LED.
+    re.compile(rf"(?:(?i:art(?:icle|\.)?)\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?i:of\s+(?:the\s+)?)?)?\b(?P<name>{_EU_ACRONYMS})\b"),
+    _eu_acronym,
 ))
 register(Grammar(
     "eu_named_full", "regulation",

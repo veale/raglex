@@ -301,6 +301,11 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Corpus-integrity probes: invariant violations with counts + samples."""
         return facade.run_probes(only=only.split(",") if only else None)
 
+    @app.post("/backfill-eu-titles")
+    def backfill_eu_titles_ep(payload: dict = Body(default={})) -> dict:
+        """Fill missing EU-instrument titles from their own scraped text."""
+        return facade.backfill_eu_titles(limit=int((payload or {}).get("limit", 2000)))
+
     @app.post("/probes/repair")
     def probes_repair_ep(payload: dict = Body(...)) -> dict:
         """Run the targeted repair for one repairable probe (read samples first)."""
@@ -643,13 +648,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.corpus_shape()
 
     @app.get("/drill")
-    def drill_ep(jurisdiction: str, court: str | None = None, kind: str | None = None,
+    def drill_ep(jurisdiction: str = "", court: str | None = None, kind: str | None = None,
                  year_from: str | None = None, year_to: str | None = None,
+                 cites: str | None = None, sort: str = "authority",
                  limit: int = 25) -> dict:
-        """One Explore drill-down step: top documents of a slice, authority-ranked,
-        with hanging groupings for legislation."""
+        """One Explore drill-down step: top documents of a slice, sortable
+        (authority/cited/newest/oldest), with hanging groupings for legislation.
+        ``cites`` flips to the documents citing that target."""
         return facade.jurisdiction_drill(jurisdiction, court=court, kind=kind,
-                                         year_from=year_from, year_to=year_to, limit=limit)
+                                         year_from=year_from, year_to=year_to,
+                                         cites=cites, sort=sort, limit=limit)
 
     @app.get("/corpus-map")
     def corpus_map_ep() -> dict:

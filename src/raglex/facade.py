@@ -1026,6 +1026,34 @@ class Facade:
         (("in-",), "India"),
     )
 
+    # source key → the natural-language name a person recognises (and, where the
+    # source has a public face, the label used for external links). Fallback:
+    # prettified key.
+    _SOURCE_LABELS = {
+        "uk-caselaw": "Find Case Law", "uk-legislation": "legislation.gov.uk",
+        "uk-hol": "House of Lords archive", "hol": "House of Lords archive",
+        "bailii": "BAILII", "bailii-corpus": "BAILII", "bailii-html": "BAILII",
+        "bailii-parquet": "BAILII", "westlaw": "Westlaw import",
+        "westlaw-rtf": "Westlaw import", "ofcom": "Ofcom", "ofcom-osa": "Ofcom (OSA)",
+        "ofcom-enforcement": "Ofcom enforcement", "ico": "ICO",
+        "eu-cellar": "EUR-Lex (CJEU)", "eu-legislation": "EUR-Lex",
+        "edpb": "EDPB", "edpb-oss": "EDPB one-stop-shop", "a29wp": "Article 29 WP",
+        "dma-cases": "DMA case register", "echr": "HUDOC (ECtHR)",
+        "nl-rechtspraak": "Rechtspraak.nl", "nl-legislation": "wetten.overheid.nl",
+        "ie-legislation": "eISB (Ireland)", "ie-caselaw": "Irish courts",
+        "au-caselaw": "Open Australian Legal Corpus", "au-legislation": "Federal Register (AU)",
+        "ca-caselaw": "CanLII (A2AJ)", "ca-legislation": "Justice Laws (Canada)",
+        "nz-caselaw": "NZ courts", "nz-legislation": "NZ Legislation",
+        "sg-legislation": "Singapore Statutes Online", "hk-legislation": "HK e-Legislation",
+        "in-caselaw": "Indian Kanoon", "user-import": "Manual imports",
+        "ci-caselaw": "Channel Islands", "offshore-caselaw": "Offshore courts",
+    }
+
+    def source_label(self, source: str) -> str:
+        if source in self._SOURCE_LABELS:
+            return self._SOURCE_LABELS[source]
+        return (source or "").replace("-", " ").replace("_", " ").title()
+
     def _jurisdiction_of(self, source: str) -> str:
         s = (source or "").lower()
         for prefixes, label in self._JURISDICTIONS:
@@ -1115,24 +1143,50 @@ class Facade:
                     ({"court": c, "n": n} for c, n in b["courts"].items()),
                     key=lambda x: -x["n"])[:12]
                 b["sources"] = sorted(
-                    ({"source": s, "n": n} for s, n in b["sources"].items()),
+                    ({"source": s, "label": self.source_label(s), "n": n}
+                     for s, n in b["sources"].items()),
                     key=lambda x: -x["n"])
                 b.setdefault("top_authority", [])
                 b.pop("citations", None)
                 out.append(b)
             return {"jurisdictions": out, "total": sum(b["total"] for b in out)}
 
+    _DRILL_SORTS = {
+        "authority": "pagerank DESC, cited_by DESC, d.decision_date DESC",
+        "cited": "cited_by DESC, pagerank DESC, d.decision_date DESC",
+        "newest": "d.decision_date DESC, pagerank DESC",
+        "oldest": "d.decision_date ASC, pagerank DESC",
+    }
+
     def jurisdiction_drill(self, jurisdiction: str, *, court: str | None = None,
                            kind: str | None = None, year_from: str | None = None,
-                           year_to: str | None = None, limit: int = 25) -> dict:
+                           year_to: str | None = None, cites: str | None = None,
+                           sort: str = "authority", limit: int = 25) -> dict:
         """One drill-down step inside Explore: the top documents of a slice
-        (jurisdiction × optional court × kind × year range), ranked by network
-        authority with citation counts — plus, for legislation slices, what
-        hangs off each instrument (citing cases/guidance, sibling legislation)."""
-        sources = [s for s in self._all_sources() if self._jurisdiction_of(s) == jurisdiction]
+        (jurisdiction × optional court × kind × year range), ranked by the chosen
+        sort (network authority / most cited / newest / oldest) — plus, for
+        legislation, what hangs off each instrument. ``cites`` flips the panel to
+        the documents CITING that target (the clickable cited-by drill), same
+        facets and sorts. Each item carries availability (text/pdf) and its
+        source's public link + label for the external-link affordance."""
+        sources = [s for s in self._all_sources() if self._jurisdiction_of(s) == jurisdiction] \
+            if jurisdiction else []
+        order = self._DRILL_SORTS.get(sort, self._DRILL_SORTS["authority"])
         with self._open() as (cat, _rs, _ts):
-            clauses = ["d.source IN (%s)" % ",".join("?" * len(sources))]
-            params: list = list(sources)
+            clauses: list[str] = []
+            params: list = []
+            if sources:
+                clauses.append("d.source IN (%s)" % ",".join("?" * len(sources)))
+                params.extend(sources)
+            if cites:
+                tdoc = cat.get_document(cites)
+                tids = [cites] + ([tdoc["ecli"]] if tdoc and tdoc["ecli"] else [])
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM relations r WHERE r.src_id = d.stable_id "
+                    f"AND r.dst_id IN ({','.join('?' * len(tids))}) "
+                    "AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred' "
+                    "AND r.src_id <> r.dst_id)")
+                params.extend(tids)
             if court:
                 clauses.append("d.court = ?")
                 params.append(court)
@@ -1147,6 +1201,8 @@ class Facade:
             if year_to:
                 clauses.append("d.decision_date <= ?")
                 params.append(f"{year_to}-12-31")
+            if not clauses:
+                return {"items": []}
             rows = cat.conn.execute(
                 f"""
                 SELECT d.*, COALESCE(a.pagerank, 0) AS pagerank, a.percentile,
@@ -1154,23 +1210,35 @@ class Facade:
                                  WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by
                 FROM documents d LEFT JOIN doc_authority a ON a.doc_id = d.stable_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY pagerank DESC, cited_by DESC, d.decision_date DESC
+                ORDER BY {order}
                 LIMIT ?
                 """, (*params, limit)).fetchall()
             items = []
             for r in rows:
+                raw_path = r["raw_path"] or ""
                 item = {
                     "id": r["stable_id"], "title": r["title"], "doc_type": r["doc_type"],
                     "court": r["court"],
                     "date": str(r["decision_date"])[:10] if r["decision_date"] else None,
                     "percentile": r["percentile"], "cited_by": r["cited_by"],
                     "oscola": _oscola_cite(r, _row_meta(r)),
+                    # availability: full text / original pdf only / metadata only
+                    "has_text": bool(r["has_text"]),
+                    "pdf": raw_path.rsplit(".", 1)[-1].lower() == "pdf" if "." in raw_path else False,
+                    "url": r["landing_url"],
+                    "source_label": self.source_label(r["source"]),
                 }
                 if r["doc_type"] == "legislation":
                     item["hanging"] = cat.cited_by_types([r["stable_id"]])
                 items.append(item)
-            return {"jurisdiction": jurisdiction, "court": court, "kind": kind,
-                    "items": items}
+            out: dict = {"jurisdiction": jurisdiction, "court": court, "kind": kind,
+                         "sort": sort, "items": items}
+            if cites:
+                tdoc = cat.get_document(cites)
+                out["cites"] = {"id": cites,
+                                "oscola": _oscola_cite(tdoc, _row_meta(tdoc)) if tdoc else None,
+                                "title": tdoc["title"] if tdoc else cites}
+            return out
 
     def _all_sources(self) -> list[str]:
         def _compute():
@@ -1178,6 +1246,68 @@ class Facade:
                 return {"sources": [r["k"] for r in cat.conn.execute(
                     "SELECT DISTINCT source AS k FROM documents").fetchall()]}
         return self._cached("all-sources", 600, _compute)["sources"]
+
+    # "1999/468/EC: Council Decision of 28 June 1999 laying down the procedures…"
+    # — the title line old EUR-Lex HTML pages carry near the top. Matched against
+    # the first ~3k chars of the text projection.
+    _EU_TITLE_RE = None  # compiled lazily
+
+    def backfill_eu_titles(self, *, limit: int = 2000, on_progress=None) -> dict:
+        """Construct titles for EU instruments that have none (or a bare CELEX
+        echo) from their own scraped text — the '31999D0468 has no title but the
+        HTML plainly states it' fix. Non-destructive: only fills empty/echo
+        titles, recorded as a system backfill, re-runnable."""
+        import re as _re
+        from pathlib import Path
+
+        if Facade._EU_TITLE_RE is None:
+            Facade._EU_TITLE_RE = _re.compile(
+                r"^\s*(\d{4}/\d{1,4}/(?:EC|EEC|EU|JHA|CFSP|Euratom)\s*:\s*[^\n]{15,400})$"
+                r"|^\s*((?:Council |Commission )?(?:Regulation|Directive|Decision)\s*"
+                r"\((?:EC|EEC|EU|Euratom)\)\s*No\s*\d+/\d+[^\n]{15,400})$",
+                _re.MULTILINE)
+        done = fixed = 0
+        # a "title" that merely echoes the instrument number ("Decision 468/1999")
+        # is as good as none — the scraped page states the real one
+        echo = _re.compile(r"^(?:Regulation|Directive|Decision)\s*(?:\((?:EC|EEC|EU)\)\s*)?"
+                           r"(?:No\.?\s*)?\d+/\d+$", _re.IGNORECASE)
+        with self._open() as (cat, _rs, ts):
+            rows = [r for r in cat.conn.execute(
+                "SELECT stable_id, title, payload_hash FROM documents "
+                "WHERE source IN ('eu-legislation', 'eu-cellar') AND has_text = 1 "
+                "AND doc_type IN ('legislation', 'decision') "
+                "AND (title IS NULL OR title = '' OR title = stable_id "
+                "     OR LENGTH(title) < 40) LIMIT ?",
+                (limit,)).fetchall()
+                if not r["title"] or r["title"] == r["stable_id"] or echo.match(r["title"])]
+            tag = _re.compile(r"<[^>]+>")
+            for r in rows:
+                done += 1
+                if on_progress and done % 100 == 0:
+                    on_progress(stage="eu titles", done=done, total=len(rows))
+                m = None
+                try:
+                    m = Facade._EU_TITLE_RE.search(ts.get(r["payload_hash"])[:3000])
+                except OSError:
+                    pass
+                if not m:
+                    # the text projection often strips the page header — the title
+                    # line then lives only in the RAW HTML (the 31999D0468 case)
+                    doc = cat.get_document(r["stable_id"])
+                    raw_path = doc["raw_path"] if doc else None
+                    if raw_path:
+                        try:
+                            raw_head = Path(raw_path).read_bytes()[:12000].decode("utf-8", "ignore")
+                            m = Facade._EU_TITLE_RE.search(tag.sub("\n", raw_head))
+                        except OSError:
+                            m = None
+                if not m:
+                    continue
+                title = " ".join((m.group(1) or m.group(2)).split())
+                cat.update_document_fields(r["stable_id"], {"title": title}, curate=False)
+                fixed += 1
+        self._invalidate_caches()
+        return {"scanned": done, "titled": fixed}
 
     def run_probes(self, *, only: list[str] | None = None) -> list[dict]:
         """Corpus-integrity probes (§8): invariant checks over the citation
