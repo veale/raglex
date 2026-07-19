@@ -184,7 +184,9 @@ class _Client:
         for suffix, body in self.routes.items():
             if url.endswith(suffix):
                 return _Resp(body)
-        raise FetchError(f"404 {url}")
+        # a 404 is a FATAL fetch error (as the real http client raises it) — an absence,
+        # not a transient blip; the adapter treats the two differently.
+        raise FetchError(f"404 {url}", transient=False)
 
 
 # -- ids ---------------------------------------------------------------------
@@ -420,6 +422,25 @@ def test_statute_book_adapter_mints_the_rdfa_and_isbc_edges():
 def test_statute_book_adapter_returns_none_when_nothing_is_served():
     adapter = IrishStatuteBookAdapter(ids="ie/1999/act/999", client=_Client({}))
     assert adapter.fetch(next(iter(adapter.discover(None)))) is None
+
+
+def test_statute_book_adapter_reraises_a_transient_blip_across_all_formats():
+    # A network blip on every format is a FAILURE, not an absence — it must propagate
+    # (freeze + retry) rather than return None (which would poison the 90-day miss list).
+    import pytest
+
+    from raglex.core.errors import FetchError
+
+    class _AllTransient:
+        seen: list[str] = []
+
+        def get(self, url, **kw):
+            self.seen.append(url)
+            raise FetchError(f"503 {url}", transient=True)
+
+    adapter = IrishStatuteBookAdapter(ids="ie/1999/act/999", client=_AllTransient())
+    with pytest.raises(FetchError):
+        adapter.fetch(next(iter(adapter.discover(None))))
 
 
 def test_year_walk_always_rewalks_the_open_year():

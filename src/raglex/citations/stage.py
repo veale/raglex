@@ -201,6 +201,9 @@ def extract_document(
             )
     edges = _drop_self_citations(catalogue, stable_id, edges)
     catalogue.add_relations(stable_id, list(edges.values()))
+    # durable "last rescanned at" stamp — set even when the document cited nothing, so a
+    # staleness-scoped rescan can skip it next time (§5).
+    catalogue.mark_extracted(stable_id)
     return len(cites)
 
 

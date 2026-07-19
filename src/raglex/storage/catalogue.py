@@ -349,6 +349,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _iso_days_ago(days: int) -> str:
+    """UTC ISO timestamp ``days`` in the past — the cutoff a staleness filter compares
+    against. ISO-8601 strings sort lexicographically, so ``created_at >= cutoff`` works
+    as a plain string comparison on both backends."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
 def _family_key(provider: str, model: str, model_version: str) -> str:
     return f"{provider}/{model}/{model_version}"
 
@@ -456,6 +463,9 @@ class Catalogue:
             ("documents", "meta_json", "TEXT"),
             ("relations", "candidate_id", "TEXT"),
             ("relations", "raw_fold", "TEXT"),
+            # when this document's citations were last (re-)extracted — the durable
+            # "last rescanned at" stamp a staleness-scoped rescan skips against (§5).
+            ("documents", "last_extracted_at", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -747,6 +757,18 @@ class Catalogue:
     def clear_citations(self, src_id: str) -> None:
         self.conn.execute("DELETE FROM citations WHERE src_id = ?", (src_id,))
         self.conn.commit()
+
+    def mark_extracted(self, src_id: str, *, commit: bool = True) -> None:
+        """Stamp ``last_extracted_at`` = now for a document — the durable "last rescanned"
+        signal a staleness-scoped rescan skips against (§5). Set on every extraction,
+        including ones that produced no citations, so citation-less documents converge and
+        aren't re-scanned every run."""
+        self.conn.execute(
+            "UPDATE documents SET last_extracted_at = ? WHERE stable_id = ?",
+            (_now(), src_id),
+        )
+        if commit:
+            self.conn.commit()
 
     def citations_for(self, src_id: str) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -1489,7 +1511,8 @@ class Catalogue:
     def text_document_ids(self, *, limit: int | None = None,
                           doc_types: list[str] | None = None,
                           source: str | None = None,
-                          only_unextracted: bool = False) -> list[str]:
+                          only_unextracted: bool = False,
+                          stale_days: int | None = None) -> list[str]:
         """Document ids that have extractable text, in id order — the target set for a
         re-extraction. ``doc_types`` scopes it (e.g. ``['judgment']`` to skip the 122k
         legislation docs, which mostly cite only other legislation); ``source`` scopes it
@@ -1503,7 +1526,17 @@ class Catalogue:
         to reach them; this selects exactly the backlog, so re-running is cheap and
         convergent. It is deliberately "no rows at all" rather than a timestamp check: a
         document that genuinely cites nothing is re-tried each run, which is far cheaper
-        than the alternative of re-extracting everything."""
+        than the alternative of re-extracting everything.
+
+        ``stale_days`` narrows it to documents **not extracted within the last N days** —
+        the "avoid re-doing everything on restart" set. Freshness is read from two
+        signals, so it works *retroactively* on data that predates the durable stamp: the
+        ``last_extracted_at`` column (set going forward on every extraction) OR the newest
+        ``citations.created_at`` for the document (``extract_document`` clears+reinserts
+        citation rows each run, so that timestamp already tracks the last extraction —
+        including the rescan running right now). A document is skipped when *either* signal
+        is within the window. A genuinely citation-less document that has never been
+        stamped counts as stale (re-tried), same tradeoff as ``only_unextracted``."""
         sql = "SELECT d.stable_id FROM documents d WHERE d.has_text = 1"
         params: list = []
         if doc_types:
@@ -1514,6 +1547,13 @@ class Catalogue:
             params.append(source)
         if only_unextracted:
             sql += " AND NOT EXISTS (SELECT 1 FROM citations c WHERE c.src_id = d.stable_id)"
+        if stale_days is not None:
+            cutoff = _iso_days_ago(stale_days)
+            # fresh = stamped recently OR has a recently-created citation row → skip it.
+            sql += (" AND (d.last_extracted_at IS NULL OR d.last_extracted_at < ?)"
+                    " AND NOT EXISTS (SELECT 1 FROM citations c"
+                    " WHERE c.src_id = d.stable_id AND c.created_at >= ?)")
+            params.extend([cutoff, cutoff])
         sql += " ORDER BY d.stable_id"
         if limit:
             sql += " LIMIT ?"

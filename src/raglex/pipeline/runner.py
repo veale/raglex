@@ -140,6 +140,17 @@ class Pipeline:
                         "contenthash") if feed_hash else None
                     if not (feed_hash and held_hash and feed_hash != held_hash):
                         stats.deduped += 1
+                        # A deduped stub was still *seen and held* — advance the cursor
+                        # past it. Otherwise a run where everything is already held (e.g.
+                        # after a bulk import pre-populated the docs) leaves the watermark
+                        # unmoved, so every later incremental run re-pages the same
+                        # ever-growing feed window from the same stale cursor.
+                        if not wm_frozen:
+                            highest = _max_watermark(
+                                highest,
+                                stub.hints.get("watermark")
+                                or (stub.hint_date and stub.hint_date.isoformat()),
+                            )
                         continue
                     refreshed = True
 

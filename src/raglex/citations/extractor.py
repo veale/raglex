@@ -172,7 +172,13 @@ def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
     for phrase, target in sorted(aliases.items(), key=lambda kv: -len(kv[0])):
         if not phrase or not target:
             continue
-        for m in re.finditer(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE):
+        # \b only guards against mid-word matches when the adjacent phrase character
+        # is itself a word character. On a non-word edge — e.g. an alias like "(UK)
+        # GDPR" — a bare \b demands a boundary that never exists there, so the phrase
+        # silently never matches. Apply the boundary per edge only when it helps.
+        lb = r"\b" if phrase[0].isalnum() or phrase[0] == "_" else ""
+        rb = r"\b" if phrase[-1].isalnum() or phrase[-1] == "_" else ""
+        for m in re.finditer(rf"{lb}{re.escape(phrase)}{rb}", text, re.IGNORECASE):
             found.append(Citation(raw=m.group(0), entity_kind="named", candidate_id=target,
                                   pinpoint=None, char_start=m.start(), char_end=m.end(),
                                   method="named_alias"))

@@ -142,6 +142,23 @@ def test_pipeline_watermark_advances_on_clean_run(catalogue, rawstore):
     assert catalogue.get_watermark("fake") == "2024-05-01"
 
 
+def test_watermark_advances_even_when_every_stub_is_deduped(catalogue, rawstore):
+    # A run where everything is already held (e.g. after a bulk import pre-populated the
+    # docs) still SAW each stub — the cursor must advance past them, or every later
+    # incremental run re-pages the same ever-growing feed window from the stale cursor.
+    v1 = _rec("a", "personal data GDPR 2016/679", d=date(2024, 1, 1))
+    pipe = Pipeline(catalogue, rawstore)
+    pipe.run(HintedAdapter([v1]))
+    assert catalogue.get_watermark("fake") == "2024-01-01"
+
+    # re-discover the same held doc with a newer feed date and no content change
+    later = _rec("a", "personal data GDPR 2016/679", d=date(2024, 6, 1))
+    ad = HintedAdapter([later])
+    stats = pipe.run(ad)
+    assert stats.deduped == 1 and ad.fetched == []        # deduped BEFORE any fetch
+    assert catalogue.get_watermark("fake") == "2024-06-01"  # cursor still moved forward
+
+
 def test_rate_limit_pauses_without_advancing_watermark(catalogue, rawstore):
     records = [
         _rec("a", "personal data GDPR 2016/679", d=date(2024, 5, 1)),

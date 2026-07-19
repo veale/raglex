@@ -31,6 +31,7 @@ from .hol import HouseOfLordsAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
+from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
 from .uk_legislation import UKLegislationAdapter
 
@@ -102,6 +103,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Australian case law — the Open Australian Legal Corpus JSONL. Decisions only by
     # default: the statutes are better served by the live registers (au-cth et al).
     "au-caselaw": AustralianCaseLawAdapter,
+    # New Zealand Supreme Court — the Courts of NZ RSS feed → case page → judgment PDF,
+    # keyed by the neutral citation printed in the PDF ("[2026] NZSC 88" → nzsc/2026/88).
+    "nz-caselaw": NZSupremeCourtAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -393,6 +397,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("jurisdictions", "Limit to jurisdictions", "new_south_wales,commonwealth"),
          SourceOption("min_year", "Earliest decision year", "2000")),
         ("neutral citation ([2020] NSWSC 1)", "nswsc/2020/1"),
+    ),
+    "nz-caselaw": SourceInfo(
+        "nz-caselaw", "New Zealand Supreme Court (Courts of NZ RSS)", "caselaw",
+        "NZ", False,
+        "Every NZ Supreme Court judgment from the Courts of NZ RSS feed (2004–present). "
+        "Each case page's judgment PDF is fetched and parsed layout-aware: the neutral "
+        "citation printed in the PDF is the identity (\"[2026] NZSC 88\" → nzsc/2026/88), "
+        "numbered paragraphs become citable segments, and footnotes are lifted into a "
+        "preserved zone so their authorities still resolve. Party names come from the case "
+        "page. Incremental by the RSS pubDate; a backfill walks the whole feed. Polite 10s "
+        "floor between requests, widening automatically if the court rate-limits.",
+        (SourceOption("rss_url", "RSS feed URL", "defaults to the Supreme Court feed"),
+         SourceOption("rss_path", "Local RSS fallback", "path to a saved feed XML")),
+        ("neutral citation ([2026] NZSC 88)", "nzsc/2026/88"),
     ),
     "hk-legislation": SourceInfo(
         "hk-legislation", "Hong Kong legislation (e-Legislation bulk XML)", "legislation",

@@ -523,10 +523,16 @@ class IrishStatuteBookAdapter(BaseAdapter):
         #    for SIs and pre-1922 Acts, so it is recorded as a fact about the item.
         raw = fmt = None
         available: list[str] = []
+        transient_err: FetchError | None = None
         for candidate in EISB_FORMATS:
             try:
                 resp = self._client.get(f"{base}/{version}/{lang}/{candidate}")
-            except FetchError:
+            except FetchError as exc:
+                # A transient failure on one format is not proof that format is absent —
+                # keep probing the others, but remember it so that if EVERY format fails
+                # transiently we raise rather than report a (poisoning) whole-item absence.
+                if exc.transient:
+                    transient_err = exc
                 continue
             body = resp.content or b""
             if not body or _is_not_found(body):
@@ -535,7 +541,9 @@ class IrishStatuteBookAdapter(BaseAdapter):
             if raw is None:
                 raw, fmt = body, candidate
         if raw is None:
-            return None  # nothing served in any format — an absence, not a failure
+            if transient_err is not None:
+                raise transient_err  # a blip across all formats is a failure, not an absence
+            return None  # nothing served in any format — a genuine absence
 
         parser = "eisb-xml" if fmt == "xml" else "eisb-html"
         parsed = parse(parser, raw)

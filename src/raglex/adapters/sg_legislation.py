@@ -299,7 +299,11 @@ class SGLegislationAdapter(BaseAdapter):
         path = f"/{'SL' if subsidiary else 'Act'}/{code}"
         try:
             parsed = parse_act_page(self._client.get(f"{SSO_BASE}{path}").text)
-        except FetchError:
+        except FetchError as exc:
+            # Transient failures are not an absence — re-raise so the pipeline retries
+            # rather than filing this Act onto the 90-day harvest-miss list.
+            if exc.transient:
+                raise
             return None
 
         provisions = list(parsed.provisions)

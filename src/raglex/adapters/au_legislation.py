@@ -223,7 +223,13 @@ class CommonwealthAdapter(BaseAdapter):
         try:
             title = json.loads(self._client.get(
                 f"{FRL_API}/titles('{tid}')", params={"$format": "json"}).content)
-        except (FetchError, json.JSONDecodeError):
+        except FetchError as exc:
+            # A transient fetch failure is not an absence — re-raise so the pipeline
+            # retries rather than cooling this title onto the 90-day miss list.
+            if exc.transient:
+                raise
+            return None
+        except json.JSONDecodeError:
             return None
         if not title.get("id"):
             return None
@@ -601,13 +607,13 @@ class LawMakerAdapter(BaseAdapter):
             yield from self._discover_enumerate(max_pages=max_pages)
             return
         if self.ids:
+            today = date.today().isoformat()
             for raw in self.ids:
-                docid = _norm_docid(raw)
-                sid = lawmaker_stable_id(self.jurisdiction, docid) if docid else None
-                if not sid:
-                    continue
-                today = date.today().isoformat()
-                yield self._stub(docid, sid, self.status, today, title=None)
+                for docid in _norm_docids(raw):
+                    sid = lawmaker_stable_id(self.jurisdiction, docid)
+                    if not sid:
+                        continue
+                    yield self._stub(docid, sid, self.status, today, title=None)
             return
         # Feed-driven (Qld/Tas). NSW has no feed we can fetch headless → id-only.
         try:
@@ -645,7 +651,13 @@ class LawMakerAdapter(BaseAdapter):
                     try:
                         resp = self._client.get(url)
                         ok = bool(resp.content) and b"<div id=\"fragview\"" in resp.content
-                    except FetchError:
+                    except FetchError as exc:
+                        # A transient failure is NOT evidence the id is a gap — counting it
+                        # toward miss_streak lets a short outage truncate an entire year of
+                        # the backfill. Re-raise so the run freezes and retries; only a
+                        # genuine 404-class miss advances the streak.
+                        if exc.transient:
+                            raise
                         ok = False
                     if not ok:
                         misses += 1
@@ -673,7 +685,10 @@ class LawMakerAdapter(BaseAdapter):
     def fetch(self, stub: Stub) -> Record | None:
         try:
             resp = self._client.get(stub.raw_url)
-        except FetchError:
+        except FetchError as exc:
+            # Transient failures must not be recorded as an absence (miss-list poison).
+            if exc.transient:
+                raise
             return None
         body = resp.content or b""
         if not body:
@@ -749,22 +764,29 @@ def _title_id(raw: str) -> str:
     return raw
 
 
-def _norm_docid(raw: str) -> str | None:
-    """``act-2016-001``, a view URL, or a corpus id → the LawMaker ``docid``.
+def _norm_docids(raw: str) -> list[str]:
+    """``act-2016-001``, a view URL, or a corpus id → candidate LawMaker ``docid``s.
 
     A docid or view URL is used **verbatim** — LawMaker's number width is not uniform
     (Qld Acts are 3-digit ``act-2016-001``, Qld subordinate legislation 4-digit
     ``sl-2023-0107``), so reformatting it breaks the fetch. The corpus-id form
-    (``au/qld/act/2016/1``) can't recover the exact width, so it's zero-padded to the
-    common 4-digit form as a best effort; prefer passing the real docid."""
+    (``au/qld/act/2016/1``) can't recover the exact width, so we return BOTH the 4-digit
+    and the 3-digit form as candidates (the wrong one just 404s); prefer passing the
+    real docid. Returns [] when nothing looks like a LawMaker id."""
     raw = (raw or "").strip()
     m = _VIEW_RE.search(raw)
     if m:
-        return m.group("docid").lower()
+        return [m.group("docid").lower()]
     m = _DOCID_RE.match(raw)
     if m:
-        return raw.lower()
+        return [raw.lower()]
     m = re.search(r"au/[a-z]{2,3}/(?P<type>act|sl|sr|si)/(?P<year>\d{4})/(?P<num>\d+[a-z]?)", raw, re.I)
     if m:
-        return f"{m.group('type').lower()}-{m.group('year')}-{int(re.sub('[a-z]', '', m.group('num'))):04d}"
-    return None
+        typ, year = m.group("type").lower(), m.group("year")
+        n = int(re.sub("[a-z]", "", m.group("num")))
+        # de-dup while keeping order: a number ≥1000 is identical at both widths
+        seen: dict[str, None] = {}
+        for width in (4, 3):
+            seen.setdefault(f"{typ}-{year}-{n:0{width}d}", None)
+        return list(seen)
+    return []

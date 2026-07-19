@@ -507,7 +507,8 @@ def cmd_rescan(args: argparse.Namespace) -> int:
     from .facade import Facade
 
     rep = Facade(Config.from_env()).rescan(
-        limit=args.limit, parallel=not args.no_parallel, on_progress=lambda **p: None)
+        limit=args.limit, parallel=not args.no_parallel,
+        stale_days=getattr(args, "stale_days", None), on_progress=lambda **p: None)
     print(_json.dumps(rep, indent=2))
     return 0
 
@@ -757,6 +758,9 @@ def build_parser() -> argparse.ArgumentParser:
     rs2 = sub.add_parser("rescan", help="full fresh relink: re-extract all docs + run the whole chain (§5)")
     rs2.add_argument("--limit", type=int, default=None, help="re-extract at most N docs (default: all)")
     rs2.add_argument("--no-parallel", action="store_true", help="skip the heavy parallel-mining pass")
+    rs2.add_argument("--stale-days", type=int, default=None,
+                     help="only re-extract docs not scanned in the last N days (restart-cheap; "
+                          "reads last_extracted_at + newest citation timestamp)")
     rs2.set_defaults(func=cmd_rescan)
 
     ml = sub.add_parser("match-legislation", help="resolve name-only statutes against held legislation titles (§5b)")

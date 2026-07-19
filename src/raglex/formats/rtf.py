@@ -25,10 +25,19 @@ _LINE_RE = re.compile(r"\\line\b")
 _TAB_RE = re.compile(r"\\tab\b")
 # Hex-escaped Latin-1: \'XX  →  the character at that code point
 _HEX_RE = re.compile(r"\\'([0-9a-fA-F]{2})")
-# Unicode escapes: \uNNNN? (positive or two's-complement negative)
-_UNI_RE = re.compile(r"\\u(-?\d+)\??")
-# All other control words (with optional numeric parameter and trailing space)
-_CTRL_RE = re.compile(r"\\[a-zA-Z-]+\*?\s?(?:-?\d+)?\s?")
+# Unicode escapes: \uNNNN followed by a low-ANSI fallback for readers that can't
+# render the code point. The fallback is one unit — a literal "?", or a \'XX hex
+# escape (e.g. \'3f), or a plain char. We must consume the \'XX form here, before
+# _HEX_RE decodes it, or it survives and duplicates the character.
+_UNI_RE = re.compile(r"\\u(-?\d+)(?:\\'[0-9a-fA-F]{2}|\?)?")
+# All other control words. An RTF control word is letters only; its numeric
+# parameter (if any) immediately follows the letters — "\fs24", "\li-360" — and a
+# single trailing space is the delimiter RTF consumes. Crucially, a space *before*
+# the digits means those digits are document text, not a parameter ("{\b 1985}" is
+# the text "1985" in bold), so the digit group must be glued to the letters with no
+# optional whitespace between them — otherwise years / paragraph numbers / amounts
+# get silently eaten.
+_CTRL_RE = re.compile(r"\\[a-zA-Z]+(?:-?\d+)? ?")
 # Stray backslash-symbol sequences
 _CTRL_SYM_RE = re.compile(r"\\[^a-zA-Z\s]")
 # Paragraph number: "[1]", "[12]" etc. at the start of a line (BAILII convention)
@@ -60,9 +69,11 @@ def strip_rtf(data: bytes) -> str:
     text = _LINE_RE.sub("\n", text)
     text = _TAB_RE.sub("  ", text)
 
-    # Decode character escapes before stripping control words so \'e9 → é
-    text = _HEX_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+    # Decode character escapes before stripping control words so \'e9 → é.
+    # Unicode escapes first: they may carry a \'XX fallback that must be swallowed
+    # as part of the escape rather than decoded as a standalone character.
     text = _UNI_RE.sub(_uni_char, text)
+    text = _HEX_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
 
     # Remove all remaining RTF control words and group markers
     text = _CTRL_RE.sub("", text)

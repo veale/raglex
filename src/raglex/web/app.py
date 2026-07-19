@@ -253,9 +253,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: v for k, v in p.items()
                   if k in ("limit", "parallel", "coref", "doc_types", "source",
                            # resume rather than redo: only documents with no edges yet
-                           "only_unextracted")}
+                           "only_unextracted",
+                           # skip documents extracted within the last N days (restart-cheap)
+                           "stale_days")}
         scope = params.get("source") or (
             "judgments" if params.get("doc_types") == ["judgment"] else "all docs")
+        if params.get("stale_days"):
+            scope += f", stale >{params['stale_days']}d"
         return _start_job("rescan", f"full fresh relink ({scope}) — re-extract + match everything", params)
 
     @app.post("/jobs/harvest-echr")

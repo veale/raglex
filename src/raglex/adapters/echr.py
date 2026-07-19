@@ -183,12 +183,20 @@ class ECHRAdapter(BaseAdapter):
     def fetch(self, stub: Stub) -> Record | None:
         try:
             resp = self._client.get(stub.raw_url)
-        except FetchError:
+        except FetchError as exc:
+            # A transient failure (transport error, 5xx after retries) is NOT an
+            # absence — returning None here files a routable reference onto the 90-day
+            # harvest-miss list on a blip. Re-raise so the pipeline freezes the cursor
+            # and retries; only a genuine 404-class failure counts as "nothing there".
+            if exc.transient:
+                raise
             return None
         raw = resp.content
         text, segments = parse_body_html(raw)
         if not text:
-            return None
+            # An empty HUDOC HTML conversion is far likelier a transient upstream hiccup
+            # than a genuinely empty judgment — treat it as transient, not an absence.
+            raise FetchError(f"empty HUDOC conversion for {stub.stable_id}", transient=True)
         date_raw = (stub.hints.get("date") or "")[:10]
         try:
             from datetime import date as _date

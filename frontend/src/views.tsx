@@ -2291,6 +2291,7 @@ function KeepCurrentPanel() {
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain">⟳ Full relink (judgments)</button>
         <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain">⟳ Full relink (all)</button>
+        <button onClick={() => fireJob("rescan", { stale_days: 7 }, (m) => setMsg(`rescan stale (>1 week): ${m}`))} title="Re-extract only documents NOT scanned in the last 7 days, then run the resolution chain. Reads the last-extracted stamp (and, retroactively, the newest citation timestamp) so it skips whatever a current/recent rescan already covered — cheap to run after a restart.">⟳ Rescan stale (&gt;1 week)</button>
       </div>
       {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
     </div>

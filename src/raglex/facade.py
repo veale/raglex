@@ -5084,7 +5084,7 @@ class Facade:
 
     def rescan(self, *, limit: int | None = None, coref: bool = True, parallel: bool = True,
                doc_types: list[str] | None = None, source: str | None = None,
-               only_unextracted: bool = False,
+               only_unextracted: bool = False, stale_days: int | None = None,
                on_progress=None, cancel_check=None) -> dict:
         """Full fresh relink of the corpus: re-extract every text document with the current
         grammars, then run the whole resolution chain — so every fix (statute-name grammar,
@@ -5107,7 +5107,14 @@ class Facade:
         interrupted — an OOM kill, a container restart — leaves a backlog of text documents
         with no edges; without this, picking up where it left off means re-extracting the
         entire source from scratch. With it, a killed 200k-document run can simply be
-        re-launched and will process only what never finished."""
+        re-launched and will process only what never finished.
+
+        ``stale_days`` scopes the re-extraction to documents **not extracted in the last N
+        days** — the "avoid re-doing the whole corpus on restart" set. It reads freshness
+        from the ``last_extracted_at`` stamp OR the newest ``citations.created_at``, so it
+        works retroactively against an in-flight or just-finished rescan (which is stamping
+        those timestamps as it goes): running "rescan stale (>1 week)" now targets only
+        what the current run hasn't already reached."""
         from .citations import extract_document
 
         report: dict = {}
@@ -5118,7 +5125,7 @@ class Facade:
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()          # user shorthand rules — loaded ONCE
             ids = cat.text_document_ids(limit=limit, doc_types=doc_types, source=source,
-                                        only_unextracted=only_unextracted)
+                                        only_unextracted=only_unextracted, stale_days=stale_days)
             total = len(ids)
             docs = cites = 0
             for i, sid in enumerate(ids):

@@ -94,7 +94,9 @@ _NAME_TO_CELEX = {
     "dma": "32022R1925", "digital markets act": "32022R1925",
     "dsa": "32022R2065", "digital services act": "32022R2065",
     "e-privacy directive": "32002L0058", "eprivacy directive": "32002L0058",
-    "eprivacy regulation": "32002L0058",
+    # NB: "ePrivacy Regulation" is deliberately NOT mapped — it refers to the
+    # (still-withdrawn) proposal, not Directive 2002/58, so mapping it here would
+    # mint a confidently wrong edge to the existing Directive.
     "law enforcement directive": "32016L0680", "led": "32016L0680",
 }
 # Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
@@ -166,7 +168,7 @@ REPORT_SERIES = {
     "WLR", "AC", "QB", "KB", "CH", "FAM", "AACR", "ICR", "IRLR", "ECR", "CMLR",
     "BCLC", "FSR", "RPC", "FLR", "HRLR", "UKHRR", "EHRR", "LGR", "STC", "ER",
     "PIQR", "BMLR", "EMLR", "ENTLR", "INLR", "ACD", "COD", "WLUK", "NI",  # NI Law Reports
-    "EHRR", "EHRLR", "EHRC", "CHRLD",  # European Human Rights Reports / Law Review etc.
+    "EHRLR", "EHRC", "CHRLD",  # European Human Rights Law Review etc.
     # further report/journal series the bracketless grammar was minting as fake courts —
     # they have no neutral-citation URI, so they stay candidate-less "maybe" citations
     "NJ",       # Nederlandse Jurisprudentie (Dutch law reports)
@@ -194,7 +196,7 @@ REPORT_SERIES = {
 # candidate. (Mostly the Tax Law Rewrite abbreviations.)
 STATUTE_ABBREVS = {
     "CTA", "ITEPA", "ITTOIA", "TCGA", "TMA", "ITA", "VATA", "VERA", "TPDA", "FA",
-    "ICTA", "CAA", "IHTA", "TIOPA", "FA2", "CRCA", "TMA", "CEMA", "OTA", "TCTA",
+    "ICTA", "CAA", "IHTA", "TIOPA", "FA2", "CRCA", "CEMA", "OTA", "TCTA",
 }
 
 # Tokens the *bracketless* grammar ("YEAR TOKEN NUMBER") grabs as a "court" that are not
@@ -212,6 +214,11 @@ NON_CITATION_TOKENS = {
     "OJ", "OJL", "WL", "ISBN", "ISO", "SI", "SR",
     # document-structure / OCR junk swept up by "YEAR WORD NUMBER"
     "PART", "FINAL", "TOTAL", "FORM", "TABLE", "AND", "NO", "THE", "OF", "EN", "CY", "TO",
+    # government-agency initialisms the bracketless grammar grabs as a "court"
+    # ("In 2019 HMRC 5 assessments" → hmrc/2019/5) — parties/bodies, not courts.
+    # (Kept to UK-only bodies; e.g. "FCA" is left out — it's a live neutral-citation
+    # court token for the Federal Court of Australia.)
+    "HMRC", "DWP", "ICO", "OFT",
 }
 
 # OCR / typo court codes → the canonical Find Case Law code, so the minted slug is
@@ -357,7 +364,10 @@ register(Grammar(
 
 def _cjeu_old_celex(m: "re.Match[str]") -> Normalised:
     yy = m.group("year")
-    year = ("20" if int(yy) < 60 else "19") + yy if len(yy) == 2 else yy
+    # The bracketless "Case N/YY" form only existed 1952–1989, so a 2-digit year is
+    # always 19xx — Case 9/56 (Meroni) is 1956, not 2056. (The C-/T- prefixed form,
+    # which starts in 1989, keeps the <60 → 20xx rule below.)
+    year = "19" + yy if len(yy) == 2 else yy
     return f"6{year}CJ{int(m.group('num')):04d}", None, "case"  # pre-1989: all Court of Justice
 
 
@@ -479,7 +489,10 @@ register(Grammar(
 # Services Act". Acronym form (uppercase) and spelled-out form (any case).
 register(Grammar(
     "eu_named", "regulation",
-    re.compile(rf"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+(?:the\s+)?)?)?(?P<name>{_EU_ACRONYMS})\b"),
+    # The whole grammar is case-sensitive so the acronym (GDPR/DMA/DSA/LED) stays
+    # uppercase-only, but the "Article" prefix must still match lowercase "article 17
+    # GDPR" — otherwise the pinpoint is dropped. Make only the prefix case-insensitive.
+    re.compile(rf"(?:(?i:art(?:icle|\.)?)\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?i:of\s+(?:the\s+)?)?)?(?P<name>{_EU_ACRONYMS})\b"),
     lambda m: (
         _name_to_celex(m.group("name")),
         f"Article {m.group('art')}" if m.group("art") else None,
@@ -579,7 +592,9 @@ register(Grammar(
     # the section number may carry a subsection/paragraph tail — "166(2)", "55A",
     # "33(1)(a)" — all of which belong in the pinpoint.
     re.compile(
-        rf"(?:s(?:ection|\.)?\s*(?P<sec>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+of\s+(?:the\s+)?)?(?P<name>{_ACT_NAMES})"
+        # \b after the name group so an abbreviation like "FOIA" doesn't match inside
+        # a longer word ("FOIAs", "FOIABILITY").
+        rf"(?:s(?:ection|\.)?\s*(?P<sec>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+of\s+(?:the\s+)?)?(?P<name>{_ACT_NAMES})\b"
         rf"(?:\s+s(?:ection|\.)?\s*(?P<sec2>\d+[a-z]?(?:\(\d+[a-z]?\))*))?",
         re.IGNORECASE,
     ),

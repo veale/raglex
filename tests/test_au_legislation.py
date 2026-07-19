@@ -9,7 +9,7 @@ import json
 from raglex.adapters.au_legislation import (
     CommonwealthAdapter,
     LawMakerAdapter,
-    _norm_docid,
+    _norm_docids,
     _title_id,
     frl_stable_id,
     lawmaker_stable_id,
@@ -136,10 +136,11 @@ def test_title_id_accepts_register_id_corpus_id_and_url():
 
 
 def test_norm_docid_preserves_width_but_derives_from_corpus_id():
-    assert _norm_docid("act-2016-001") == "act-2016-001"      # verbatim — width varies
-    assert _norm_docid("sl-2023-0107") == "sl-2023-0107"
-    assert _norm_docid("https://x/view/whole/html/inforce/2024-02-01/act-2016-001") == "act-2016-001"
-    assert _norm_docid("au/qld/act/2016/1") == "act-2016-0001"  # best-effort pad
+    assert _norm_docids("act-2016-001") == ["act-2016-001"]      # verbatim — width varies
+    assert _norm_docids("sl-2023-0107") == ["sl-2023-0107"]
+    assert _norm_docids("https://x/view/whole/html/inforce/2024-02-01/act-2016-001") == ["act-2016-001"]
+    # corpus-id width is ambiguous → try both the 4-digit and the 3-digit form
+    assert _norm_docids("au/qld/act/2016/1") == ["act-2016-0001", "act-2016-001"]
 
 
 def test_lawmaker_stable_id_and_target():
@@ -289,6 +290,34 @@ def test_lawmaker_adapter_fetches_a_pit_view_and_flags_authoritative():
     assert record.extra["text_status"] == "inforce"
     assert record.title == "Multicultural Recognition Act 2016"
     assert record.text and record.segments
+
+
+def test_lawmaker_fetch_reraises_transient_error_instead_of_reporting_absence():
+    # A transient failure must NOT be swallowed into a None (which the pipeline reads as
+    # a positive absence → 90-day miss list). It has to propagate so the cursor freezes
+    # and the item is retried.
+    import pytest
+
+    from raglex.core.errors import FetchError
+
+    class _Transient:
+        def get(self, url, params=None, **kw):
+            raise FetchError("temporary upstream 503", transient=True)
+
+    adapter = LawMakerAdapter(jurisdiction="qld", ids="act-2016-001",
+                              client=_Client({"/view/whole/html/inforce/": LAWMAKER_HTML}))
+    stub = next(iter(adapter.discover(None)))
+    adapter._client = _Transient()
+    with pytest.raises(FetchError):
+        adapter.fetch(stub)
+
+    # a genuine (fatal) 404 is still an absence → returns None
+    class _Gone:
+        def get(self, url, params=None, **kw):
+            raise FetchError("404 not found", transient=False)
+
+    adapter._client = _Gone()
+    assert adapter.fetch(stub) is None
 
 
 def test_lawmaker_adapter_feed_discovery_scopes_to_its_jurisdiction():

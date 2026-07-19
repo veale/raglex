@@ -251,7 +251,11 @@ class NZLegislationAdapter(BaseAdapter):
             return None
         try:
             resp = self._client.get(url, headers={"X-Api-Key": self.api_key or ""})
-        except FetchError:
+        except FetchError as exc:
+            # Transient failures are not an absence — re-raise so the pipeline retries
+            # rather than cooling this reference onto the 90-day harvest-miss list.
+            if exc.transient:
+                raise
             return None
         data = resp.content or b""
         doc = parse_nz_pco_xml(data)

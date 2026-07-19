@@ -21,6 +21,22 @@ def test_extracts_gdpr_by_name_and_directive():
     assert "32002L0058" in cites  # directive → CELEX
 
 
+def test_lowercase_article_keeps_pinpoint_on_acronym():
+    # the acronym stays uppercase-only, but a lowercase "article" prefix must still
+    # attach the pinpoint (previously "article 17 GDPR" dropped Article 17).
+    c = next(c for c in extract_citations("a breach of article 17 GDPR") if c.candidate_id == "32016R0679")
+    assert c.pinpoint == "Article 17"
+    c = next(c for c in extract_citations("art. 6 of the DMA") if c.candidate_id == "32022R1925")
+    assert c.pinpoint == "Article 6"
+
+
+def test_eprivacy_regulation_does_not_map_to_the_directive():
+    # "ePrivacy Regulation" is the withdrawn proposal, not Directive 2002/58 — it must
+    # not mint a confidently-wrong edge to the existing Directive.
+    assert not any(c.candidate_id == "32002L0058"
+                   for c in extract_citations("the proposed ePrivacy Regulation"))
+
+
 def test_old_style_eu_case_numbers_and_ecr_reports():
     # pre-1989 bare number (no court letter) → Court of Justice CELEX
     assert any(c.candidate_id == "61983CJ0240"
@@ -36,6 +52,12 @@ def test_old_style_eu_case_numbers_and_ecr_reports():
         assert cs and all(c.candidate_id is None for c in cs), s
     # a bare number with no "Case" cue must NOT be mistaken for a case (it's a ratio etc.)
     assert not any(c.method == "cjeu_case_number_old" for c in extract_citations("a 240/83 split"))
+    # pre-1960 bare-number cases are 19xx, not 20xx: the bracketless form only existed
+    # 1952–1989, so Case 9/56 (Meroni) is 1956 → 61956CJ0009, never 62056CJ0009.
+    assert any(c.candidate_id == "61956CJ0009"
+               for c in extract_citations("Case 9/56 Meroni v High Authority [1958] ECR 133."))
+    assert any(c.candidate_id == "61955CJ0008"
+               for c in extract_citations("Case 8/55 Fédéchar v High Authority [1956] ECR 245."))
 
 
 def test_cjeu_case_number_accepts_various_pdf_dashes():
@@ -179,6 +201,24 @@ def test_named_alias_longer_phrase_wins():
     cites = extract_citations("the UK GDPR applies", aliases=aliases)
     named = [c for c in cites if c.method == "named_alias"]
     assert {c.candidate_id for c in named} == {"b"}  # not the shorter "GDPR" → a
+
+
+def test_named_alias_matches_phrase_with_non_word_edges():
+    # a phrase beginning/ending in a non-word char ("(UK) GDPR") must still match —
+    # a bare \b at those edges demands an impossible boundary and never fires.
+    aliases = {"(UK) GDPR": "european/regulation/2016/0679"}
+    cites = [c for c in extract_citations("processing under the (UK) GDPR regime", aliases=aliases)
+             if c.method == "named_alias"]
+    assert cites and cites[0].candidate_id == "european/regulation/2016/0679"
+
+
+def test_act_abbreviation_not_matched_inside_longer_word():
+    # "FOIA" must not match inside "FOIAs"/"FOIAble" (word-boundary after the name).
+    assert not any(c.method == "uk_act_section"
+                   for c in extract_citations("multiple FOIAs were filed"))
+    # but the standalone abbreviation still resolves
+    assert any(c.candidate_id == "ukpga/2000/36"
+               for c in extract_citations("a request under FOIA was refused"))
 
 
 def test_directive_two_digit_year_resolves_to_celex():

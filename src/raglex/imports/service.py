@@ -168,6 +168,23 @@ def import_file(
     )
 
 
+def _url_filename_and_ext(url: str, ctype: str = "") -> tuple[str, str]:
+    """Derive (filename, extension) from a URL, inferring the extension from the URL
+    *path* only. A query/fragment ("file.pdf?dl=1") must be stripped first — otherwise
+    the extension comes out "pdf?dl=1", matching no extractor and falling through to the
+    HTML fallback. Falls back to the content-type, then HTML, when the path has none."""
+    from urllib.parse import urlsplit
+
+    last = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    ext = last.rsplit(".", 1)[-1].lower() if "." in last else ""
+    if not ext:
+        ext = {"application/pdf": "pdf", "text/html": "html"}.get(ctype, "html")
+    filename = last or "download"
+    if "." not in filename:
+        filename = f"{filename}.{ext}"
+    return filename, ext
+
+
 def import_url(
     catalogue: Catalogue,
     rawstore: RawStore,
@@ -189,12 +206,7 @@ def import_url(
     resp.raise_for_status()
     data = resp.content
     ctype = resp.headers.get("content-type", "").split(";")[0].strip()
-    ext = url.rstrip("/").rsplit(".", 1)[-1].lower() if "." in url.rsplit("/", 1)[-1] else ""
-    if not ext:
-        ext = {"application/pdf": "pdf", "text/html": "html"}.get(ctype, "html")
-    filename = url.rsplit("/", 1)[-1] or "download"
-    if "." not in filename:
-        filename = f"{filename}.{ext}"
+    filename, _ext = _url_filename_and_ext(url, ctype)
     return import_file(
         catalogue, rawstore, textstore, data=data, filename=filename,
         doc_type=doc_type, title=title or url, link_to=link_to, relationship=relationship,

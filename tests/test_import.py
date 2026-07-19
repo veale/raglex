@@ -66,6 +66,17 @@ def test_import_file_creates_secondary_doc_linked_to_case(catalogue, tmp_path):
     assert edge["resolution_status"] == "resolved"  # target present → live edge
 
 
+def test_url_filename_and_ext_strips_query_string():
+    from raglex.imports.service import _url_filename_and_ext
+
+    # query/fragment must not leak into the extension (the extractor router keys on it)
+    assert _url_filename_and_ext("https://x/report.pdf?dl=1") == ("report.pdf", "pdf")
+    assert _url_filename_and_ext("https://x/a/doc.html#frag") == ("doc.html", "html")
+    # no extension in the path → fall back to content-type, then HTML
+    assert _url_filename_and_ext("https://x/download?id=9", "application/pdf")[1] == "pdf"
+    assert _url_filename_and_ext("https://x/page", "")[1] == "html"
+
+
 def test_import_url_uses_injected_client(catalogue, tmp_path):
     rs, ts = _stores(tmp_path)
 
