@@ -332,6 +332,10 @@ register(Grammar(
     _echr_appno,
 ))
 
+# (CanLII citations — "1997 CanLII 358 (SCC)" — are handled by the commonwealth
+# grammar set, which mints canlii/YYYY/N candidates; the parallel-adjacency miner
+# clusters them with SCR/neutral forms cited in the same breath.)
+
 # Bracketless form (Canada / India): "2024 SCC 1", "2023 INSC 456". Tighter to
 # curb false positives — a 4-digit year, an all-caps 2–6 letter court token, a
 # number. Resolution still gates whether it points at a real node.

@@ -133,3 +133,50 @@ def blocks_by_localname(
                 label = child.text.strip()
         blocks.append((label or f"{counter_label} {n}", kind, text))
     return blocks
+
+
+# Judgments imported as FLAT TEXT (the Canadian A2AJ corpus, BAILII long tail)
+# still carry their paragraph numbers in the prose — "[15] The applicant…" at
+# line starts. Synthesising segments from those makes pinpoints ("at para 15")
+# land, the minimap work, and peeks scroll — without re-importing anything.
+_NUM_PARA_RE = re.compile(r"^\s{0,8}\[(\d{1,4})\]\s", re.MULTILINE)
+
+
+def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segment]:
+    """Derive ``Segment``s from ``[N]``-numbered paragraphs in flat text.
+
+    The trap (real example: Perreault v Canada): a judgment QUOTING another
+    judgment reproduces the quote's own paragraph numbers at line starts —
+    para [33] may contain a quoted "[107] Section 49 directs…" and then
+    continue at [34]. Numbering in the host judgment is sequential, so a
+    candidate is accepted only if it advances the sequence by a small step;
+    an out-of-sequence number is quoted material and stays inside the
+    enclosing paragraph. Returns [] when fewer than ``min_paras`` sequential
+    paragraphs are found (not actually a numbered judgment)."""
+    if not text:
+        return []
+    marks: list[tuple[int, int, int]] = []  # (n, match_start, body_start)
+    last = 0
+    for m in _NUM_PARA_RE.finditer(text):
+        n = int(m.group(1))
+        # STRICT sequential guard: first paragraph is [1] (or [2] — some
+        # transcripts lose the opener), every later one must be exactly last+1.
+        # Judgments number contiguously; a quoted judgment's numbers are
+        # off-sequence, so strictness is what keeps them inside the quoting
+        # paragraph. (Cost: a genuine numbering gap ends the labelled region —
+        # degraded but never wrong.)
+        if (not marks and n in (1, 2)) or (marks and n == last + 1):
+            marks.append((n, m.start(), m.end()))
+            last = n
+    if len(marks) < min_paras:
+        return []
+    segs: list[Segment] = []
+    # preamble (intituling) before [1] becomes an unlabelled header segment
+    if marks[0][1] > 0 and text[:marks[0][1]].strip():
+        segs.append(Segment(label="", kind="header", level=0,
+                            char_start=0, char_end=marks[0][1]))
+    for i, (n, start, _bs) in enumerate(marks):
+        end = marks[i + 1][1] if i + 1 < len(marks) else len(text)
+        segs.append(Segment(label=f"[{n}]", kind="paragraph", level=1,
+                            char_start=start, char_end=end))
+    return segs

@@ -89,11 +89,20 @@ def _get_pool(dsn: str):
             return False
         import os
 
+        # statement_timeout: a runaway query dies instead of pinning a pool worker
+        # until every connection is wedged and the whole API reads as a
+        # NetworkError (the freeze-until-restart failure mode). Long-running
+        # batch work (rescan, rebuilds) runs through its OWN exec'd processes /
+        # job threads and can override via RAGLEX_PG_STATEMENT_TIMEOUT_MS.
+        # 3 min: above the heaviest legitimate in-process batch statement (the
+        # citation-counts INSERT-SELECT runs ~65s live) but far below "wedged".
+        timeout_ms = int(os.environ.get("RAGLEX_PG_STATEMENT_TIMEOUT_MS") or 180000)
         pool = ConnectionPool(
             dsn,
             min_size=int(os.environ.get("RAGLEX_PG_POOL_MIN") or 2),
-            max_size=int(os.environ.get("RAGLEX_PG_POOL_MAX") or 12),
-            kwargs={"row_factory": dict_row, "autocommit": True},
+            max_size=int(os.environ.get("RAGLEX_PG_POOL_MAX") or 16),
+            kwargs={"row_factory": dict_row, "autocommit": True,
+                    "options": f"-c statement_timeout={timeout_ms}"},
             open=True,
         )
         _POOLS[dsn] = pool

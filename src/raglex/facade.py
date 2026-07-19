@@ -494,26 +494,19 @@ class Facade:
             # N+1 over a heavily-cited authority).
             _RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
                      "considers": 4, "mentions": 5}
-            # `inferred` edges are heuristic carry-forwards — a bare "Section 12" pinned to
-            # the last-named Act — not citations anyone made. They are 36% of the resolved
-            # graph, so folding them into "cited by" silently inflates every authority
-            # count. Report them, separately.
+            # Incoming edges via ONE bounded, PageRank-ordered indexed query — the
+            # old unbounded scan materialised a mega-authority's 100k citers in
+            # Python and pinned a pool connection for seconds per page view
+            # (a prime suspect in the pool-exhaustion freezes). `inferred` edges
+            # (heuristic carry-forwards) are excluded there and counted apart.
+            ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
             best: dict[str, dict] = {}
-            inferred_srcs: set[str] = set()
-            for r in cat.relations_to(stable_id):
-                if r["extracted_via"] == "inferred":
-                    inferred_srcs.add(r["src_id"])
-                    continue
+            for r in cat.top_citing_edges(ids_self, limit=600):
                 cur = best.get(r["src_id"])
                 if cur is None or _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
                     best[r["src_id"]] = dict(r)
-            # rank the citing documents by their own network authority (PageRank),
-            # so the cited-by list leads with the citers that matter
-            auth = cat.authority_for(list(best))
-            ranked = sorted(best.items(),
-                            key=lambda kv: -(auth.get(kv[0], {}).get("pagerank") or 0.0))
             incoming = []
-            for sid, r in ranked[:200]:
+            for sid, r in list(best.items())[:200]:
                 src = cat.get_document(sid)
                 # OSCOLA citation for the citing document, so "cited by / mentioned by"
                 # reads in proper form. meta_json is on the row → no extra query.
@@ -521,8 +514,10 @@ class Facade:
                 incoming.append({**r, "src_title": src["title"] if src else None,
                                  "src_court": src["court"] if src else None,
                                  "src_date": src["decision_date"] if src else None,
-                                 "src_authority": auth.get(sid, {}).get("pagerank") or 0.0,
+                                 "src_authority": r.get("src_pagerank") or 0.0,
                                  "src_oscola": src_oscola})
+            cited_by_total = cat.cited_by_stats(ids_self)["documents"]
+            inferred_total = cat.inferred_citer_count(ids_self)
             meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
             # Summary line: distinct authorities this document cites, split into cases vs
             # statutory material by the citation's entity_kind (OSCOLA's two source families).
@@ -568,8 +563,8 @@ class Facade:
                 "relations": [r for r in rels if r["relationship_type"] != "suppressed"],
                 "suppressed_count": len(suppressed),
                 "incoming": incoming,
-                "cited_by_count": len(best),
-                "inferred_by_count": len(inferred_srcs - set(best)),
+                "cited_by_count": cited_by_total,
+                "inferred_by_count": max(0, inferred_total),
                 "assets": [dict(a) for a in cat.assets_for(stable_id)],
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
             }
@@ -654,9 +649,16 @@ class Facade:
                 })
             raw_path = doc["raw_path"]
             meta = _row_meta(doc)
+            segments = ts.get_segments(ph)
+            if not segments and text:
+                # flat-text imports (Canadian A2AJ, BAILII long tail) carry their
+                # paragraph numbers in the prose — synthesise segments so "[15]"
+                # pinpoints land and peeks can scroll (quote-guarded)
+                from .core.segmentation import synthesise_numbered_segments
+                segments = synthesise_numbered_segments(text)
             return {
                 "text": text,
-                "segments": [asdict(s) for s in ts.get_segments(ph)],
+                "segments": [asdict(s) for s in segments],
                 "citations": citations,
                 "doc_type": doc["doc_type"],
                 "title": doc["title"],
@@ -949,6 +951,9 @@ class Facade:
             except OSError:
                 return {"error": "text unavailable", "stable_id": stable_id}
             segs = ts.get_segments(doc["payload_hash"])
+            if not segs:
+                from .core.segmentation import synthesise_numbered_segments
+                segs = synthesise_numbered_segments(text)
             idx = -1
             if label:
                 idx = _match_segment(segs, label)
@@ -1084,6 +1089,13 @@ class Facade:
         if Facade._COURT_NOTE_RE is None:
             Facade._COURT_NOTE_RE = _re.compile(
                 r"\s*\((?:BAILII legacy code|pre-\d{4}|unidentified)\)\s*$")
+        low = (code or "").lower()
+        if low == "euecj":
+            return "Court of Justice (BAILII archive)"
+        if low.startswith("dpa-"):
+            country = self._DPA_COUNTRY.get(low[4:])
+            return f"Data protection authority · {country}" if country \
+                else "Data protection authority"
         c = lookup((code or "").upper()) or classify((code or "").upper())
         if c and c.name:
             return Facade._COURT_NOTE_RE.sub("", c.name)
@@ -1095,6 +1107,37 @@ class Facade:
             if any(s.startswith(p) or s == p.rstrip("-") for p in prefixes):
                 return label
         return "Other"
+
+    # National regulators' decisions (EDPB one-stop-shop, court = dpa-xx) belong to
+    # their own COUNTRY, not to "European Union" where the register happens to live.
+    _DPA_COUNTRY = {
+        "ie": "Ireland", "se": "Sweden", "fr": "France", "lu": "Luxembourg",
+        "at": "Austria", "de": "Germany", "es": "Spain", "it": "Italy",
+        "nl": "Netherlands", "be": "Belgium", "pl": "Poland", "pt": "Portugal",
+        "dk": "Denmark", "fi": "Finland", "no": "Norway", "gr": "Greece",
+        "el": "Greece", "cz": "Czechia", "hu": "Hungary", "ro": "Romania",
+        "bg": "Bulgaria", "hr": "Croatia", "sk": "Slovakia", "si": "Slovenia",
+        "lt": "Lithuania", "lv": "Latvia", "ee": "Estonia", "cy": "Cyprus",
+        "mt": "Malta", "is": "Iceland", "li": "Liechtenstein",
+    }
+    # Regulators whose output is ADMINISTRATIVE DECISIONS — a kind of its own, not
+    # case law and not guidance. Extend as bodies join (Scottish Information
+    # Commissioner, Irish DPC's pre-GDPR decisions, state privacy commissioners…).
+    _ADMIN_SOURCES = {"edpb-oss", "ofcom-enforcement", "ico"}
+
+    def _doc_bucket(self, source: str, court: str | None) -> str:
+        c = (court or "").lower()
+        if c.startswith("dpa-"):
+            return self._DPA_COUNTRY.get(c[4:], "European Union")
+        return self._jurisdiction_of(source)
+
+    def _doc_kind(self, source: str, doc_type: str, court: str | None) -> str:
+        if (court or "").lower().startswith("dpa-") or source in self._ADMIN_SOURCES:
+            return "administrative"
+        return ("cases" if doc_type in self._CASE_TYPES
+                else "legislation" if doc_type == "legislation"
+                else "guidance" if doc_type == "guidance"
+                else "other")
 
     def corpus_shape(self) -> dict:
         """The Explore homepage's data: the whole corpus's shape in one payload —
@@ -1111,9 +1154,9 @@ class Facade:
     def _corpus_shape_uncached(self) -> dict:
         with self._open() as (cat, _rs, _ts):
             rows = cat.conn.execute(
-                "SELECT source, doc_type, substr(decision_date, 1, 4) AS yr, COUNT(*) AS n, "
-                "SUM(has_text) AS with_text, SUM(has_embedding) AS embedded "
-                "FROM documents GROUP BY source, doc_type, substr(decision_date, 1, 4)"
+                "SELECT source, doc_type, court, substr(decision_date, 1, 4) AS yr, "
+                "COUNT(*) AS n, SUM(has_text) AS with_text, SUM(has_embedding) AS embedded "
+                "FROM documents GROUP BY source, doc_type, court, substr(decision_date, 1, 4)"
             ).fetchall()
             # resolved outgoing edges per source → citation density per document
             dens = {r["source"]: r["n"] for r in cat.conn.execute(
@@ -1128,33 +1171,32 @@ class Facade:
 
             juris: dict[str, dict] = {}
 
+            _KINDS = ("cases", "legislation", "guidance", "administrative")
+
             def _blank_slice() -> dict:
                 return {"years": {}, "courts": {}, "sources": {}}
 
-            def _bucket(source: str) -> dict:
-                j = self._jurisdiction_of(source)
+            def _bucket_named(j: str) -> dict:
                 return juris.setdefault(j, {
                     "jurisdiction": j, "total": 0, "cases": 0, "legislation": 0,
-                    "guidance": 0, "other": 0, "with_text": 0, "embedded": 0,
+                    "guidance": 0, "administrative": 0, "other": 0,
+                    "with_text": 0, "embedded": 0,
                     "years": {}, "sources": {}, "citations": 0, "courts": {},
-                    # per-kind rail data: selecting Cases/Legislation/Guidance in
-                    # the drill re-scopes the timeline, courts and sources too
-                    "kinds": {k: _blank_slice() for k in ("cases", "legislation", "guidance")}})
+                    # per-kind rail data: selecting a kind in the drill re-scopes
+                    # the timeline, courts/bodies and sources too
+                    "kinds": {k: _blank_slice() for k in _KINDS}})
 
-            def _kind_of(doc_type: str) -> str:
-                return ("cases" if doc_type in self._CASE_TYPES
-                        else "legislation" if doc_type == "legislation"
-                        else "guidance" if doc_type == "guidance"
-                        else "other")
+            def _bucket(source: str, court: str | None = None) -> dict:
+                return _bucket_named(self._doc_bucket(source, court))
 
             for r in rows:
-                b = _bucket(r["source"])
+                b = _bucket(r["source"], r["court"])
                 n = r["n"]
                 b["total"] += n
                 b["with_text"] += r["with_text"] or 0
                 b["embedded"] += r["embedded"] or 0
                 b["sources"][r["source"]] = b["sources"].get(r["source"], 0) + n
-                kind = _kind_of(r["doc_type"])
+                kind = self._doc_kind(r["source"], r["doc_type"], r["court"])
                 b[kind] += n
                 ks = b["kinds"].get(kind)
                 if ks is not None:
@@ -1167,9 +1209,9 @@ class Facade:
             for src, n in dens.items():
                 _bucket(src)["citations"] += n
             for r in courts:
-                b = _bucket(r["source"])
+                b = _bucket(r["source"], r["court"])
                 b["courts"][r["court"]] = b["courts"].get(r["court"], 0) + r["n"]
-                ks = b["kinds"].get(_kind_of(r["doc_type"]))
+                ks = b["kinds"].get(self._doc_kind(r["source"], r["doc_type"], r["court"]))
                 if ks is not None:
                     ks["courts"][r["court"]] = ks["courts"].get(r["court"], 0) + r["n"]
 
@@ -1179,7 +1221,7 @@ class Facade:
                 "FROM doc_authority a JOIN documents d ON d.stable_id = a.doc_id "
                 "ORDER BY a.pagerank DESC LIMIT 400").fetchall()
             for r in top_auth:
-                b = _bucket(r["source"])
+                b = _bucket(r["source"], r["court"])
                 lst = b.setdefault("top_authority", [])
                 if len(lst) < 5:
                     lst.append({
@@ -1194,12 +1236,54 @@ class Facade:
             from .citations.reporters import REPORT_SERIES
             _SERIES = {s.upper() for s in REPORT_SERIES}
 
+            # Legislation TYPES per jurisdiction — the same taxonomy the Unresolved
+            # page uses ("Secondary · UK-wide", "Assimilated EU law", AU registers
+            # by jurisdiction), regularised where a register's native split isn't
+            # a level split (Canada's Acts/Regulations → Primary/Secondary ·
+            # Federal). Each type carries its own year histogram + the filter
+            # dicts that reproduce exactly that slice in the drill.
+            from .citations.taxonomy import classify_document
+            _REGULARISE = {
+                ("ca-legislation", "act"): "Primary · Federal",
+                ("ca-legislation", "regulation"): "Secondary · Federal",
+                ("nz-legislation", "public"): "Primary",
+                ("nz-legislation", "secondary-legislation"): "Secondary",
+                ("hk-legislation", "cap"): "Ordinances",
+                ("hk-legislation", "instrument"): "Constitutional instruments",
+                ("sg-legislation", "act"): "Acts",
+                ("sg-legislation", "sl"): "Subsidiary legislation",
+            }
+            _CELEX_LETTER = {"reg": "R", "dir": "L", "dec": "D"}
+            for r in cat.conn.execute(
+                    "SELECT stable_id, source, court, substr(decision_date, 1, 4) AS yr "
+                    "FROM documents WHERE doc_type = 'legislation'").fetchall():
+                b = _bucket(r["source"])
+                ks = b["kinds"]["legislation"]
+                tax = classify_document(source=r["source"], doc_type="legislation",
+                                        court=r["court"], stable_id=r["stable_id"])
+                label = _REGULARISE.get((tax.category, tax.subtype), tax.subtype_label)
+                t = ks.setdefault("types", {}).setdefault(
+                    label, {"n": 0, "years": {}, "filters": []})
+                t["n"] += 1
+                yr = r["yr"]
+                if yr and yr.isdigit() and 1200 <= int(yr) <= 2100:
+                    t["years"][yr] = t["years"].get(yr, 0) + 1
+                filt = dict(tax.filter)
+                if tax.category == "eu-legislation" and tax.subtype in _CELEX_LETTER:
+                    filt["celex_kind"] = _CELEX_LETTER[tax.subtype]
+                if filt not in t["filters"] and len(t["filters"]) < 16:
+                    t["filters"].append(filt)
+
             def _finish(slice_: dict) -> None:
                 slice_["courts"] = sorted(
                     ({"court": c, "label": self.court_label(c), "n": n}
                      for c, n in slice_["courts"].items()
                      if c.upper() not in _SERIES),
                     key=lambda x: -x["n"])[:12]
+                if "types" in slice_:  # legislation taxonomy rail
+                    slice_["types"] = sorted(
+                        ({"label": lbl, **t} for lbl, t in slice_["types"].items()),
+                        key=lambda x: -x["n"])[:14]
                 slice_["sources"] = sorted(
                     ({"source": s, "label": self.source_label(s), "n": n}
                      for s, n in slice_["sources"].items()),
@@ -1223,9 +1307,15 @@ class Facade:
         "oldest": "d.decision_date ASC, pagerank DESC",
     }
 
+    # administrative decisions = regulator output: OSS register rows (court dpa-xx)
+    # or a registered admin source. Must be excluded from "cases" so DPA decisions
+    # never masquerade as case law.
+    _ADMIN_CLAUSE = "(d.court LIKE 'dpa-%' OR d.source IN ('edpb-oss', 'ofcom-enforcement', 'ico'))"
+
     def jurisdiction_drill(self, jurisdiction: str, *, court: str | None = None,
                            kind: str | None = None, year_from: str | None = None,
                            year_to: str | None = None, cites: str | None = None,
+                           leg: str | None = None,
                            sort: str = "authority", limit: int = 25) -> dict:
         """One drill-down step inside Explore: the top documents of a slice
         (jurisdiction × optional court × kind × year range), ranked by the chosen
@@ -1236,13 +1326,58 @@ class Facade:
         source's public link + label for the external-link affordance."""
         sources = [s for s in self._all_sources() if self._jurisdiction_of(s) == jurisdiction] \
             if jurisdiction else []
+        # a DPA-country bucket (Sweden, France…) has no sources of its own: its
+        # documents live in the OSS register under court dpa-xx
+        dpa_codes = [c for c, name in self._DPA_COUNTRY.items() if name == jurisdiction]
         order = self._DRILL_SORTS.get(sort, self._DRILL_SORTS["authority"])
         with self._open() as (cat, _rs, _ts):
             clauses: list[str] = []
             params: list = []
-            if sources:
+            if sources and dpa_codes:
+                qs = ",".join("?" * len(sources))
+                ds = ",".join("?" * len(dpa_codes))
+                clauses.append(f"(d.source IN ({qs}) OR d.court IN ({ds}))")
+                params.extend(sources)
+                params.extend(f"dpa-{c}" for c in dpa_codes)
+            elif sources:
                 clauses.append("d.source IN (%s)" % ",".join("?" * len(sources)))
                 params.extend(sources)
+            elif dpa_codes:
+                clauses.append("d.court IN (%s)" % ",".join("?" * len(dpa_codes)))
+                params.extend(f"dpa-{c}" for c in dpa_codes)
+            # legislation-type filter: the taxonomy's own filter dicts (whitelisted
+            # keys only), OR-ed — "Secondary · UK-wide" = uksi OR uksro OR …
+            if leg:
+                import json as _json
+                ors: list[str] = []
+                try:
+                    filts = _json.loads(leg)
+                except ValueError:
+                    filts = []
+                for filt in filts[:20]:
+                    ands: list[str] = []
+                    if filt.get("source"):
+                        ands.append("d.source = ?")
+                        params_add = [filt["source"]]
+                    else:
+                        params_add = []
+                    if filt.get("id_prefix"):
+                        ands.append("d.stable_id LIKE ?")
+                        params_add.append(filt["id_prefix"].replace("%", "") + "/%")
+                    if filt.get("doc_type"):
+                        ands.append("d.doc_type = ?")
+                        params_add.append(filt["doc_type"])
+                    if filt.get("court"):
+                        ands.append("d.court = ?")
+                        params_add.append(filt["court"])
+                    if filt.get("celex_kind") in ("R", "L", "D"):
+                        ands.append("substr(d.stable_id, 6, 1) = ?")
+                        params_add.append(filt["celex_kind"])
+                    if ands:
+                        ors.append("(" + " AND ".join(ands) + ")")
+                        params.extend(params_add)
+                if ors:
+                    clauses.append("(" + " OR ".join(ors) + ")")
             if cites:
                 tdoc = cat.get_document(cites)
                 tids = [cites] + ([tdoc["ecli"]] if tdoc and tdoc["ecli"] else [])
@@ -1257,6 +1392,9 @@ class Facade:
                 params.append(court)
             if kind == "cases":
                 clauses.append("d.doc_type IN ('judgment', 'decision', 'opinion')")
+                clauses.append(f"NOT {self._ADMIN_CLAUSE}")
+            elif kind == "administrative":
+                clauses.append(self._ADMIN_CLAUSE)
             elif kind:
                 clauses.append("d.doc_type = ?")
                 params.append(kind)

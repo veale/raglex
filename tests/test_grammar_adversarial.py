@@ -62,7 +62,9 @@ def test_pinpoint_ranges_attach_to_the_case():
         "see, to that effect, judgment of 4 May 2023, Österreichische Post, "
         "C-300/21, EU:C:2023:370, paragraphs 32 and 33")
     ecli = [c for c in cites if c.method == "ecli"]
-    assert ecli and ecli[0].pinpoint == "para 32"
+    # multi-paragraph runs are preserved in full ("para 32 and 33"); anchor
+    # matching jumps to the first number
+    assert ecli and ecli[0].pinpoint == "para 32 and 33"
     # and the range's paragraphs must NOT become carried-forward provision edges
     cf = [c for c in cites if c.method == "carry_forward" and c.raw.lower().startswith("para")]
     assert not cf, cf
@@ -132,3 +134,57 @@ def test_scanner_clean_when_everything_extracted():
     cites = extract_citations(text)
     audit = scan_unconsumed("doc/y", text, [(c.char_start, c.char_end) for c in cites])
     assert not [u for u in audit.unconsumed if u.cue == "ecli"]
+
+
+# -- Perreault v Canada regressions (flat-text CA corpus feedback round) ------
+
+def test_multi_paragraph_pincite_list():
+    cites = extract_citations(
+        "(Lukács v Canada (Public Safety and Emergency Preparedness), 2020 FC 1142 at paras 8, 44).")
+    fc = [c for c in cites if c.candidate_id == "fc/2020/1142"]
+    assert fc and fc[0].pinpoint == "para 8, 44"
+
+
+def test_canlii_interjection_does_not_block_pinpoint():
+    cites = extract_citations(
+        "Canada (Information Commissioner) v Canada, 2019 FC 1279 (CanLII) at para 40 [Public Safety].")
+    fc = [c for c in cites if c.candidate_id == "fc/2019/1279"]
+    assert fc and fc[0].pinpoint == "para 40"
+
+
+def test_shorthand_two_criteria_linking():
+    text = ("(Suncor Energy Inc v Canada, 2021 FC 138 at para 64 [Suncor]). Later in the "
+            "judgment: as held in Suncor at paras 30–31, the review is de novo. "
+            "[Emphasis added.] But Emphasis at nothing links, and a bare Suncor mention "
+            "without a pincite does not either.")
+    sh = [c for c in extract_citations(text) if c.method == "shorthand"]
+    assert len(sh) == 1
+    assert sh[0].candidate_id == "fc/2021/138"
+    assert sh[0].pinpoint == "para 30–31"
+
+
+def test_synthesised_segments_via_body(catalogue, tmp_path):
+    """Flat-text Canadian judgment → [N] paragraphs become real segments (with
+    the quote guard), so pinpoint anchors land in the reader/peek."""
+    from datetime import date
+
+    from raglex.core.models import DocType, Record
+    from raglex.storage import TextStore
+
+    ts = TextStore(tmp_path / "text")
+    text = ("PERREAULT v CANADA\n[1] Intro.\n[2] More.\n[3] Quoting Dagg:\n"
+            "[107] Section 49 directs the court.\n[4] Following Dagg, we hold.\n")
+    rec = Record(source="ca-caselaw", stable_id="ca-case/fc/abc", doc_type=DocType.JUDGMENT,
+                 title="Perreault v Canada", court="fc", decision_date=date(2024, 1, 1),
+                 language="en", text=text, raw_bytes=text.encode())
+    rec.ensure_payload_hash()
+    catalogue.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, text)))
+
+    from raglex.config import Config
+    # go through the facade path that the reader hits
+    import raglex.facade as fmod
+    from raglex.core.segmentation import synthesise_numbered_segments
+    segs = synthesise_numbered_segments(text)
+    labels = [s.label for s in segs if s.kind == "paragraph"]
+    assert labels == ["[1]", "[2]", "[3]", "[4]"]
+    assert "[107]" not in labels

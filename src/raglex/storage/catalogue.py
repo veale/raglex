@@ -1304,6 +1304,35 @@ class Catalogue:
         ).fetchall()
         return [{**dict(r), "of": len(keep)} for r in rows]
 
+    def top_citing_edges(self, ids: list[str], *, limit: int = 200) -> list[sqlite3.Row]:
+        """The strongest incoming edges for the cited-by panel: rows ranked by the
+        CITING document's PageRank, bounded — one indexed query instead of
+        materialising a mega-authority's 100k citers in Python (which pinned a
+        pool connection for seconds per page view). ``src_pagerank`` rides along."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return []
+        qs = ",".join("?" * len(ids))
+        return self.conn.execute(
+            f"""
+            SELECT r.*, COALESCE(a.pagerank, 0) AS src_pagerank
+            FROM relations r LEFT JOIN doc_authority a ON a.doc_id = r.src_id
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+            ORDER BY src_pagerank DESC LIMIT ?
+            """, (*ids, limit)).fetchall()
+
+    def inferred_citer_count(self, ids: list[str]) -> int:
+        """Distinct inferred-only citers (reported separately, never in cited-by)."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return 0
+        qs = ",".join("?" * len(ids))
+        return self.conn.execute(
+            f"SELECT COUNT(DISTINCT src_id) AS n FROM relations "
+            f"WHERE dst_id IN ({qs}) AND extracted_via = 'inferred' AND src_id <> dst_id",
+            ids).fetchone()["n"]
+
     def cited_by_stats(self, ids: list[str], *, recent_years: int = 5) -> dict:
         """Aggregate cited-by numbers for the citator: distinct citing documents,
         total occurrences, and how many of those citers decided in the last N

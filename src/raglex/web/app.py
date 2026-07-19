@@ -651,13 +651,14 @@ def create_app(config: Config | None = None) -> FastAPI:
     def drill_ep(jurisdiction: str = "", court: str | None = None, kind: str | None = None,
                  year_from: str | None = None, year_to: str | None = None,
                  cites: str | None = None, sort: str = "authority",
-                 limit: int = 25) -> dict:
+                 leg: str | None = None, limit: int = 25) -> dict:
         """One Explore drill-down step: top documents of a slice, sortable
         (authority/cited/newest/oldest), with hanging groupings for legislation.
-        ``cites`` flips to the documents citing that target."""
+        ``cites`` flips to the documents citing that target; ``leg`` is a JSON
+        list of taxonomy filter dicts scoping a legislation type."""
         return facade.jurisdiction_drill(jurisdiction, court=court, kind=kind,
                                          year_from=year_from, year_to=year_to,
-                                         cites=cites, sort=sort, limit=limit)
+                                         cites=cites, sort=sort, leg=leg, limit=limit)
 
     @app.get("/corpus-map")
     def corpus_map_ep() -> dict:

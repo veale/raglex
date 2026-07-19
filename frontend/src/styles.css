@@ -686,6 +686,7 @@ table { width: 100%; }
   --exp-cases: var(--ctp-blue);
   --exp-leg: var(--ctp-green);
   --exp-guid: var(--ctp-mauve);
+  --exp-admin: var(--ctp-teal);
   --exp-other: var(--ctp-overlay0);
 }
 .explore { max-width: 1160px; margin: 0 auto; }

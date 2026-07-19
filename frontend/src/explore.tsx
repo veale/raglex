@@ -18,6 +18,7 @@ const KIND_COLOURS: [string, string, string][] = [
   ["cases", "var(--exp-cases)", "case law"],
   ["legislation", "var(--exp-leg)", "legislation"],
   ["guidance", "var(--exp-guid)", "guidance"],
+  ["administrative", "var(--exp-admin)", "admin decisions"],
   ["other", "var(--exp-other)", "other"],
 ];
 
@@ -129,10 +130,12 @@ function Availability({ it }: { it: any }) {
   );
 }
 
+type LegType = { label: string; n: number; years: Record<string, number>; filters: any[] };
 type Facets = {
   kind: string; sort: string; court: string | null;
   years: [string, string] | null;
   cites: { id: string; label: any } | null;
+  leg: LegType | null;              // a legislation type from the taxonomy rail
 };
 
 const SORT_LABEL: Record<string, string> = {
@@ -141,11 +144,14 @@ const SORT_LABEL: Record<string, string> = {
 };
 const KIND_LABEL: Record<string, string> = {
   "": "documents", cases: "case law", legislation: "legislation", guidance: "guidance",
+  administrative: "administrative decisions",
 };
 
 // The always-true sentence describing what the panel currently shows.
 function describe(j: string, f: Facets, courtLabel?: string): string {
-  const bits = [`The ${SORT_LABEL[f.sort]} ${KIND_LABEL[f.kind] ?? f.kind}`];
+  const what = f.kind === "legislation" && f.leg
+    ? `${f.leg.label} legislation` : (KIND_LABEL[f.kind] ?? f.kind);
+  const bits = [`The ${SORT_LABEL[f.sort]} ${what}`];
   if (f.cites) bits.push("citing the document below");
   if (f.court) bits.push(`in the ${courtLabel || f.court}`);
   if (f.years) bits.push(f.years[0] === f.years[1] ? `from ${f.years[0]}`
@@ -166,12 +172,13 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
     const p: Record<string, string> = { jurisdiction, sort: f.sort };
     if (f.court) p.court = f.court;
     if (f.kind) p.kind = f.kind;
+    if (f.kind === "legislation" && f.leg) p.leg = JSON.stringify(f.leg.filters);
     if (f.years) { p.year_from = f.years[0]; p.year_to = f.years[1]; }
     if (f.cites) p.cites = f.cites.id;
     api.drill(p).then((d) => { if (live) setData(d); }).catch(() => live && setData({ items: [] }))
       .finally(() => live && setBusy(false));
     return () => { live = false; };
-  }, [jurisdiction, f.court, f.kind, f.sort, f.years?.[0], f.years?.[1], f.cites?.id]);
+  }, [jurisdiction, f.court, f.kind, f.sort, f.years?.[0], f.years?.[1], f.cites?.id, f.leg?.label]);
 
   const HANG: [string, string][] = [["judgment", "cases"], ["decision", "decisions"],
     ["opinion", "opinions"], ["guidance", "guidance"], ["legislation", "legislation"]];
@@ -196,11 +203,13 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
       )}
       <div className="drill-head">
         <div className="seg-toggle mini-toggle">
-          {[["", "All"], ["cases", "Cases"], ["legislation", "Legislation"], ["guidance", "Guidance"]].map(([v, l]) => (
-            // switching kind re-scopes the rail, so a court picked under another
-            // kind may no longer exist — reset it for a predictable view
+          {[["", "All"], ["cases", "Cases"], ["legislation", "Legislation"],
+            ["guidance", "Guidance"], ["administrative", "Admin decisions"]].map(([v, l]) => (
+            // switching kind re-scopes the rail, so a court or legislation type
+            // picked under another kind may no longer exist — reset for a
+            // predictable view
             <button key={v} className={f.kind === v ? "on" : ""}
-              onClick={() => setF({ kind: v, court: null })}>{l}</button>
+              onClick={() => setF({ kind: v, court: null, leg: null })}>{l}</button>
           ))}
         </div>
       </div>
@@ -245,19 +254,40 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
 // --- one expanded jurisdiction: rail (timeline, courts, sources) + drill -----
 function Expanded({ r, open }: { r: ShapeRow; open: (id: string, a?: string) => void }) {
   const [f, setFacets] = useState<Facets>({ kind: "", sort: "authority", court: null,
-    years: null, cites: null });
+    years: null, cites: null, leg: null });
   const setF = (p: Partial<Facets>) => setFacets((old) => ({ ...old, ...p }));
   // the rail follows the kind filter: choose Legislation and the timeline,
-  // courts and sources re-scope to legislation only
+  // types and sources re-scope to legislation only
   const slice = (f.kind && (r as any).kinds?.[f.kind]) || r;
+  const isLeg = f.kind === "legislation";
+  const legTypes: LegType[] = isLeg ? (slice.types || []) : [];
+  // the timeline narrows again when a legislation type is selected
+  const timelineYears = (isLeg && f.leg?.years) || slice.years;
   return (
     <div className="exp-detail">
       <div className="exp-rail">
-        <div className="exp-rail-title">Timeline{f.kind ? ` — ${KIND_LABEL[f.kind]}` : ""} <span className="muted">— drag to focus</span></div>
-        <Spark years={slice.years} width={240} height={44} brush active={f.years}
+        <div className="exp-rail-title">Timeline
+          {isLeg && f.leg ? ` — ${f.leg.label}` : f.kind ? ` — ${KIND_LABEL[f.kind]}` : ""}{" "}
+          <span className="muted">— drag to focus</span></div>
+        <Spark years={timelineYears} width={240} height={44} brush active={f.years}
           onBrush={(a, b) => setF({ years: [a, b], cites: null })} />
         {f.years && <a className="mini-link" onClick={() => setF({ years: null })}>clear {f.years[0]}–{f.years[1]} ✕</a>}
-        {slice.courts.length > 0 && <>
+        {isLeg && legTypes.length > 0 && <>
+          <div className="exp-rail-title">Types</div>
+          <ul className="court-list">
+            <li><a className={!f.leg ? "on" : ""} onClick={() => setF({ leg: null })}>all</a></li>
+            {legTypes.map((t) => (
+              <li key={t.label}>
+                <a className={f.leg?.label === t.label ? "on" : ""}
+                  onClick={() => setF({ leg: f.leg?.label === t.label ? null : t, cites: null })}>
+                  <span className="court-name">{t.label}</span>
+                  <span className="court-n">{FMT(t.n)}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>}
+        {!isLeg && slice.courts.length > 0 && <>
           <div className="exp-rail-title">Courts and bodies</div>
           <ul className="court-list">
             <li><a className={!f.court ? "on" : ""} onClick={() => setF({ court: null })}>all</a></li>

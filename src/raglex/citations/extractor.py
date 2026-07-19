@@ -20,36 +20,102 @@ from typing import Protocol
 from .grammars import DROP, GRAMMARS
 from .models import Citation
 
-# A pinpoint into a *cited case*: the paragraph number that trails the citation —
-# "… at [57]", "(per Mostyn J at 57 and 62/63)", "[5]", "at para 131". Three precise
-# forms so it can't grab the next citation's year: an at/para cue + number, or a
-# fully-bracketed 1–3 digit "[57]". Years (19xx/20xx) are excluded.
+# A pinpoint into a *cited case*: the paragraph number(s) trailing the citation —
+# "at [57]", "at paras 8, 44", "at paras 30–31", "paragraphs 168 and 177",
+# "§§ 35-36". The continuation swallows list/range tails but never a following
+# citation's year (4-digit 19xx/20xx excluded there). Years excluded as leads too.
+_PIN_CONT = r"(?:\s*(?:,|–|—|-|to|and|&)\s*\[?(?!(?:19|20)\d\d\b)\d{1,4}\]?)*"
 _CASE_PINPOINT = re.compile(
-    r"^[\s,;]*\(?\s*(?:per\b[^.;)\n]{0,40}?\s)?(?:"
-    r"(?:at|in)\s+(?:paras?\.?\s*|paragraphs?\s+|§§?\s*)?\[?(?P<a>\d{1,4})\]?"
-    r"|(?:paras?\.?\s*|paragraphs?\s+)\[?(?P<b>\d{1,4})\]?"
-    r"|§§?\s*(?P<d>\d{1,4})"  # ECHR uses § for paragraphs ("Golder v UK, § 35")
+    r"^[\s,;]*(?:\(CanLII\)\s*)?\(?\s*(?:per\b[^.;)\n]{0,40}?\s)?(?:"
+    rf"(?:at|in)\s+(?:paras?\.?\s*|paragraphs?\s+|§§?\s*)?(?P<a>\[?\d{{1,4}}\]?{_PIN_CONT})"
+    rf"|(?:paras?\.?\s*|paragraphs?\s+)(?P<b>\[?\d{{1,4}}\]?{_PIN_CONT})"
+    rf"|§§?\s*(?P<d>\d{{1,4}}{_PIN_CONT})"  # ECHR: "Golder v UK, § 35", "§§ 35-36"
     r"|\[(?P<c>\d{1,3})\]"
     r")",
     re.IGNORECASE,
 )
 
 
+def _pin_text(run: str) -> str:
+    """Normalise a matched paragraph run to a stored pinpoint: '[8]' → 'para 8',
+    '8, 44' → 'para 8, 44', '30–31' stays a range. First number leads (anchor
+    matching jumps to it); the full list is preserved for the network."""
+    cleaned = re.sub(r"[\[\]]", "", run)
+    cleaned = re.sub(r"\s*(,|–|—|-|to|and|&)\s*", lambda m: {",": ", "}.get(m.group(1), f" {m.group(1)} ")
+                     if m.group(1) in (",", "to", "and", "&") else m.group(1), cleaned).strip()
+    return f"para {cleaned}"
+
+
 def _attach_case_pinpoints(text: str, cites: list[Citation]) -> list[Citation]:
     """For case citations with no pinpoint, look just after the citation for a
-    paragraph reference ("at [57]", "[5]") and attach it — JADE-style pinpoint links
-    into the cited judgment."""
+    paragraph reference ("at [57]", "at paras 8, 44") and attach it — JADE-style
+    pinpoint links into the cited judgment, multi-paragraph lists preserved."""
     out: list[Citation] = []
     for c in cites:
         if c.pinpoint or c.entity_kind not in ("case", "opinion"):
             out.append(c)
             continue
-        m = _CASE_PINPOINT.match(text[c.char_end: c.char_end + 40])
-        num = m and (m.group("a") or m.group("b") or m.group("c") or m.group("d"))
-        if num and not re.fullmatch(r"(?:19|20)\d{2}", num):  # not a year
-            out.append(replace(c, pinpoint=f"para {num}"))
+        m = _CASE_PINPOINT.match(text[c.char_end: c.char_end + 60])
+        run = m and (m.group("a") or m.group("b") or m.group("c") or m.group("d"))
+        first = re.match(r"\[?(\d{1,4})", run or "")
+        if run and first and not re.fullmatch(r"(?:19|20)\d{2}", first.group(1)):
+            out.append(replace(c, pinpoint=_pin_text(run)))
         else:
             out.append(c)
+    return out
+
+
+# --- in-document shorthand names (design feedback, Perreault v Canada) --------
+# Canadian/UK drafting defines shorthands inline: "Suncor Energy Inc v … 2021 FC
+# 138 at para 64 [Suncor]" or "(hereinafter “Dagg”)" — and later cites "Suncor at
+# para 30". TWO criteria gate the link (both must hold, so "[Emphasis added]"
+# never links): (1) a name defined in citation-adjacent position; (2) a later
+# use of that name WITH a paragraph pincite. Each use mints a pinpointed
+# citation of the defined case — free extra pincites for the network.
+_SHORTHAND_DEF = re.compile(
+    r"\[(?P<br>[A-Z][A-Za-z'’&\- ]{1,40})\]"
+    r"|(?:hereina?fter|hereafter)\s+[\"“']?(?P<hf>[A-Z][A-Za-z'’&\- ]{1,40})[\"”']?"
+)
+
+
+def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
+    defs: dict[str, Citation] = {}
+    for c in kept:
+        if c.entity_kind not in ("case", "opinion") or not c.candidate_id:
+            continue
+        window = text[c.char_end: c.char_end + 90]
+        m = _SHORTHAND_DEF.search(window)
+        if not m:
+            continue
+        # the definition must belong to THIS citation: nothing but a pinpoint /
+        # report tail may sit between the citation and the bracket
+        head = window[:m.start()]
+        if re.search(r"[A-Za-z]{12,}", head):  # long prose between → not a def
+            continue
+        name = (m.group("br") or m.group("hf") or "").strip()
+        if len(name) >= 3 and name not in defs:
+            defs[name] = c
+    if not defs:
+        return kept
+    out = list(kept)
+    occupied = [(c.char_start, c.char_end) for c in kept]
+    for name in sorted(defs, key=len, reverse=True):
+        host = defs[name]
+        use_re = re.compile(
+            rf"\b{re.escape(name)}(?:,)?\s+at\s+paras?\.?\s*"
+            rf"(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})")
+        for m in use_re.finditer(text):
+            s, e = m.start(), m.end()
+            if s <= host.char_start:   # only USES after the definition count
+                continue
+            if any(os < e and s < oe for os, oe in occupied):
+                continue
+            out.append(Citation(
+                raw=m.group(0), entity_kind=host.entity_kind,
+                candidate_id=host.candidate_id, pinpoint=_pin_text(m.group("run")),
+                char_start=s, char_end=e, method="shorthand", confidence=0.7,
+            ))
+            occupied.append((s, e))
     return out
 
 
@@ -212,10 +278,11 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     cites += grammar_citations(text)
     grammar = _dedupe_overlaps(cites)
     if llm is None:
-        return _attach_carry_forward(text, _attach_case_pinpoints(text, grammar))
+        return _attach_carry_forward(
+            text, _attach_shorthands(text, _attach_case_pinpoints(text, grammar)))
     extra = [c for c in llm.extract(text) if not _overlaps_any(c, grammar)]
     merged = _attach_case_pinpoints(text, _dedupe_overlaps(grammar + extra))
-    return _attach_carry_forward(text, merged)
+    return _attach_carry_forward(text, _attach_shorthands(text, merged))
 
 
 def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:

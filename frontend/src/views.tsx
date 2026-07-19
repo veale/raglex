@@ -927,7 +927,7 @@ function matchSegIndex(segs: any[], anchor?: string): number {
 // page. If it isn't in the corpus yet, it offers to fetch it.
 function DocPeek({ id, anchor, raw, onCite, openFull }:
   { id: string; anchor?: string; raw?: string; onCite: (c: any) => void; openFull: (id: string, a?: string) => void }) {
-  const [doc, , reload] = useAsync(() => api.document(id), [id]);
+  const [doc, docErr, reload] = useAsync(() => api.document(id), [id]);
   const [body] = useAsync(() => api.documentBody(id), [id]);
   const segs = (body?.segments || []) as any[];
   // jump to the pinpointed paragraph/section once the full text has rendered
@@ -937,7 +937,19 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
     const el = idx >= 0 ? document.getElementById("peek-seg-" + idx) : null;
     if (el) setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "start" }); el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 2000); }, 60);
   }, [body, anchor]);
+  // Three non-happy paths, each with a REAL affordance (a dead "Open full" on a
+  // half-loaded panel was the old failure mode):
+  //  - the document isn't held → the fetch prompt (targeted fetch / URL paste);
+  //  - the API call itself failed (network blip, pool pressure) → retry;
+  //  - still loading → say so.
   if (doc?.error) return <FetchPrompt refId={id} raw={raw} onDone={reload} />;
+  if (docErr) return (
+    <div>
+      <p className="err">Couldn’t reach the server ({String(docErr).slice(0, 80)}).</p>
+      <button className="primary" onClick={reload}>↻ Retry</button>
+    </div>
+  );
+  if (!doc) return <p className="muted loading-pulse">Loading preview…</p>;
   const d = doc?.document;
   const cites = body?.citations || [];
   return (
@@ -1562,10 +1574,13 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
 // just who cites this authority, but HOW (follows / distinguishes / overrules …).
 function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: number; inferred?: number }) {
   const peek = usePeek();
+  const tray = useTray();
   const open = (id: string, a?: string) => peek.push({ kind: "doc", id, anchor: a });
   // ordered by the citing document's own network authority (server default);
   // the discreet control swaps to recency within the loaded slice
   const [sort, setSort] = useState<"authority" | "newest" | "oldest">("authority");
+  const [page, setPage] = useState(0);
+  const PER = 50;
   const shown = [...incoming].sort((a, b) =>
     sort === "authority" ? (b.src_authority || 0) - (a.src_authority || 0)
     : sort === "newest" ? String(b.src_date || "").localeCompare(String(a.src_date || ""))
@@ -1595,7 +1610,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
         ))}
       </div>
       <table><tbody>
-        {shown.slice(0, 50).map((r, i) => (
+        {shown.slice(page * PER, (page + 1) * PER).map((r, i) => (
           <tr key={i}>
             <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
             <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
@@ -1604,6 +1619,22 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
           </tr>
         ))}
       </tbody></table>
+      {shown.length > PER && (
+        <div className="row" style={{ justifyContent: "center", alignItems: "baseline", marginTop: 8 }}>
+          <button className="mini" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>‹ prev</button>
+          <span className="muted" style={{ flex: "0 0 auto", fontSize: 12 }}>
+            {page * PER + 1}–{Math.min((page + 1) * PER, shown.length)} of the top {shown.length}
+            {count && count > shown.length ? ` (of ${count.toLocaleString()} total)` : ""}</span>
+          <button className="mini" disabled={(page + 1) * PER >= shown.length} onClick={() => setPage((p) => p + 1)}>next ›</button>
+        </div>
+      )}
+      {count != null && count > shown.length && incoming[0]?.dst_id && (
+        <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          Showing the {shown.length} most authoritative citers of {count.toLocaleString()} —{" "}
+          <a className="mini-link" onClick={() => tray.push({ kind: "mentions",
+            target: incoming[0].dst_id, label: "All citations to this decision" })}>
+            see all, with the citing passages</a></p>
+      )}
     </div>
   );
 }
