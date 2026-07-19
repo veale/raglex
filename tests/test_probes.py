@@ -151,3 +151,62 @@ def test_led_acronym_guard():
     real = "the processing falls under Article 4 of the LED and the LED generally"
     hits = [c for c in extract_citations(real) if c.candidate_id == "32016L0680"]
     assert len(hits) == 2 and hits[0].pinpoint == "Article 4"
+
+
+def _mk_case(catalogue, sid, when):
+    catalogue.conn.execute(
+        "INSERT INTO documents (stable_id, source, doc_type, title, decision_date, version, "
+        "is_latest, has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+        "VALUES (?,?,?,?,?,1,1,1,0,'harvest','[]','live','2026-01-01')",
+        (sid, "t", "judgment", sid, when))
+
+
+def test_forward_citation_probe_flags_only_case_to_case(catalogue):
+    _mk_case(catalogue, "ewhc/2000/1", "2000-01-01")
+    _mk_case(catalogue, "ewhc/2020/9", "2020-01-01")
+    # legislation whose stored date is a consolidation, later than a citing judgment
+    catalogue.conn.execute(
+        "INSERT INTO documents (stable_id, source, doc_type, title, decision_date, version, "
+        "is_latest, has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+        "VALUES ('sor/87-7','t','legislation','Reg',date('2006-03-22'),1,1,1,0,'harvest','[]','live','2026-01-01')")
+    # a case citing a case decided 20y AFTER it — impossible
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, resolution_status, relationship_type, extracted_via) "
+        "VALUES ('ewhc/2000/1','ewhc/2020/9','resolved','mentions','regex')")
+    # a case citing legislation dated later (consolidation) — legitimate, must NOT flag
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, resolution_status, relationship_type, extracted_via) "
+        "VALUES ('ewhc/2000/1','sor/87-7','resolved','mentions','regex')")
+    catalogue.conn.commit()
+
+    by_name = {p.name: p for p in run_probes(catalogue, only=["forward_citation"])}
+    fc = by_name["forward_citation"]
+    assert fc.count == 1
+    assert fc.samples[0]["dst_id"] == "ewhc/2020/9"
+
+
+def test_misdated_case_probe_and_repair(catalogue):
+    # slug says 2025, stored date says 1202 — the date is wrong
+    catalogue.conn.execute(
+        "INSERT INTO documents (stable_id, source, doc_type, title, decision_date, version, "
+        "is_latest, has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+        "VALUES ('ewhc/admin/2025/1471','t','judgment','R (Tompson)',date('1202-06-13'),1,1,1,0,"
+        "'harvest','[]','live','2026-01-01')")
+    # a correctly-dated case must not be flagged
+    _mk_case(catalogue, "ewhc/admin/2024/50", "2024-03-01")
+    catalogue.conn.commit()
+
+    by_name = {p.name: p for p in run_probes(catalogue, only=["misdated_case"])}
+    md = by_name["misdated_case"]
+    assert md.count == 1
+    assert md.samples[0]["stable_id"] == "ewhc/admin/2025/1471"
+
+    from raglex.ops.probes import repair_misdated_case
+    assert repair_misdated_case(catalogue)["dates_cleared"] == 1
+    # the contradicted date is nulled (not guessed), the good one untouched
+    row = catalogue.conn.execute(
+        "SELECT decision_date FROM documents WHERE stable_id='ewhc/admin/2025/1471'").fetchone()
+    assert row["decision_date"] is None
+    good = catalogue.conn.execute(
+        "SELECT decision_date FROM documents WHERE stable_id='ewhc/admin/2024/50'").fetchone()
+    assert str(good["decision_date"]).startswith("2024")

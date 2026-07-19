@@ -131,7 +131,8 @@ def test_pipeline_records_outstanding_effects_queue(catalogue, rawstore):
     # a later re-pull with everything incorporated drops it from the queue (the
     # refresh worker uses backfill=True to bypass the watermark, as here)
     rec.extra = {"unapplied_effects": {"outstanding": 0, "affecting": []}}
-    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]), backfill=True)
+    # refetch_held: the effects worker re-pulls a HELD doc to re-read its state
+    Pipeline(catalogue, rawstore).run(FakeAdapter([rec]), backfill=True, refetch_held=True)
     assert catalogue.list_effects_refresh() == []
 
 
@@ -255,3 +256,52 @@ def test_one_malformed_document_does_not_sink_the_run(catalogue, rawstore):
     assert stats.errors == 1 and stats.errors_transient == 1 and stats.errors_fatal == 0
     # and it says which document blew up, and how
     assert any("bad" in n and "Failed to open stream" in n for n in stats.notes)
+
+
+class ProvisionalIdAdapter(BaseAdapter):
+    """Mimics the NZ courts feed: the discovery stub carries a PROVISIONAL id (from
+    the URL); the real id (neutral citation) is only known once fetched."""
+    source = "prov"
+    min_interval = 0.0
+
+    def __init__(self, url_to_real: dict[str, Record]):
+        self._map = url_to_real
+        self.fetched: list[str] = []
+
+    def discover(self, since, *, max_pages=None) -> Iterator[Stub]:
+        for url in self._map:
+            yield Stub(stable_id=f"prov:{url}", landing_url=url, hint_date=date(2024, 1, 1))
+
+    def fetch(self, stub: Stub) -> Record | None:
+        self.fetched.append(stub.landing_url)
+        return self._map[stub.landing_url]
+
+
+def test_backfill_skips_already_held_documents(catalogue, rawstore):
+    # a "get everything" pass must not re-download the whole corpus every run —
+    # already-held items fall through so the never-fetched tail is reachable
+    rec = _rec("nzsc/2020/1", "A judgment.")
+    ad = FakeAdapter([rec])
+    Pipeline(catalogue, rawstore).run(ad, backfill=True)
+    assert ad._fetched == 1
+
+    ad2 = FakeAdapter([rec])
+    stats = Pipeline(catalogue, rawstore).run(ad2, backfill=True)
+    assert stats.deduped == 1 and ad2._fetched == 0   # held → skipped before fetch
+
+
+def test_backfill_dedups_provisional_id_stub_by_landing_url(catalogue, rawstore):
+    # NZ-style: the stub id can't match the stored neutral-citation id, so the skip
+    # falls back to the landing URL — otherwise every backfill re-pulls every PDF
+    real = _rec("nzsc/2020/9", "A Supreme Court judgment.")
+    real.landing_url = "https://courtsofnz.govt.nz/case-9"
+    url_map = {real.landing_url: real}
+
+    ad = ProvisionalIdAdapter(url_map)
+    Pipeline(catalogue, rawstore).run(ad, backfill=True)
+    assert ad.fetched == [real.landing_url]          # fetched once, keyed by real id
+    assert catalogue.get_document("nzsc/2020/9") is not None
+
+    ad2 = ProvisionalIdAdapter(url_map)
+    stats = Pipeline(catalogue, rawstore).run(ad2, backfill=True)
+    assert ad2.fetched == [] and stats.deduped == 1  # recognised by URL, not re-pulled

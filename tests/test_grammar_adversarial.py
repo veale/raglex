@@ -221,3 +221,21 @@ def test_synthesised_segments_via_body(catalogue, tmp_path):
     labels = [s.label for s in segs if s.kind == "paragraph"]
     assert labels == ["[1]", "[2]", "[3]", "[4]"]
     assert "[107]" not in labels
+
+
+def test_cjeu_judgment_in_shortname_coref():
+    # The CJEU/AG-opinion idiom (flagged for refinement in the corpus): a case is
+    # introduced with a full citation and a "judgment in <Name>" label, then later
+    # references are "Judgment in <Name>, paragraph N" — which must resolve locally
+    # to the same case, carrying the pincite.
+    text = ("The judgment of 8 April 2014, Digital Rights Ireland and Others, Cases "
+            "C-293/12 and C-594/12, judgment in Digital Rights, EU:C:2014:238, "
+            "concerned data retention. ... As the Court held, Judgment in Digital "
+            "Rights, paragraph 57, the interference was serious. See also Judgment "
+            "in Digital Rights, paragraph 65.")
+    sh = [c for c in extract_citations(text) if c.method == "shorthand"]
+    assert len(sh) == 2
+    # the label sits between the case-number and the ECLI, both of which identify the
+    # same case (62012CJ0293 resolves to ECLI:EU:C:2014:238 via the CELEX→ECLI alias)
+    assert {c.candidate_id for c in sh} in ({"62012CJ0293"}, {"ECLI:EU:C:2014:238"})
+    assert {c.pinpoint for c in sh} == {"para 57", "para 65"}

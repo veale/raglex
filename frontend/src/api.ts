@@ -248,6 +248,12 @@ export const api = {
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
     return postForm("/import/file", fd);
   },
+  importLegislationAkn: async (file: File, stableId?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (stableId) fd.append("stable_id", stableId);
+    return postForm("/import/legislation-akn", fd) as Promise<{ stable_id?: string; title?: string; chars?: number; segments?: number; resolved_edges?: number; error?: string }>;
+  },
   importCase: async (file: File, opts: { ref?: string; neutral_citation?: string; also_cited_as?: string } = {}) => {
     const fd = new FormData();
     fd.append("file", file);

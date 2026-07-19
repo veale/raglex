@@ -66,3 +66,21 @@ def test_mark_extracted_sets_the_column(catalogue, rawstore):
     catalogue.mark_extracted("a")
     row = catalogue.get_document("a")
     assert row["last_extracted_at"] is not None
+
+
+def test_never_extracted_documents_are_ordered_first(catalogue, rawstore):
+    # "all jobs should start scanning with stuff that has never scanned" — the id
+    # stream must put never-extracted docs ahead of already-extracted ones, so a
+    # time-boxed or interrupted run always makes progress on the backlog first.
+    for sid in ("z-old", "m-older", "a-never"):
+        _text_doc(catalogue, rawstore, sid)
+    # a-never has no stamp; the other two were extracted, at different times
+    catalogue.mark_extracted("z-old")
+    catalogue.conn.execute(
+        "UPDATE documents SET last_extracted_at = ? WHERE stable_id = 'm-older'",
+        (_iso_days_ago(30),))
+    catalogue.conn.commit()
+
+    ids = catalogue.text_document_ids()
+    assert ids[0] == "a-never"                    # never-scanned leads
+    assert ids.index("m-older") < ids.index("z-old")  # then least-recently-scanned

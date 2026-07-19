@@ -78,6 +78,18 @@ _SHORTHAND_DEF = re.compile(
 )
 
 
+# The CJEU/AG-opinion idiom: a case is introduced in full, then relabelled with a
+# short "judgment in <Name>" tag beside the citation, and every later reference is
+# "Judgment in <Name>, paragraph N" — never the bracket/hereinafter form above.
+# "The judgment of 8 April 2014, Digital Rights Ireland and Others, Cases C-293/12
+# and C-594/12, judgment in Digital Rights, EU:C:2014:238 … Judgment in Digital
+# Rights, paragraph 57." Without this the later short references dangle, losing the
+# pincites the opinion actually turns on. The label can sit either side of the
+# citation, so both windows are searched.
+_CJEU_LABEL = re.compile(r"judgment\s+in\s+(?P<name>[A-Z][A-Za-z'’&.\- ]{2,40}?)\s*(?=[,.]|$)",
+                         re.IGNORECASE)
+
+
 def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
     defs: dict[str, Citation] = {}
     for c in kept:
@@ -85,34 +97,48 @@ def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
             continue
         window = text[c.char_end: c.char_end + 90]
         m = _SHORTHAND_DEF.search(window)
-        if not m:
-            continue
-        # the definition must belong to THIS citation: nothing but a pinpoint /
-        # report tail may sit between the citation and the bracket
-        head = window[:m.start()]
-        if re.search(r"[A-Za-z]{12,}", head):  # long prose between → not a def
-            continue
-        name = (m.group("br") or m.group("hf") or "").strip()
-        if len(name) >= 3 and name not in defs:
-            defs[name] = c
+        if m:
+            # the definition must belong to THIS citation: nothing but a pinpoint /
+            # report tail may sit between the citation and the bracket
+            head = window[:m.start()]
+            if not re.search(r"[A-Za-z]{12,}", head):  # long prose between → not a def
+                name = (m.group("br") or m.group("hf") or "").strip()
+                if len(name) >= 3 and name not in defs:
+                    defs[name] = c
+        # CJEU "judgment in <Name>" label, immediately either side of the citation
+        # (a label followed by a pincite is a USE, handled below — skip those here)
+        for side in (text[max(0, c.char_start - 60): c.char_start],
+                     text[c.char_end: c.char_end + 60]):
+            lm = _CJEU_LABEL.search(side)
+            if lm and not re.match(r"\s*,?\s*(?:paragraph|para)", side[lm.end():]):
+                nm = lm.group("name").strip()
+                if len(nm) >= 3 and nm not in defs:
+                    defs[nm] = c
     if not defs:
         return kept
     out = list(kept)
     occupied = [(c.char_start, c.char_end) for c in kept]
     for name in sorted(defs, key=len, reverse=True):
         host = defs[name]
+        # two later-use surfaces, both minting a pinpointed citation of the defined
+        # case: the common-law "Suncor at para 30" and the CJEU "Judgment in
+        # Digital Rights, paragraph 57"
         use_re = re.compile(
             rf"\b{re.escape(name)}(?:,)?\s+at\s+paras?\.?\s*"
-            rf"(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})")
+            rf"(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})"
+            rf"|judgment\s+in\s+{re.escape(name)}\s*,?\s*"
+            rf"(?:paragraphs?|paras?\.?)\s*(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})",
+            re.IGNORECASE)
         for m in use_re.finditer(text):
             s, e = m.start(), m.end()
             if s <= host.char_start:   # only USES after the definition count
                 continue
+            run = m.group("run") or m.group("run2")
             if any(os < e and s < oe for os, oe in occupied):
                 continue
             out.append(Citation(
                 raw=m.group(0), entity_kind=host.entity_kind,
-                candidate_id=host.candidate_id, pinpoint=_pin_text(m.group("run")),
+                candidate_id=host.candidate_id, pinpoint=_pin_text(run),
                 char_start=s, char_end=e, method="shorthand", confidence=0.7,
             ))
             occupied.append((s, e))

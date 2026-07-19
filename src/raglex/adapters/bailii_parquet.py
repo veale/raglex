@@ -156,9 +156,22 @@ def _normalise_ecli(raw: str | None) -> str | None:
     return e if e.startswith("ECLI:") else f"ECLI:{e}"
 
 
-def _parse_bailii_date(raw: str | None) -> date | None:
+def _parse_bailii_date(raw: str | None, expect_year: int | None = None) -> date | None:
     """The ``date`` column is a free-text string ("22 June 2011", "09 October 2025").
-    Parse the common day-month-year form; give up (None) on anything unusual."""
+    Parse the common day-month-year form; give up (None) on anything unusual.
+
+    ``expect_year`` is the year of the neutral citation, which for these documents
+    is authoritative — "[2025] EWHC 1471 (Admin)" was handed down in 2025, full
+    stop. Because the column is free text and the pattern is searched ANYWHERE in
+    it, a stray date-shaped run elsewhere in the field could win: R (Tompson) v
+    SSJ, a 2025 case, was stored as 1202-06-13, and ~1,000 BAILII-parquet judgments
+    carried a year that contradicted their own citation. A parse that disagrees
+    with the citation year is discarded rather than trusted — no date at all beats
+    a wrong one, and the harvest can backfill it later.
+
+    A year of tolerance: a judgment handed down in late December is occasionally
+    reported, and numbered, under the following year.
+    """
     if not raw:
         return None
     m = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", raw)
@@ -171,9 +184,12 @@ def _parse_bailii_date(raw: str | None) -> date | None:
     if not mon:
         return None
     try:
-        return date(int(m.group(3)), mon, int(m.group(1)))
+        got = date(int(m.group(3)), mon, int(m.group(1)))
     except ValueError:
         return None
+    if expect_year is not None and abs(got.year - expect_year) > 1:
+        return None
+    return got
 
 
 def _clean_title(raw: str | None) -> str | None:
@@ -242,9 +258,14 @@ def parse_parquet_row(row: dict) -> ParsedRow | None:
     stub = _is_stub_body(text)
     bailii_url = f"https://www.bailii.org{path}" if path.startswith("/") else path
 
+    # the neutral-citation year in the slug ("ewhc/admin/2025/1471" → 2025) is
+    # authoritative and bounds the free-text date parse
+    ym = re.search(r"/((?:19|20)\d{2})/", f"/{slug}/")
+    expect_year = int(ym.group(1)) if ym else None
+
     return ParsedRow(
         slug=slug, primary_id=primary_id, source=source, bailii_url=bailii_url,
-        title=title, decision_date=_parse_bailii_date(row.get("date")),
+        title=title, decision_date=_parse_bailii_date(row.get("date"), expect_year),
         court_label=(row.get("court") or "").strip() or None,
         ecli=ecli, appno=appno,
         self_citations=tuple(dict.fromkeys(c for c in self_cites if c)),

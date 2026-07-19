@@ -693,9 +693,36 @@ class Facade:
                 # pinpoints land and peeks can scroll (quote-guarded)
                 from .core.segmentation import synthesise_numbered_segments
                 segments = synthesise_numbered_segments(text)
+            segs = [asdict(s) for s in segments]
+            # Legislation only: a section arrives as ONE segment whose body is
+            # newline-separated provisions ("(1)…\n(2)…\n(a)…"). Recover the
+            # drafting hierarchy so the reader can indent (a) under (2) instead of
+            # ranging everything flush left. Judgments are flat numbered
+            # paragraphs with no such nesting, so they're left alone.
+            #
+            # Computed PER SEGMENT, never across the whole document: each section
+            # restarts its own numbering, so a stack carried across a section
+            # boundary would read s.2(1) as a continuation of s.1's subsections.
+            flat_lines = None
+            if doc["doc_type"] == "legislation" and text:
+                from .core.structure import line_depths
+
+                def _spans(body: str, base: int) -> list[dict]:
+                    return [{"start": base + a, "end": base + b, "depth": d}
+                            for a, b, d in line_depths(body)]
+
+                for s in segs:
+                    body = text[s["char_start"]:s["char_end"]]
+                    if "\n" in body:
+                        s["lines"] = _spans(body, s["char_start"])
+                # unsegmented legislation (flat-text imports) renders as one block,
+                # which still wants indenting
+                if not segs and "\n" in text:
+                    flat_lines = _spans(text, 0)
             return {
                 "text": text,
-                "segments": [asdict(s) for s in segments],
+                "segments": segs,
+                "lines": flat_lines,
                 "citations": citations,
                 "doc_type": doc["doc_type"],
                 "title": doc["title"],
@@ -1676,6 +1703,61 @@ class Facade:
     # the first ~3k chars of the text projection.
     _EU_TITLE_RE = None  # compiled lazily
 
+    def backfill_eu_stubs(self, *, limit: int = 500, on_progress=None,
+                          cancel_check=None) -> dict:
+        """Re-fetch EU instruments held only as metadata stubs, so heavily-cited
+        acts stop being dead ends.
+
+        An instrument becomes a stub when NEITHER Formex nor the EUR-Lex HTML came
+        back at harvest time — but that includes every transient failure, and
+        nothing ever retried them: ~7,400 eu-legislation records sit at
+        ``metadata_only``, some (31987D0373, cited 45 times) with a perfectly good
+        HTML rendition upstream the whole time. Re-running the adapter's fetch
+        upgrades the ones that now parse and leaves the genuinely-absent alone.
+
+        Non-destructive and re-runnable: a stub that still yields nothing is left
+        exactly as it was.
+        """
+        from .adapters.eu_legislation import CELEX_BASE, EULegislationAdapter
+        from .core.models import Stub
+        from .pipeline import Pipeline
+        from .pipeline.runner import RunStats
+
+        checked = upgraded = 0
+        with self._open() as (cat, rs, ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, landing_url FROM documents "
+                "WHERE source = 'eu-legislation' AND meta_json LIKE '%metadata_only%' "
+                "ORDER BY stable_id LIMIT ?", (limit,)).fetchall()
+            if not rows:
+                return {"checked": 0, "upgraded": 0}
+            adapter = EULegislationAdapter()
+            pipe = Pipeline(cat, rs, textstore=ts)
+            for r in rows:
+                if cancel_check and cancel_check():
+                    break
+                checked += 1
+                if on_progress and checked % 25 == 0:
+                    on_progress(stage="eu stubs", done=checked, total=len(rows))
+                celex = r["stable_id"]
+                stub = Stub(
+                    stable_id=celex,
+                    landing_url=r["landing_url"]
+                    or f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
+                    raw_url=f"{CELEX_BASE}/{celex}",
+                )
+                try:
+                    rec = adapter.fetch(stub)
+                except Exception:  # noqa: BLE001 — one bad instrument must not stop the pass
+                    continue
+                # still a stub upstream: leave the existing record untouched
+                if rec is None or not rec.text or (rec.extra or {}).get("metadata_only"):
+                    continue
+                if pipe._ingest(rec, RunStats(source=adapter.source)):
+                    upgraded += 1
+        self._invalidate_caches()
+        return {"checked": checked, "upgraded": upgraded}
+
     def backfill_eu_titles(self, *, limit: int = 2000, on_progress=None) -> dict:
         """Construct titles for EU instruments that have none (or a bare CELEX
         echo) from their own scraped text — the '31999D0468 has no title but the
@@ -2432,6 +2514,50 @@ class Facade:
                 "resolved": still is not None,
             }
 
+    def import_legislation_akn(self, *, data: bytes, stable_id: str | None = None,
+                               filename: str | None = None) -> dict:
+        """Import a hand-supplied Akoma Ntoso file as a full legislation document.
+
+        legislation.gov.uk occasionally won't serve an instrument's AKN (or an old
+        harvest missed it), so ukpga/2006/46 and the like end up absent even though
+        the XML exists. Given the file, this keys it under the proper legislation
+        URI (derived from the AKN's own FRBR, or supplied) and runs the SAME
+        structural parse as a live harvest — schedules, unapplied-effects edges,
+        pinpoints and all — then resolves its citations. Supersedes any existing
+        copy of that id (raw is canonical, §1.2)."""
+        from .adapters.uk_legislation import UKLegislationAdapter
+        from .formats.akoma_ntoso import _frbr_work_id
+
+        sid = (stable_id or "").strip() or _frbr_work_id(data)
+        if not sid:
+            return {"error": "no stable_id given and none derivable from the AKN "
+                             "FRBRWork — pass one explicitly, e.g. ukpga/2006/46"}
+        # a full URL or /id/ form → the bare path
+        import re as _re
+        m = _re.search(r"legislation\.gov\.uk/(?:id/)?([a-z]{2,6}/[^\s?#]+)", sid, _re.I)
+        if m:
+            sid = m.group(1)
+        sid = sid.strip("/")
+
+        try:
+            record = UKLegislationAdapter().record_from_akn(sid, data)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"AKN parse failed: {exc}"}
+        if not record.text:
+            return {"error": "AKN parsed but produced no text — is this an Akoma "
+                             "Ntoso legislation file?"}
+        record.ensure_payload_hash()
+        with self._open() as (cat, rs, ts):
+            raw_path = str(rs.path_for(rs.put(data, ext="xml"), "xml"))
+            text_path = str(ts.put(record.payload_hash, record.text))
+            ts.put_segments(record.payload_hash, record.segments)
+            cat.upsert_document(record, raw_path=raw_path, text_path=text_path)
+            resolved = Resolver(cat).run()
+        self._invalidate_caches()
+        return {"stable_id": sid, "title": record.title,
+                "chars": len(record.text or ""), "segments": len(record.segments),
+                "resolved_edges": resolved.resolved}
+
     def reparse_document(self, *, stable_id: str) -> dict:
         """Re-derive a document's text + structural segments from its **immutable raw**
         using the current format parser — the projection-refresh path when a parser
@@ -3169,10 +3295,12 @@ class Facade:
             ids = [r["stable_id"] for r in due]
             before = {r["stable_id"]: r["outstanding"] for r in due}
             adapter = get_adapter("uk-legislation", ids=",".join(ids))
-            # backfill=True ignores the watermark (the item is already in corpus).
-            # Each fetch re-records the effects state via the pipeline (_ingest), so the
-            # queue is rescheduled/cleared as a side effect of the re-pull.
-            Pipeline(cat, rs, textstore=ts).run(adapter, backfill=True)
+            # backfill=True ignores the watermark (the item is already in corpus);
+            # refetch_held=True re-pulls it despite being held — the whole point here
+            # is to re-read the CURRENT outstanding-amendments state. Each fetch
+            # re-records the effects via the pipeline (_ingest), so the queue is
+            # rescheduled/cleared as a side effect of the re-pull.
+            Pipeline(cat, rs, textstore=ts).run(adapter, backfill=True, refetch_held=True)
             cleared, still = 0, 0
             for sid in ids:
                 row = cat.conn.execute(

@@ -80,6 +80,20 @@ def test_bare_eu_ecli_without_prefix_is_recognised():
     assert not [c for c in extract_citations("NL:HR:2021:123") if c.candidate_id]
 
 
+def test_bare_echr_ecli_is_recognised():
+    # CJEU opinions cite the ECtHR in bare-ECLI form; the corpus holds those
+    # judgments under exactly this ECLI, so it must link, not dangle
+    assert any(c.candidate_id == "ECLI:CE:ECHR:2008:1202JUD000287202"
+               for c in extract_citations(
+                   "K.U. v. Finland (CE:ECHR:2008:1202JUD000287202, para 48)"))
+    assert any(c.candidate_id == "ECLI:CE:ECHR:1998:1028JUD002345294"
+               for c in extract_citations(
+                   "Osman v. the United Kingdom (CE:ECHR:1998:1028JUD002345294)"))
+    # the prefixed form still works, and it isn't swallowed mid-word
+    assert any(c.candidate_id == "ECLI:CE:ECHR:2008:1202JUD000287202"
+               for c in extract_citations("see ECLI:CE:ECHR:2008:1202JUD000287202"))
+
+
 def test_eur_typecode_classifies_as_assimilated_uk_legislation():
     from raglex.citations.snowball import _classify
     from raglex.resolve.matchers import assimilated_celex

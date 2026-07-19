@@ -901,8 +901,51 @@ function anchorKey(text: string): string | null {
 // number both as a label AND at the head of the prose ("1. This is an appeal…"). When the
 // prose already carries it, we drop the separate label and style the inline number instead
 // (greeny-blue, bold, in flow) so the text reads without a repeated, orphaned number.
-function segBody(text: string, s: { label: string; char_start: number; char_end: number },
+// Doc types whose segments are flat numbered paragraphs (a judgment, an opinion) as
+// opposed to a drafted hierarchy. Only these get the vertical paragraph rail: a
+// statute's label carries real information (the section's name), which doesn't
+// survive being turned on its side.
+const CASE_DOC_TYPES = new Set(["judgment", "decision", "opinion", "order", "ruling"]);
+
+// The rail's caption for a segment: "para 14", "recital 79", "art 17". Falls back to
+// null when the label isn't a numbered provision (a named heading keeps its label
+// in the flow instead).
+const _RAIL_PREFIX: Record<string, string> = {
+  paragraph: "para", recital: "recital", article: "art", section: "s",
+  point: "pt", rule: "r",
+};
+function railCaption(s: { label: string; kind: string }): { prefix: string; num: string } | null {
+  const label = (s.label || "").trim();
+  const m = /^\[?(\d{1,4}[a-z]?)[.\])]?$/i.exec(label)
+    || /^(?:para(?:graph)?|recital|art(?:icle)?|s(?:ection)?|pt|point|r(?:ule)?)\.?\s*(\d{1,4}[a-z]?)\b/i.exec(label);
+  if (!m) return null;
+  return { prefix: _RAIL_PREFIX[s.kind] || "para", num: m[1] };
+}
+
+// A statute section arrives as one segment whose body is newline-separated provisions;
+// `lines` (from the backend's drafting-hierarchy reader) gives each its nesting depth.
+// Each line becomes its own block so the indent applies to the WHOLE provision, wrapped
+// lines included — not just the first line, which a text-indent would give.
+function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
+                  paraSet?: Set<string>, onPara?: (n: string) => void) {
+  return (
+    <>
+      {s.lines.map((ln: any, i: number) => (
+        <div className="stat-line" key={i}
+          style={ln.depth ? { paddingLeft: `calc(var(--indent-step) * ${ln.depth})` } : undefined}>
+          {renderCited(text, ln.start, ln.end, cites, onCite, paraSet, onPara)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function segBody(text: string, s: { label: string; char_start: number; char_end: number; lines?: any[] },
                  cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void) {
+  // drafted hierarchy (legislation): render provision-by-provision, indented
+  if (s.lines && s.lines.length > 1) {
+    return { showLabel: true, body: segLines(text, s, cites, onCite, paraSet, onPara) };
+  }
   const num = labelNum(s.label);
   const raw = text.slice(s.char_start, s.char_end);
   const m = num ? new RegExp(`^(\\s*)(${num})([.)\\]]?)(\\s+)`).exec(raw) : null;
@@ -1002,11 +1045,22 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
       </div>
       {!body?.text && doc && <p className="muted">No text yet (metadata only).</p>}
       {body?.text && segs.length > 0 && (
-        <div className="reader">
+        <div className={`reader${CASE_DOC_TYPES.has(body.doc_type) ? " has-rails" : ""}`}>
           {segs.map((s, i) => {
             const sb = segBody(body.text, s, cites, onCite);
+            // the same on-its-side paragraph marker as the main reader, so a
+            // paragraph is identified the same way wherever it is shown
+            const rail = CASE_DOC_TYPES.has(body.doc_type) ? railCaption(s) : null;
             return (
-            <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}`} key={i} id={"peek-seg-" + i}>
+            <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}${rail ? " has-rail" : ""}`}
+                 key={i} id={"peek-seg-" + i}>
+              {rail && (
+                <span className="seg-rail" aria-hidden="true">
+                  <span className="rail-line" />
+                  <span className="rail-label">{rail.prefix}&nbsp;<b>{rail.num}</b></span>
+                  <span className="rail-line" />
+                </span>
+              )}
               {sb.showLabel && <span className="seg-label">{s.label}</span>}
               <span className="seg-body">{sb.body}</span>
             </div>
@@ -1212,14 +1266,33 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     "distinguishes", "overrules", "interprets"]);
   const pinned = (label: string) => (incoming || []).filter(
     (r) => r.dst_anchor === label && !CITE_TYPES.has(r.relationship_type));
+  const isCase = CASE_DOC_TYPES.has(body.doc_type);
   const content = !body.text ? null : (!segs || segs.length === 0)
-    ? <div className="reader"><div className="seg"><div className="seg-body">{renderCited(body.text, 0, body.text.length, cites, onCite, paraSet, onPara)}</div></div></div>
+    ? <div className="reader"><div className="seg"><div className="seg-body">
+        {body.lines && body.lines.length > 1
+          ? segLines(body.text, body, cites, onCite, paraSet, onPara)
+          : renderCited(body.text, 0, body.text.length, cites, onCite, paraSet, onPara)}
+      </div></div></div>
     : (
-      <div className="reader">
+      <div className={`reader${isCase ? " has-rails" : ""}`}>
         {segs.map((s, i) => {
           const sb = segBody(body.text, s, cites, onCite, paraSet, onPara);
+          const rail = isCase ? railCaption(s) : null;
+          const mb = mentionsFor(s.label);
           return (
-          <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}`} key={i} id={segId(s.label)}>
+          <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}`
+                 + (rail ? " has-rail" : "") + (mb && mb.list.length ? " has-mentions" : "")}
+               key={i} id={segId(s.label)}>
+            {/* the paragraph's number, set on its side against a rule that spans the
+                whole provision — subtle, because the number is usually in the prose
+                too; it's there to mark the extent of the paragraph, not to shout */}
+            {rail && (
+              <span className="seg-rail" aria-hidden="true">
+                <span className="rail-line" />
+                <span className="rail-label">{rail.prefix}&nbsp;<b>{rail.num}</b></span>
+                <span className="rail-line" />
+              </span>
+            )}
             <a className="seg-plus" title="Link commentary or an authority to this paragraph"
               onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>
             {sb.showLabel && <span className="seg-label">{s.label}</span>}
@@ -1228,8 +1301,8 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
               <div className="pinned" key={j}>💬 {r.relationship_type}: <a onClick={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</a>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
             ))}
-            {(() => { const mb = mentionsFor(s.label); return mb && mb.list.length > 0
-              ? <MentionedBy list={mb.list} target={id} anchor={mb.anchor} /> : null; })()}
+            {mb && mb.list.length > 0
+              && <MentionedBy list={mb.list} target={id} anchor={mb.anchor} />}
           </div>
           );
         })}
@@ -2090,11 +2163,50 @@ export function ImportView({ open }: { open?: (id: string) => void }) {
           try { show(await api.importFile(file, { doc_type: docType, link_to: linkTo })); } catch (e: any) { show("error: " + e); }
         }}>Import file</button></p>
       </div>
+      <LegislationAknPanel open={open} />
       <CaseLawImportPanel />
       <LiiWorklistPanel />
       <ZoteroPanel show={show} />
       <GuidanceRulesPanel />
       {msg && <div className="panel"><pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{msg}</pre></div>}
+    </div>
+  );
+}
+
+// Import a hand-supplied Akoma Ntoso legislation file — for an act legislation.gov.uk
+// won't serve (ukpga/2006/46 was absent), where you have the .akn/.xml. It gets the same
+// structural parse as a live harvest: schedules, unapplied-effects edges, pinpoints. The
+// id defaults to the AKN's own FRBRWork, so usually you just pick the file and go.
+function LegislationAknPanel({ open }: { open?: (id: string) => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [sid, setSid] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<any>(null);
+  const go = async () => {
+    if (!file) { setMsg({ error: "choose an .akn / .xml file" }); return; }
+    setBusy(true); setMsg(null);
+    try { setMsg(await api.importLegislationAkn(file, sid.trim() || undefined)); }
+    catch (e: any) { setMsg({ error: String(e) }); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="panel">
+      <h3>Import legislation from an Akoma Ntoso file <span className="muted">— for an act legislation.gov.uk won’t serve</span></h3>
+      <p className="muted">
+        Drop the <b>.akn</b> (or <b>.xml</b>) file. It’s parsed exactly as a live harvest —
+        sections, schedules (as <i>sch 1 para 1</i>), and amendment edges — and keyed under its
+        own legislation id. Leave the id blank to take it from the file’s FRBRWork.
+      </p>
+      <div className="row">
+        <input type="file" accept=".akn,.xml" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        <input value={sid} onChange={(e) => setSid(e.target.value)} placeholder="id (optional) — e.g. ukpga/2006/46" />
+        <button className="primary" disabled={busy} style={{ flex: "0 0 auto" }} onClick={go}>
+          {busy ? "importing…" : "Import"}</button>
+      </div>
+      {msg && (msg.error
+        ? <p className="err" style={{ marginTop: 8 }}>{msg.error}</p>
+        : <p className="ok" style={{ marginTop: 8 }}>✓ imported <b>{msg.title || msg.stable_id}</b> — {msg.segments} segments, {msg.resolved_edges} edges resolved{" "}
+            {open && msg.stable_id && <a onClick={() => open(msg.stable_id)} style={{ cursor: "pointer" }}>open ↗</a>}</p>)}
     </div>
   );
 }
@@ -2583,8 +2695,9 @@ function KeepCurrentPanel() {
           catch (e: any) { setMsg("✗ " + e); } finally { setBusy(false); }
         }} title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs the daily auto-task now.">⇊ EU case names</button>
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
-        <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain">⟳ Full relink (judgments)</button>
-        <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain">⟳ Full relink (all)</button>
+        <button onClick={() => fireJob("rescan", { doc_types: ["judgment"], only_unextracted: true }, (m) => setMsg(`scan unscanned judgments: ${m}`))} title="Extract ONLY judgments that have no citation edges yet — the never-scanned backlog. Never re-touches an already-scanned document, so it's the cheap way to finish an interrupted run.">⟳ Scan unscanned (judgments)</button>
+        <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain. Never-scanned documents go FIRST, and anything already scanned in the last 7 days is skipped (pass stale_days:0 to force a full redo).">⟳ Full relink (judgments)</button>
+        <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain. Never-scanned first; skips anything scanned in the last 7 days.">⟳ Full relink (all)</button>
         <button onClick={() => fireJob("rescan", { stale_days: 7 }, (m) => setMsg(`rescan stale (>1 week): ${m}`))} title="Re-extract only documents NOT scanned in the last 7 days, then run the resolution chain. Reads the last-extracted stamp (and, retroactively, the newest citation timestamp) so it skips whatever a current/recent rescan already covered — cheap to run after a restart.">⟳ Rescan stale (&gt;1 week)</button>
       </div>
       {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}

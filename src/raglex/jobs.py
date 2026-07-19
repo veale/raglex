@@ -36,6 +36,7 @@ log = logging.getLogger("raglex.jobs")
 # radiate, expand-citing) is keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
+    "backfill-eu-stubs",
     "rebuild-citation-counts", "rebuild-authority", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
@@ -95,6 +96,10 @@ RUNNERS: dict[str, Callable] = {
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(source=p.get("source"), on_progress=cb, cancel_check=cancel),
     "backfill-metadata": lambda f, p, cb, cancel: f.backfill_document_metadata(on_progress=cb),
     "backfill-edge-keys": lambda f, p, cb, cancel: f.backfill_edge_keys(on_progress=cb, cancel_check=cancel),
+    # re-fetch EU instruments stored as bare metadata stubs (a transient harvest
+    # failure left ~7,400 heavily-cited acts as dead ends)
+    "backfill-eu-stubs": lambda f, p, cb, cancel: f.backfill_eu_stubs(
+        limit=int(p.get("limit") or 500), on_progress=cb, cancel_check=cancel),
     "rebuild-citation-counts": lambda f, p, cb, cancel: f.rebuild_citation_counts(),
     "rebuild-authority": lambda f, p, cb, cancel: f.rebuild_authority(on_progress=cb, cancel_check=cancel),
     "pull-ag-opinions": lambda f, p, cb, cancel: f.pull_ag_opinions(on_progress=cb, cancel_check=cancel),

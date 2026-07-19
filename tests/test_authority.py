@@ -277,3 +277,38 @@ def test_corpus_shape_and_drill(tmp_path):
     # kind filter really filters
     assert all(i["doc_type"] in ("judgment", "decision", "opinion")
                for i in f.jurisdiction_drill("United Kingdom", kind="cases")["items"])
+
+
+def _cited_by_edge(catalogue, seed, citer):
+    # the CELLAR forward-discovery scaffold: stored REVERSED (src=cited seed,
+    # dst=citer) because the citer isn't held yet — see facade.find_citing
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, resolution_status, relationship_type, extracted_via) "
+        "VALUES (?,?,'resolved','cited_by','structured')", (seed, citer))
+    catalogue.conn.commit()
+
+
+def test_cited_by_scaffold_edges_never_read_as_forward_citations(catalogue, tmp_path):
+    # A (2010) is cited by C (2024). The forward fact is a normal edge C->A. The
+    # CELLAR discovery scaffold ALSO records it reversed as A --cited_by--> C.
+    # That reversed edge must not make C look cited-by-A (backwards in time), nor
+    # inflate C's authority — the exact C-5/77 / C-359/92 defect.
+    ts = TextStore(tmp_path / "text")
+    for sid, when in [("A", date(2010, 1, 1)), ("C", date(2024, 1, 1))]:
+        _doc(catalogue, ts, sid, f"body {sid}", when=when)
+    _edge(catalogue, "C", "A")             # real, forward-in-time
+    _cited_by_edge(catalogue, "A", "C")    # reverse-oriented scaffold
+
+    # C's cited-by panel must be EMPTY — A does not cite C
+    assert catalogue.cited_by_stats(["C"])["documents"] == 0
+    assert catalogue.top_citors(["C"]) == []
+    assert [r["src_id"] for r in catalogue.top_citing_edges(["C"])] == []
+    assert [r["src_id"] for r in catalogue.relations_to("C")] == []
+    # A's cited-by is unaffected (the real C->A edge still counts)
+    assert catalogue.cited_by_stats(["A"])["documents"] == 1
+
+    # and PageRank isn't fed the backwards edge: with only A<-C, A outranks C
+    catalogue.rebuild_authority()
+    a = catalogue.authority_for(["A"])["A"]["pagerank"]
+    c = catalogue.authority_for(["C"])["C"]["pagerank"]
+    assert a > c

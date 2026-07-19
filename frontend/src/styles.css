@@ -400,7 +400,29 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* --- reader (legislation / judgment) --------------------------------------- */
 .reader { max-height: 560px; overflow-y: auto; padding-right: var(--sp-3); padding-left: 1.5em; }
-.reader .seg { margin: 0 0 var(--sp-4); position: relative; }
+/* extra left gutter only where paragraph rails are drawn (cases), so legislation
+   doesn't pay for space it never uses */
+.reader.has-rails { padding-left: 2.6em; }
+.peek .reader.has-rails, .tray .reader.has-rails { padding-left: 2.2em; }
+/* Tighter than the app default: a judgment is read in long runs, and the old
+   0.75rem paragraph gap plus a loose line-height pushed a 100-paragraph case to
+   several screens more than it needed. */
+.reader .seg { margin: 0 0 var(--sp-3); position: relative; line-height: 1.45;
+  border-radius: 3px; transition: background .12s; }
+/* the paragraph under the cursor lifts very slightly off the page — paired with
+   the ＋ handle that already fades in, so the hover target is unambiguous */
+.reader .seg:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
+/* a paragraph other documents cite gets a little more air AFTER it, so the
+   "Mentioned by …" line reads as belonging to it rather than to what follows */
+.reader .seg.has-mentions { margin-bottom: var(--sp-5); }
+/* one provision of a section, indented to its drafting tier. Block-level, so the
+   indent holds for every wrapped line rather than only the first. */
+.reader { --indent-step: 1.35em; }
+.reader .stat-line { margin: 0 0 .12em; }
+.reader .stat-line:last-child { margin-bottom: 0; }
+/* the side panels are ~384px wide — a full-width indent would eat the text, so
+   the tiers step in much more finely there while staying distinguishable */
+.peek .reader, .tray .reader { --indent-step: .6em; }
 /* left-gutter link handle: fades in on paragraph hover, aligned to its vertical centre */
 .reader .seg-plus { position: absolute; left: -1.25em; top: 50%; transform: translateY(-50%);
   color: var(--accent); font-size: .95rem; line-height: 1; opacity: 0; cursor: pointer;
@@ -409,6 +431,25 @@ tbody tr:hover { background: var(--surface-2); }
 .reader .seg-plus:hover { opacity: 1; text-decoration: none; }
 /* inline paragraph number (de-duplicated from the label above), greeny-blue + bold, in flow */
 .reader .seg-num { color: var(--info); font-weight: 700; }
+/* --- the paragraph rail (cases only) ---------------------------------------
+   "para 14" set on its side against a hairline that spans the paragraph's full
+   height, the caption breaking the rule in the middle. It marks the EXTENT of a
+   provision — useful when a paragraph runs to several quoted blocks — so it must
+   stay quiet: the number is nearly always in the prose as well. */
+.reader .seg-rail { position: absolute; left: -2.35em; top: .15em; bottom: .15em;
+  width: 1.1em; display: flex; flex-direction: column; align-items: center;
+  gap: .3em; opacity: .38; user-select: none; pointer-events: none;
+  transition: opacity .12s; }
+.reader .seg:hover .seg-rail { opacity: .72; }
+.reader .rail-line { flex: 1 1 auto; width: 1px; min-height: 2px;
+  background: var(--line); }
+/* vertical-rl + 180° is the reliable way to set text bottom-to-top (-90°) */
+.reader .rail-label { writing-mode: vertical-rl; transform: rotate(180deg);
+  font-size: .58rem; letter-spacing: .04em; line-height: 1; white-space: nowrap;
+  color: var(--faint); flex: 0 0 auto; }
+.reader .rail-label b { color: var(--info); font-weight: 700; }
+/* a very short paragraph can't fit the caption — drop the rules, keep the number */
+.reader .seg-rail .rail-line:first-child { min-height: 0; }
 /* subtle options/metadata disclosure on a document page */
 .opts-toggle { display: inline-block; font-size: .8rem; cursor: pointer; user-select: none; }
 .opts-toggle:hover { color: var(--text); }

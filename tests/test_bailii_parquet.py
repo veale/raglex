@@ -230,3 +230,28 @@ def test_only_unextracted_selects_just_the_backlog(facade):
         cat.commit()
         assert cat.text_document_ids(doc_types=["judgment"],
                                      only_unextracted=True) == ["uksc/2020/1"]
+
+
+def test_free_text_date_that_contradicts_the_citation_year_is_dropped():
+    from raglex.adapters.bailii_parquet import _parse_bailii_date
+
+    # a clean day-month-year within a year of the citation is kept
+    assert _parse_bailii_date("13 June 2025", 2025).year == 2025
+    assert _parse_bailii_date("31 December 2024", 2025).year == 2024   # reported next year
+    # a stray date-shaped run elsewhere in the free-text field must not win: this is
+    # the R (Tompson) v SSJ case, a 2025 judgment stored as 1202-06-13
+    assert _parse_bailii_date("13 June 1202", 2025) is None
+    # …and with no citation year to check against, we take what parses
+    assert _parse_bailii_date("13 June 1202", None).year == 1202
+
+
+def test_parquet_row_year_bounds_the_date(monkeypatch):
+    import raglex.adapters.bailii_parquet as bp
+
+    row = {"path": "/ew/cases/EWHC/Admin/2025/1471.html",
+           "html_content": "<html><body><p>1. A judgment about something.</p></body></html>",
+           "date": "13 June 1202", "court": "High Court", "title": "R (Tompson) v SSJ"}
+    parsed = bp.parse_parquet_row(row)
+    assert parsed is not None
+    # the impossible 1202 date is discarded rather than stored against a 2025 case
+    assert parsed.decision_date is None

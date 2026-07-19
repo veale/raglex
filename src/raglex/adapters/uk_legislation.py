@@ -52,6 +52,15 @@ _ID_PATH = re.compile(r"legislation\.gov\.uk/id/(?P<path>[a-z]{2,6}/[^\s?#]+)", 
 
 
 @dataclass(frozen=True, slots=True)
+class _Ns:
+    """Minimal stand-in for a Stub so record_from_akn can share fetch's body
+    whether the AKN came from the feed or a manual upload."""
+    stable_id: str
+    landing_url: str | None
+    hints: dict
+
+
+@dataclass(frozen=True, slots=True)
 class FeedEntry:
     path: str            # ukpga/2026/12 — the stable_id / fetch path
     title: str | None
@@ -244,10 +253,27 @@ class UKLegislationAdapter(BaseAdapter):
                 f"{self.source}: {url} still generating (HTTP 202) after 4 attempts",
                 transient=True,
             )
+        return self.record_from_akn(
+            stub.stable_id, raw,
+            landing_url=stub.landing_url,
+            base_id=stub.hints.get("base_id"),
+            version_date=stub.hints.get("version_date"))
+
+    def record_from_akn(self, stable_id: str, raw: bytes, *,
+                        landing_url: str | None = None,
+                        base_id: str | None = None,
+                        version_date: str | None = None) -> Record:
+        """Build a legislation Record from Akoma Ntoso bytes. Shared by the live
+        harvest (``fetch``) and manual uploads, so a hand-supplied AKN file for an
+        instrument legislation.gov.uk won't serve gets exactly the same structural
+        parse, unapplied-effects edges and schedule pinpoints as a harvested one."""
         parsed = parse("akoma-ntoso", raw)
-        title = parsed.title or stub.stable_id
+        title = parsed.title or stable_id
         relations = list(parsed.relations)
         extra: dict = {"format": "akoma-ntoso"}
+        stub = _Ns(stable_id=stable_id,
+                   landing_url=landing_url or f"{BASE_URL}/{stable_id}",
+                   hints={"base_id": base_id, "version_date": version_date})
         # point-in-time copy → mark the title and link to the base instrument
         base_id = stub.hints.get("base_id")
         # Outstanding amendments (§0): the editorial lag is in the XML. Skip this for

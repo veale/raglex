@@ -268,6 +268,150 @@ def repair_anachronistic_eu_citation(cat) -> dict:
     return {"edges_deleted": edges, "citations_deleted": cites}
 
 
+# A judgment can only cite BACKWARDS in time. Where a case is dated well before
+# the case it cites, the edge is proof of a defect — a misattributed citation, or
+# one of the two documents dated wrong. Unlike probe_anachronistic_eu_citation
+# this reads the HELD document's own date rather than a CELEX year, so it covers
+# national case law too.
+#
+# Restricted to case→case ON PURPOSE. For legislation, decision_date is the date
+# of the CONSOLIDATED VERSION, not of enactment — Canada's SOR/87-7 is stored as
+# 2006-03-22, its last consolidation — so a 1995 judgment citing it is *correctly*
+# "citing forward". Including legislation targets reported 188,033 rows, 160,482
+# of them one entirely legitimate Canadian consolidation pattern, which buried the
+# 5,639 real defects. The invariant only holds between point-in-time documents.
+#
+# A year of slack is deliberate. Judgments are routinely reported, and sometimes
+# dated in the corpus, a little after they are handed down; an Opinion delivered
+# in December and cited by a judgment dated January is normal. Beyond a year the
+# explanation is a defect, not a calendar.
+def _year4(cat, col: str) -> str:
+    """The 4-digit year of a date column, as SQL valid on both backends.
+    decision_date is TEXT on sqlite and DATE on postgres, so it is cast to text
+    before slicing."""
+    return f"substr(CAST({col} AS CHAR(10)), 1, 4)"
+
+
+def _year4_guard(cat, col: str) -> str:
+    """…and only where those four characters really are digits, so a malformed
+    stored date can't crash the cast."""
+    y = _year4(cat, col)
+    return (f"{y} GLOB '[0-9][0-9][0-9][0-9]'" if cat.backend == "sqlite"
+            else f"{y} ~ '^[0-9]{{4}}$'")
+
+
+def _forward_citation_sql(cat) -> tuple[str, str]:
+    sy, dy = _year4(cat, "s.decision_date"), _year4(cat, "d.decision_date")
+    gap = f"CAST({dy} AS INTEGER) - CAST({sy} AS INTEGER)"
+    return gap, f"""
+    FROM relations r
+    JOIN documents s ON s.stable_id = r.src_id
+    JOIN documents d ON d.stable_id = r.dst_id
+    WHERE r.resolution_status = 'resolved'
+      AND r.relationship_type <> 'suppressed'
+      AND r.src_id <> r.dst_id
+      AND s.doc_type IN ('judgment', 'decision', 'opinion')
+      AND d.doc_type IN ('judgment', 'decision', 'opinion')
+      AND s.decision_date IS NOT NULL AND d.decision_date IS NOT NULL
+      AND {_year4_guard(cat, 's.decision_date')}
+      AND {_year4_guard(cat, 'd.decision_date')}
+      AND {gap} > 1
+    """
+
+
+def probe_forward_citation(cat) -> ProbeResult:
+    gap, sql = _forward_citation_sql(cat)
+    n = _one(cat, f"SELECT COUNT(*) AS n {sql}")
+    samples = _rows(cat, f"""
+        SELECT r.src_id, s.decision_date AS src_date, s.source AS src_source,
+               r.dst_id, d.decision_date AS dst_date, d.source AS dst_source,
+               r.raw_citation_string, r.extracted_via, {gap} AS gap_years
+        {sql} ORDER BY {gap} DESC LIMIT {SAMPLE}""")
+    return ProbeResult(
+        "forward_citation",
+        "case citing another case decided >1yr AFTER it — impossible. Known "
+        "causes, in order of size: (1) reverse-oriented cited_by scaffold edges "
+        "[fixed: excluded from reads]; (2) a misdated document [see misdated_case]; "
+        "(3) a shared ECHR/EU application- or case-number alias collapsed to the "
+        "LATEST judgment on that application, so earlier cases citing the same "
+        "application resolve forward — the remaining cluster, needs a "
+        "date-aware alias resolver",
+        "critical", n, samples, repairable=False)
+
+
+# A judgment slug carries the neutral-citation year ("ewhc/admin/2025/1471" → 2025),
+# which is authoritative: that case was handed down in 2025. Where the stored
+# decision_date disagrees by more than a year, the DATE is wrong — usually a
+# free-text date field where a stray date-shaped run was parsed instead of the real
+# one (R (Tompson) v SSJ, a 2025 case, was stored as 1202). This is the upstream
+# cause of most forward_citation hits, so it's worth fixing at the source date.
+def _slug_year_mismatch_sql(cat) -> str:
+    # extract the /YYYY/ segment from the slug; both backends via regexp/substr
+    if cat.backend == "sqlite":
+        # sqlite lacks regexp_replace; a LIKE-guard plus a Python-side recheck is
+        # used by the probe, so here we only need a broad candidate filter
+        slug_ok = "stable_id GLOB '*/[12][0-9][0-9][0-9]/*'"
+    else:
+        slug_ok = "stable_id ~ '/(19|20)[0-9]{2}/'"
+    return f"""
+    FROM documents
+    WHERE doc_type IN ('judgment', 'decision', 'opinion')
+      AND decision_date IS NOT NULL
+      AND {slug_ok}
+      AND {_year4_guard(cat, 'decision_date')}
+    """
+
+
+def _slug_year(stable_id: str) -> int | None:
+    import re as _re
+
+    m = _re.search(r"/((?:19|20)\d{2})/", f"/{stable_id}/")
+    return int(m.group(1)) if m else None
+
+
+def _misdated_rows(cat, limit: int | None = None) -> list[dict]:
+    """Held case-law docs whose stored year contradicts their slug's citation year
+    by more than one. The slug is authoritative; the date is the wrong end."""
+    sql = _slug_year_mismatch_sql(cat)
+    cap = f" LIMIT {limit}" if limit else ""
+    rows = _rows(cat, f"SELECT stable_id, decision_date, source, title {sql}{cap}")
+    out = []
+    for r in rows:
+        sy = _slug_year(r["stable_id"])
+        dy = str(r["decision_date"])[:4]
+        if sy and dy.isdigit() and abs(sy - int(dy)) > 1:
+            r["slug_year"] = sy
+            out.append(r)
+    return out
+
+
+def probe_misdated_case(cat) -> ProbeResult:
+    hits = _misdated_rows(cat)
+    return ProbeResult(
+        "misdated_case",
+        "case-law documents whose stored year contradicts the neutral-citation year "
+        "in their own slug — a mis-parsed free-text date (the direct cause of most "
+        "forward_citation hits); the slug year is authoritative",
+        "critical", len(hits), hits[:SAMPLE], repairable=True)
+
+
+def repair_misdated_case(cat) -> dict:
+    """Null the contradicted decision_date so it stops poisoning the time-ordering
+    (a wrong date is worse than none — the harvest can backfill a right one). Never
+    guesses a replacement; bounded to the probe's own predicate; re-runnable."""
+    hits = _misdated_rows(cat)
+    cleared = 0
+    with cat._atomic():
+        for i in range(0, len(hits), 500):
+            chunk = hits[i:i + 500]
+            qs = ",".join("?" * len(chunk))
+            cur = cat.conn.execute(
+                f"UPDATE documents SET decision_date = NULL "
+                f"WHERE stable_id IN ({qs})", [h["stable_id"] for h in chunk])
+            cleared += cur.rowcount if cur.rowcount and cur.rowcount > 0 else len(chunk)
+    return {"dates_cleared": len(hits)}
+
+
 def probe_never_extracted(cat) -> ProbeResult:
     # the live audit found judgments with full text and ZERO citation rows —
     # extraction never ran (an import path that skipped it). By source, because
@@ -311,6 +455,8 @@ PROBES = (
     probe_pending_but_held,
     probe_alias_dangling,
     probe_anachronistic_eu_citation,
+    probe_forward_citation,
+    probe_misdated_case,
     probe_never_extracted,
     probe_duplicate_spans,
 )
@@ -400,6 +546,7 @@ REPAIRS = {
     # side; the carry-forward repair clears the adjacent cases, and what remains
     # deserves eyes before deletion — so no blind repair for it.
     "self_citation": repair_self_citation,
+    "misdated_case": repair_misdated_case,
 }
 
 

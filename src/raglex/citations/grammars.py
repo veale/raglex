@@ -140,13 +140,17 @@ def _ecli(m: "re.Match[str]") -> Normalised:
 
 
 # -- grammars ---------------------------------------------------------------
-# Full ECLI (any country) OR a bare EU ECLI without the "ECLI:" prefix — the latter
-# turns up when a PDF drops the prefix or a citation style writes "EU:C:2020:559". The
-# bare form is restricted to EU (EU:C/T/F) so it can't swallow arbitrary "XX:YY:…" text.
+# Full ECLI (any country) OR a bare ECLI without the "ECLI:" prefix — the latter
+# turns up when a PDF drops the prefix or a citation style writes "EU:C:2020:559".
+# The bare forms are an allow-list (EU:C/T/F, and CE:ECHR for Strasbourg) so the
+# pattern can't swallow arbitrary "XX:YY:…" text. CE:ECHR is how CJEU opinions cite
+# the ECtHR — "K.U. v. Finland (CE:ECHR:2008:1202JUD000287202, § 48)" — and the
+# corpus already holds those judgments under exactly that ECLI, so recognising the
+# bare form links them straight through instead of leaving a dangling reference.
 register(Grammar(
     "ecli", "case",
     re.compile(
-        r"(?:ECLI:[A-Z]{2}:[A-Z0-9]+|(?<![A-Za-z])EU:[CTF])"
+        r"(?:ECLI:[A-Z]{2}:[A-Z0-9]+|(?<![A-Za-z])(?:EU:[CTF]|CE:ECHR))"
         r":\d{4}:[A-Z0-9]+(?:[._-][A-Z0-9]+)*",
         re.IGNORECASE,
     ),

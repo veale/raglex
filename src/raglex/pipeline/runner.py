@@ -90,6 +90,7 @@ class Pipeline:
         adapter: Adapter,
         *,
         backfill: bool = False,
+        refetch_held: bool = False,
         since: str | None = None,
         max_pages: int | None = None,
         ignore_watermark: bool = False,
@@ -98,7 +99,12 @@ class Pipeline:
         on_progress=None,
     ) -> RunStats:
         """Run one source. ``backfill`` ignores the stored watermark and pages deep
-        from ``since`` (§5). ``ignore_watermark`` runs with NO date cursor at all and
+        from ``since`` (§5); it now SKIPS already-held documents (unchanged) so a
+        "get everything" sweep advances into the never-fetched tail instead of
+        re-downloading the corpus on every run. ``refetch_held`` opts back into
+        re-fetching held docs — for a *targeted* re-pull that needs the current
+        upstream state (the effects-refresh worker re-reads outstanding amendments).
+        ``ignore_watermark`` runs with NO date cursor at all and
         doesn't advance the watermark — for a targeted **search** (e.g. discover-citing),
         which isn't an incremental feed crawl, so the newest-first cutoff would otherwise
         drop every older result. ``record_health=False`` skips the consecutive-failures
@@ -129,14 +135,31 @@ class Pipeline:
                 # otherwise only fires on the payload hash, *after* the fetch). A query/
                 # full-text harvest — e.g. discover-citing — returns mostly docs already in
                 # the corpus, so this turns 50 needless fetches into 50 cheap PK lookups.
-                # A backfill still re-fetches (to pick up upstream revisions).
+                #
+                # This applies on BACKFILL too. A "get everything" pass that re-downloaded
+                # the whole corpus on every run (the NZ Supreme Court complaint) never made
+                # progress into the never-fetched tail — the point of a backfill is to reach
+                # what we DON'T hold, so already-held items should fall straight through. A
+                # genuine upstream revision is still picked up: the contenthash-changed
+                # branch below re-fetches those.
+                #
+                # The held check is by id, then by landing URL — the latter for adapters
+                # whose stub id is provisional until the document is fetched (NZ), where an
+                # id lookup can never match a doc already keyed by its real neutral citation.
                 refreshed = False
-                if not backfill and stub.stable_id and self.catalogue.get_document(stub.stable_id) is not None:
+                held_id = None
+                if refetch_held:
+                    pass  # targeted re-pull: fetch even held docs (effects refresh)
+                elif stub.stable_id and self.catalogue.get_document(stub.stable_id) is not None:
+                    held_id = stub.stable_id
+                elif stub.landing_url:
+                    held_id = self.catalogue.document_id_by_landing_url(stub.landing_url)
+                if held_id is not None:
                     # …unless the feed says the content CHANGED: a differing contenthash
                     # (FCL's change signal) means the held copy is a superseded revision —
                     # re-fetch it. No hash on either side → assume unchanged (the old rule).
                     feed_hash = stub.hints.get("contenthash")
-                    held_hash = (self.catalogue.document_meta(stub.stable_id) or {}).get(
+                    held_hash = (self.catalogue.document_meta(held_id) or {}).get(
                         "contenthash") if feed_hash else None
                     if not (feed_hash and held_hash and feed_hash != held_hash):
                         stats.deduped += 1

@@ -531,6 +531,19 @@ class Catalogue:
             "SELECT * FROM documents WHERE stable_id = ?", (stable_id,)
         ).fetchone()
 
+    def document_id_by_landing_url(self, url: str | None) -> str | None:
+        """The stable_id of a held document with this landing URL, if any. The dedup
+        gate needs it for adapters whose discovery stub carries only a PROVISIONAL id
+        (the NZ courts feed keys a stub by URL; the real id is the neutral citation
+        read out of the fetched PDF), so a stub can't be matched by id before fetch —
+        but its URL is stable and already stored."""
+        if not url:
+            return None
+        row = self.conn.execute(
+            "SELECT stable_id FROM documents WHERE landing_url = ? LIMIT 1", (url,)
+        ).fetchone()
+        return row["stable_id"] if row else None
+
     def all_stable_ids(self) -> set[str]:
         """Every document id (one cheap single-column scan) — used to diff before/after a
         harvest so only the *newly* added docs get the expensive extract/classify pass."""
@@ -1153,7 +1166,8 @@ class Catalogue:
         """Incoming resolved edges — what cites/treats this document (citing cases,
         commentary). The other half of 1-hop graph expansion (§6c)."""
         return self.conn.execute(
-            "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved'",
+            "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
+            "AND relationship_type <> 'cited_by'",  # reverse-oriented scaffold
             (dst_id,),
         ).fetchall()
 
@@ -1178,6 +1192,9 @@ class Catalogue:
         "SELECT DISTINCT src_id, dst_id FROM relations "
         "WHERE resolution_status = 'resolved' AND dst_id IS NOT NULL "
         "AND extracted_via <> 'inferred' AND relationship_type <> 'suppressed' "
+        # cited_by edges are reverse-oriented harvest scaffolds (src=cited,
+        # dst=citer) — counting them feeds PageRank backwards
+        "AND relationship_type <> 'cited_by' "
         # self-loops excluded: an instrument's internal cross-references (429k
         # structured src==dst edges live) must not feed its own PageRank
         "AND src_id <> dst_id"
@@ -1250,6 +1267,7 @@ class Catalogue:
         extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
         return self.conn.execute(
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
+            "AND relationship_type <> 'cited_by' "  # reverse-oriented scaffold
             f"AND src_id <> dst_id {extra}LIMIT ?", (doc_id, limit)).fetchall()
 
     def co_cited_with(self, ids: list[str], *, limit: int = 15,
@@ -1326,6 +1344,7 @@ class Catalogue:
             FROM relations r LEFT JOIN doc_authority a ON a.doc_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
               AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+              AND r.relationship_type <> 'cited_by'  -- reverse-oriented scaffold
             ORDER BY src_pagerank DESC LIMIT ?
             """, (*ids, limit)).fetchall()
 
@@ -1352,6 +1371,8 @@ class Catalogue:
         qs = ",".join("?" * len(ids))
         base = (f"FROM relations r WHERE r.dst_id IN ({qs}) "
                 "AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred' "
+                # exclude the reverse-oriented cited_by discovery scaffold
+                "AND r.relationship_type <> 'cited_by' "
                 "AND r.src_id <> r.dst_id")
         total = self.conn.execute(
             f"SELECT COUNT(DISTINCT r.src_id) AS n {base}", ids).fetchone()["n"]
@@ -1376,6 +1397,7 @@ class Catalogue:
             FROM relations r JOIN documents d ON d.stable_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
               AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+              AND r.relationship_type <> 'cited_by'
             GROUP BY d.doc_type
             """, ids).fetchall()
         return {r["doc_type"]: r["n"] for r in rows}
@@ -1394,6 +1416,7 @@ class Catalogue:
             FROM relations r JOIN documents d ON d.stable_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
               AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+              AND r.relationship_type <> 'cited_by'
             GROUP BY r.dst_id, d.doc_type
             """, ids).fetchall()
         out: dict[str, dict[str, int]] = {}
@@ -1414,6 +1437,7 @@ class Catalogue:
             FROM relations r LEFT JOIN doc_authority a ON a.doc_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
               AND r.extracted_via <> 'inferred'
+              AND r.relationship_type <> 'cited_by'  -- reverse-oriented scaffold
             GROUP BY r.src_id ORDER BY pagerank DESC LIMIT ?
             """,
             (*ids, limit),
@@ -1826,7 +1850,13 @@ class Catalogue:
                     " AND NOT EXISTS (SELECT 1 FROM citations c"
                     " WHERE c.src_id = d.stable_id AND c.created_at >= ?)")
             params.extend([cutoff, cutoff])
-        sql += " ORDER BY d.stable_id"
+        # Never-extracted documents FIRST, then least-recently-extracted, so an
+        # interrupted or time-boxed run always makes progress on what has no edges
+        # yet before re-touching what already does. NULLS FIRST is honoured by both
+        # backends (sqlite ≥3.30, postgres). A doc extracted before the durable
+        # stamp existed reads as NULL and sorts early — it gets one stamped pass,
+        # after which it orders by its real recency.
+        sql += " ORDER BY d.last_extracted_at ASC NULLS FIRST, d.stable_id"
         if limit:
             sql += " LIMIT ?"
             params.append(limit)

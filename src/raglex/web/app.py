@@ -256,6 +256,15 @@ def create_app(config: Config | None = None) -> FastAPI:
                            "only_unextracted",
                            # skip documents extracted within the last N days (restart-cheap)
                            "stale_days")}
+        # A full relink defaults to skipping anything already re-extracted in the last
+        # week: that's the weekly-maintenance cadence, and without it a re-launched or
+        # repeated run redoes the whole corpus instead of advancing into what's stale.
+        # The resume set (only_unextracted) is by definition never-scanned, so it isn't
+        # date-filtered. Pass stale_days=0 to force a genuine redo of everything.
+        if "stale_days" not in params and not params.get("only_unextracted"):
+            params["stale_days"] = 7
+        if params.get("stale_days") in (0, "0"):
+            params.pop("stale_days")          # explicit override → redo everything
         scope = params.get("source") or (
             "judgments" if params.get("doc_types") == ["judgment"] else "all docs")
         if params.get("stale_days"):
@@ -290,6 +299,15 @@ def create_app(config: Config | None = None) -> FastAPI:
         """One-off after upgrade: populate candidate_id/raw_fold on pre-existing edges so
         the set-based resolver and the SQL worklist see the whole graph."""
         return _start_job("backfill-edge-keys", "backfill edge candidate ids")
+
+    @app.post("/jobs/backfill-eu-stubs")
+    def job_backfill_eu_stubs_ep(payload: dict = Body(default={})) -> dict:
+        """Re-fetch EU instruments held only as metadata stubs. A transient failure at
+        harvest time left ~7,400 acts with no text and nothing ever retried them —
+        including heavily-cited ones (31987D0373, cited 45×) whose HTML was there all
+        along. Re-runnable; instruments still absent upstream are left as they are."""
+        return _start_job("backfill-eu-stubs", "re-fetch EU metadata-only stubs",
+                          {"limit": int((payload or {}).get("limit") or 500)})
 
     @app.post("/jobs/rebuild-citation-counts")
     def job_rebuild_counts_ep() -> dict:
@@ -777,6 +795,18 @@ def create_app(config: Config | None = None) -> FastAPI:
             data=data, filename=file.filename or "upload.bin", doc_type=doc_type,
             title=title, link_to=link_to, relationship=relationship,
         )
+
+    @app.post("/import/legislation-akn")
+    async def import_legislation_akn_ep(
+        file: UploadFile = File(...),
+        stable_id: str | None = Form(None),
+    ) -> dict:
+        """Import a hand-supplied Akoma Ntoso legislation file (e.g. an act
+        legislation.gov.uk won't serve). Keys under the AKN's own FRBRWork id, or a
+        supplied one (ukpga/2006/46). Full structural parse — schedules and all."""
+        data = await file.read()
+        return facade.import_legislation_akn(
+            data=data, stable_id=stable_id, filename=file.filename)
 
     @app.post("/import/url")
     def import_url_ep(payload: dict = Body(...)) -> dict:
