@@ -60,6 +60,12 @@ LII_ASSIGNED = "lii"     # AustLII/NZLII/Laws.Africa-style pseudo-neutral, or a 
 @dataclass(frozen=True, slots=True)
 class Court:
     code: str
+    # CONVENTION: `name` is the natural-language name the UI shows wherever a
+    # court/body appears (Explore's courts rail, drill entries, facet sentences)
+    # — users see "Immigration & Asylum Tribunal", never "ukaitur". Every court
+    # code a future adapter introduces MUST be registered here with a real name;
+    # an unregistered code falls back to a prettified slug, which reads wrong.
+    # (Reporter series are NOT courts and never belong in this registry.)
     name: str
     jurisdiction: str  # ISO-ish: GB, IE, CA, AU, NZ, IN, EU …
     adapter: str | None = None  # the source adapter that can fetch it, if any

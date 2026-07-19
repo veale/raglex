@@ -507,8 +507,13 @@ class Facade:
                 cur = best.get(r["src_id"])
                 if cur is None or _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
                     best[r["src_id"]] = dict(r)
+            # rank the citing documents by their own network authority (PageRank),
+            # so the cited-by list leads with the citers that matter
+            auth = cat.authority_for(list(best))
+            ranked = sorted(best.items(),
+                            key=lambda kv: -(auth.get(kv[0], {}).get("pagerank") or 0.0))
             incoming = []
-            for sid, r in list(best.items())[:200]:
+            for sid, r in ranked[:200]:
                 src = cat.get_document(sid)
                 # OSCOLA citation for the citing document, so "cited by / mentioned by"
                 # reads in proper form. meta_json is on the row → no extra query.
@@ -516,6 +521,7 @@ class Facade:
                 incoming.append({**r, "src_title": src["title"] if src else None,
                                  "src_court": src["court"] if src else None,
                                  "src_date": src["decision_date"] if src else None,
+                                 "src_authority": auth.get(sid, {}).get("pagerank") or 0.0,
                                  "src_oscola": src_oscola})
             meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
             # Summary line: distinct authorities this document cites, split into cases vs
@@ -1047,12 +1053,41 @@ class Facade:
         "sg-legislation": "Singapore Statutes Online", "hk-legislation": "HK e-Legislation",
         "in-caselaw": "Indian Kanoon", "user-import": "Manual imports",
         "ci-caselaw": "Channel Islands", "offshore-caselaw": "Offshore courts",
+        "uk-grc": "FTT (General Regulatory Chamber)",
     }
+    # short tokens in a prettified slug are almost always initialisms — "uk-grc"
+    # must read "UK GRC", never "Uk Grc"
+    _ACRONYM_TOKENS = {"uk", "eu", "us", "hk", "nz", "sg", "nl", "ie", "ca", "au", "in",
+                       "grc", "echr", "hol", "oss", "osa", "dma", "dsa", "ico", "rtf",
+                       "html", "xml", "api", "sso", "frl", "a29wp", "fcl"}
 
     def source_label(self, source: str) -> str:
         if source in self._SOURCE_LABELS:
             return self._SOURCE_LABELS[source]
-        return (source or "").replace("-", " ").replace("_", " ").title()
+        words = (source or "").replace("_", "-").split("-")
+        return " ".join(w.upper() if w.lower() in self._ACRONYM_TOKENS or len(w) <= 2
+                        else w.capitalize() for w in words if w)
+
+    # registry annotations that are for citation-matching, not for humans
+    _COURT_NOTE_RE = None
+
+    def court_label(self, code: str) -> str:
+        """Natural-language name for a court/body slug ('ukaitur' → 'Immigration
+        & Asylum Tribunal'), from the citations court registry. CONVENTION: every
+        court code a new adapter introduces must have a name in
+        citations/courts.py — the UI renders these labels, never raw slugs, so an
+        unnamed code shows up prettified-but-wrong until it's registered."""
+        import re as _re
+
+        from .citations.courts import classify, lookup
+
+        if Facade._COURT_NOTE_RE is None:
+            Facade._COURT_NOTE_RE = _re.compile(
+                r"\s*\((?:BAILII legacy code|pre-\d{4}|unidentified)\)\s*$")
+        c = lookup((code or "").upper()) or classify((code or "").upper())
+        if c and c.name:
+            return Facade._COURT_NOTE_RE.sub("", c.name)
+        return self.source_label(code)
 
     def _jurisdiction_of(self, source: str) -> str:
         s = (source or "").lower()
@@ -1087,17 +1122,30 @@ class Facade:
                 "WHERE r.resolution_status = 'resolved' AND r.src_id <> r.dst_id "
                 "GROUP BY d.source").fetchall()}
             courts = cat.conn.execute(
-                "SELECT source, court, COUNT(*) AS n FROM documents "
-                "WHERE court IS NOT NULL AND court <> '' GROUP BY source, court").fetchall()
+                "SELECT source, court, doc_type, COUNT(*) AS n FROM documents "
+                "WHERE court IS NOT NULL AND court <> '' "
+                "GROUP BY source, court, doc_type").fetchall()
 
             juris: dict[str, dict] = {}
+
+            def _blank_slice() -> dict:
+                return {"years": {}, "courts": {}, "sources": {}}
 
             def _bucket(source: str) -> dict:
                 j = self._jurisdiction_of(source)
                 return juris.setdefault(j, {
                     "jurisdiction": j, "total": 0, "cases": 0, "legislation": 0,
                     "guidance": 0, "other": 0, "with_text": 0, "embedded": 0,
-                    "years": {}, "sources": {}, "citations": 0, "courts": {}})
+                    "years": {}, "sources": {}, "citations": 0, "courts": {},
+                    # per-kind rail data: selecting Cases/Legislation/Guidance in
+                    # the drill re-scopes the timeline, courts and sources too
+                    "kinds": {k: _blank_slice() for k in ("cases", "legislation", "guidance")}})
+
+            def _kind_of(doc_type: str) -> str:
+                return ("cases" if doc_type in self._CASE_TYPES
+                        else "legislation" if doc_type == "legislation"
+                        else "guidance" if doc_type == "guidance"
+                        else "other")
 
             for r in rows:
                 b = _bucket(r["source"])
@@ -1106,19 +1154,24 @@ class Facade:
                 b["with_text"] += r["with_text"] or 0
                 b["embedded"] += r["embedded"] or 0
                 b["sources"][r["source"]] = b["sources"].get(r["source"], 0) + n
-                kind = ("cases" if r["doc_type"] in self._CASE_TYPES
-                        else "legislation" if r["doc_type"] == "legislation"
-                        else "guidance" if r["doc_type"] == "guidance"
-                        else "other")
+                kind = _kind_of(r["doc_type"])
                 b[kind] += n
+                ks = b["kinds"].get(kind)
+                if ks is not None:
+                    ks["sources"][r["source"]] = ks["sources"].get(r["source"], 0) + n
                 yr = r["yr"]
                 if yr and yr.isdigit() and 1200 <= int(yr) <= 2100:
                     b["years"][yr] = b["years"].get(yr, 0) + n
+                    if ks is not None:
+                        ks["years"][yr] = ks["years"].get(yr, 0) + n
             for src, n in dens.items():
                 _bucket(src)["citations"] += n
             for r in courts:
                 b = _bucket(r["source"])
                 b["courts"][r["court"]] = b["courts"].get(r["court"], 0) + r["n"]
+                ks = b["kinds"].get(_kind_of(r["doc_type"]))
+                if ks is not None:
+                    ks["courts"][r["court"]] = ks["courts"].get(r["court"], 0) + r["n"]
 
             # top authority per jurisdiction: one indexed pass over the roll-up
             top_auth = cat.conn.execute(
@@ -1136,16 +1189,28 @@ class Facade:
                         "oscola": _oscola_cite(r, _row_meta(r)),
                     })
 
+            # report series (WLR, AC, …) are neither courts nor bodies — keep them
+            # out of the facet even if an import wrote one into the court column
+            from .citations.reporters import REPORT_SERIES
+            _SERIES = {s.upper() for s in REPORT_SERIES}
+
+            def _finish(slice_: dict) -> None:
+                slice_["courts"] = sorted(
+                    ({"court": c, "label": self.court_label(c), "n": n}
+                     for c, n in slice_["courts"].items()
+                     if c.upper() not in _SERIES),
+                    key=lambda x: -x["n"])[:12]
+                slice_["sources"] = sorted(
+                    ({"source": s, "label": self.source_label(s), "n": n}
+                     for s, n in slice_["sources"].items()),
+                    key=lambda x: -x["n"])
+
             out = []
             for b in sorted(juris.values(), key=lambda x: -x["total"]):
                 b["density"] = round(b["citations"] / b["total"], 1) if b["total"] else 0
-                b["courts"] = sorted(
-                    ({"court": c, "n": n} for c, n in b["courts"].items()),
-                    key=lambda x: -x["n"])[:12]
-                b["sources"] = sorted(
-                    ({"source": s, "label": self.source_label(s), "n": n}
-                     for s, n in b["sources"].items()),
-                    key=lambda x: -x["n"])
+                _finish(b)
+                for ks in b["kinds"].values():
+                    _finish(ks)
                 b.setdefault("top_authority", [])
                 b.pop("citations", None)
                 out.append(b)
@@ -1206,7 +1271,13 @@ class Facade:
             rows = cat.conn.execute(
                 f"""
                 SELECT d.*, COALESCE(a.pagerank, 0) AS pagerank, a.percentile,
-                       COALESCE((SELECT MAX(cc.occurrences) FROM citation_counts cc
+                       -- cited_by = DISTINCT citing documents on the resolved graph
+                       -- (alias-aware: report citations funnel in), falling back to
+                       -- the string roll-up for docs outside the authority table.
+                       -- The roll-up alone showed ICS [1997] UKHL 28 as "cited by 30"
+                       -- when 558 documents cite it via its WLR/AC report forms.
+                       COALESCE(a.in_degree,
+                                (SELECT MAX(cc.occurrences) FROM citation_counts cc
                                  WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by
                 FROM documents d LEFT JOIN doc_authority a ON a.doc_id = d.stable_id
                 WHERE {' AND '.join(clauses)}
@@ -1219,6 +1290,7 @@ class Facade:
                 item = {
                     "id": r["stable_id"], "title": r["title"], "doc_type": r["doc_type"],
                     "court": r["court"],
+                    "court_label": self.court_label(r["court"]) if r["court"] else None,
                     "date": str(r["decision_date"])[:10] if r["decision_date"] else None,
                     "percentile": r["percentile"], "cited_by": r["cited_by"],
                     "oscola": _oscola_cite(r, _row_meta(r)),
@@ -1308,6 +1380,61 @@ class Facade:
                 fixed += 1
         self._invalidate_caches()
         return {"scanned": done, "titled": fixed}
+
+    def repair_led_context(self, *, on_progress=None) -> dict:
+        """Re-apply the LED acronym guard to STORED citations: a bare 'LED' match
+        without a preceding "the/of" is prose ("EVIDENCE LED AT TRIAL"), not
+        Directive 2016/680. The anachronism repair caught the pre-2016 slice;
+        this catches the post-2016 false matches by re-reading each span's
+        context. When a document loses its last real LED citation, its dependent
+        2016/680 edges and carry-forward children go too. One-off, re-runnable."""
+        import re as _re
+
+        guard = _re.compile(r"(?i)\b(?:the|of)\s+$")
+        with self._open() as (cat, _rs, ts):
+            rows = cat.conn.execute(
+                "SELECT citation_id, src_id, char_start FROM citations "
+                "WHERE raw = 'LED' AND method = 'eu_named'").fetchall()
+            by_doc: dict[str, list] = {}
+            for r in rows:
+                by_doc.setdefault(r["src_id"], []).append(r)
+            deleted = kept = 0
+            cleared_docs: list[str] = []
+            for i, (sid, items) in enumerate(by_doc.items()):
+                if on_progress and i % 200 == 0:
+                    on_progress(stage="LED context", done=i, total=len(by_doc))
+                doc = cat.get_document(sid)
+                try:
+                    text = ts.get(doc["payload_hash"]) if doc and doc["payload_hash"] else None
+                except OSError:
+                    text = None
+                bad_ids = []
+                doc_kept = 0
+                for r in items:
+                    s = r["char_start"]
+                    ok = bool(text) and s is not None and guard.search(text[max(0, s - 12):s])
+                    if ok:
+                        doc_kept += 1
+                    else:
+                        bad_ids.append(r["citation_id"])
+                if bad_ids:
+                    qs = ",".join("?" * len(bad_ids))
+                    cat.conn.execute(f"DELETE FROM citations WHERE citation_id IN ({qs})", bad_ids)
+                    deleted += len(bad_ids)
+                kept += doc_kept
+                if doc_kept == 0:
+                    # nothing real remains: drop the carry-forward children + edges
+                    cat.conn.execute(
+                        "DELETE FROM citations WHERE src_id = ? AND candidate_id = '32016L0680'",
+                        (sid,))
+                    cat.conn.execute(
+                        "DELETE FROM relations WHERE src_id = ? AND extracted_via IN ('regex', 'inferred') "
+                        "AND (dst_id = '32016L0680' OR candidate_id = '32016L0680')", (sid,))
+                    cleared_docs.append(sid)
+            cat.conn.commit()
+        self._invalidate_caches()
+        return {"docs_checked": len(by_doc), "false_led_deleted": deleted,
+                "kept": kept, "docs_fully_cleared": len(cleared_docs)}
 
     def run_probes(self, *, only: list[str] | None = None) -> list[dict]:
         """Corpus-integrity probes (§8): invariant checks over the citation

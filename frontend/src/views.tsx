@@ -1480,8 +1480,12 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
       <div className="panel">
         <h2 className="doc-title" style={{ marginTop: 0 }}><Oscola c={doc.oscola} fallback={d.title || d.stable_id} /></h2>
         <div className="doc-summary">
-          <a className="summary-stat" title="Later documents that cite this one"
-            onClick={() => tray.push({ kind: "mentions", target: d.stable_id, label: "Citations to this decision" })}>Citations to this decision <b>{doc.cited_by_count ?? 0}</b></a>
+          <a className="summary-stat" title="Later documents that cite this one — the full list is at the foot of the page"
+            onClick={() => {
+              const el = document.getElementById("cited-by-panel");
+              if (el) { el.scrollIntoView({ behavior: "smooth", block: "start" }); el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 1500); }
+              else tray.push({ kind: "mentions", target: d.stable_id, label: "Citations to this decision" });
+            }}>Cited by <b>{doc.cited_by_count ?? 0}</b> ↓</a>
           <span className="summary-sep">|</span>
           <a className="summary-stat" title="Distinct cases this document cites"
             onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "cases", label: "Cases cited" })}>Cases cited <b>{doc.cases_cited_count ?? 0}</b></a>
@@ -1520,11 +1524,12 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           </div>
         )}
       </div>
-      {(doc.incoming || []).length > 0 && <CitedByPanel incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} />}
       <div className="panel">
         <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
       </div>
+      {(doc.incoming || []).length > 0 &&
+        <div id="cited-by-panel"><CitedByPanel incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} /></div>}
       <RelatedPanel id={d.stable_id} open={open} />
       {d.doc_type === "legislation" && <EffectsBanner id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <ChangesPanel id={d.stable_id} open={open} />}
@@ -1558,6 +1563,13 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
 function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: number; inferred?: number }) {
   const peek = usePeek();
   const open = (id: string, a?: string) => peek.push({ kind: "doc", id, anchor: a });
+  // ordered by the citing document's own network authority (server default);
+  // the discreet control swaps to recency within the loaded slice
+  const [sort, setSort] = useState<"authority" | "newest" | "oldest">("authority");
+  const shown = [...incoming].sort((a, b) =>
+    sort === "authority" ? (b.src_authority || 0) - (a.src_authority || 0)
+    : sort === "newest" ? String(b.src_date || "").localeCompare(String(a.src_date || ""))
+    : String(a.src_date || "9999").localeCompare(String(b.src_date || "9999")));
   const byType: Record<string, number> = {};
   for (const r of incoming) byType[r.relationship_type] = (byType[r.relationship_type] || 0) + 1;
   const order = ["overrules", "distinguishes", "applies", "follows", "considers", "mentions"];
@@ -1566,6 +1578,12 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   const treat = (t: string) => (t === "mentions" ? "mentioned by" : t);
   return (
     <div className="panel">
+      <select className="sort-select" style={{ float: "right" }} value={sort} aria-label="ordering"
+        onChange={(e) => setSort(e.target.value as any)}>
+        <option value="authority">most authoritative</option>
+        <option value="newest">newest first</option>
+        <option value="oldest">oldest first</option>
+      </select>
       <h3>Cited by <span className="muted">({count ?? incoming.length}) — later documents that cite this one, and how</span>
         {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" "}
           <Info t={`Plus ${inferred} inferred link${inferred === 1 ? "" : "s"} — heuristic carry-forwards (a bare "Section 12" pinned to the last-named Act), not citations anyone made. Excluded from the count above so they don't inflate it.`} />
@@ -1577,7 +1595,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
         ))}
       </div>
       <table><tbody>
-        {incoming.slice(0, 50).map((r, i) => (
+        {shown.slice(0, 50).map((r, i) => (
           <tr key={i}>
             <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
             <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>

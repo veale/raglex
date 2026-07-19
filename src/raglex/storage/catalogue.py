@@ -1215,14 +1215,17 @@ class Catalogue:
         return len(rows)
 
     def authority_for(self, ids: list[str]) -> dict[str, dict]:
-        """Authority rows for a set of document ids (missing → absent)."""
+        """Authority rows for a set of document ids (missing → absent). Chunked —
+        callers pass up to a heavily-cited authority's whole citer set."""
         ids = [i for i in dict.fromkeys(ids) if i]
-        if not ids:
-            return {}
-        qs = ",".join("?" * len(ids))
-        rows = self.conn.execute(
-            f"SELECT * FROM doc_authority WHERE doc_id IN ({qs})", ids).fetchall()
-        return {r["doc_id"]: dict(r) for r in rows}
+        out: dict[str, dict] = {}
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            qs = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT * FROM doc_authority WHERE doc_id IN ({qs})", chunk).fetchall()
+            out.update({r["doc_id"]: dict(r) for r in rows})
+        return out
 
     def neighbours_out(self, doc_id: str, *, limit: int = 200,
                        include_inferred: bool = False) -> list[sqlite3.Row]:

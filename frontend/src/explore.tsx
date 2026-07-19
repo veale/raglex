@@ -88,23 +88,27 @@ function Spark({ years, height = 26, width = 132, brush, onBrush, active }:
   );
 }
 
-// Proportional kind bar with IN-SITU labels: each segment wide enough to carry
-// its own name does so inside the segment (the standard treatment for stacked
-// bars); narrower segments keep the tooltip. No separate legend needed.
+// Proportional kind bar, colour-only — the numbers live in a small caption
+// beneath it ("case law (281k) · legislation (99k)"), each with its colour dot,
+// so nothing ever has to fit inside a segment.
 function KindBar({ r }: { r: ShapeRow }) {
+  const parts = KIND_COLOURS.filter(([k]) => ((r as any)[k] as number) > 0);
   return (
-    <div className="kindbar" title={KIND_COLOURS.map(([k, , label]) =>
-      `${label}: ${((r as any)[k] as number).toLocaleString()}`).join(" · ")}>
-      {KIND_COLOURS.map(([k, colour, label]) => {
-        const n = (r as any)[k] as number;
-        const frac = n / (r.total || 1);
-        if (frac <= 0.004) return null;
-        return (
-          <span key={k} className="kindseg" style={{ width: `${frac * 100}%`, background: colour }}>
-            {frac >= 0.18 && <i className="kindlabel">{label} {FMT(n)}</i>}
-          </span>
-        );
-      })}
+    <div className="kindwrap">
+      <div className="kindbar" title={parts.map(([k, , label]) =>
+        `${label}: ${((r as any)[k] as number).toLocaleString()}`).join(" · ")}>
+        {parts.map(([k, colour]) => {
+          const frac = ((r as any)[k] as number) / (r.total || 1);
+          return frac > 0.004 &&
+            <span key={k} className="kindseg" style={{ width: `${frac * 100}%`, background: colour }} />;
+        })}
+      </div>
+      <div className="kind-caption">
+        {parts.map(([k, colour, label]) => (
+          <span key={k}><i className="kind-dot" style={{ background: colour }} />
+            {label} ({FMT((r as any)[k] as number)})</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -140,10 +144,10 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 // The always-true sentence describing what the panel currently shows.
-function describe(j: string, f: Facets): string {
+function describe(j: string, f: Facets, courtLabel?: string): string {
   const bits = [`The ${SORT_LABEL[f.sort]} ${KIND_LABEL[f.kind] ?? f.kind}`];
   if (f.cites) bits.push("citing the document below");
-  if (f.court) bits.push(`in ${f.court}`);
+  if (f.court) bits.push(`in the ${courtLabel || f.court}`);
   if (f.years) bits.push(f.years[0] === f.years[1] ? `from ${f.years[0]}`
     : `from ${f.years[0]}–${f.years[1]}`);
   bits.push(f.cites ? "" : `— ${j}`);
@@ -151,9 +155,9 @@ function describe(j: string, f: Facets): string {
 }
 
 // --- the drill panel: documents of the current facet slice -------------------
-function DrillPanel({ jurisdiction, f, setF, open }:
+function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
   { jurisdiction: string; f: Facets; setF: (p: Partial<Facets>) => void;
-    open: (id: string, a?: string) => void }) {
+    open: (id: string, a?: string) => void; courtLabel?: string }) {
   const [data, setData] = useState<any | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -174,8 +178,15 @@ function DrillPanel({ jurisdiction, f, setF, open }:
   return (
     <div className="drill">
       <div className="drill-desc">
-        <span>{describe(jurisdiction, f)}</span>
+        <span className="drill-desc-text">{describe(jurisdiction, f, courtLabel)}</span>
         {busy && <span className="loading-chip">loading…</span>}
+        <select className="sort-select" value={f.sort} onChange={(e) => setF({ sort: e.target.value })}
+          title="ordering" aria-label="ordering">
+          <option value="authority">most authoritative</option>
+          <option value="cited">most cited</option>
+          <option value="newest">newest first</option>
+          <option value="oldest">oldest first</option>
+        </select>
       </div>
       {f.cites && (
         <div className="cites-crumb">
@@ -186,16 +197,12 @@ function DrillPanel({ jurisdiction, f, setF, open }:
       <div className="drill-head">
         <div className="seg-toggle mini-toggle">
           {[["", "All"], ["cases", "Cases"], ["legislation", "Legislation"], ["guidance", "Guidance"]].map(([v, l]) => (
-            <button key={v} className={f.kind === v ? "on" : ""} onClick={() => setF({ kind: v })}>{l}</button>
+            // switching kind re-scopes the rail, so a court picked under another
+            // kind may no longer exist — reset it for a predictable view
+            <button key={v} className={f.kind === v ? "on" : ""}
+              onClick={() => setF({ kind: v, court: null })}>{l}</button>
           ))}
         </div>
-        <select className="sort-select" value={f.sort} onChange={(e) => setF({ sort: e.target.value })}
-          title="ordering">
-          <option value="authority">Most authoritative</option>
-          <option value="cited">Most cited</option>
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-        </select>
       </div>
       {busy && !data && <p className="muted drill-loading">Loading the slice…</p>}
       <ol className={`drill-list${busy ? " stale" : ""}`}>
@@ -206,8 +213,8 @@ function DrillPanel({ jurisdiction, f, setF, open }:
               <a onClick={() => open(it.id)}><Oscola c={it.oscola} fallback={it.title || it.id} /></a>
               <div className="drill-meta muted">
                 <span className="tag">{it.doc_type}</span>
-                {it.court && <a className="facet-link" title={`focus on ${it.court}`}
-                  onClick={() => setF({ court: it.court, cites: null })}>{it.court}</a>}
+                {it.court && <a className="facet-link" title={`focus on ${it.court_label || it.court}`}
+                  onClick={() => setF({ court: it.court, cites: null })}>{it.court_label || it.court}</a>}
                 {it.date && <a className="facet-link" title={`focus on ${it.date.slice(0, 4)}`}
                   onClick={() => setF({ years: [it.date.slice(0, 4), it.date.slice(0, 4)], cites: null })}>{it.date.slice(0, 4)}</a>}
                 {it.cited_by > 0 && <a className="facet-link" title="see what cites this"
@@ -240,35 +247,42 @@ function Expanded({ r, open }: { r: ShapeRow; open: (id: string, a?: string) => 
   const [f, setFacets] = useState<Facets>({ kind: "", sort: "authority", court: null,
     years: null, cites: null });
   const setF = (p: Partial<Facets>) => setFacets((old) => ({ ...old, ...p }));
+  // the rail follows the kind filter: choose Legislation and the timeline,
+  // courts and sources re-scope to legislation only
+  const slice = (f.kind && (r as any).kinds?.[f.kind]) || r;
   return (
     <div className="exp-detail">
       <div className="exp-rail">
-        <div className="exp-rail-title">Timeline <span className="muted">— drag to focus</span></div>
-        <Spark years={r.years} width={240} height={44} brush active={f.years}
+        <div className="exp-rail-title">Timeline{f.kind ? ` — ${KIND_LABEL[f.kind]}` : ""} <span className="muted">— drag to focus</span></div>
+        <Spark years={slice.years} width={240} height={44} brush active={f.years}
           onBrush={(a, b) => setF({ years: [a, b], cites: null })} />
         {f.years && <a className="mini-link" onClick={() => setF({ years: null })}>clear {f.years[0]}–{f.years[1]} ✕</a>}
-        {r.courts.length > 0 && <>
+        {slice.courts.length > 0 && <>
           <div className="exp-rail-title">Courts and bodies</div>
           <ul className="court-list">
             <li><a className={!f.court ? "on" : ""} onClick={() => setF({ court: null })}>all</a></li>
-            {r.courts.map((c) => (
+            {slice.courts.map((c: { court: string; label?: string; n: number }) => (
               <li key={c.court}>
-                <a className={f.court === c.court ? "on" : ""}
+                <a className={f.court === c.court ? "on" : ""} title={c.court}
                   onClick={() => setF({ court: f.court === c.court ? null : c.court, cites: null })}>
-                  <span className="court-name">{c.court}</span>
+                  <span className="court-name">{c.label || c.court}</span>
                   <span className="court-n">{FMT(c.n)}</span>
                 </a>
               </li>
             ))}
           </ul>
         </>}
-        <div className="exp-rail-title">Sources</div>
+        <div className="exp-rail-title">Sources{f.kind ? ` — ${KIND_LABEL[f.kind]}` : ""}</div>
         <div className="src-chips">
-          {r.sources.map((s) => <span key={s.source} className="tag"
-            title={`${s.n.toLocaleString()} documents (${s.source})`}>{s.label}</span>)}
+          {slice.sources.map((s: { source: string; label: string; n: number }) =>
+            <span key={s.source} className="tag"
+              title={`${s.n.toLocaleString()} documents (${s.source})`}>{s.label}</span>)}
         </div>
       </div>
-      <DrillPanel jurisdiction={r.jurisdiction} f={f} setF={setF} open={open} />
+      <DrillPanel jurisdiction={r.jurisdiction} f={f} setF={setF} open={open}
+        courtLabel={f.court
+          ? slice.courts.find((c: any) => c.court === f.court)?.label
+          : undefined} />
     </div>
   );
 }
@@ -338,7 +352,7 @@ export function ExploreView({ open, goSearch }:
         <table className="shape-table">
           <thead>
             <tr><th /><th>Jurisdiction</th><th className="num">Documents</th><th>Composition</th>
-              <th>Timeline</th><th className="num" title="resolved citations per document">Density</th></tr>
+              <th>Timeline</th></tr>
           </thead>
           <tbody>
             {rows.map((r) => {
@@ -353,9 +367,8 @@ export function ExploreView({ open, goSearch }:
                     <td className="num jtotal">{r.total.toLocaleString()}</td>
                     <td className="jbar"><KindBar r={r} /></td>
                     <td className="jspark"><Spark years={r.years} /></td>
-                    <td className="num">{r.density ? `${r.density}×` : "—"}</td>
                   </tr>
-                  {on && <tr className="exp-row"><td colSpan={6}><Expanded r={r} open={open} /></td></tr>}
+                  {on && <tr className="exp-row"><td colSpan={5}><Expanded r={r} open={open} /></td></tr>}
                 </Fragment>
               );
             })}
