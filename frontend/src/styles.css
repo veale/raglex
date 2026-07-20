@@ -193,6 +193,15 @@ button.mini:hover { color: var(--text); }
 
 .row { display: flex; gap: var(--sp-4); flex-wrap: wrap; align-items: center; }
 .row > * { flex: 1; min-width: 140px; }
+/* A panel must never push the page wider than the viewport: dense control rows
+   (the Westlaw/Lexis export, the harvest worklist header) carry many inline
+   controls, and the 140px per-child minimum above can otherwise sum past the
+   container before wrapping resolves. */
+.panel { min-width: 0; max-width: 100%; }
+.panel .row { max-width: 100%; }
+.panel .row > * { min-width: 0; }
+/* keep the practical minimum for genuine form fields, which look broken squashed */
+.panel .row > input, .panel .row > select, .panel .row > textarea { min-width: 140px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-5); }
 @media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
 

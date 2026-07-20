@@ -588,7 +588,7 @@ class Facade:
                 "oscola": _oscola_cite(doc, meta),  # this document's own OSCOLA citation
                 # the reader shows names, never slugs: "Court of Appeal (Civil
                 # Division)" + "England & Wales", not "ewca"
-                "court_label": self.court_label(doc["court"]) if doc["court"] else None,
+                "court_label": self.court_label(doc["court"], doc["source"]) if doc["court"] else None,
                 "jurisdiction": self._doc_bucket(doc["source"], doc["court"]),
                 "source_label": self.source_label(doc["source"]),
                 "link_label": self.link_label(doc["landing_url"], doc["source"]),
@@ -799,7 +799,7 @@ class Facade:
                     "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)),
                     "src_court": sdoc["court"], "src_date": sdoc["decision_date"],
                     # name the citing court and its jurisdiction, as the explorer does
-                    "src_court_label": self.court_label(sdoc["court"]) if sdoc["court"] else None,
+                    "src_court_label": self.court_label(sdoc["court"], sdoc["source"]) if sdoc["court"] else None,
                     "src_jurisdiction": self._doc_bucket(sdoc["source"], sdoc["court"]),
                     "src_kind": self._doc_kind(sdoc["source"], sdoc["doc_type"], sdoc["court"]),
                     "authority": _authority(sid, sdoc), "count": len(rs),
@@ -1276,12 +1276,19 @@ class Facade:
     # registry annotations that are for citation-matching, not for humans
     _COURT_NOTE_RE = None
 
-    def court_label(self, code: str) -> str:
+    def court_label(self, code: str, source: str | None = None) -> str:
         """Natural-language name for a court/body slug ('ukaitur' → 'Immigration
         & Asylum Tribunal'), from the citations court registry. CONVENTION: every
         court code a new adapter introduces must have a name in
         citations/courts.py — the UI renders these labels, never raw slugs, so an
-        unnamed code shows up prettified-but-wrong until it's registered."""
+        unnamed code shows up prettified-but-wrong until it's registered.
+
+        ``source`` disambiguates the cross-jurisdiction code collisions the registry
+        resolves by citation STYLE: "FCA" is the Federal Court of Australia when
+        bracketed ([2020] FCA 1) and the Federal Court of Appeal of Canada when not
+        (2020 FCA 1). A stored document has no brackets to read, but its source says
+        which country it came from — so Canadian documents stop being labelled with
+        Australian courts."""
         import re as _re
 
         from .citations.courts import classify, lookup
@@ -1299,7 +1306,13 @@ class Facade:
             country = self._DPA_COUNTRY.get(cc)
             return f"Data protection authority · {country}" if country \
                 else "Data protection authority"
-        c = lookup((code or "").upper()) or classify((code or "").upper())
+        # bracketless-citation jurisdictions (Canada, US) vs bracketed (AU, NZ, UK)
+        src = (source or "").lower()
+        hint = False if src.startswith(("ca-", "ca/")) else True if src.startswith(
+            ("au-", "nz-", "uk-")) else None
+        up = (code or "").upper()
+        c = (lookup(up, bracketed=hint) if hint is not None else None) \
+            or lookup(up) or classify(up)
         if c and c.name:
             return Facade._COURT_NOTE_RE.sub("", c.name)
         return self.source_label(code)
@@ -1492,8 +1505,13 @@ class Facade:
                     t["filters"].append(filt)
 
             def _finish(slice_: dict) -> None:
+                # the slice's dominant source disambiguates the cross-jurisdiction
+                # court-code collisions (a "FCA" inside a Canadian slice is the
+                # Federal Court of Appeal, not the Federal Court of Australia)
+                srcs = slice_.get("sources") or {}
+                hint = max(srcs, key=srcs.get) if isinstance(srcs, dict) and srcs else None
                 slice_["courts"] = sorted(
-                    ({"court": c, "label": self.court_label(c), "n": n}
+                    ({"court": c, "label": self.court_label(c, hint), "n": n}
                      for c, n in slice_["courts"].items()
                      if c.upper() not in _SERIES),
                     key=lambda x: -x["n"])[:12]
@@ -1678,7 +1696,7 @@ class Facade:
                 item = {
                     "id": r["stable_id"], "title": r["title"], "doc_type": r["doc_type"],
                     "court": r["court"],
-                    "court_label": self.court_label(r["court"]) if r["court"] else None,
+                    "court_label": self.court_label(r["court"], r["source"]) if r["court"] else None,
                     "date": str(r["decision_date"])[:10] if r["decision_date"] else None,
                     "percentile": r["percentile"], "cited_by": r["cited_by"],
                     "oscola": _oscola_cite(r, _row_meta(r)),
@@ -2661,7 +2679,11 @@ class Facade:
         — run after a parser upgrade so already-harvested docs pick up the new
         formatting/recitals."""
         with self._open() as (cat, _rs, _ts):
-            ids = [r["stable_id"] for r in cat.list_documents(limit=100000, doc_type=doc_type)]
+            # ALL matching docs, not a 100k slice — the corpus holds ~145k pieces of
+            # legislation, so the old cap silently skipped ~45k of them, meaning a
+            # parser upgrade (new schedule/indent handling) never reached the tail.
+            # text_document_ids is unbounded and already scopes to docs with text/raw.
+            ids = cat.text_document_ids(doc_types=[doc_type] if doc_type else None)
         n = sum(1 for sid in ids if self.reparse_document(stable_id=sid).get("reparsed"))
         return {"candidates": len(ids), "reparsed": n}
 
@@ -6288,7 +6310,7 @@ class Facade:
                 coref=coref, on_progress=on_progress, cancel_check=cancel_check)
         return report
 
-    def match_named_legislation(self, *, limit: int = 20000, on_progress=None,
+    def match_named_legislation(self, *, limit: int | None = None, on_progress=None,
                                 cancel_check=None) -> dict:
         """Resolve name-only statute references ("the Police and Criminal Evidence Act
         1984", "section 32 of the Limitation Act 1980") against the titles of legislation
@@ -6794,7 +6816,7 @@ class Facade:
                 if t:
                     r["target"] = {
                         "title": t["title"], "court": t["court"],
-                        "court_label": self.court_label(t["court"]) if t["court"] else None,
+                        "court_label": self.court_label(t["court"], t["source"]) if t["court"] else None,
                         "date": str(t["decision_date"])[:10] if t["decision_date"] else None,
                         "doc_type": t["doc_type"], "jurisdiction": tj,
                         "source_label": self.source_label(t["source"]),

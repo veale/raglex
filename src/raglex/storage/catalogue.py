@@ -1872,20 +1872,27 @@ class Catalogue:
             "WHERE doc_type = 'legislation' AND title IS NOT NULL"
         ).fetchall()
 
-    def pending_statute_refs(self, *, limit: int = 20000) -> list[sqlite3.Row]:
+    def pending_statute_refs(self, *, limit: int | None = None) -> list[sqlite3.Row]:
         """Distinct still-pending, candidate-less citation strings that look like a named
         statute ("… Act 1984", "… Regulations 2004", "… Order 2015"), most-cited first —
         the references the name-only legislation matcher tries to resolve. LIKE patterns are
-        bound as params (the pg literal-% gotcha)."""
+        bound as params (the pg literal-% gotcha).
+
+        ``limit=None`` (default) returns ALL of them: the matcher does one cheap dict
+        lookup per reference, so an arbitrary cap only leaves the tail unresolved — the
+        live corpus has ~112k distinct such references, and the old 20k cap silently
+        dropped ~92k of them, so most name-only legislation never got linked."""
         like = ["%Act 1%", "%Act 2%", "%Regulations 1%", "%Regulations 2%",
                 "%Order 1%", "%Order 2%", "%Rules 1%", "%Rules 2%", "%Measure 1%", "%Measure 2%"]
         clause = " OR ".join(["raw_citation_string LIKE ?"] * len(like))
+        tail = " LIMIT ?" if limit is not None else ""
+        params: tuple = (*like, limit) if limit is not None else (*like,)
         return self.conn.execute(
             f"SELECT raw_citation_string AS raw, COUNT(*) AS n FROM relations "
             f"WHERE resolution_status = 'pending' AND candidate_id IS NULL "
             f"AND raw_citation_string IS NOT NULL AND ({clause}) "
-            f"GROUP BY raw_citation_string ORDER BY n DESC LIMIT ?",
-            (*like, limit),
+            f"GROUP BY raw_citation_string ORDER BY n DESC{tail}",
+            params,
         ).fetchall()
 
     def echr_pool(self) -> list[sqlite3.Row]:

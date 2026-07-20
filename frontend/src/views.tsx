@@ -3339,9 +3339,9 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
     <div>
     <CorpusMap cov={cov} navigate={navigate} />
     <div className="panel">
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" }}>
-        <h3 style={{ margin: 0 }}>Harvest worklist <span className="muted">— citations the corpus can’t find (yet), most-cited first. Resolve by harvest, identifier, existing item, scrape, or upload.</span></h3>
-        <div className="row" style={{ flex: "0 0 auto", alignItems: "center" }}>
+      <div className="row worklist-head" style={{ justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" }}>
+        <h3 style={{ margin: 0, flex: "1 1 100%", minWidth: 0 }}>Harvest worklist <span className="muted">— citations the corpus can’t find (yet), most-cited first. Resolve by harvest, identifier, existing item, scrape, or upload.</span></h3>
+        <div className="row" style={{ flex: "1 1 auto", alignItems: "center", minWidth: 0 }}>
           <select className="theme-select" value={srcFilter}
             onChange={(e) => { setSrcFilter(e.target.value); setLegFilter(""); }} title="Filter by source">
             <option value="">All sources</option>
@@ -3444,7 +3444,8 @@ function RetrievalExportPanel() {
           <input type="checkbox" checked={names} onChange={(e) => setNames(e.target.checked)} />
           include cases cited by name (won't retrieve without a citation)
         </label>
-        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
+        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13,
+                       flexWrap: "wrap", minWidth: 0 }}
           title="Which report-series jurisdictions to include. A UK subscription can't retrieve Irish or Commonwealth reports — they'd burn slots in the 100-citation batch.">
           <span className="muted">jurisdictions:</span>
           {JURS.map(([k, label]) => (

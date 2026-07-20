@@ -264,6 +264,26 @@ COURTS: tuple[Court, ...] = (
     Court("NUCA", "Nunavut Court of Appeal", "CA", bracketed=False),
     Court("NUCJ", "Nunavut Court of Justice", "CA", bracketed=False),
 
+    # Canadian federal tribunals and boards. The bulk Canadian corpora key these by
+    # their own short codes; unregistered, the UI prettifies the slug and a reader
+    # sees "Sst", "Rad", "Citt" rather than the body's name (the convention in
+    # court_label: every code an adapter introduces needs a name here).
+    Court("SST", "Social Security Tribunal of Canada", "CA", bracketed=False),
+    Court("RAD", "Refugee Appeal Division (IRB)", "CA", bracketed=False),
+    Court("RPD", "Refugee Protection Division (IRB)", "CA", bracketed=False),
+    Court("CITT", "Canadian International Trade Tribunal", "CA", bracketed=False),
+    Court("FPSLREB", "Federal Public Sector Labour Relations and Employment Board",
+          "CA", bracketed=False),
+    Court("CIRB", "Canada Industrial Relations Board", "CA", bracketed=False),
+    Court("CHRT", "Canadian Human Rights Tribunal", "CA", bracketed=False),
+    Court("OHSTC", "Occupational Health and Safety Tribunal Canada", "CA", bracketed=False),
+    Court("PSDPT", "Public Servants Disclosure Protection Tribunal", "CA", bracketed=False),
+    Court("OIC", "Office of the Information Commissioner of Canada", "CA", bracketed=False),
+    Court("RLLR", "Refugee Law Lab Reporter", "CA", bracketed=False),
+    Court("NSSM", "Nova Scotia Small Claims Court", "CA", bracketed=False),
+    Court("NSFC", "Nova Scotia Family Court", "CA", bracketed=False),
+    Court("CT", "Competition Tribunal (Canada)", "CA", bracketed=False),
+
     # ---- New Zealand ------------------------------------------------------
     Court("NZSC", "Supreme Court of New Zealand", "NZ"),
     Court("NZCA", "Court of Appeal of New Zealand", "NZ"),

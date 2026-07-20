@@ -322,3 +322,29 @@ def test_reference_key_strips_the_australian_jurisdiction_tag():
     assert reference_key("s 5 of the Crimes Act 1900 (NSW)") == normalise_title("Crimes Act 1900")
     # a UK reference with no tag is unchanged
     assert reference_key("the Human Rights Act 1998") == "human rights act 1998"
+
+
+def test_canadian_tribunal_codes_have_natural_language_names():
+    # the bulk Canadian corpora key these by their own short codes; unregistered
+    # they surfaced in the Explore facets as "Sst", "Rad", "Citt"
+    from raglex.citations.courts import lookup
+
+    for code, expect in [("SST", "Social Security Tribunal"),
+                         ("RAD", "Refugee Appeal Division"),
+                         ("RPD", "Refugee Protection Division"),
+                         ("CITT", "Canadian International Trade Tribunal"),
+                         ("CHRT", "Canadian Human Rights Tribunal"),
+                         ("FPSLREB", "Federal Public Sector Labour"),
+                         ("CIRB", "Canada Industrial Relations Board"),
+                         ("CT", "Competition Tribunal")]:
+        c = lookup(code, bracketed=False)
+        assert c and c.name and expect in c.name, (code, c and c.name)
+
+
+def test_fca_disambiguates_by_citation_style():
+    # "FCA" is the Federal Court of AUSTRALIA when bracketed ([2020] FCA 1) and the
+    # Federal Court of APPEAL of Canada when not (2020 FCA 1)
+    from raglex.citations.courts import lookup
+
+    assert "Australia" in lookup("FCA", bracketed=True).name
+    assert "Canada" in lookup("FCA", bracketed=False).name
