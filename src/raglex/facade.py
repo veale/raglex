@@ -217,6 +217,7 @@ _CATEGORY_JURISDICTION: dict[str, str] = {
     "eu-cellar": "eu", "eu-legislation": "eu", "echr": "eu",
     "ca-caselaw": "commonwealth", "au-caselaw": "commonwealth",
     "nz-caselaw": "commonwealth", "in-caselaw": "commonwealth",
+    "us-caselaw": "us",
 }
 
 
@@ -313,6 +314,23 @@ def _targeted_uk_hol(candidate: str):
     return get_adapter("uk-hol", ids=candidate)
 
 
+def _targeted_us_caselaw(candidate: str):
+    """A US case by its reporter citation (``us/us/576/644``) — resolved through
+    CourtListener's citation-lookup endpoint.
+
+    Returns None when there is no API token, so the reference is reported as an
+    absence for this run rather than raising: the citation is perfectly good, we just
+    can't reach the source. The free-tier quota is enforced inside the adapter (a
+    persisted rolling-window ledger); when it is spent the fetch surfaces as
+    rate-limiting, which stops the drain's batch and leaves the rest of the queue
+    intact for the next tick.
+    """
+    from .adapters.registry import get_adapter
+
+    adapter = get_adapter("us-caselaw", ids=candidate)
+    return adapter if getattr(adapter, "configured", False) else None
+
+
 def _targeted_nl_rechtspraak(candidate: str):
     """A Dutch judgment by ECLI — Rechtspraak fetches the content directly by ECLI."""
     if not candidate.upper().startswith("ECLI:NL:"):
@@ -337,6 +355,7 @@ _TARGETED_HARVEST = {
     "eu-cellar": _targeted_eu_cellar,
     "echr": _targeted_echr,
     "nl-rechtspraak": _targeted_nl_rechtspraak,
+    "us-caselaw": _targeted_us_caselaw,
 }
 
 
@@ -1182,6 +1201,7 @@ class Facade:
         "au-caselaw": "Open Australian Legal Corpus", "au-legislation": "Federal Register (AU)",
         "ca-caselaw": "CanLII (A2AJ)", "ca-legislation": "Justice Laws (Canada)",
         "nz-caselaw": "NZ courts", "nz-legislation": "NZ Legislation",
+        "us-caselaw": "CourtListener",
         "sg-legislation": "Singapore Statutes Online", "hk-legislation": "HK e-Legislation",
         "in-caselaw": "Indian Kanoon", "user-import": "Manual imports",
         "ci-caselaw": "Channel Islands", "offshore-caselaw": "Offshore courts",
@@ -1934,6 +1954,36 @@ class Facade:
             with self._open() as (cat, _rs, _ts):
                 return pipeline_queues(cat)
         return self._cached("queues", 30, _compute)
+
+    def us_caselaw_budget(self) -> dict:
+        """CourtListener's remaining free-tier quota, plus what is queued against it.
+
+        US case law is the one source with a hard *daily* ceiling (125 requests on the
+        free tier), so "how much is left today" is operational information rather than
+        trivia: it is the difference between a queue that is stalled and one that is
+        merely waiting. ``pending_us_references`` is the backlog the drip is working
+        through — with the day's allowance beside it, an operator can see that the
+        queue has, say, 900 cases and four days of quota ahead of it.
+        """
+        from .adapters.courtlistener import queue_reserve
+        from .adapters.registry import get_adapter
+
+        status = get_adapter("us-caselaw").budget_status()
+        pending = sum(1 for r in self.unresolved_references(limit=None)
+                      if r["suggested_adapter"] == "us-caselaw")
+        day = status["windows"].get("day", {})
+        allowance = status["queue_allowance"]
+        return {
+            **status,
+            "queue_reserve": queue_reserve(),
+            "pending_us_references": pending,
+            # A case costs one request per opinion in its cluster; 2 is a fair average
+            # across SCOTUS + circuits (a lead opinion, sometimes a separate one).
+            "estimated_cases_today": allowance // 2,
+            "estimated_days_to_clear": (
+                round(pending / max(1, (day.get("limit", 125) * queue_reserve()) / 2), 1)
+                if pending else 0),
+        }
 
     def alerts(self) -> list[dict]:
         with self._open() as (cat, _rs, _ts):

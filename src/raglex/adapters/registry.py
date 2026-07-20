@@ -17,6 +17,8 @@ from .au_legislation import CommonwealthAdapter, LawMakerAdapter
 from .au_caselaw import AustralianCaseLawAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_legislation import CanadaFederalAdapter
+from .courtlistener import CourtListenerAdapter
+from .courtlistener_bulk import CourtListenerBulkAdapter
 from .dma import DMACasesAdapter
 from .hk_legislation import HKLegislationAdapter
 from .nz_legislation import NZLegislationAdapter
@@ -103,6 +105,14 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Australian case law — the Open Australian Legal Corpus JSONL. Decisions only by
     # default: the statutes are better served by the live registers (au-cth et al).
     "au-caselaw": AustralianCaseLawAdapter,
+    # US case law — CourtListener v4. Keyed by reporter citation (us/us/576/644), the
+    # same slug the US matcher mints, so harvesting a case resolves the citations the
+    # corpus already holds pending. Free tier is 125 requests/day, enforced by a
+    # persisted budget ledger: this is an on-demand + drip source, never a bulk one.
+    "us-caselaw": CourtListenerAdapter,
+    # The bulk path for the same corpus — quarterly CSV exports read off local disk,
+    # no API and no rate limit. How whole courts (SCOTUS, the circuits) get seeded.
+    "us-caselaw-bulk": CourtListenerBulkAdapter,
     # New Zealand Supreme Court — the Courts of NZ RSS feed → case page → judgment PDF,
     # keyed by the neutral citation printed in the PDF ("[2026] NZSC 88" → nzsc/2026/88).
     "nz-caselaw": NZSupremeCourtAdapter,
@@ -397,6 +407,41 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("jurisdictions", "Limit to jurisdictions", "new_south_wales,commonwealth"),
          SourceOption("min_year", "Earliest decision year", "2000")),
         ("neutral citation ([2020] NSWSC 1)", "nswsc/2020/1"),
+    ),
+    "us-caselaw": SourceInfo(
+        "us-caselaw", "US case law (CourtListener API)", "caselaw", "US", False,
+        "US federal case law from CourtListener (Free Law Project). Cases are stored "
+        "under their reporter citation (us/us/576/644) — the same id the citation "
+        "matcher mints — so pulling one resolves every pending reference to it, in "
+        "every parallel reporter. Needs a free API token "
+        "(courtlistener.com/profile/api-token/). "
+        "The free tier allows 125 requests/day, enforced by a persisted budget: give "
+        "citation ids to fetch specific cases, or leave blank for an incremental poll "
+        "of the named courts. Seed whole courts with us-caselaw-bulk instead — this "
+        "API cannot afford a backfill.",
+        (SourceOption("ids", "Citations to fetch", "576 U.S. 644, us/f3d/347/1200"),
+         SourceOption("cluster_ids", "CourtListener cluster ids", "2812209"),
+         SourceOption("courts", "Courts to poll", "scotus,ca9 (default: SCOTUS + circuits)"),
+         SourceOption("prefer_html", "Also store display HTML", "true | false (default)")),
+        ("reporter citation (576 U.S. 644)", "us/us/576/644",
+         "CourtListener cluster id / opinion URL"),
+    ),
+    "us-caselaw-bulk": SourceInfo(
+        "us-caselaw-bulk", "US case law (CourtListener bulk CSV)", "caselaw", "US", False,
+        "The quarterly CourtListener bulk exports, read from a local directory — no "
+        "API and no rate limit, which is the only practical way to seed whole courts. "
+        "Point `path` at the downloaded CSVs (courts, dockets, opinion-clusters, "
+        "opinions, citation map) and set `courts` to the allowlist you actually want: "
+        "the exports are whole-table snapshots of every US jurisdiction, so filtering "
+        "on the way in is what keeps a SCOTUS+circuits seed from ingesting millions of "
+        "district-court rows. Ids and aliases match the API adapter's exactly, so bulk "
+        "and on-demand rows are the same nodes. Re-point at a fresh quarterly drop to "
+        "refresh; identical rows dedup on content hash.",
+        (SourceOption("path", "Bulk export directory", "/corpora/courtlistener"),
+         SourceOption("courts", "Court allowlist", "scotus,ca1,ca2… (required in practice)"),
+         SourceOption("min_year", "Earliest decision year", "1900"),
+         SourceOption("citation_map", "Import the citation graph", "true (default) | false")),
+        ("reporter citation (576 U.S. 644)", "us/us/576/644"),
     ),
     "nz-caselaw": SourceInfo(
         "nz-caselaw", "New Zealand Supreme Court (Courts of NZ RSS)", "caselaw",

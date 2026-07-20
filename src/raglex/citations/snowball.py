@@ -131,11 +131,12 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
     # *before* the neutral-citation regex so they aren't mistaken for a court.
     if "/" in candidate and candidate.split("/")[0] in _UK_LEG_TYPES:
         return "UK legislation", "GB", "uk-legislation"
-    # US reporter citations: recognised and clustered, but the corpus
-    # holds no US case law and has no adapter — so it reads as a US case in the
-    # frontier and stays OUT of the routable harvest worklist.
+    # US reporter citations → CourtListener. Routable, so these join the harvest
+    # worklist and the auto-drain like any other citation — but the free-tier quota is
+    # 125 requests/day, so the adapter's budget ledger (not this classifier) is what
+    # meters them: the drain simply stops for the day when the budget says stop.
     if head == "us":
-        return "US case (reporter)", "US", None
+        return "US case (reporter)", "US", "us-caselaw"
     m = _NEUTRAL_RE.match(candidate)
     if m:
         court = m.group("court").upper()

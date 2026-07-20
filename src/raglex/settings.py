@@ -66,6 +66,26 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("RAGLEX_NZ_API_KEY", "NZ Legislation API key", True, "Sources",
                 "PCO Developer API — apply at legislation.govt.nz; the NZ site is "
                 "bot-walled so there is no scraping fallback without this"),
+    SettingSpec("RAGLEX_COURTLISTENER_TOKEN", "CourtListener API token", True, "Sources",
+                "free at courtlistener.com/profile/api-token/ — v4 rejects anonymous "
+                "requests, so US case law needs this. One account per project: Free Law "
+                "Project forbids extra accounts to work around the limits"),
+    # The free tier's three concurrent rolling windows. Exposed (rather than hard-coded)
+    # only so an operator with a Free Law Project membership or commercial partnership
+    # can raise them — leave blank for the free numbers. Raising them beyond what the
+    # account actually has just converts refusals into 429s.
+    SettingSpec("RAGLEX_COURTLISTENER_PER_MINUTE", "CourtListener requests/minute", False,
+                "Sources", "blank = 5 (free tier); an academic/commercial membership is "
+                "typically 20. Also sets the pacing floor — 5/min paces at 12s, 20/min at 3s"),
+    SettingSpec("RAGLEX_COURTLISTENER_PER_HOUR", "CourtListener requests/hour", False,
+                "Sources", "blank = 50 (free tier); a membership is typically 1000"),
+    SettingSpec("RAGLEX_COURTLISTENER_PER_DAY", "CourtListener requests/day", False,
+                "Sources", "blank = 125 (free tier). 0/none = no daily cap, for a "
+                "membership that only limits per-minute and per-hour. A case costs one "
+                "request per opinion, so 125/day is roughly 40-100 cases"),
+    SettingSpec("RAGLEX_COURTLISTENER_QUEUE_RESERVE", "CourtListener queue share", False,
+                "Sources", "0.6 — the fraction of the daily quota the unattended "
+                "US-citation queue may spend, leaving the rest for on-demand lookups"),
     SettingSpec("EURLEX_USERNAME", "EUR-Lex webservice user", False, "Sources"),
     SettingSpec("EURLEX_PASSWORD", "EUR-Lex webservice password", True, "Sources"),
     SettingSpec("PISTE_KEY_ID", "PISTE KeyId (Judilibre)", True, "Sources"),

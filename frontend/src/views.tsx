@@ -3402,7 +3402,7 @@ function RetrievalExportPanel() {
   const [names, setNames] = useState(false);
   // Westlaw UK / Lexis+ UK are UK subscriptions: an Irish or Commonwealth report in the
   // batch can't retrieve and just burns one of the 100 slots — so default to UK only.
-  const JURS: [string, string][] = [["uk", "UK"], ["ie", "Ireland"], ["eu", "EU (CMLR…)"], ["commonwealth", "Commonwealth"]];
+  const JURS: [string, string][] = [["uk", "UK"], ["ie", "Ireland"], ["eu", "EU (CMLR…)"], ["commonwealth", "Commonwealth"], ["us", "US"]];
   const [jurs, setJurs] = useState<Record<string, boolean>>({ uk: true, ie: false, eu: false, commonwealth: false });
   const jurCsv = JURS.filter(([k]) => jurs[k]).map(([k]) => k).join(",");
   const [data, setData] = useState<any>(null);

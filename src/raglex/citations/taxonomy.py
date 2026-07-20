@@ -40,6 +40,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "au-caselaw": "Australian case-law",
     "nz-caselaw": "New Zealand case-law",
     "in-caselaw": "Indian case-law",
+    "us-caselaw": "US case-law",
     "sg-caselaw": "Singapore case-law",
     "hk-caselaw": "Hong Kong case-law",
     "za-caselaw": "South African case-law",
@@ -58,7 +59,7 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
                   "eu-cellar", "eu-legislation", "echr", "guidance",
-                  "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw",
+                  "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw", "us-caselaw",
                   "sg-caselaw", "hk-caselaw", "za-caselaw", "my-caselaw",
                   "africa-caselaw", "caribbean-caselaw", "pacific-caselaw",
                   "ci-caselaw", "offshore-caselaw",
@@ -72,7 +73,7 @@ CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation"
 # understanding these places precedes any import route existing.
 JURISDICTION_CATEGORY: dict[str, str] = {
     "IE": "ie-caselaw", "CA": "ca-caselaw", "AU": "au-caselaw",
-    "NZ": "nz-caselaw", "IN": "in-caselaw",
+    "NZ": "nz-caselaw", "IN": "in-caselaw", "US": "us-caselaw",
     # The wider Commonwealth. The big single jurisdictions get their own row; the long
     # tail is grouped by region, because ~30 one-case rows would bury the map while
     # "African case-law: 214 pending" is a signal worth acting on.
@@ -364,6 +365,16 @@ def classify_candidate(candidate: str, kind: str = "") -> Tax:
         if cand.lower() == "echr/convention":
             return Tax("echr", CATEGORY_LABELS["echr"], "convention", "Convention (treaty)", {})
         return Tax("echr", CATEGORY_LABELS["echr"], "case", "ECHR case", {"source": "echr"})
+    if adapter == "us-caselaw":
+        # Sub-typed by reporter ("U.S.", "F.3d"), which is how US case law is actually
+        # organised — the reporter series carries the court and the precedential level,
+        # where a US slug has no court token to bucket on.
+        from .us_cases import reporter_name
+
+        rep = cand.split("/")[1].lower() if cand.lower().startswith("us/") else "other"
+        return Tax("us-caselaw", CATEGORY_LABELS["us-caselaw"], rep,
+                   reporter_name(rep) if rep != "other" else "Other reporter",
+                   {"source": "us-caselaw"})
     # Adapter-less neutral-citation courts: a recognised court token still buckets the
     # candidate by its jurisdiction — Irish/Commonwealth citations are first-class
     # pending case-law (upload/link resolves them), and NI/Scottish courts belong

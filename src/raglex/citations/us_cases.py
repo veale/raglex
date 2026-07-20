@@ -19,10 +19,12 @@ the fuller scan only fires when the text actually looks American, so it also cat
 US cites wherever they appear (a UK Supreme Court judgment reaching for a US
 authority), not just in a named jurisdiction.
 
-The candidate id is a normalised ``us/<reporter>/<vol>/<page>`` slug: the corpus
-holds no US case law and there is no adapter, so the reference is deliberately
-unfetchable but clusters to one node and reads as a US case in the frontier (where
-it can be filtered by jurisdiction for a later bulk import).
+The candidate id is a normalised ``us/<reporter>/<vol>/<page>`` slug. The
+``us-caselaw`` adapter (CourtListener) mints its documents under exactly this slug,
+so every citation recognised here resolves to the held case once that case is
+harvested — and stays a clustered, jurisdiction-filterable frontier node until then.
+``us_candidate_id`` is the shared constructor: extractor and adapter must agree on
+the slug or nothing ever joins.
 """
 
 from __future__ import annotations
@@ -91,6 +93,48 @@ def _canonical_reporter(matched: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", key.lower())
 
 
+def reporter_slug(reporter: str) -> str:
+    """The canonical slug token for a reporter abbreviation, however it is spaced or
+    dotted ("S.Ct." / "S. Ct." → ``sct``).
+
+    Public because the CourtListener adapter has to mint the *same* slug from the
+    reporter strings the API hands back ("U.S.", "F.3d") that this module mints from
+    the ones it finds in prose. A reporter outside the table degrades to its
+    stripped-alphanumeric form on both sides, so an unlisted series still clusters
+    with itself — it just isn't one of the curated names.
+    """
+    return _canonical_reporter(reporter)
+
+
+# slug token → the canonical abbreviation, derived from the table above rather than
+# written out twice. The first spelling of each slug wins, which is why _REPORTERS
+# lists the canonical form first ("U.S." before "U. S.").
+_SLUG_TO_REPORTER: dict[str, str] = {}
+for _rep, _slug in _REPORTERS.items():
+    _SLUG_TO_REPORTER.setdefault(_slug, _rep)
+
+
+def reporter_name(slug: str) -> str:
+    """``"sct"`` → ``"S. Ct."`` — the inverse of ``reporter_slug``.
+
+    Needed wherever a slug has to become a real citation again: the CourtListener
+    adapter sends the abbreviation (the API won't recognise our canonical token), and
+    the Corpus Map uses it as a sub-type label.
+    """
+    return _SLUG_TO_REPORTER.get(slug.lower(), slug.upper())
+
+
+def us_candidate_id(volume: str | int, reporter: str, page: str | int) -> str:
+    """``us/<reporter>/<vol>/<page>`` — the shared identity for a US case.
+
+    The single constructor for the slug, used by the extractor when it recognises a
+    citation in prose and by the ``us-caselaw`` adapter when it stores the case. They
+    must not drift: the slug IS the join key between a pending citation and the held
+    document.
+    """
+    return f"us/{reporter_slug(reporter)}/{volume}/{page}"
+
+
 def us_case_citations(text: str) -> list[Citation]:
     """US case citations in ``text`` as RagLex ``Citation``s. Empty when the text
     isn't American (the gate)."""
@@ -98,8 +142,7 @@ def us_case_citations(text: str) -> list[Citation]:
         return []
     out: list[Citation] = []
     for m in _US_CITE_RE.finditer(text):
-        rep = _canonical_reporter(m.group("rep"))
-        cand = f"us/{rep}/{m.group('vol')}/{m.group('page')}"
+        cand = us_candidate_id(m.group("vol"), m.group("rep"), m.group("page"))
         out.append(Citation(
             raw=m.group(0),
             entity_kind="case",
