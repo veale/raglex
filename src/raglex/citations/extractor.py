@@ -174,9 +174,11 @@ def _is_abbrev(name: str) -> bool:
     return bool(letters) and sum(ch.isupper() for ch in letters) >= max(2, len(letters) - 1)
 
 
-def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
-    # name → (host citation, is_abbrev). Abbreviations (FMIOA) link on a bare later
-    # mention; case short-names (Dunsmuir) link only with a pincite.
+def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[Citation, bool]]:
+    """The shorthand DEFINITIONS this document establishes: name → (host citation,
+    is_abbrev). Abbreviations (FMIOA) link on a bare later mention; case short-names
+    (Dunsmuir) link only with a pincite. Split out of ``_attach_shorthands`` so the
+    stage can harvest the same definitions into the corpus-wide store."""
     defs: dict[str, tuple[Citation, bool]] = {}
 
     def _register(name: str, host: Citation, *, abbrev: bool) -> None:
@@ -215,37 +217,136 @@ def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
                 short = _party_short_form(party)
                 if short:
                     _register(short, c, abbrev=False)
+    return defs
+
+
+def _link_shorthand_uses(
+    text: str, name: str, *, entity_kind: str | None, candidate_id: str | None,
+    abbrev: bool, out: list[Citation], occupied: list[tuple[int, int]],
+    after: int = -1, method: str = "shorthand", confidence: float = 0.7,
+) -> None:
+    """Append a citation for every later USE of ``name`` in ``text``, skipping spans an
+    existing citation already covers. ``after`` is the definition's position — only uses
+    beyond it count — and is -1 for a *stored* shorthand, which has no definition here."""
+    esc = re.escape(name)
+    # case / opinion short-name uses always carry a pincite ("Suncor at para 30",
+    # "Judgment in Digital Rights, paragraph 57"); an abbreviation links on a
+    # bare mention too ("the FMIOA", "under FMIOA", "s. 3 of the FMIOA").
+    pat = (rf"\b{esc}(?:,)?\s+at\s+paras?\.?\s*(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})"
+           rf"|judgment\s+in\s+{esc}\s*,?\s*(?:paragraphs?|paras?\.?)\s*"
+           rf"(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})")
+    if abbrev:
+        # a bare mention, optionally preceded by "the" — but not when it's being
+        # (re)defined in brackets, which the def pass already owns
+        pat += rf"|(?<![\[(\"“'])\b{esc}\b(?![\"”'\])])"
+    use_re = re.compile(pat, re.IGNORECASE if not abbrev else 0)
+    for m in use_re.finditer(text):
+        s, e = m.start(), m.end()
+        if s <= after:   # only USES after the definition count
+            continue
+        if any(os < e and s < oe for os, oe in occupied):
+            continue
+        run = m.groupdict().get("run") or m.groupdict().get("run2")
+        out.append(Citation(
+            raw=m.group(0), entity_kind=entity_kind, candidate_id=candidate_id,
+            pinpoint=_pin_text(run) if run else None,
+            char_start=s, char_end=e, method=method, confidence=confidence,
+        ))
+        occupied.append((s, e))
+
+
+def _attach_shorthands(text: str, kept: list[Citation],
+                       defs: dict[str, tuple[Citation, bool]] | None = None) -> list[Citation]:
+    if defs is None:
+        defs = _collect_shorthand_defs(text, kept)
     if not defs:
         return kept
     out = list(kept)
     occupied = [(c.char_start, c.char_end) for c in kept]
     for name in sorted(defs, key=len, reverse=True):
         host, abbrev = defs[name]
-        esc = re.escape(name)
-        # case / opinion short-name uses always carry a pincite ("Suncor at para 30",
-        # "Judgment in Digital Rights, paragraph 57"); an abbreviation links on a
-        # bare mention too ("the FMIOA", "under FMIOA", "s. 3 of the FMIOA").
-        pat = (rf"\b{esc}(?:,)?\s+at\s+paras?\.?\s*(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})"
-               rf"|judgment\s+in\s+{esc}\s*,?\s*(?:paragraphs?|paras?\.?)\s*"
-               rf"(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})")
-        if abbrev:
-            # a bare mention, optionally preceded by "the" — but not when it's being
-            # (re)defined in brackets, which the def pass already owns
-            pat += rf"|(?<![\[(\"“'])\b{esc}\b(?![\"”'\])])"
-        use_re = re.compile(pat, re.IGNORECASE if not abbrev else 0)
-        for m in use_re.finditer(text):
-            s, e = m.start(), m.end()
-            if s <= host.char_start:   # only USES after the definition count
-                continue
-            if any(os < e and s < oe for os, oe in occupied):
-                continue
-            run = m.groupdict().get("run") or m.groupdict().get("run2")
-            out.append(Citation(
-                raw=m.group(0), entity_kind=host.entity_kind,
-                candidate_id=host.candidate_id, pinpoint=_pin_text(run) if run else None,
-                char_start=s, char_end=e, method="shorthand", confidence=0.7,
-            ))
-            occupied.append((s, e))
+        _link_shorthand_uses(
+            text, name, entity_kind=host.entity_kind, candidate_id=host.candidate_id,
+            abbrev=abbrev, out=out, occupied=occupied, after=host.char_start)
+    return out
+
+
+def _def_rows(defs: dict[str, tuple[Citation, bool]]) -> list[dict]:
+    """Definitions as plain dicts — the harvest the stage promotes into the corpus-wide
+    ``learned_shorthands`` store. Only definitions naming a resolvable candidate are
+    kept; an unresolved host would store a link to nothing."""
+    return [
+        {"shorthand": name, "candidate_id": host.candidate_id,
+         "entity_kind": host.entity_kind, "is_abbrev": abbrev}
+        for name, (host, abbrev) in defs.items() if host.candidate_id
+    ]
+
+
+def shorthand_defs(text: str, cites: list[Citation]) -> list[dict]:
+    """The shorthand definitions ``text`` establishes, computed from scratch.
+
+    ``extract_citations`` already collects these internally, so the extraction path
+    takes them via its ``defs_out`` parameter instead of paying for a second pass —
+    on a 700k-document rescan that duplicate harvest measured ~4% of the whole job.
+    This standalone form is for callers holding citations from somewhere else."""
+    return _def_rows(_collect_shorthand_defs(text, cites))
+
+
+# Initialisms too common across the corpus to trust on a bare mention even when their
+# parent IS cited: a document citing the Federal Courts Act still uses "CA" for "Court
+# of Appeal" a dozen times. These fall back to the case rule — link only with a pincite
+# — rather than being dropped, since a pincited "CA, at para 5" is genuinely a reference.
+_COMMON_INITIALISMS = {"ca", "sc", "hc", "cj", "dpp", "ec", "eu", "uk", "us", "ecj",
+                       "cjeu", "echr", "hl", "fc", "qb", "kb", "sca", "cca"}
+
+
+def attach_stored_shorthands(
+    text: str, kept: list[Citation], stored: list[tuple[str, str, str | None, bool]],
+    *, exclude: frozenset[str] | set[str] = frozenset(),
+) -> list[Citation]:
+    """Apply shorthands LEARNED IN OTHER DOCUMENTS — "[Suncor]" defined in one judgment
+    linking "Suncor, at para 30" in the next.
+
+    The caller (``citations.stage``) supplies only shorthands whose parent candidate this
+    document already cites by some other means; that parent-cited gate is the whole point
+    of the feature, because a corpus-wide "FCA" would otherwise link in every unrelated
+    judgment that happens to use the letters. ``exclude`` holds the names the document
+    defines for ITSELF — an in-document definition always wins over a stored one.
+
+    ``stored`` rows are ``(shorthand, candidate_id, entity_kind, is_abbrev)``. A case
+    short-name still requires a pincite; only a statute-hosted initialism links bare, and
+    even then not if it is a common legal initialism (CA/SC/DPP…) or ≤2 characters."""
+    if not stored:
+        return kept
+    out = list(kept)
+    occupied = [(c.char_start, c.char_end) for c in kept]
+    # Presence pre-filter, which is not an optimisation but the thing that makes the
+    # feature affordable at all. A heavily-cited case accumulates a short name from
+    # every document that ever defined one, and EVERY document citing it would
+    # otherwise pay a compiled full-text regex scan per variant — measured at +93% on
+    # the rescan hot path before this filter existed.
+    #
+    # A plain per-name substring test (~1.7µs each), deliberately NOT one combined
+    # alternation regex over all the names: the applicable name set is different for
+    # every document, so an alternation misses Python's pattern cache and pays a fresh
+    # compile of a 100-branch regex per document — measured 12x worse than this loop.
+    # The test only asks "does this string occur at all"; the pattern below does the
+    # boundary and pincite work.
+    lowered = text.lower()
+    # longest first, so "Digital Rights Ireland" claims its span before "Digital Rights"
+    for name, candidate_id, entity_kind, abbrev in sorted(
+            stored, key=lambda r: len(r[0]), reverse=True):
+        if not name or not candidate_id or name in exclude:
+            continue
+        if name.lower() not in lowered:
+            continue
+        core = name.replace(".", "").replace(" ", "")
+        if abbrev and (len(core) <= 2 or core.lower() in _COMMON_INITIALISMS):
+            abbrev = False   # demand a pincite rather than trusting a bare mention
+        _link_shorthand_uses(
+            text, name, entity_kind=entity_kind, candidate_id=candidate_id,
+            abbrev=abbrev, out=out, occupied=occupied,
+            method="shorthand_global", confidence=0.6)
     return out
 
 
@@ -517,10 +618,15 @@ def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
 
 
 def extract_citations(text: str, *, llm: CitationExtractor | None = None,
-                      aliases: dict[str, str] | None = None) -> list[Citation]:
+                      aliases: dict[str, str] | None = None,
+                      defs_out: list[dict] | None = None) -> list[Citation]:
     """Recognise citations in ``text``. Grammars run first (deterministic, cheap),
     then user-defined shorthand rules (``aliases``), then an optional ``llm`` pass for
-    narrative citations. More specific / earlier matches win an overlap."""
+    narrative citations. More specific / earlier matches win an overlap.
+
+    ``defs_out``, if given, is filled with the in-document shorthand definitions found
+    along the way (see ``shorthand_defs``). It's an out-parameter rather than a wider
+    return type because this function has many callers, none of which want it."""
     if not text:
         return []
     # User shorthand rules take precedence over the built-in grammars on an overlap: a
@@ -535,12 +641,15 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     cites += us_case_citations(text)
     grammar = _dedupe_overlaps(cites)
     if llm is None:
-        return _attach_carry_forward(text, _attach_section_lists(text, _attach_article_lists(
-            text, _attach_shorthands(text, _attach_case_pinpoints(text, grammar)))))
-    extra = [c for c in llm.extract(text) if not _overlaps_any(c, grammar)]
-    merged = _attach_case_pinpoints(text, _dedupe_overlaps(grammar + extra))
-    return _attach_carry_forward(text, _attach_section_lists(
-        text, _attach_article_lists(text, _attach_shorthands(text, merged))))
+        base = _attach_case_pinpoints(text, grammar)
+    else:
+        extra = [c for c in llm.extract(text) if not _overlaps_any(c, grammar)]
+        base = _attach_case_pinpoints(text, _dedupe_overlaps(grammar + extra))
+    defs = _collect_shorthand_defs(text, base)
+    if defs_out is not None:
+        defs_out.extend(_def_rows(defs))
+    return _attach_carry_forward(text, _attach_section_lists(text, _attach_article_lists(
+        text, _attach_shorthands(text, base, defs))))
 
 
 def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:

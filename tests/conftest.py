@@ -21,6 +21,18 @@ from raglex.core.models import DocType, Record, RelationshipType, TypedRelation
 from raglex.storage import Catalogue, RawStore
 
 
+@pytest.fixture(autouse=True)
+def _reset_shorthand_cache():
+    """The corpus-wide shorthand store is cached per PROCESS (it must be, or the rescan
+    would query it once per document). Each test gets its own in-memory catalogue, so
+    without this a shorthand learned in one test would still be live in the next."""
+    from raglex.citations.stage import reset_shorthand_cache
+
+    reset_shorthand_cache()
+    yield
+    reset_shorthand_cache()
+
+
 @pytest.fixture
 def catalogue() -> Catalogue:
     cat = Catalogue(":memory:")

@@ -144,6 +144,27 @@ CREATE TABLE IF NOT EXISTS citation_aliases (
     source   TEXT
 );
 
+-- Shorthands LEARNED from one document and applied in others ("[Suncor]" defined in
+-- one judgment, used bare in the next). Deliberately NOT `citation_aliases`: that map
+-- is unconditional, applied to every document, which is exactly wrong here — a stored
+-- "FCA" must only link inside a document that already cites the Federal Courts Act by
+-- some other means. The gates live in citations/stage.py; this is just the store.
+--
+-- No occurrence counter: a per-document UPDATE of a hot row (every judgment defines
+-- "GDPR") would serialise the parallel rescan workers against each other on a single
+-- tuple. Rows are written once, ever (INSERT … ON CONFLICT DO NOTHING), so the write
+-- path stays contention-free.
+CREATE TABLE IF NOT EXISTS learned_shorthands (
+    shorthand    TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    entity_kind  TEXT,
+    is_abbrev    INTEGER NOT NULL DEFAULT 0,
+    first_doc    TEXT,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (shorthand, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS learned_shorthands_cand_idx ON learned_shorthands (candidate_id);
+
 -- Version history (§1 principle 4): a document is a *series of versions*; the
 -- catalogue points at "latest" (the documents row) but retains all. When upstream
 -- content changes (payload_hash differs), the prior version is archived here
@@ -567,6 +588,7 @@ class Catalogue:
     # resolved target, so they must repoint too.
     _DOC_ID_REFS = (
         ("citation_aliases", "dst_id"),
+        ("learned_shorthands", "candidate_id"),
         ("relations", "src_id"), ("relations", "dst_id"), ("relations", "candidate_id"),
         ("citations", "src_id"), ("citations", "candidate_id"),
         ("embeddings", "doc_id"), ("document_tags", "doc_id"),
@@ -616,6 +638,7 @@ class Catalogue:
         ("document_tags", "doc_id"): ("tag",),
         ("document_versions", "stable_id"): ("version",),
         ("citation_aliases", "dst_id"): ("alias",),
+        ("learned_shorthands", "candidate_id"): ("shorthand",),
     }
 
     def set_document_meta(self, stable_id: str, meta: dict, *, title_if_empty: str | None = None,
@@ -2134,6 +2157,53 @@ class Catalogue:
         )
         if commit:
             self.conn.commit()
+
+    # -- learned shorthands (corpus-wide, but gated at application time) -------
+    def add_learned_shorthands(self, rows: list[dict], *, doc_id: str | None = None,
+                               commit: bool = True) -> int:
+        """Record shorthand definitions a document established. Each row: shorthand,
+        candidate_id, entity_kind, is_abbrev.
+
+        Insert-only (``ON CONFLICT DO NOTHING``): re-extracting a document must not
+        rewrite rows it already wrote, because this runs inside the whole-corpus rescan
+        where ~700k documents share one table. Returns the number of rows written."""
+        rows = [r for r in rows if r.get("shorthand") and r.get("candidate_id")]
+        if not rows:
+            return 0
+        now = _now()
+        written = 0
+        for r in rows:
+            cur = self.conn.execute(
+                """
+                INSERT INTO learned_shorthands
+                    (shorthand, candidate_id, entity_kind, is_abbrev, first_doc, created_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(shorthand, candidate_id) DO NOTHING
+                """,
+                (r["shorthand"], r["candidate_id"], r.get("entity_kind"),
+                 1 if r.get("is_abbrev") else 0, doc_id, now),
+            )
+            written += max(cur.rowcount, 0)
+        if commit:
+            self.conn.commit()
+        return written
+
+    def learned_shorthand_map(self, *, limit: int = 400000) -> dict[str, list[tuple]]:
+        """``{candidate_id: [(shorthand, entity_kind, is_abbrev), …]}`` — the whole store,
+        loaded once and cached by the stage. Keyed by candidate because application is
+        gated on the citing document already citing that candidate, so the caller only
+        ever looks up ids it has in hand."""
+        out: dict[str, list[tuple]] = {}
+        for r in self.conn.execute(
+                "SELECT shorthand, candidate_id, entity_kind, is_abbrev "
+                "FROM learned_shorthands LIMIT ?", (limit,)):
+            out.setdefault(r["candidate_id"], []).append(
+                (r["shorthand"], r["entity_kind"], bool(r["is_abbrev"])))
+        return out
+
+    def count_learned_shorthands(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM learned_shorthands").fetchone()["n"]
 
     def list_named_aliases(self) -> list[sqlite3.Row]:
         """User-defined shorthand → document mappings (e.g. "UK GDPR" → its id). These

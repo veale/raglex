@@ -52,7 +52,9 @@ def _extract_worker(conn) -> None:  # pragma: no cover — exercised via the gua
             return
         text, aliases = item
         try:
-            conn.send(("ok", _extract(text, aliases=aliases)))
+            defs: list[dict] = []
+            cites = _extract(text, aliases=aliases, defs_out=defs)
+            conn.send(("ok", (cites, defs)))
         except Exception as exc:  # surfaced to the caller as RuntimeError
             conn.send(("err", f"{type(exc).__name__}: {exc}"))
 
@@ -71,16 +73,19 @@ class _ExtractionGuard:
         return float(os.environ.get("RAGLEX_EXTRACT_TIMEOUT_S") or 90)
 
     def extract(self, text: str, aliases: dict[str, str] | None):
-        """``extract_citations`` under a wall-clock budget; None = budget blown."""
+        """``extract_citations`` under a wall-clock budget, as ``(citations, shorthand
+        definitions)``; None = budget blown. The definitions ride back with the result
+        because the extractor already collected them — recomputing them in the parent
+        cost ~4% of a whole-corpus rescan."""
         if os.environ.get("RAGLEX_EXTRACT_INPROC"):  # tests / debugging escape hatch
-            return extract_citations(text, aliases=aliases)
+            return self._inproc(text, aliases)
         with self._lock:
             try:
                 self._ensure()
                 self._conn.send((text, aliases))
             except Exception:  # spawn unavailable / worker torn down mid-send
                 self._kill()
-                return extract_citations(text, aliases=aliases)
+                return self._inproc(text, aliases)
             if not self._conn.poll(self.timeout_s()):
                 self._kill()
                 return None
@@ -92,10 +97,15 @@ class _ExtractionGuard:
                 # in-process rather than mis-report it as "exceeded budget".
                 self._kill()
                 log.warning("[cite-extract] worker died mid-document — extracting in-process")
-                return extract_citations(text, aliases=aliases)
+                return self._inproc(text, aliases)
             if status == "err":
                 raise RuntimeError(f"extraction worker: {payload}")
             return payload
+
+    @staticmethod
+    def _inproc(text: str, aliases: dict[str, str] | None):
+        defs: list[dict] = []
+        return extract_citations(text, aliases=aliases, defs_out=defs), defs
 
     def _ensure(self) -> None:
         if self._proc is None or not self._proc.is_alive():
@@ -199,6 +209,113 @@ def _uk_referred_preliminary(catalogue: Catalogue, stable_id: str) -> bool:
     return False
 
 
+# --- corpus-wide shorthand store ---------------------------------------------
+# A shorthand a document defines ("Suncor Energy Inc v … 2021 FC 138 [Suncor]") is
+# useful in the NEXT document too — but only there, and only under gates, or a bare
+# "FCA" would link the Federal Courts Act into every judgment that uses the letters.
+# The gates: the citing document must already cite the parent by some other means; a
+# case short-name still needs a pincite; an ambiguous shorthand is never guessed.
+#
+# Both halves run inside the whole-corpus rescan (~700k documents, parallel workers),
+# so neither may add a per-document query or a hot-row write:
+#   - READ  — the whole store is loaded once per process and cached (it is small: a
+#             shorthand per few hundred documents), so application costs zero queries.
+#   - WRITE — insert-only, and pre-filtered against a process-local set of pairs
+#             already known, so a re-extraction of a settled corpus issues no writes.
+_SHORTHAND_TTL_S = 900.0
+
+
+def _shorthands_enabled() -> bool:
+    return (os.environ.get("RAGLEX_SHORTHAND_GLOBAL") or "1") not in ("0", "false", "no")
+
+
+class _ShorthandStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._loaded_at = 0.0
+        self._loaded = False
+        self._by_candidate: dict[str, list[tuple]] = {}
+        self._by_name: dict[str, set[str]] = {}
+        self._known: set[tuple[str, str]] = set()
+
+    def load(self, catalogue: Catalogue) -> tuple[dict, dict]:
+        import time
+
+        with self._lock:
+            # `_loaded`, not "is the map non-empty": an EMPTY store is a legitimate
+            # steady state (a fresh corpus), and re-querying it would put one COUNT-ish
+            # scan per document back into the rescan hot loop.
+            if self._loaded and time.monotonic() - self._loaded_at < _SHORTHAND_TTL_S:
+                return self._by_candidate, self._by_name
+            try:
+                by_cand = catalogue.learned_shorthand_map()
+            except Exception:  # noqa: BLE001 — a missing/locked table must not fail extraction
+                by_cand = {}
+            by_name: dict[str, set[str]] = {}
+            for cid, rows in by_cand.items():
+                for name, _kind, _abbrev in rows:
+                    by_name.setdefault(name, set()).add(cid)
+            self._by_candidate, self._by_name = by_cand, by_name
+            self._known |= {(n, c) for c, rows in by_cand.items() for n, _k, _a in rows}
+            self._loaded_at = time.monotonic()
+            self._loaded = True
+            return by_cand, by_name
+
+    def unseen(self, defs: list[dict]) -> list[dict]:
+        """The definitions this process has not already stored — the filter that keeps a
+        steady-state rescan from issuing one INSERT per document per shorthand."""
+        with self._lock:
+            return [d for d in defs
+                    if (d["shorthand"], d["candidate_id"]) not in self._known]
+
+    def note_stored(self, defs: list[dict]) -> None:
+        """Record freshly written pairs AND fold them into the live map, so a shorthand
+        learned early in a rescan is usable by the very next document rather than waiting
+        out the reload TTL."""
+        with self._lock:
+            for d in defs:
+                key = (d["shorthand"], d["candidate_id"])
+                if key in self._known:
+                    continue
+                self._known.add(key)
+                self._by_candidate.setdefault(d["candidate_id"], []).append(
+                    (d["shorthand"], d.get("entity_kind"), bool(d.get("is_abbrev"))))
+                self._by_name.setdefault(d["shorthand"], set()).add(d["candidate_id"])
+
+
+_SHORTHANDS = _ShorthandStore()
+
+
+def reset_shorthand_cache() -> None:
+    """Forget the cached store — for tests, which build several corpora in one process,
+    and for a long-lived server that should pick up a rebuilt table promptly."""
+    global _SHORTHANDS
+    _SHORTHANDS = _ShorthandStore()
+
+
+def _stored_shorthands_for(catalogue: Catalogue, cites: list) -> list[tuple]:
+    """Stored shorthands applicable to this document: those whose parent candidate the
+    document ALREADY cites, minus anything ambiguous.
+
+    Ambiguity guard — a shorthand registered against more than one candidate is never
+    guessed. It applies only when exactly one of its candidates is cited here (then the
+    document itself has disambiguated it); otherwise it is dropped."""
+    cited = {c.candidate_id for c in cites if c.candidate_id}
+    if not cited:
+        return []
+    by_cand, by_name = _SHORTHANDS.load(catalogue)
+    if not by_cand:
+        return []
+    out: list[tuple] = []
+    for cid in cited:
+        for name, kind, abbrev in by_cand.get(cid, ()):
+            owners = by_name.get(name) or {cid}
+            if len(owners) > 1 and len(owners & cited) != 1:
+                continue
+            out.append((name, cid, kind, abbrev))
+    return out
+
+
 def extract_document(
     catalogue: Catalogue, textstore: TextStore, stable_id: str,
     *, llm: CitationExtractor | None = None, aliases: dict[str, str] | None = None,
@@ -217,7 +334,8 @@ def extract_document(
     if aliases is None:
         aliases = catalogue.named_alias_map()  # user shorthand rules (propagate)
     if llm is None:
-        cites = _GUARD.extract(text, aliases)
+        guarded = _GUARD.extract(text, aliases)
+        cites, raw_defs = guarded if guarded is not None else (None, [])
         if cites is None:
             # budget blown: keep whatever rows a previous run left, stamp so
             # staleness-scoped reruns converge instead of re-hitting the doc
@@ -226,7 +344,8 @@ def extract_document(
             catalogue.mark_extracted(stable_id)
             return 0
     else:  # the llm extractor is not picklable (and may call the network) — unguarded
-        cites = extract_citations(text, llm=llm, aliases=aliases)
+        raw_defs = []
+        cites = extract_citations(text, llm=llm, aliases=aliases, defs_out=raw_defs)
 
     # Inside LEGISLATION, a bare "Article 3" / "paragraph 2" is almost always the
     # instrument referring to ITSELF, not to the directive it last named — the
@@ -274,6 +393,32 @@ def extract_document(
     if _is_eu_guidance(doc):
         cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
                  for c in cites]
+
+    # Corpus-wide shorthands: apply the ones learned elsewhere whose parent this
+    # document already cites, then harvest the ones IT defines for the next document.
+    # Both are no-ops for a document that cites nothing resolvable.
+    if _shorthands_enabled() and any(c.candidate_id for c in cites):
+        from .extractor import attach_stored_shorthands
+
+        # The definitions come from the extractor, but the jurisdiction guards above ran
+        # AFTER it and may have stripped a candidate (a UK statute name inside a CJEU
+        # judgment). Keep only definitions whose target survived, or the store would
+        # learn precisely the links those guards exist to prevent.
+        live = {c.candidate_id for c in cites if c.candidate_id}
+        defs = [d for d in raw_defs if d["candidate_id"] in live]
+        stored = _stored_shorthands_for(catalogue, cites)
+        if stored:
+            # an in-document definition always beats a stored one, so exclude the names
+            # this document defines for itself (already linked by the extractor's pass)
+            cites = attach_stored_shorthands(
+                text, cites, stored, exclude={d["shorthand"] for d in defs})
+        fresh = _SHORTHANDS.unseen(defs)
+        if fresh:
+            try:
+                catalogue.add_learned_shorthands(fresh, doc_id=stable_id)
+                _SHORTHANDS.note_stored(fresh)
+            except Exception as exc:  # noqa: BLE001 — learning is best-effort
+                log.debug("[cite-extract] %s: shorthand store write failed: %s", stable_id, exc)
 
     # respect human corrections: drop citations the user has rejected (§1.3a). The
     # suppressed edges are manual, so they survive the clear below and keep their veto.

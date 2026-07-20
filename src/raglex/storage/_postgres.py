@@ -241,6 +241,20 @@ CREATE TABLE IF NOT EXISTS citation_aliases (
     source   TEXT
 );
 
+-- Corpus-wide store of shorthands learned in one document and applied (under the
+-- gates in citations/stage.py) in others. See the SQLite DDL for why this is not
+-- citation_aliases and why it carries no occurrence counter.
+CREATE TABLE IF NOT EXISTS learned_shorthands (
+    shorthand    TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    entity_kind  TEXT,
+    is_abbrev    INTEGER NOT NULL DEFAULT 0,
+    first_doc    TEXT,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (shorthand, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS learned_shorthands_cand_idx ON learned_shorthands (candidate_id);
+
 CREATE TABLE IF NOT EXISTS citations (
     citation_id   BIGSERIAL PRIMARY KEY,
     src_id        TEXT NOT NULL,
