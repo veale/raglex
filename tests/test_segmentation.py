@@ -70,3 +70,20 @@ def test_bailii_para_segments_uses_the_strict_guard():
     labels = [s.label for s in _para_segments(text)]
     # the quoted 1./2. must not appear as their own paragraphs
     assert labels == ["para 1", "para 2", "para 3", "para 4"]
+
+
+def test_bare_number_line_paragraphs_cjeu_layout():
+    # CJEU/Formex judgments put the paragraph number ALONE on its own line, then the
+    # text — "…cited).\n60\nTherefore, …". The bare-number fallback recovers these.
+    text = ("JUDGMENT OF THE COURT\n1\nThis reference concerns data protection.\n"
+            "2\nThe questions were referred by the national court.\n"
+            "3\nArticle 9 of the GDPR is relevant here.\n"
+            "4\nThe Court answers as follows.\n5\nCosts are reserved.")
+    assert _labels(text) == ["1", "2", "3", "4", "5"]
+
+
+def test_bare_number_fallback_still_needs_density_and_sequence():
+    # a scatter of bare numbers on lines (a table of amounts) must NOT be read as
+    # paragraphs — no from-1 sequence
+    text = "Amounts:\n1000\n2500\n3750\ntotal 7250"
+    assert _labels(text) == []

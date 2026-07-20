@@ -150,15 +150,25 @@ def test_tabular_capitalised_run_terminates_fast():
 
 def test_scanner_flags_uncovered_citation_residue():
     text = ("The tribunal considered Smith v Jones [1998] 2 WLR 448 at length. "
-            "It also discussed ECLI:EU:C:2020:559 and 425 U.S. 748 in passing.")
+            "It also discussed ECLI:EU:C:2020:559 and a bare Re Application 12/34.")
     cites = extract_citations(text)
     spans = [(c.char_start, c.char_end) for c in cites]
     audit = scan_unconsumed("doc/x", text, spans)
-    # the US-style citation has no grammar — the scanner must surface it
-    assert any(u.cue == "us_style" for u in audit.unconsumed), \
-        [(u.cue, u.text) for u in audit.unconsumed]
-    # while the extracted UK/EU forms count as covered, not missed
+    # the extracted UK/EU forms count as covered, not missed
     assert not any(u.cue in ("ecli", "report_cite") for u in audit.unconsumed), \
+        [(u.cue, u.text) for u in audit.unconsumed]
+
+
+def test_us_citations_are_now_covered_not_flagged_as_residue():
+    # US reporter citations used to be unhandled residue; eyecite now recognises
+    # them, so a US authority is a covered case, not an unconsumed miss
+    text = "It also discussed 425 U.S. 748 and 519 U.S. 452 (1997) in passing."
+    cites = extract_citations(text)
+    us = [c for c in cites if c.method == "us_reporter"]
+    assert {c.candidate_id for c in us} == {"us/us/425/748", "us/us/519/452"}
+    spans = [(c.char_start, c.char_end) for c in cites]
+    audit = scan_unconsumed("doc/x", text, spans)
+    assert not any(u.cue == "us_style" for u in audit.unconsumed), \
         [(u.cue, u.text) for u in audit.unconsumed]
 
 

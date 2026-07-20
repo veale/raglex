@@ -32,7 +32,7 @@ export function PeekProvider({ children }: { children: any }) {
 type Tray =
   | { kind: "mentions"; target: string; anchor?: string; label: any }
   | { kind: "cites"; target: string; family: "cases" | "statute"; label: any }
-  | { kind: "doc"; id: string; highlightTarget?: string; label: any };
+  | { kind: "doc"; id: string; highlightTarget?: string; highlightAnchor?: string; label: any };
 const TrayCtx = createContext<{ stack: Tray[]; push: (t: Tray) => void; closeAt: (i: number) => void } | null>(null);
 export function useTray() {
   return useContext(TrayCtx) ?? { stack: [] as Tray[], push: (_t: Tray) => {}, closeAt: (_i: number) => {} };
@@ -88,7 +88,7 @@ export function EscapeCloser() {
 }
 
 function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => void }) {
-  if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget} open={open} />;
+  if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget} highlightAnchor={t.highlightAnchor} open={open} />;
   if (t.kind === "cites") return <CitesTray target={t.target} family={t.family} open={open} />;
   return <MentionsTray target={t.target} anchor={t.anchor} open={open} />;
 }
@@ -128,16 +128,49 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
       </select>
     </div>
   );
+  // Cross-section filter tokens — jurisdiction × kind ("UK cases 7 | EU legislation 3"),
+  // same as the cited-by panel. No relationship-type chips here: the mentions box goes
+  // straight to the categories.
+  const KIND_LABEL: Record<string, string> = {
+    cases: "cases", legislation: "legislation", guidance: "guidance",
+    administrative: "admin decisions", other: "other",
+  };
+  const [slice, setSlice] = useState<string | null>(null);
+  const facets = new Map<string, { jur: string; kind: string; n: number }>();
+  for (const g of groups) {
+    if (!g.src_jurisdiction || !g.src_kind) continue;
+    const key = `${g.src_jurisdiction}|${g.src_kind}`;
+    const f = facets.get(key) || { jur: g.src_jurisdiction, kind: g.src_kind, n: 0 };
+    f.n++; facets.set(key, f);
+  }
+  const tokens = [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
+  const shown = slice
+    ? groups.filter((g) => `${g.src_jurisdiction}|${g.src_kind}` === slice) : groups;
+
   if (!groups.length) return <><p className="muted">Nothing mentions this yet.</p></>;
   return (
     <div>
       {sorter}
+      {tokens.length > 1 && (
+        <div className="active-chips cited-by-facets" style={{ marginBottom: 8 }}>
+          {tokens.map(([key, f]) => (
+            <button key={key} className={`tag tag-btn${slice === key ? " on" : ""}`}
+              title={`Show only ${f.jur} ${KIND_LABEL[f.kind] || f.kind} citing this`}
+              onClick={() => setSlice(slice === key ? null : key)}>
+              {f.jur} {KIND_LABEL[f.kind] || f.kind} <b>{f.n}</b></button>
+          ))}
+          {slice && (
+            <button className="tag tag-btn tag-clear" onClick={() => setSlice(null)}
+              title="Show every citing document again">clear ✕</button>
+          )}
+        </div>
+      )}
       {data.total > groups.length && <p className="muted" style={{ fontSize: 12 }}>{data.total} citing documents · showing {groups.length}</p>}
-      {groups.map((g, i) => (
+      {shown.map((g, i) => (
         <div className="mgroup" key={i}>
           <div className="mgroup-head">
             <a className="mgroup-title" title="Open this citing document in a new tray, with its citing passages highlighted"
-              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
+              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
               <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
             <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
           </div>
@@ -187,31 +220,46 @@ function CitesTray({ target, family, open }: { target: string; family: "cases" |
 
 // A read-only reader inside a tray, highlighting the paragraphs where the document cites
 // the origin document (the "bit linked from"), scrolled to the first.
-function MentionReader({ id, highlightTarget, open }: { id: string; highlightTarget?: string; open: (id: string, a?: string) => void }) {
+function MentionReader({ id, highlightTarget, highlightAnchor, open }:
+  { id: string; highlightTarget?: string; highlightAnchor?: string; open: (id: string, a?: string) => void }) {
   const [body] = useAsync(() => api.documentBody(id), [id]);
   const peek = usePeek();
   const onCite = (c: any) => peek.push(citePeek(c));
   const segs: any[] = body?.segments || [];
   const cites: any[] = body?.citations || [];
+  // paragraphs where THIS document cites the target. When the reader arrived from a
+  // specific pinpoint ("Article 25 GDPR"), the citation of THAT pinpoint is the one
+  // to jump to — not merely the first mention of the instrument (which is often an
+  // earlier, general "the GDPR" reference). We highlight every target mention but
+  // prioritise the pinpoint match for the scroll.
+  const wantKey = highlightAnchor ? anchorKey(highlightAnchor) : null;
   const hi = new Set<number>();
+  let pinpointSeg: number | null = null;
   if (highlightTarget && body) {
     segs.forEach((s: any, i: number) => {
-      if (cites.some((c: any) => c.char_start >= s.char_start && c.char_start < s.char_end && c.resolved_id === highlightTarget))
-        hi.add(i);
+      const hits = cites.filter((c: any) => c.char_start >= s.char_start
+        && c.char_start < s.char_end && c.resolved_id === highlightTarget);
+      if (!hits.length) return;
+      hi.add(i);
+      if (pinpointSeg == null && wantKey
+          && hits.some((c: any) => c.pinpoint && anchorKey(c.pinpoint) === wantKey))
+        pinpointSeg = i;
     });
   }
   useEffect(() => {
     if (!body) return;
-    const first = [...hi][0];
-    if (first != null) {
-      const el = document.getElementById(`tray-${id}-seg-${first}`);
-      if (el) setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "center" }); }, 80);
+    // the pinpoint's own paragraph wins; else the first target mention
+    const target = pinpointSeg != null ? pinpointSeg : [...hi][0];
+    if (target != null) {
+      const el = document.getElementById(`tray-${id}-seg-${target}`);
+      if (el) setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 1600); }, 80);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [body]);
   if (!body) return <p className="muted loading-pulse">Loading…</p>;
   return (
-    <div>
+    <SelectionShorthand docId={id}>
       <div className="tray-doc-head">
         <b><Oscola c={body.oscola} fallback={body.title || id} /></b>
         <button className="mini" onClick={() => open(id)}>open full ↗</button>
@@ -221,14 +269,14 @@ function MentionReader({ id, highlightTarget, open }: { id: string; highlightTar
         {segs.map((s: any, i: number) => {
           const sb = segBody(body.text, s, cites, onCite);
           return (
-            <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}${hi.has(i) ? " seg-hi" : ""}`} key={i} id={`tray-${id}-seg-${i}`}>
+            <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}${hi.has(i) ? " seg-hi" : ""}${i === pinpointSeg ? " seg-pinpoint" : ""}`} key={i} id={`tray-${id}-seg-${i}`}>
               {sb.showLabel && <span className="seg-label">{s.label}</span>}
               <span className="seg-body">{sb.body}</span>
             </div>
           );
         })}
       </div>
-    </div>
+    </SelectionShorthand>
   );
 }
 
@@ -1033,7 +1081,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
   const d = doc?.document;
   const cites = body?.citations || [];
   return (
-    <div>
+    <SelectionShorthand docId={id}>
       <div className="peek-doc-head">
         <b><Oscola c={(doc as any)?.oscola} fallback={d?.title || id} /></b>
         <div className="muted" style={{ fontSize: 12 }}>
@@ -1069,7 +1117,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
         </div>
       )}
       {body?.text && !segs.length && <div className="reader"><div className="seg-body">{renderCited(body.text, 0, body.text.length, cites, onCite)}</div></div>}
-    </div>
+    </SelectionShorthand>
   );
 }
 
@@ -1761,6 +1809,15 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   const colour: Record<string, string> = { overrules: "var(--bad)", distinguishes: "var(--warn)", applies: "var(--ok)", follows: "var(--ok)" };
   // "mentions" is confusing from the cited-authority's side — read it as "mentioned by".
   const treat = (t: string) => (t === "mentions" ? "mentioned by" : t);
+  // plain-language explanation of each treatment, for a rollover on the chips
+  const TREAT_HELP: Record<string, string> = {
+    overrules: "A later court held this decision was wrong and replaced it.",
+    distinguishes: "A later court set this decision aside as not applying to its facts.",
+    applies: "A later document applied this decision's rule to its own case.",
+    follows: "A later court followed this decision as binding or persuasive.",
+    considers: "A later document discussed this decision without applying or rejecting it.",
+    mentions: "A later document referred to this one (the general case — no specific treatment detected).",
+  };
   return (
     <div className="panel">
       <select className="sort-select" style={{ float: "right" }} value={sort} aria-label="ordering"
@@ -1769,14 +1826,19 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
         <option value="newest">newest first</option>
         <option value="oldest">oldest first</option>
       </select>
-      <h3>Cited by <span className="muted">({count ?? incoming.length})
-        {slice ? ` — ${shown.length} in this slice` : " — later documents that cite this one, and how"}</span>
-        {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" "}
-          <Info t={`Plus ${inferred} inferred link${inferred === 1 ? "" : "s"} — heuristic carry-forwards (a bare "Section 12" pinned to the last-named Act), not citations anyone made. Excluded from the count above so they don't inflate it.`} />
-          {" +"}{inferred} inferred</span> : null}</h3>
+      <h3>Cited by <b>{(count ?? incoming.length).toLocaleString()}</b> later {(count ?? incoming.length) === 1 ? "document" : "documents"}
+        {" "}<Info t="Documents elsewhere in the corpus that cite THIS one. The coloured chips below break them down by how they treat it (applied, distinguished, overruled…) and by where they come from. Click any document to open it." />
+        {slice && (() => {
+          const f = facets.get(slice);
+          return <span className="muted" style={{ fontWeight: 400 }}> — showing the <b>{shown.length}</b> that {f ? `are ${f.jur} ${KIND_LABEL[f.kind] || f.kind}` : "match"}</span>;
+        })()}
+        {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" · "}
+          plus <b>{inferred.toLocaleString()}</b> auto-linked {inferred === 1 ? "reference" : "references"}
+          {" "}<Info t={`These are references RagLex joined up itself but that nobody wrote as a citation — for example a bare "Section 12" that we attached to the last-named Act. They're likely right but unconfirmed, so they're kept separate and NOT counted in the "cited by" total above.`} /></span> : null}</h3>
       <div className="active-chips" style={{ marginBottom: 6 }}>
         {order.filter((t) => byType[t]).map((t) => (
-          <span key={t} className="tag" style={{ borderColor: colour[t] || "var(--line)", color: colour[t] || "inherit" }}>
+          <span key={t} className="tag" title={TREAT_HELP[t] || `${treat(t)} this document`}
+            style={{ borderColor: colour[t] || "var(--line)", color: colour[t] || "inherit", cursor: "help" }}>
             {byType[t]} {treat(t)}</span>
         ))}
       </div>

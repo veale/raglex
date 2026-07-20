@@ -801,6 +801,7 @@ class Facade:
                     # name the citing court and its jurisdiction, as the explorer does
                     "src_court_label": self.court_label(sdoc["court"]) if sdoc["court"] else None,
                     "src_jurisdiction": self._doc_bucket(sdoc["source"], sdoc["court"]),
+                    "src_kind": self._doc_kind(sdoc["source"], sdoc["doc_type"], sdoc["court"]),
                     "authority": _authority(sid, sdoc), "count": len(rs),
                     "pagerank": _pagerank(sid, sdoc),
                     "anchors": anchors, "_rels": rs,
@@ -1340,12 +1341,20 @@ class Facade:
         return self._jurisdiction_of(source)
 
     def _doc_kind(self, source: str, doc_type: str, court: str | None) -> str:
+        # GUIDANCE wins first: a regulator's guidance is guidance, not an
+        # "administrative decision", even though it comes from an admin source (ICO,
+        # EDPB) — otherwise guidance never appears as its own filter category.
+        if doc_type == "guidance":
+            return "guidance"
+        # then an administrative body's DECISIONS (a DPA decision, an enforcement
+        # notice) — before the case-type check, since those carry doc_type "decision"
         if (court or "").lower().startswith("dpa-") or source in self._ADMIN_SOURCES:
             return "administrative"
-        return ("cases" if doc_type in self._CASE_TYPES
-                else "legislation" if doc_type == "legislation"
-                else "guidance" if doc_type == "guidance"
-                else "other")
+        if doc_type in self._CASE_TYPES:
+            return "cases"
+        if doc_type == "legislation":
+            return "legislation"
+        return "other"
 
     def corpus_shape(self) -> dict:
         """The Explore homepage's data: the whole corpus's shape in one payload —

@@ -145,6 +145,10 @@ _NUM_PARA_RE = re.compile(r"^\s{0,8}\[(\d{1,4})\]\s", re.MULTILINE)
 # noisier than the bracket form (a line can open "51." for all sorts of reasons),
 # so it's a FALLBACK, gated harder: see the density guard below.
 _DOT_PARA_RE = re.compile(r"^[ \t]{0,8}(\d{1,4})\.[ \t]+\S", re.MULTILINE)
+# A bare paragraph number alone on its own line — the CJEU/Formex judgment layout
+# ("…case-law cited).\n60\nTherefore, …"). The most ambiguous form of all, so it's
+# the LAST fallback and leans hardest on the strict-sequence + density guards.
+_BARE_NUM_LINE_RE = re.compile(r"^[ \t]{0,8}(\d{1,4})[ \t]*$", re.MULTILINE)
 # A real numbered paragraph is at most this long on average; beyond it the
 # "numbering" is a sparse scatter of stray "N." line-openers, not paragraphs
 # (a 1997 HCA judgment with no paragraph numbers matched 26 across 375k chars —
@@ -198,14 +202,19 @@ def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segme
     marks = _sequential_marks(text, _NUM_PARA_RE)
     label_fmt = "[{}]"
     if len(marks) < min_paras:
-        # dotted fallback, with the density guard
-        dotted = _sequential_marks(text, _DOT_PARA_RE)
-        if len(dotted) < max(min_paras, 5):
+        # the ambiguous fallbacks (dotted "N.", then bare "N" on its own line), each
+        # gated by a strict from-1 sequence AND a plausible mean paragraph length
+        for rx, fmt in ((_DOT_PARA_RE, "{}."), (_BARE_NUM_LINE_RE, "{}")):
+            cand = _sequential_marks(text, rx)
+            if len(cand) < max(min_paras, 5):
+                continue
+            span = cand[-1][1] - cand[0][1]
+            if span <= 0 or span / len(cand) > _MAX_MEAN_PARA_CHARS:
+                continue
+            marks, label_fmt = cand, fmt
+            break
+        else:
             return []
-        span = dotted[-1][1] - dotted[0][1]
-        if span <= 0 or span / len(dotted) > _MAX_MEAN_PARA_CHARS:
-            return []
-        marks, label_fmt = dotted, "{}."
     segs: list[Segment] = []
     # preamble (intituling) before the first paragraph → unlabelled header segment
     if marks[0][1] > 0 and text[:marks[0][1]].strip():

@@ -326,6 +326,11 @@ def _echr_appno(m: "re.Match[str]") -> Normalised:
     before = m.string[max(0, m.start() - 40): m.start()]
     if _EU_INSTRUMENT_BEFORE.search(before):
         return None, None, DROP  # "…Regulation (EEC) No 1408/71" — an EU instrument, not an appno
+    # "Case No 9/70" is a pre-1989 CJEU case number, not a Strasbourg application
+    # number — the cjeu grammar owns it (and a 2-digit "year" like /70 is a CJEU
+    # tell; ECHR application numbers run /YY too, but never behind "Case")
+    if re.search(r"(?i)\bcases?\s*$", before):
+        return None, None, DROP
     return m.group("appno"), None, "case"
 
 
@@ -392,11 +397,14 @@ def _cjeu_old_celex(m: "re.Match[str]") -> Normalised:
 
 # Pre-1989 EU cases had NO court letter — "Case 240/83", "Joined Cases 56/64 and 58/64".
 # They were all Court of Justice (CJ). Require the "Case"/"Cases" cue so a bare "240/83"
-# (a fraction, a ratio) isn't mistaken for a case number.
+# (a fraction, a ratio) isn't mistaken for a case number. The older reports write
+# "Case No 9/70" / "Case No. 13/68" — the "No" must be allowed, and it must WIN over
+# the ECHR application-number grammar (which would otherwise read "No 9/70" as a
+# Strasbourg appno); the longer "Case No 9/70" span carries it through the dedupe.
 register(Grammar(
     "cjeu_case_number_old", "case",
     re.compile(
-        rf"\b(?:Joined\s+Cases?|Cases?|Case)\s+(?P<num>\d+)/(?P<year>\d{{2,4}})\b"
+        rf"\b(?:Joined\s+Cases?|Cases?|Case)\s+(?:Nos?\.?\s+)?(?P<num>\d+)/(?P<year>\d{{2,4}})\b"
     ),
     _cjeu_old_celex,
 ))

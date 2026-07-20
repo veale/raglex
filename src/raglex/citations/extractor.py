@@ -72,9 +72,25 @@ def _attach_case_pinpoints(text: str, cites: list[Citation]) -> list[Citation]:
 # never links): (1) a name defined in citation-adjacent position; (2) a later
 # use of that name WITH a paragraph pincite. Each use mints a pinpointed
 # citation of the defined case — free extra pincites for the network.
+# A short-name DEFINITION beside a citation. Legal drafting introduces one in many
+# shapes, and we accept them all (the user's ask): any bracket type — [], (), {} —
+# holding a name, in single or double (straight or curly) quotes or bare, optionally
+# behind a cue ("hereinafter", "hereafter", "henceforth", "the", "collectively", "or"):
+#   [Suncor]  ("Digital Rights")  ('FMIOA')  (hereinafter "the Charter")
+#   (the "Vienna Convention")  ("Dagg")  [the Act]
+# A BARE (unquoted, no cue) name is only trusted in SQUARE brackets — the OSCOLA
+# convention — because a round "(…)" is far more often a year/court-tag/aside; a
+# quoted or cued name is trusted in any bracket.
 _SHORTHAND_DEF = re.compile(
-    r"\[(?P<br>[A-Z][A-Za-z'’&\- ]{1,40})\]"
-    r"|(?:hereina?fter|hereafter)\s+[\"“']?(?P<hf>[A-Z][A-Za-z'’&\- ]{1,40})[\"”']?"
+    # quoted or cued name, any bracket
+    r"[\[({]\s*(?:(?:herein)?after\s+|hereafter\s+|henceforth\s+|collectively\s+|or\s+)?"
+    r"(?:the\s+)?[\"“']\s*(?P<q>[A-Za-z][\w'’&.\- ]{1,45}?)\s*[\"”']\s*[\])}]"
+    r"|[\[({]\s*(?:(?:herein)?after|hereafter|henceforth)\s+(?:the\s+)?"
+    r"(?P<cue>[A-Z][\w'’&.\- ]{1,45}?)\s*[\])}]"
+    # bare name, square brackets only (OSCOLA short-title convention)
+    r"|\[\s*(?:the\s+)?(?P<br>[A-Z][A-Za-z'’&.\- ]{1,40}?)\s*\]"
+    # legacy "hereinafter Name" with no brackets
+    r"|(?:hereina?fter|hereafter|henceforth)\s+[\"“']?(?P<hf>[A-Z][A-Za-z'’&.\- ]{1,40})[\"”']?"
 )
 
 
@@ -89,56 +105,144 @@ _SHORTHAND_DEF = re.compile(
 _CJEU_LABEL = re.compile(r"judgment\s+in\s+(?P<name>[A-Z][A-Za-z'’&.\- ]{2,40}?)\s*(?=[,.]|$)",
                          re.IGNORECASE)
 
+# A case NAME immediately before a citation — "Dunsmuir v. New Brunswick, " ahead
+# of "2008 SCC 9". Party names are short runs of Capitalised words; "v"/"v." is the
+# join. Anchored to the end so it's the name that actually introduces the citation.
+_CASE_NAME_BEFORE = re.compile(
+    r"(?P<p1>[A-Z][\w.'’()-]*(?:\s+[A-Z][\w.'’()-]*){0,4})\s+v\.?\s+"
+    r"(?P<p2>[A-Z][\w.'’()-]*(?:\s+[A-Z][\w.'’()-]*){0,5})\s*,?\s*$")
+# Parties too generic to be a distinctive short form: a bare "Canada, at para 5"
+# or "R, at para 2" must never mint a link. Government/Crown/office parties only —
+# a real surname (Dunsmuir, Khosa, Vavilov) always survives.
+_GENERIC_PARTY = {
+    "r", "the queen", "the king", "regina", "rex", "canada", "quebec", "ontario",
+    "the crown", "crown", "her majesty", "his majesty", "the state", "state",
+    "united states", "united kingdom", "the united states", "commonwealth",
+    "the commonwealth", "director of public prosecutions", "dpp", "attorney general",
+    "the attorney general", "minister", "the minister", "secretary of state",
+    "the secretary of state", "commissioner", "the commissioner", "government",
+}
+_STOP_WORDS = {"and", "others", "ors", "anor", "another", "et", "al", "no", "inc",
+               "ltd", "llc", "plc", "co", "corp", "the", "of", "for"}
+# Words that introduce a citation but aren't part of the case name; the plaintiff
+# capture reaches back over them ("See Dunsmuir v …"), so strip them off the front.
+_LEADING_SIGNAL = {"see", "in", "cf", "cf.", "also", "accord", "compare", "citing",
+                   "following", "applying", "per", "and", "but", "e.g", "e.g.",
+                   "i.e", "i.e.", "namely", "viz", "eg", "ie", "from", "at", "as",
+                   "held", "decision", "judgment", "the"}
+
+
+def _party_short_form(party: str | None) -> str | None:
+    """The distinctive short form of a party name — "Dunsmuir v. New Brunswick" is
+    referred to as "Dunsmuir" — or None for a generic government/Crown party (whose
+    surname would mislink a bare later mention)."""
+    p = " ".join((party or "").split()).strip(" ,.")
+    if not p or p.lower() in _GENERIC_PARTY:
+        return None
+    words = [w for w in re.split(r"\s+", p) if w]
+    # drop leading citation-signal words the lookback swept in ("See", "In", "held")
+    while words and words[0].lower().strip(".") in _LEADING_SIGNAL:
+        words.pop(0)
+    # a corporate/first-named party: take its leading distinctive word(s), dropping
+    # trailing corporate/list tails ("Suncor Energy Inc" → "Suncor")
+    lead: list[str] = []
+    for w in words:
+        if w.lower().strip(".") in _STOP_WORDS and lead:
+            break
+        lead.append(w)
+        if len(lead) >= 2:
+            break
+    short = " ".join(lead).strip(" ,.")
+    if len(short) < 3 or short.lower() in _GENERIC_PARTY:
+        return None
+    # must contain a real alphabetic surname, not just initials/numbers
+    return short if re.search(r"[A-Za-z]{3,}", short) else None
+
+
+_STATUTE_KINDS = ("act", "regulation", "directive", "treaty", "eu_instrument")
+
+
+def _is_abbrev(name: str) -> bool:
+    """A distinctive short label safe to link on a BARE later mention (no pincite
+    needed) — an initialism like FMIOA/GDPR, or a compact CamelCase tag. A single
+    ordinary-case word ("Suncor") is NOT, since it could be a common noun; those
+    only link with a pincite."""
+    core = name.replace(".", "").replace(" ", "")
+    if len(core) < 2:
+        return False
+    letters = [ch for ch in core if ch.isalpha()]
+    return bool(letters) and sum(ch.isupper() for ch in letters) >= max(2, len(letters) - 1)
+
 
 def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
-    defs: dict[str, Citation] = {}
+    # name → (host citation, is_abbrev). Abbreviations (FMIOA) link on a bare later
+    # mention; case short-names (Dunsmuir) link only with a pincite.
+    defs: dict[str, tuple[Citation, bool]] = {}
+
+    def _register(name: str, host: Citation, *, abbrev: bool) -> None:
+        name = (name or "").strip(" '\"“”’")
+        if len(name) >= 2 and name not in defs:
+            defs[name] = (host, abbrev)
+
     for c in kept:
-        if c.entity_kind not in ("case", "opinion") or not c.candidate_id:
+        if not c.candidate_id:
             continue
+        is_statute = (c.entity_kind or "") in _STATUTE_KINDS
+        is_case = (c.entity_kind or "") in ("case", "opinion")
+        # Bracketed short-name / abbreviation right after ANY citation — a case
+        # ("Suncor"), a statute ("FMIOA"), a treaty ("Vienna Convention"). This is
+        # the "(short)" that legal drafting drops after a full first/second mention.
         window = text[c.char_end: c.char_end + 90]
         m = _SHORTHAND_DEF.search(window)
-        if m:
-            # the definition must belong to THIS citation: nothing but a pinpoint /
-            # report tail may sit between the citation and the bracket
-            head = window[:m.start()]
-            if not re.search(r"[A-Za-z]{12,}", head):  # long prose between → not a def
-                name = (m.group("br") or m.group("hf") or "").strip()
-                if len(name) >= 3 and name not in defs:
-                    defs[name] = c
+        if m and not re.search(r"[A-Za-z]{12,}", window[:m.start()]):
+            name = (m.group("q") or m.group("cue") or m.group("br")
+                    or m.group("hf") or "").strip(" '\"“”’")
+            if len(name) >= 3:
+                _register(name, c, abbrev=is_statute or _is_abbrev(name))
+        if not is_case:
+            continue
         # CJEU "judgment in <Name>" label, immediately either side of the citation
-        # (a label followed by a pincite is a USE, handled below — skip those here)
         for side in (text[max(0, c.char_start - 60): c.char_start],
                      text[c.char_end: c.char_end + 60]):
             lm = _CJEU_LABEL.search(side)
             if lm and not re.match(r"\s*,?\s*(?:paragraph|para)", side[lm.end():]):
-                nm = lm.group("name").strip()
-                if len(nm) >= 3 and nm not in defs:
-                    defs[nm] = c
+                _register(lm.group("name"), c, abbrev=False)
+        # Party-name short forms — the common-law idiom with NO explicit marker
+        # ("Dunsmuir v. New Brunswick, 2008 SCC 9" … "Dunsmuir, at para. 61").
+        nm2 = _CASE_NAME_BEFORE.search(text[max(0, c.char_start - 100): c.char_start])
+        if nm2:
+            for party in (nm2.group("p1"), nm2.group("p2")):
+                short = _party_short_form(party)
+                if short:
+                    _register(short, c, abbrev=False)
     if not defs:
         return kept
     out = list(kept)
     occupied = [(c.char_start, c.char_end) for c in kept]
     for name in sorted(defs, key=len, reverse=True):
-        host = defs[name]
-        # two later-use surfaces, both minting a pinpointed citation of the defined
-        # case: the common-law "Suncor at para 30" and the CJEU "Judgment in
-        # Digital Rights, paragraph 57"
-        use_re = re.compile(
-            rf"\b{re.escape(name)}(?:,)?\s+at\s+paras?\.?\s*"
-            rf"(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})"
-            rf"|judgment\s+in\s+{re.escape(name)}\s*,?\s*"
-            rf"(?:paragraphs?|paras?\.?)\s*(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})",
-            re.IGNORECASE)
+        host, abbrev = defs[name]
+        esc = re.escape(name)
+        # case / opinion short-name uses always carry a pincite ("Suncor at para 30",
+        # "Judgment in Digital Rights, paragraph 57"); an abbreviation links on a
+        # bare mention too ("the FMIOA", "under FMIOA", "s. 3 of the FMIOA").
+        pat = (rf"\b{esc}(?:,)?\s+at\s+paras?\.?\s*(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})"
+               rf"|judgment\s+in\s+{esc}\s*,?\s*(?:paragraphs?|paras?\.?)\s*"
+               rf"(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})")
+        if abbrev:
+            # a bare mention, optionally preceded by "the" — but not when it's being
+            # (re)defined in brackets, which the def pass already owns
+            pat += rf"|(?<![\[(\"“'])\b{esc}\b(?![\"”'\])])"
+        use_re = re.compile(pat, re.IGNORECASE if not abbrev else 0)
         for m in use_re.finditer(text):
             s, e = m.start(), m.end()
             if s <= host.char_start:   # only USES after the definition count
                 continue
-            run = m.group("run") or m.group("run2")
             if any(os < e and s < oe for os, oe in occupied):
                 continue
+            run = m.groupdict().get("run") or m.groupdict().get("run2")
             out.append(Citation(
                 raw=m.group(0), entity_kind=host.entity_kind,
-                candidate_id=host.candidate_id, pinpoint=_pin_text(run),
+                candidate_id=host.candidate_id, pinpoint=_pin_text(run) if run else None,
                 char_start=s, char_end=e, method="shorthand", confidence=0.7,
             ))
             occupied.append((s, e))
@@ -190,6 +294,78 @@ def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
                 raw=am.group(0), entity_kind=kind or "regulation",
                 candidate_id=cand, pinpoint=f"Article {num}",
                 char_start=s, char_end=e, method="article_list", confidence=0.75,
+            ))
+            occupied.append((s, e))
+    return out
+
+
+# A list of sections all governed by one statute — "ss. 27 and 28", "sections 20 to
+# 23", "ss 3, 4 and 5 of the Act". The single-section grammar captures only the first
+# ("ss. 27" → s. 27) and drops the rest, so "ss 27 and 28" lost s. 28 entirely. The
+# statute can sit either side of the list: after it ("ss 27 and 28 of the Act") or
+# before it ("R.S.C. 1985, c. F-7, ss. 27 and 28").
+_SECTION_LIST = re.compile(
+    r"\b(?:ss?\.?|sections?)\s+"
+    r"(?P<list>\d{1,4}[A-Z]?(?:\(\d+[A-Za-z]?\))*"
+    r"(?:\s*(?:,|and|&|to|through|–|—|-)\s*(?:ss?\.?\s+|sections?\s+)?"
+    r"\d{1,4}[A-Z]?(?:\(\d+[A-Za-z]?\))*)+)",
+    re.IGNORECASE)
+_SECTION_NUM = re.compile(r"\d{1,4}[A-Z]?(?:\(\d+[A-Za-z]?\))*")
+_STATUTE_ISH = ("act", "regulation")
+
+
+def _expand_section_list(list_text: str) -> list[tuple[str, int, int]]:
+    """Section tokens in a list, as (label, start, end) offsets into ``list_text``.
+    A small "N to M" range is expanded to its members (endpoints carry the offsets;
+    interior members get the range's span) so every section in the range links."""
+    toks = list(_SECTION_NUM.finditer(list_text))
+    out: list[tuple[str, int, int]] = []
+    for i, tm in enumerate(toks):
+        out.append((tm.group(0), tm.start(), tm.end()))
+        # a bare numeric "N to M" range between two simple integers → fill it in
+        joiner = list_text[tm.end(): toks[i + 1].start()] if i + 1 < len(toks) else ""
+        if re.search(r"(?i)\b(?:to|through)\b|[–—-]", joiner) and tm.group(0).isdigit():
+            nxt = toks[i + 1].group(0)
+            if nxt.isdigit() and 0 < int(nxt) - int(tm.group(0)) <= 20:
+                for k in range(int(tm.group(0)) + 1, int(nxt)):
+                    out.append((str(k), tm.start(), toks[i + 1].end()))
+    return out
+
+
+def _attach_section_lists(text: str, kept: list[Citation]) -> list[Citation]:
+    """Split a section list into one pinpoint edge per section, borrowing the statute
+    identity from an act citation adjacent to the list (before or after)."""
+    acts_by_start = {c.char_start: c for c in kept
+                     if c.candidate_id and (c.entity_kind or "") in _STATUTE_ISH}
+    acts_by_end = {c.char_end: c for c in kept
+                   if c.candidate_id and (c.entity_kind or "") in _STATUTE_ISH}
+    out = list(kept)
+    occupied = [(c.char_start, c.char_end) for c in kept]
+    for m in _SECTION_LIST.finditer(text):
+        # "…ss 27 and 28 of the Act" — a statute begins just after the list, across a
+        # short "of the <Name>," connective (no sentence break); "…c. F-7, ss. 27 and
+        # 28" — a statute ends just before it.
+        host = None
+        for p in range(m.end(), min(len(text), m.end() + 48)):
+            if p in acts_by_start:
+                gap = text[m.end():p]
+                if ". " not in gap and re.fullmatch(r"[\s,]*(?:of\s+)?(?:the\s+)?[\w' .,()\-]*", gap):
+                    host = acts_by_start[p]
+                break
+        if host is None:
+            host = next((acts_by_end[p] for p in range(m.start(), max(-1, m.start() - 6), -1)
+                         if p in acts_by_end), None)
+        if host is None:
+            continue
+        for lbl, ls, le in _expand_section_list(m.group("list")):
+            s = m.start("list") + ls
+            e = m.start("list") + le
+            if any(os < e and s < oe for os, oe in occupied):
+                continue  # the grammar already linked this one (usually the first)
+            out.append(Citation(
+                raw=text[s:e], entity_kind=host.entity_kind,
+                candidate_id=host.candidate_id, pinpoint=f"s. {lbl}",
+                char_start=s, char_end=e, method="section_list", confidence=0.75,
             ))
             occupied.append((s, e))
     return out
@@ -352,14 +528,19 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # list so the stable longest-match dedupe keeps them on a span tie.
     cites = alias_citations(text, aliases) if aliases else []
     cites += grammar_citations(text)
+    # US reporter citations (eyecite), gated to text that looks American — recognises
+    # "135 S. Ct. 2401" so it clusters as a case instead of being misread as statutory
+    # material. Added before the dedupe so a genuine overlap resolves by span.
+    from .us_cases import us_case_citations
+    cites += us_case_citations(text)
     grammar = _dedupe_overlaps(cites)
     if llm is None:
-        return _attach_carry_forward(text, _attach_article_lists(
-            text, _attach_shorthands(text, _attach_case_pinpoints(text, grammar))))
+        return _attach_carry_forward(text, _attach_section_lists(text, _attach_article_lists(
+            text, _attach_shorthands(text, _attach_case_pinpoints(text, grammar)))))
     extra = [c for c in llm.extract(text) if not _overlaps_any(c, grammar)]
     merged = _attach_case_pinpoints(text, _dedupe_overlaps(grammar + extra))
-    return _attach_carry_forward(text, _attach_article_lists(
-        text, _attach_shorthands(text, merged)))
+    return _attach_carry_forward(text, _attach_section_lists(
+        text, _attach_article_lists(text, _attach_shorthands(text, merged))))
 
 
 def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:
