@@ -113,29 +113,41 @@ def parse_lawmaker_html(data: bytes, *, jurisdiction: str = "") -> ParsedDoc:
     for m in _BLOCK_RE.finditer(html):
         cls_m = _CLASS_RE.search(m.group("attrs"))
         classes = (cls_m.group(1) if cls_m else "").lower()
+        # EXACT class tokens, not substrings: "HeadingParagraph" is a section, but
+        # "TopHeadingParagraph" (the short title) and "OtherHeadingParagraph" (a
+        # Division/Subdivision heading) both CONTAIN "headingparagraph" and were being
+        # swept up as sections — so a Tas SR came out with "s. Road Rules 2019" (the
+        # title) and "s. Division 1 - Road Rules" (a division) as bogus sections.
+        tokens = set(classes.split())
         body = _norm(_text(m.group("body")))
         if not body:
             continue
 
-        if "topheadingspan" in classes and title is None:
-            title = body
+        if "topheadingspan" in tokens or "topheadingparagraph" in tokens:
+            # the short title (its <span> text is inside the wrapping <blockquote>,
+            # so either block yields it) — a title, never a section
+            if title is None:
+                title = body
             continue
-        if "longtitle" in classes:
+        if any(t.startswith("longtitle") for t in tokens):
             if long_title is None:
                 long_title = body
             continue
         # Only act on the outermost block for each role (LawMaker nests <p> in <div> of
         # the same class); a section heading's <p> and its wrapper <div> both match, so
         # dedupe by ignoring a block identical to the one just buffered.
-        if any(k in classes for k in ("partheading", "chapterheading", "divisionheading")):
+        if any(t.startswith(("partheading", "chapterheading", "divisionheading",
+                             "subdivisionheading", "otherheading")) for t in tokens):
             flush()
+            # a Division/Subdivision heading (OtherHeadingParagraph) sits between Part
+            # and section; render it as a heading, never "s. …"
             label, kind, level = body, "part", 0
             buffer.append(body)
-        elif "scheduleheading" in classes:
+        elif any(t.startswith("scheduleheading") for t in tokens):
             flush()
             label, kind, level = body, "schedule", 0
             buffer.append(body)
-        elif "headingparagraph" in classes and "partheading" not in classes:
+        elif "headingparagraph" in tokens:
             num_m = _HEADINGSTYLE_RE.search(m.group("body"))
             num = _norm(_text(num_m.group(1))) if num_m else ""
             flush()

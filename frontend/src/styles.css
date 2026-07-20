@@ -698,7 +698,7 @@ mark.pdfcite:hover { filter: brightness(1.25); }
 /* ⌘K command palette */
 .palette-backdrop { position: fixed; inset: 0; background: color-mix(in srgb, var(--base, #000) 45%, transparent);
   z-index: 90; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
-.palette { width: min(640px, calc(100vw - 32px)); background: var(--surface-0, var(--panel-bg, #fff));
+.palette { width: min(640px, calc(100vw - 32px)); background: var(--surface); color: var(--text);
   border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 50px rgba(0,0,0,.35);
   padding: var(--sp-3); max-height: 60vh; overflow-y: auto; }
 .palette input { width: 100%; font-size: 1rem; padding: var(--sp-3) var(--sp-4); }
@@ -711,7 +711,10 @@ mark.pdfcite:hover { filter: brightness(1.25); }
 
 /* citation hover card */
 .cite-card { position: fixed; z-index: 80; width: 360px; max-width: calc(100vw - 24px);
-  background: var(--surface-0, var(--panel-bg, #fff)); border: 1px solid var(--line); border-radius: 8px;
+  /* was hardcoded #fff via an undefined token — white card in dark mode; use the
+     theme's card surface + text so it tracks every Catppuccin flavour */
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
   box-shadow: 0 10px 32px rgba(0,0,0,.28); padding: var(--sp-3) var(--sp-4); pointer-events: none;
   animation: cite-card-in .12s ease-out; }
 @keyframes cite-card-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; } }

@@ -145,6 +145,56 @@ def _attach_shorthands(text: str, kept: list[Citation]) -> list[Citation]:
     return out
 
 
+# A list of articles all governed by one instrument — "Articles 7, 8 and 11 and
+# Article 52(1) of the Charter", "Articles 4 and 6 of the Charter", "Articles 107
+# and 108 TFEU". The single-instrument grammar captures only the article ADJACENT to
+# the instrument name and drops the rest of the list, so most of the articles a
+# passage turns on went unlinked. This pass finds the instrument that closes such a
+# list (an instrument/treaty/regulation citation the grammars already resolved, whose
+# span begins at the tail of the list) and mints one pinpointed edge per article to
+# it. A single article number is left to the grammar.
+_ARTICLE_IN_LIST = re.compile(
+    r"(?:Art(?:icle|\.)?s?\.?\s+)?(?P<n>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)")
+# the whole list construct: two or more article numbers joined by commas / "and"
+# (allowing a repeated "and Article 52(1)"), ending just before the instrument
+_ARTICLE_LIST = re.compile(
+    r"\bArt(?:icle|\.)?s?\.?\s+"
+    r"(?P<list>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*"
+    r"(?:\s*(?:,|and|&)\s*(?:Art(?:icle|\.)?s?\.?\s+)?\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)+)"
+    r"\s+(?:of\s+)?(?:the\s+)?",
+    re.IGNORECASE)
+
+
+def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
+    """Split "Articles 7, 8 and 11 … of the Charter" into one edge per article. The
+    single-instrument grammar only links the article adjacent to the name; this links
+    the rest. The instrument that closes the list is resolved by name here, so it
+    works even when NO article reached the grammar ("Articles 4 and 6 of the
+    Charter")."""
+    from .grammars import instrument_at
+
+    out = list(kept)
+    occupied = [(c.char_start, c.char_end) for c in kept]
+    for m in _ARTICLE_LIST.finditer(text):
+        cand, kind = instrument_at(text[m.end(): m.end() + 120])
+        if not cand:
+            continue
+        for am in _ARTICLE_IN_LIST.finditer(m.group("list")):
+            num = am.group("n")
+            s = m.start() + am.start("n")
+            e = m.start() + am.end("n")
+            # skip any article the grammar already linked (avoid a duplicate edge)
+            if any(os < e and s < oe for os, oe in occupied):
+                continue
+            out.append(Citation(
+                raw=am.group(0), entity_kind=kind or "regulation",
+                candidate_id=cand, pinpoint=f"Article {num}",
+                char_start=s, char_end=e, method="article_list", confidence=0.75,
+            ))
+            occupied.append((s, e))
+    return out
+
+
 # A *bare* provision reference with no statute named alongside it — "section 5",
 # "Article 6", "regulation 3", "paragraph 12 of Schedule 1". On its own it doesn't
 # say which instrument; the carry-forward pass attaches it to the last-named one.
@@ -304,11 +354,12 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     cites += grammar_citations(text)
     grammar = _dedupe_overlaps(cites)
     if llm is None:
-        return _attach_carry_forward(
-            text, _attach_shorthands(text, _attach_case_pinpoints(text, grammar)))
+        return _attach_carry_forward(text, _attach_article_lists(
+            text, _attach_shorthands(text, _attach_case_pinpoints(text, grammar))))
     extra = [c for c in llm.extract(text) if not _overlaps_any(c, grammar)]
     merged = _attach_case_pinpoints(text, _dedupe_overlaps(grammar + extra))
-    return _attach_carry_forward(text, _attach_shorthands(text, merged))
+    return _attach_carry_forward(text, _attach_article_lists(
+        text, _attach_shorthands(text, merged)))
 
 
 def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:

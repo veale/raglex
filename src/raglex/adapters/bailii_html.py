@@ -161,9 +161,18 @@ def _body_text(fragment: str) -> str:
 
 
 def _para_segments(text: str) -> list[Segment]:
-    """Numbered-paragraph segments from the flattened text: a line starting "12. " is a
+    """Numbered-paragraph segments from the flattened text: a block starting "12. " is a
     paragraph seam. Only trusted when the numbering behaves like numbering — several
-    paragraphs, ascending — so a bare "3." in prose can't fake a structure."""
+    paragraphs, contiguously ascending from 1 — so a quoted statute's own "(2) … (3) …"
+    sub-list can't fake a structure.
+
+    The strict from-1 sequential guard (shared with the flat-text synthesiser)
+    replaces the old local-peak filter, which merely required each number to exceed
+    the previous and precede the next — far too weak: an ECHR judgment quoting
+    Bulgarian criminal procedure produced spurious "1"/"2"/"3" paragraphs from the
+    quoted sub-articles and sub-headings, interleaved with the real ones."""
+    from ..core.segmentation import sequential_para_marks
+
     marks: list[tuple[int, int]] = []  # (para number, char offset)
     offset = 0
     for line in text.split("\n\n"):
@@ -171,15 +180,12 @@ def _para_segments(text: str) -> list[Segment]:
         if m:
             marks.append((int(m.group(1)), offset))
         offset += len(line) + 2
-    ascending = [
-        (n, at) for i, (n, at) in enumerate(marks)
-        if (i == 0 or n > marks[i - 1][0]) and (i + 1 == len(marks) or n < marks[i + 1][0])
-    ]
-    if len(ascending) < 3:
+    kept = sequential_para_marks(marks)
+    if len(kept) < 3:
         return []
     segs: list[Segment] = []
-    for i, (n, at) in enumerate(ascending):
-        end = ascending[i + 1][1] if i + 1 < len(ascending) else len(text)
+    for i, (n, at) in enumerate(kept):
+        end = kept[i + 1][1] if i + 1 < len(kept) else len(text)
         segs.append(Segment(label=f"para {n}", char_start=at, char_end=end, kind="paragraph"))
     return segs
 

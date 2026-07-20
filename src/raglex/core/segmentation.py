@@ -140,43 +140,79 @@ def blocks_by_localname(
 # line starts. Synthesising segments from those makes pinpoints ("at para 15")
 # land, the minimap work, and peeks scroll — without re-importing anything.
 _NUM_PARA_RE = re.compile(r"^\s{0,8}\[(\d{1,4})\]\s", re.MULTILINE)
+# The dotted form — "1.", "2." at a line start — used by the High Court of
+# Australia and other courts that don't bracket their paragraph numbers. Much
+# noisier than the bracket form (a line can open "51." for all sorts of reasons),
+# so it's a FALLBACK, gated harder: see the density guard below.
+_DOT_PARA_RE = re.compile(r"^[ \t]{0,8}(\d{1,4})\.[ \t]+\S", re.MULTILINE)
+# A real numbered paragraph is at most this long on average; beyond it the
+# "numbering" is a sparse scatter of stray "N." line-openers, not paragraphs
+# (a 1997 HCA judgment with no paragraph numbers matched 26 across 375k chars —
+# ~14k chars each — while a genuinely numbered judgment runs a few hundred).
+_MAX_MEAN_PARA_CHARS = 6000
 
 
-def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segment]:
-    """Derive ``Segment``s from ``[N]``-numbered paragraphs in flat text.
-
-    The trap (real example: Perreault v Canada): a judgment QUOTING another
-    judgment reproduces the quote's own paragraph numbers at line starts —
-    para [33] may contain a quoted "[107] Section 49 directs…" and then
-    continue at [34]. Numbering in the host judgment is sequential, so a
-    candidate is accepted only if it advances the sequence by a small step;
-    an out-of-sequence number is quoted material and stays inside the
-    enclosing paragraph. Returns [] when fewer than ``min_paras`` sequential
-    paragraphs are found (not actually a numbered judgment)."""
-    if not text:
-        return []
-    marks: list[tuple[int, int, int]] = []  # (n, match_start, body_start)
+def sequential_para_marks(marks: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Given ``(number, offset)`` marks in document order, keep the longest run that
+    starts at 1 (or 2) and advances by exactly one — the real paragraph numbering.
+    Out-of-sequence numbers (a quoted instrument's own sub-list, a mis-numbered
+    heading) are dropped, so they stay inside the enclosing paragraph. Shared by the
+    BAILII/HUDOC importer and the flat-text synthesiser."""
+    kept: list[tuple[int, int]] = []
     last = 0
-    for m in _NUM_PARA_RE.finditer(text):
+    for n, at in marks:
+        if (not kept and n in (1, 2)) or (kept and n == last + 1):
+            kept.append((n, at))
+            last = n
+    return kept
+
+
+def _sequential_marks(text: str, rx: "re.Pattern[str]") -> list[tuple[int, int, int]]:
+    """The longest run of line-start numbers that starts at 1/2 and advances by
+    exactly one each time (carrying each mark's match span). Off-sequence numbers (a
+    quoted judgment's own paragraphs; stray "s 51.") are skipped, so they stay inside
+    the host paragraph rather than splitting it — the Perreault v Canada trap."""
+    marks: list[tuple[int, int, int]] = []
+    last = 0
+    for m in rx.finditer(text):
         n = int(m.group(1))
-        # STRICT sequential guard: first paragraph is [1] (or [2] — some
-        # transcripts lose the opener), every later one must be exactly last+1.
-        # Judgments number contiguously; a quoted judgment's numbers are
-        # off-sequence, so strictness is what keeps them inside the quoting
-        # paragraph. (Cost: a genuine numbering gap ends the labelled region —
-        # degraded but never wrong.)
         if (not marks and n in (1, 2)) or (marks and n == last + 1):
             marks.append((n, m.start(), m.end()))
             last = n
-    if len(marks) < min_paras:
+    return marks
+
+
+def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segment]:
+    """Derive ``Segment``s from numbered paragraphs in flat text.
+
+    Prefers the ``[N]`` bracket form; falls back to the ``N.`` dotted form (High
+    Court of Australia and others) only when brackets aren't the style, because
+    the dotted form is far more ambiguous. Both use the strict-sequential guard
+    (a candidate is accepted only if it advances the run by one), and the dotted
+    fallback additionally requires the paragraphs to be plausibly dense — a
+    document whose "paragraphs" average many thousands of characters isn't
+    numbered, it just has stray line-opening numbers. Returns [] when fewer than
+    ``min_paras`` sequential paragraphs are found."""
+    if not text:
         return []
+    marks = _sequential_marks(text, _NUM_PARA_RE)
+    label_fmt = "[{}]"
+    if len(marks) < min_paras:
+        # dotted fallback, with the density guard
+        dotted = _sequential_marks(text, _DOT_PARA_RE)
+        if len(dotted) < max(min_paras, 5):
+            return []
+        span = dotted[-1][1] - dotted[0][1]
+        if span <= 0 or span / len(dotted) > _MAX_MEAN_PARA_CHARS:
+            return []
+        marks, label_fmt = dotted, "{}."
     segs: list[Segment] = []
-    # preamble (intituling) before [1] becomes an unlabelled header segment
+    # preamble (intituling) before the first paragraph → unlabelled header segment
     if marks[0][1] > 0 and text[:marks[0][1]].strip():
         segs.append(Segment(label="", kind="header", level=0,
                             char_start=0, char_end=marks[0][1]))
     for i, (n, start, _bs) in enumerate(marks):
         end = marks[i + 1][1] if i + 1 < len(marks) else len(text)
-        segs.append(Segment(label=f"[{n}]", kind="paragraph", level=1,
+        segs.append(Segment(label=label_fmt.format(n), kind="paragraph", level=1,
                             char_start=start, char_end=end))
     return segs

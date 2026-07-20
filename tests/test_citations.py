@@ -564,3 +564,38 @@ def test_commonwealth_and_scots_reporters_stay_candidate_less():
         cs = extract_citations(t)
         assert cs and all(c.candidate_id is None for c in cs), t
         assert all(c.entity_kind == "case" for c in cs), t
+
+
+def test_eu_treaty_and_charter_articles_are_recognised():
+    # TEU/TFEU/Charter were unrecognised, so the reference vanished and a bare
+    # "Article 6" then carried forward to the last-named directive (the flagged
+    # Charter-vs-Directive mix-up). Sub-article pinpoints ride along.
+    def cand(text, want):
+        cs = extract_citations(text)
+        return any(c.candidate_id == want for c in cs)
+
+    assert cand("as guaranteed by Article 4(2) TEU", "12016M")
+    assert cand("Article 267 of the Treaty on the Functioning of the European Union", "12016E")
+    assert cand("Article 52(1) of the Charter of Fundamental Rights", "12012P")
+    # the sub-article is the pinpoint
+    c = next(c for c in extract_citations("Article 4(2) TEU") if c.candidate_id == "12016M")
+    assert c.pinpoint == "Article 4(2)"
+
+
+def test_multi_article_lists_link_every_article_to_the_instrument():
+    # "Articles 7, 8 and 11 and Article 52(1) of the Charter" — all four to the
+    # Charter, not just the one adjacent to the name (flags 5, 6)
+    cs = extract_citations(
+        "Articles 7, 8 and 11 and Article 52(1) of the Charter of Fundamental Rights")
+    charter = {c.pinpoint for c in cs if c.candidate_id == "12012P"}
+    assert charter == {"Article 7", "Article 8", "Article 11", "Article 52(1)"}
+
+    # a numbered instrument, where the grammar previously lost the whole article list
+    cs = extract_citations("Articles 7 and 8 of Directive 2002/58")
+    pins = {c.pinpoint for c in cs if c.candidate_id == "32002L0058" and c.pinpoint}
+    assert {"Article 7", "Article 8"} <= pins
+
+    # "Articles 4 and 6 of the Charter" — nothing reached the single-article grammar,
+    # so the list pass must resolve the Charter itself
+    cs = extract_citations("Articles 4 and 6 of the Charter of Fundamental Rights")
+    assert {c.pinpoint for c in cs if c.candidate_id == "12012P"} == {"Article 4", "Article 6"}

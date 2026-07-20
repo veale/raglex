@@ -150,3 +150,29 @@ def test_document_body_emits_line_depths_for_legislation_only(tmp_path):
     jb = f.document_body(judgment)
     assert jb["lines"] is None
     assert all("lines" not in s for s in jb["segments"])
+
+
+def test_definition_heads_reset_but_their_sub_paragraphs_nest():
+    # A Criminal Code-style interpretation section: each defined term sits at the
+    # margin and its lettered sub-paragraphs nest one tier in — successive
+    # definitions must NOT march ever deeper (flag 14).
+    text = (
+        "In this Act,\n"
+        "Act includes\n"
+        "(a) an Act of Parliament,\n"
+        "(b) an Act of the legislature of a province;\n"
+        "appearance notice means a notice in Form 9;\n"
+        "Attorney General\n"
+        "(a) with respect to some proceedings, means X, and\n"
+        "(b) with respect to other proceedings, means Y;\n"
+        "bank-note includes any negotiable instrument;"
+    )
+    assert depths(text) == [0, 0, 1, 1, 0, 0, 1, 1, 0]
+
+
+def test_definition_head_pattern_does_not_fire_on_ordinary_prose():
+    # a subsection that happens to contain "means" mid-sentence is not a new head
+    text = ("(1) The court shall consider what fairness means in the circumstances\n"
+            "(a) having regard to the parties, and\n"
+            "(b) the wider public interest.")
+    assert depths(text) == [0, 1, 1]

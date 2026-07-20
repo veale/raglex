@@ -504,6 +504,56 @@ register(Grammar(
     lambda m: ("echr/convention", f"Article {m.group('num')}", "treaty"),
 ))
 
+# EU primary law + the Charter, cited by name: "Article 4(2) TEU", "Article 267 of
+# the Treaty on the Functioning of the European Union", "Article 52(1) of the
+# Charter of Fundamental Rights". These weren't recognised at all, so the reference
+# vanished (and a bare "Article 6" then carried forward to the last-named directive,
+# which is exactly the Charter-vs-Directive mix-up flagged in the corpus). The
+# candidate is the consolidated CELEX so every reference clusters to one node and
+# the instrument is harvestable. The "(2)" sub-article rides along as the pinpoint.
+_EU_TREATIES = (
+    (r"(?:the\s+)?Treaty\s+on\s+the\s+Functioning\s+of\s+the\s+European\s+Union|TFEU", "12016E"),
+    (r"(?:the\s+)?Treaty\s+on\s+European\s+Union|TEU", "12016M"),
+    (r"(?:the\s+)?Charter\s+of\s+Fundamental\s+Rights(?:\s+of\s+the\s+European\s+Union)?"
+     r"|(?:the\s+)?EU\s+Charter|the\s+Charter", "12012P"),
+)
+for _i, (_names, _celex) in enumerate(_EU_TREATIES):
+    register(Grammar(
+        f"eu_treaty_{_celex}", "treaty",
+        re.compile(
+            rf"\bArt(?:icle|\.)?s?\.?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+"
+            rf"(?:of\s+)?(?:{_names})\b",
+            re.IGNORECASE,
+        ),
+        (lambda celex: lambda m: (celex, f"Article {m.group('art')}", "treaty"))(_celex),
+    ))
+
+# Just the instrument name at the head of a string → its candidate + kind, for the
+# multi-article-list pass (which resolves the instrument that closes "Articles 4 and
+# 6 of the Charter" itself, since only the list's last article — if any — reaches the
+# grammar). Treaties first (most specific), then named acronyms/full names, then the
+# numeric "Regulation/Directive X/Y" form.
+_TREATY_HEAD = [(re.compile(rf"^(?:{names})\b", re.IGNORECASE), celex)
+                for names, celex in _EU_TREATIES]
+
+
+def instrument_at(text: str) -> tuple[str | None, str | None]:
+    """(candidate, kind) for an EU instrument named at the START of ``text``."""
+    for rx, celex in _TREATY_HEAD:
+        if rx.match(text):
+            return celex, "treaty"
+    m = re.match(rf"(?:the\s+)?(?P<name>{_EU_FULL_NAMES})\b", text, re.IGNORECASE)
+    if m:
+        return _name_to_celex(m.group("name")), "regulation"
+    m = re.match(rf"(?P<name>{_EU_ACRONYMS})\b", text)
+    if m:
+        return _name_to_celex(m.group("name")), "regulation"
+    m = re.match(r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
+                 r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})", text, re.IGNORECASE)
+    if m:
+        return _eu_celex(m.group("kind"), m.group("a"), m.group("b")), m.group("kind").lower()
+    return None, None
+
 # "Article 17 GDPR" / "Art. 22 of the GDPR" / "Article 6 of the DMA" / "Digital
 # Services Act". Acronym form (uppercase) and spelled-out form (any case).
 def _eu_acronym(m: "re.Match[str]") -> Normalised:

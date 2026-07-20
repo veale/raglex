@@ -1499,7 +1499,11 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
       if ((e.target as HTMLElement)?.closest?.(".sel-pop")) return;  // clicking inside our popover
       const s = window.getSelection();
       const text = s?.toString().trim() || "";
-      if (!text || text.length > 140 || !ref.current || !s?.anchorNode || !ref.current.contains(s.anchorNode)) {
+      // Allow much longer selections than a shorthand rule would want, because
+      // flagging a badly-linked PASSAGE for refinement often spans several lines.
+      // The cap is only to avoid a whole-document accidental select-all; the "Link"
+      // action self-limits (it's hidden for long selections — see the menu below).
+      if (!text || text.length > 4000 || !ref.current || !s?.anchorNode || !ref.current.contains(s.anchorNode)) {
         setSel(null); setMode("menu"); return;
       }
       const rect = s.getRangeAt(0).getBoundingClientRect();
@@ -1564,8 +1568,12 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
         {msg ? <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</span>
           : mode === "menu" ? (
             <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
-              <button style={{ flex: "0 0 auto" }} onClick={() => setMode("link")}>
-                🔖 Link “{sel.text.length > 24 ? sel.text.slice(0, 24) + "…" : sel.text}” to…</button>
+              {/* a shorthand rule wants a short phrase; hide Link for a long passage
+                  selection (which is a flag-for-refinement, not an alias) */}
+              {sel.text.length <= 80 && (
+                <button style={{ flex: "0 0 auto" }} onClick={() => setMode("link")}>
+                  🔖 Link “{sel.text.length > 24 ? sel.text.slice(0, 24) + "…" : sel.text}” to…</button>
+              )}
               <button style={{ flex: "0 0 auto" }} title="Record this passage as badly linked/refined — with its location and what it links to now — for a later pass over the linking logic"
                 onClick={() => setMode("flag")}>⚑ Flag for improved refinement</button>
             </div>

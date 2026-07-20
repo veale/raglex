@@ -95,6 +95,17 @@ def _celex_case_no(celex: str | None) -> str | None:
     return f"{court}-{num}/{year[2:]}"
 
 
+# An AG opinion's title is frequently the delivery boilerplate ("Opinion of
+# Advocate General Campos Sánchez-Bordona delivered on 15 January 2020") rather
+# than the case name — 6,966 opinions in the corpus. Rendered as-is it lands in
+# the italic party slot AND draws a second ", Opinion of AG" tail, so the citation
+# reads as neither the case nor a clean opinion label. Detect it, lift the AG's
+# name out of it, and keep it OUT of the party slot.
+_AG_BOILERPLATE = re.compile(
+    r"^(?:Opinion|View)\s+of\s+Advocate\s+General\s+(?P<ag>.+?)"
+    r"(?:\s+delivered\b.*)?$", re.IGNORECASE)
+
+
 def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
     ecli = _get(doc, "ecli") or ""
     celex = (meta or {}).get("celex")
@@ -103,6 +114,14 @@ def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
     title = (_get(doc, "title") or "").strip()
     if not case_no and not ecli_short:
         return None
+    is_opinion = (_get(doc, "doc_type") == "opinion"
+                  or _get(doc, "court") == "Advocate General")
+    # an AG name from metadata, else parsed out of a boilerplate title
+    ag = (meta or {}).get("advocate_general") or (meta or {}).get("ag")
+    bm = _AG_BOILERPLATE.match(title) if title else None
+    if bm:
+        ag = ag or bm.group("ag").strip()
+        title = ""                       # boilerplate is not the case name
     parts: list[Part] = []
     if case_no:
         parts.append(_run(f"Case {case_no} "))
@@ -111,9 +130,8 @@ def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
         parts.append(_run(" "))
     if ecli_short:
         parts.append(_run(ecli_short))
-    # AG opinions / views carry an "Opinion of AG …" tail (name where we have it).
-    if _get(doc, "doc_type") == "opinion" and _get(doc, "court") == "Advocate General":
-        ag = (meta or {}).get("advocate_general") or (meta or {}).get("ag")
+    # AG opinions / views carry an "Opinion of AG …" tail (name where we have it)
+    if is_opinion:
         parts.append(_run(f", Opinion of AG {ag}" if ag else ", Opinion of AG"))
     return _pack(parts)
 

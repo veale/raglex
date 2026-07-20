@@ -44,6 +44,29 @@ def test_eu_ag_opinion_tail():
     assert out["text"].endswith("Opinion of AG")
 
 
+def test_eu_ag_opinion_boilerplate_title_is_not_treated_as_case_name():
+    # 6,966 opinions carry the delivery boilerplate as their title; it must not land
+    # in the italic party slot, and the AG's name is lifted out of it for the tail
+    out = cite({"stable_id": "ECLI:EU:C:2020:7", "source": "eu-cellar",
+                "ecli": "ECLI:EU:C:2020:7", "doc_type": "opinion",
+                "court": "Advocate General",
+                "title": "Opinion of Advocate General Campos Sánchez-Bordona "
+                         "delivered on 15 January 2020"},
+               {"celex": "62018CC0520"})
+    assert out["text"] == "Case C-520/18 EU:C:2020:7, Opinion of AG Campos Sánchez-Bordona"
+    # the boilerplate is not rendered as italic parties
+    assert not any(p["i"] and "Advocate General" in p["t"] for p in out["parts"])
+
+
+def test_eu_opinion_with_real_case_name_keeps_it():
+    out = cite({"stable_id": "ECLI:EU:C:2019:9", "source": "eu-cellar",
+                "ecli": "ECLI:EU:C:2019:9", "doc_type": "opinion",
+                "court": "Advocate General", "title": "La Quadrature du Net and Others"},
+               {"celex": "62018CC0511"})
+    assert "La Quadrature du Net and Others" in out["text"]
+    assert any(p["i"] and "La Quadrature" in p["t"] for p in out["parts"])
+
+
 def test_echr_with_appno_formation_date():
     out = cite({"stable_id": "echr/001-1", "source": "echr", "doc_type": "judgment",
                 "title": "Broniowski v Poland"},

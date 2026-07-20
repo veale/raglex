@@ -35,6 +35,15 @@ import re
 # the token has to be short and followed by whitespace.
 _MARKER_RE = re.compile(r"^[ \t]*(?:\((?P<paren>[0-9A-Za-z]{1,6})\)|(?P<dot>[0-9]{1,3}|[A-Za-z])\.)\s")
 
+# A defined term opening an interpretation-section entry: a short term (optionally
+# quoted) followed by the drafting verb that introduces its definition. Deliberately
+# narrow — the verb must follow within a few words — so ordinary prose that merely
+# contains "means" isn't caught.
+_DEFINITION_HEAD = re.compile(
+    r'^[ \t]*["“]?[A-Za-z][\w\'’.()\- ]{0,58}?["”]?[ \t,]*'
+    r"(?:means\b|includes\b|has the (?:same )?meaning\b|, in relation to\b)",
+    re.IGNORECASE)
+
 _ROMAN_RE = re.compile(r"^(?:x{0,3})(?:ix|iv|v?i{0,3})$", re.IGNORECASE)
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10}
 
@@ -123,7 +132,21 @@ def line_depths(text: str) -> list[tuple[int, int, int]]:
             continue
         m = _MARKER_RE.match(raw)
         if not m:
-            out.append((start, end, depth))  # continuation: keep the current tier
+            # A non-enumerated line usually continues the provision above it (a
+            # wrapped line), so it keeps the current tier. The exception is a new
+            # DEFINED TERM in an interpretation section — "appearance notice means
+            # …", "Act includes …" — which is a fresh head, not a continuation of
+            # the (a)/(b) sub-paragraphs of the previous definition. Recognising the
+            # drafting form ("X means/includes/has the meaning …") resets it to the
+            # base tier so successive definitions don't march ever deeper.
+            if _DEFINITION_HEAD.match(raw):
+                # the head sits at the margin (depth 0), but its lettered
+                # sub-paragraphs must nest one tier IN — so seed the stack with a
+                # sentinel no real enumerator can continue, and the next "(a)" opens
+                # beneath it at depth 1
+                levels[:] = [{"kind": "_def", "value": 0, "suffix": ""}]
+                depth = 0
+            out.append((start, end, depth))
             continue
         tok = m.group("paren") or m.group("dot")
         cands = _candidates(tok)

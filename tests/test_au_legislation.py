@@ -189,6 +189,32 @@ def test_lawmaker_html_parses_title_longtitle_sections_and_links():
     assert "au/qld/act/2022/34" in {r.dst_id for r in doc.relations}
 
 
+# The Tasmanian LawMaker variant wraps the short title in <blockquote
+# class="TopHeadingParagraph"> and Division headings in <blockquote
+# class="OtherHeadingParagraph"> — both CONTAIN "HeadingParagraph", so a substring
+# class test swept them up as sections ("s. Road Rules 2019", "s. Division 1 - …").
+LAWMAKER_TAS_HTML = b"""<html><body><div id="fragview">
+<blockquote class="TopHeadingParagraph"><b><span class="TopHeadingSpan">Road Rules 2019</span></b></blockquote>
+<blockquote class="PartHeadingParagraph"><b><span class="PartHeadingName">PART 1 - Introduction</span></b></blockquote>
+<blockquote class="OtherHeadingParagraph"><b><span class="HeadingName">Division 1 - Road Rules</span></b></blockquote>
+<P class="HeadingParagraph"><a name="sec.1"></a><B class="HeadingStyle">1</B><span class="HeadingName">Short title</span></P>
+<blockquote class="FlatParagraph">These rules may be cited as the Road Rules 2019.</blockquote>
+</div></body></html>"""
+
+
+def test_lawmaker_tas_title_and_division_are_not_mislabelled_as_sections():
+    doc = parse_lawmaker_html(LAWMAKER_TAS_HTML, jurisdiction="tas")
+    # the short title is the document title, never a section
+    assert doc.title == "Road Rules 2019"
+    kinds = {s.label: s.kind for s in doc.segments}
+    assert "s. Road Rules 2019" not in kinds
+    # the Division heading is a heading, not "s. Division 1 - Road Rules"
+    div = next(s for s in doc.segments if "Division 1" in s.label)
+    assert div.kind == "part" and not div.label.startswith("s.")
+    # a genuine section still parses correctly
+    assert kinds.get("s. 1 Short title") == "section"
+
+
 # -- feed --------------------------------------------------------------------
 def test_parse_crawler_feed_extracts_docid_status_pit_and_repealed():
     items = parse_crawler_feed(CRAWLER_FEED)
