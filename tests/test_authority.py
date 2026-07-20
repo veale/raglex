@@ -312,3 +312,32 @@ def test_cited_by_scaffold_edges_never_read_as_forward_citations(catalogue, tmp_
     a = catalogue.authority_for(["A"])["A"]["pagerank"]
     c = catalogue.authority_for(["C"])["C"]["pagerank"]
     assert a > c
+
+
+def test_cited_by_counts_batches_many_ids_into_one_aggregate(catalogue, tmp_path):
+    """The cited-by panel annotates each citer with its own citation count. Asking per
+    row would be one query per row on a page showing 200 — the N+1 that pinned a pool
+    connection per view — so the counts come back for the whole page at once."""
+    ts = TextStore(tmp_path / "text")
+    for sid in ("A", "B", "C", "D"):
+        _doc(catalogue, ts, sid, f"body of {sid}")
+    _edge(catalogue, "C", "A")
+    _edge(catalogue, "D", "A")
+    _edge(catalogue, "D", "B")
+
+    counts = catalogue.cited_by_counts(["A", "B", "C"])
+    assert counts["A"] == 2          # cited by C and D
+    assert counts["B"] == 1          # cited by D
+    assert "C" not in counts         # nothing cites C — absent, not zero-padded
+
+
+def test_cited_by_counts_ignores_inferred_and_self_edges(catalogue, tmp_path):
+    """Same exclusions as the headline cited-by total, or the subtle "[cited by N]"
+    cue would contradict the number printed at the top of the panel."""
+    ts = TextStore(tmp_path / "text")
+    for sid in ("A", "B"):
+        _doc(catalogue, ts, sid, f"body of {sid}")
+    _edge(catalogue, "B", "A")
+    _edge(catalogue, "B", "A", via="inferred")   # heuristic carry-forward
+    _edge(catalogue, "A", "A")                   # self-citation
+    assert catalogue.cited_by_counts(["A"])["A"] == 1

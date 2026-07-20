@@ -1406,6 +1406,42 @@ class Catalogue:
             "AND d.decision_date >= ?)", (*ids, cutoff)).fetchone()["n"]
         return {"documents": total, "recent_documents": recent, "recent_years": recent_years}
 
+    def source_court_for(self, ids: list[str]) -> dict[str, tuple[str, str]]:
+        """``{stable_id: (source, court)}`` for many documents in one query — enough to
+        bucket each into a jurisdiction without loading whole rows."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        out: dict[str, tuple[str, str]] = {}
+        for i in range(0, len(ids), 800):
+            chunk = ids[i: i + 800]
+            qs = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                    f"SELECT stable_id, source, court FROM documents WHERE stable_id IN ({qs})",
+                    chunk).fetchall():
+                out[r["stable_id"]] = (r["source"] or "", r["court"] or "")
+        return out
+
+    def cited_by_counts(self, ids: list[str]) -> dict[str, int]:
+        """``{doc_id: how many distinct documents cite it}`` for MANY ids at once.
+
+        The cited-by panel annotates each citer with its own citation count, as a quiet
+        cue to how much weight that citer carries. Asking per row would be 200 queries
+        on one page view — the N+1 that pinned a pool connection per view before — so
+        this is one grouped aggregate over the same partial index."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT r.dst_id AS id, COUNT(DISTINCT r.src_id) AS n
+            FROM relations r
+            WHERE r.dst_id IN ({qs})
+              AND r.resolution_status = 'resolved' AND r.extracted_via <> 'inferred'
+              AND r.relationship_type <> 'cited_by' AND r.src_id <> r.dst_id
+            GROUP BY r.dst_id
+            """, ids).fetchall()
+        return {r["id"]: r["n"] for r in rows}
+
     def cited_by_types(self, ids: list[str]) -> dict[str, int]:
         """Who cites this document, broken down by the citing document's TYPE —
         the Explore drill-down's "what hangs off this instrument" line (cases /
@@ -1751,7 +1787,8 @@ class Catalogue:
             (limit,),
         ).fetchall()
 
-    def pending_reference_groups(self) -> list[sqlite3.Row]:
+    def pending_reference_groups(self, *, min_citing: int = 1, limit: int | None = None,
+                                 need_echr: bool = True) -> list[sqlite3.Row]:
         """One row per distinct hanging reference — the worklist, as a single GROUP BY
         instead of a 450k-row Python pass (§5b, §8).
 
@@ -1760,9 +1797,31 @@ class Catalogue:
         so they never enter the worklist. ``echr_citing`` says whether any citing document
         is a Strasbourg one — a bare ``115/92`` is an ECtHR application number there and an
         old CJEU case number anywhere else, and nothing but the citing document tells them
-        apart."""
+        apart.
+
+        Three knobs, because the unbounded form got expensive as the corpus grew — it
+        aggregates 1.8M pending edges into ~517k groups and ships every one to Python:
+
+        * ``need_echr=False`` drops the join to ``documents``, which exists *only* to
+          compute ``echr_citing``. That join is a nested loop over 1.8M rows and costs
+          about 10 of the query's 16 seconds; callers that don't read the flag shouldn't
+          pay for it.
+        * ``min_citing`` filters in SQL. 70% of these groups are cited exactly once, so a
+          "most-cited" view can never show them — classifying them in Python is pure waste.
+        * ``limit`` caps the scan. The ORDER BY is already ``citing_count DESC``, so a
+          bounded read takes the top of the ranking rather than an arbitrary slice.
+        """
         agg = "string_agg(DISTINCT r.extracted_via, ',')" if self.backend == "postgres" \
             else "group_concat(DISTINCT r.extracted_via)"
+        echr_select = ("MAX(CASE WHEN d.source = 'echr' THEN 1 ELSE 0 END) AS echr_citing"
+                       if need_echr else "0 AS echr_citing")
+        join = "JOIN documents d ON d.stable_id = r.src_id" if need_echr else ""
+        having = "HAVING COUNT(DISTINCT r.src_id) >= ?" if min_citing > 1 else ""
+        params: list = [min_citing] if min_citing > 1 else []
+        tail = ""
+        if limit is not None:
+            tail = "LIMIT ?"
+            params.append(int(limit))
         return self.conn.execute(
             f"""
             SELECT COALESCE(r.candidate_id, r.raw_citation_string) AS ref,
@@ -1772,15 +1831,17 @@ class Catalogue:
                    {agg}                        AS methods,
                    COUNT(*)                     AS occurrences,
                    COUNT(DISTINCT r.src_id)     AS citing_count,
-                   MAX(CASE WHEN d.source = 'echr' THEN 1 ELSE 0 END) AS echr_citing
+                   {echr_select}
             FROM relations r
-            JOIN documents d ON d.stable_id = r.src_id
+            {join}
             WHERE r.resolution_status = 'pending'
               AND r.extracted_via <> 'inferred'
               AND COALESCE(r.candidate_id, r.raw_citation_string) IS NOT NULL
             GROUP BY COALESCE(r.candidate_id, r.raw_citation_string)
+            {having}
             ORDER BY citing_count DESC
-            """
+            {tail}
+            """, params
         ).fetchall()
 
     def report_citation_contexts(self, *, limit: int = 5000) -> list[sqlite3.Row]:
@@ -2037,6 +2098,21 @@ class Catalogue:
         row = self.conn.execute(
             "SELECT dst_id FROM citation_aliases WHERE alias = ?", (alias,)
         ).fetchone()
+        if row:
+            return row["dst_id"]
+        # Reporter abbreviations are cited with and without full stops, and the two
+        # fold to different keys — so "(1948) 1 K.B. 223" missed Wednesbury, which is
+        # held under "(1948) 1 kb 223". Retry on the de-dotted key rather than
+        # rewriting every stored alias: this also rescues aliases minted before the
+        # write path normalised them.
+        from ..core.text import fold_citation
+
+        depunctuated = fold_citation(alias)
+        if depunctuated == alias:
+            return None
+        row = self.conn.execute(
+            "SELECT dst_id FROM citation_aliases WHERE alias = ?", (depunctuated,)
+        ).fetchone()
         return row["dst_id"] if row else None
 
     # -- match suggestions (human-confirmable resolution, §5b) ----------------
@@ -2148,6 +2224,11 @@ class Catalogue:
         return cur.rowcount
 
     def put_alias(self, alias: str, dst_id: str, source: str | None = None, *, commit: bool = True) -> None:
+        # Store on the de-dotted key so "K.B." and "KB" citations converge on one row
+        # rather than each minting its own (and only one of them resolving).
+        from ..core.text import fold_citation
+
+        alias = fold_citation(alias) or alias
         self.conn.execute(
             """
             INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?)

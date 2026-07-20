@@ -809,6 +809,31 @@ _DECISION_DESCRIPTORS = {
 # every descriptor that denotes an actual decision (not a notice/communication), so a
 # stray ``…CN…`` / ``…TA…`` OJ notice is never mistaken for the case itself.
 _ALL_DECISION_DESCRIPTORS = frozenset(d for ds in _DECISION_DESCRIPTORS.values() for d in ds)
+# A case CELEX: 5-digit sector+year, a 1- or 2-letter descriptor, a 4-digit case number.
+# The descriptor length varies (legacy "61994J0334" vs modern "62016CJ0113"), so it must
+# be matched rather than sliced at a fixed offset.
+_CASE_CELEX_RE = re.compile(r"^(?P<year>\d{5})(?P<desc>[A-Z]{1,2})(?P<num>\d{4})$")
+# The legacy single-letter decision types, mapped to how they rank against the modern
+# two-letter descriptors: a bare "J" is a judgment, "O" an order, "A"/"C" an opinion.
+_LEGACY_DESCRIPTOR_TYPE = {"J": "J", "O": "O", "A": "C", "C": "C", "V": "V"}
+
+
+def _ranked_descriptors(family: str, guessed_desc: str) -> list[str]:
+    """Which CELEX descriptors to accept, best first, for a guessed case descriptor.
+
+    With a court family known ("CJ" → C), prefer that family's decisions (judgment >
+    order > opinion) and fall back to the others — a "C-" citation that only exists as
+    a "T-" case is a citation error we still want to resolve. With only a legacy type
+    letter ("J"), the family is unknown, so prefer that TYPE across every family: a
+    cited *order* should resolve to the order rather than to the judgment in the same
+    case."""
+    every = [d for ds in _DECISION_DESCRIPTORS.values() for d in ds]
+    if family:
+        ranked = list(_DECISION_DESCRIPTORS.get(family, ()))
+        return ranked + [d for d in every if d not in ranked]
+    want = _LEGACY_DESCRIPTOR_TYPE.get(guessed_desc, "")
+    ranked = [d for d in every if want and d[1] == want]
+    return ranked + [d for d in every if d not in ranked]
 
 
 class CellarUnavailable(Exception):
@@ -834,10 +859,17 @@ def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -
     descriptor) and a judgment over an order over an opinion. The caller aliases the guess
     to the resolved document, so this lookup is paid once per cited case, not per citation."""
     cu = (celex or "").upper()
-    if len(cu) < 9:
+    m = _CASE_CELEX_RE.match(cu)
+    if m is None:
         return None
-    year, guessed_desc, num = cu[:5], cu[5:7], cu[7:]
-    family = guessed_desc[0]
+    year, guessed_desc, num = m.group("year"), m.group("desc"), m.group("num")
+    # The descriptor is 1 OR 2 letters. Modern CELEX writes both the court family and
+    # the decision type ("CJ" = Court of Justice judgment); the LEGACY form writes only
+    # the type ("61994J0334"). Slicing a fixed two characters mis-split the legacy form —
+    # it read the descriptor as "J0" and the case number as "334", losing the leading
+    # zero, so the lookup regex could never match and *every* legacy-form citation was
+    # written off as absent. 61994J0334 is really 61994CJ0334, and CELLAR has it.
+    family = guessed_desc[0] if len(guessed_desc) == 2 else ""
     cellar = EUCellarAdapter(client=client)
     q = (
         f"PREFIX cdm: <{CDM}>\n"
@@ -851,8 +883,7 @@ def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -
     # ranked preference: this family's decisions (best type first), then the other
     # families' decisions (a "C-" citation that only exists as a "T-" case = a citation
     # error we still want to resolve).
-    ranked = list(_DECISION_DESCRIPTORS.get(family, ()))
-    ranked += [d for fam, ds in _DECISION_DESCRIPTORS.items() if fam != family for d in ds]
+    ranked = _ranked_descriptors(family, guessed_desc)
     for desc in ranked:
         cand = f"{year}{desc}{num}"
         if cand in found:
@@ -886,8 +917,7 @@ def _resolve_joined_case(cellar: "EUCellarAdapter", *, year: str, num: str,
         return None
     # The lead has a different case NUMBER, so rank by descriptor alone: the cited
     # family's decisions first (judgment > order > opinion), then the rest.
-    ranked = list(_DECISION_DESCRIPTORS.get(family, ()))
-    ranked += [d for fam, ds in _DECISION_DESCRIPTORS.items() if fam != family for d in ds]
+    ranked = _ranked_descriptors(family, "")
     for desc in ranked:
         for cand in sorted(leads):
             if cand[5:7] == desc:

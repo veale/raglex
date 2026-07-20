@@ -318,3 +318,56 @@ def test_fetch_reference_marks_cellar_outage_transient_not_absent(monkeypatch, t
     with f._open() as (cat, rs, ts):
         res = f._fetch_reference(cat, rs, ts, ref="C-511/18", candidate="62018CJ0511")
     assert res["outcome"] == "transient"
+
+
+# -- legacy single-letter CELEX (the "could not build a fetch" flood) ---------
+
+def test_legacy_single_letter_celex_is_parsed_not_mis_sliced(monkeypatch):
+    """"61994J0334" is the LEGACY CELEX form: one descriptor letter, not two. Slicing a
+    fixed two characters read the descriptor as "J0" and the case number as "334",
+    dropping the leading zero — so the lookup regex could never match and every such
+    citation was written off as a genuine absence. The case exists as 61994CJ0334."""
+    from raglex.adapters import eu_cellar
+
+    seen: list[str] = []
+
+    def fake_sparql(self, q):
+        seen.append(q)
+        return [{"celex": "61994CJ0334"}, {"celex": "61994CC0334"}]
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", fake_sparql)
+    assert eu_cellar.resolve_case_celex("61994J0334") == "61994CJ0334"
+    # the 4-digit case number survives into the query
+    assert "0334" in seen[0] and "^61994[A-Z][A-Z]334$" not in seen[0]
+
+
+def test_legacy_order_prefers_an_order_over_the_judgment(monkeypatch):
+    """A legacy letter names the decision TYPE but no court family. A cited order must
+    resolve to the order, not to the judgment in the same case."""
+    from raglex.adapters import eu_cellar
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql",
+                        lambda self, q: [{"celex": "61994CJ0334"}, {"celex": "61994CO0334"}])
+    assert eu_cellar.resolve_case_celex("61994O0334") == "61994CO0334"
+
+
+def test_legacy_judgment_prefers_court_of_justice_then_general_court(monkeypatch):
+    from raglex.adapters import eu_cellar
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql",
+                        lambda self, q: [{"celex": "61994TJ0334"}])
+    # only the General Court judgment exists — still resolves rather than reporting absent
+    assert eu_cellar.resolve_case_celex("61994J0334") == "61994TJ0334"
+
+
+def test_a_malformed_celex_is_rejected_rather_than_queried(monkeypatch):
+    """Guard the parse: anything not sector+year / descriptor / 4-digit number should
+    not reach CELLAR at all."""
+    from raglex.adapters import eu_cellar
+
+    def boom(self, q):
+        raise AssertionError("must not query CELLAR for a malformed CELEX")
+
+    monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", boom)
+    assert eu_cellar.resolve_case_celex("61994J334") is None      # 3-digit number
+    assert eu_cellar.resolve_case_celex("nonsense") is None

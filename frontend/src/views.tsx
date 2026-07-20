@@ -1086,7 +1086,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
         <b><Oscola c={(doc as any)?.oscola} fallback={d?.title || id} /></b>
         <div className="muted" style={{ fontSize: 12 }}>
           {/* name the court and its jurisdiction — never the raw slug ("ewca") */}
-          {[doc?.court_label || d?.court, doc?.jurisdiction].filter(Boolean).join(" · ")}
+          {provenance([doc?.court_label || d?.court, doc?.jurisdiction])}
           {d?.decision_date ? " · " + String(d.decision_date).slice(0, 10) : ""}
           {doc?.cited_by_count ? ` · cited by ${doc.cited_by_count}` : ""}{anchor ? ` · ${anchor}` : ""}</div>
         <button style={{ marginTop: 4 }} onClick={() => openFull(id, anchor)}>open full ↗</button>
@@ -1128,6 +1128,27 @@ function FetchPrompt({ refId, raw, onDone }: { refId: string; raw?: string; onDo
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [url, setUrl] = useState("");
+  // "Link to something already held" — the common case for a report citation whose
+  // case IS in the corpus under a different identifier ("(1948) 1 KB 223" against a
+  // judgment held by neutral citation). Fetching it again would mint a duplicate.
+  const [linking, setLinking] = useState(false);
+  const [q, setQ] = useState(raw || "");
+  const [hits, setHits] = useState<any[] | null>(null);
+  async function searchExisting() {
+    setBusy(true); setMsg("searching…");
+    try {
+      const r = await api.searchCorpus({ query: q, limit: "8", facets: "false" });
+      setHits(r.items || []);
+      setMsg("");
+    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+  }
+  async function linkTo(existing_id: string) {
+    setBusy(true); setMsg("linking…");
+    try {
+      await api.resolveReference({ ref: raw || refId, existing_id });
+      setMsg("✓ linked — opening…"); setTimeout(onDone, 600);
+    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+  }
   async function fetchIt() {
     setBusy(true); setMsg("fetching…");
     try {
@@ -1151,6 +1172,35 @@ function FetchPrompt({ refId, raw, onDone }: { refId: string; raw?: string; onDo
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="…or paste a URL (BAILII / Find Case Law) to add it" />
         <button disabled={busy || !url} style={{ flex: "0 0 auto" }} onClick={fetchUrl}>add</button>
       </div>
+      {!linking ? (
+        <p style={{ marginTop: 8 }}>
+          <a className="mini-link" onClick={() => { setLinking(true); if (!hits) searchExisting(); }}>
+            …or link it to something already in the corpus</a></p>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          <div className="row">
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search the corpus by name or citation"
+              onKeyDown={(e) => { if (e.key === "Enter") searchExisting(); }} />
+            <button disabled={busy || !q} style={{ flex: "0 0 auto" }} onClick={searchExisting}>find</button>
+          </div>
+          {hits && hits.length === 0 && <p className="muted" style={{ fontSize: 12 }}>nothing matched.</p>}
+          {hits && hits.length > 0 && (
+            <table><tbody>
+              {hits.map((h: any) => (
+                <tr key={h.stable_id}>
+                  <td><Oscola c={h.oscola} fallback={h.title || h.stable_id} /></td>
+                  <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                    {h.decision_date ? String(h.decision_date).slice(0, 4) : ""}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    <button className="mini" disabled={busy}
+                      title="Point this citation at that document — every other citation of it resolves too"
+                      onClick={() => linkTo(h.stable_id)}>link</button></td>
+                </tr>
+              ))}
+            </tbody></table>
+          )}
+        </div>
+      )}
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
     </div>
   );
@@ -1657,6 +1707,22 @@ export function Oscola({ c, fallback }: { c?: OscolaCite | null; fallback?: stri
   return <>{c.parts.map((p, i) => p.i ? <i key={i}>{p.t}</i> : <Fragment key={i}>{p.t}</Fragment>)}</>;
 }
 
+// "Court · jurisdiction · date" for a document head. Some court labels already name
+// their country — a national data-protection authority is labelled "Data Protection
+// Authority · Belgium", because a rail of thirty identical "Data Protection Authority"
+// rows would be useless — and naively appending the jurisdiction then read
+// "… · Belgium · Belgium". Drop the part the label already says.
+export function provenance(parts: (string | null | undefined)[]): string {
+  const out: string[] = [];
+  for (const raw of parts) {
+    const p = (raw || "").trim();
+    if (!p) continue;
+    if (out.some((seen) => seen === p || seen.split(" · ").includes(p))) continue;
+    out.push(p);
+  }
+  return out.join(" · ");
+}
+
 // --- Document reader + augment ---------------------------------------------
 export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
   const [doc, err, reload] = useAsync(() => api.document(id), [id]);
@@ -1678,7 +1744,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         {/* who decided this, and where — "Court of Appeal (Civil Division) ·
             England & Wales", matching the typology the explorer uses */}
         <div className="doc-provenance muted">
-          {[doc.court_label || d.court, doc.jurisdiction].filter(Boolean).join(" · ")}
+          {provenance([doc.court_label || d.court, doc.jurisdiction])}
           {d.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
           {d.landing_url && (
             <> · <a href={d.landing_url} target="_blank" rel="noopener noreferrer"
@@ -1774,6 +1840,8 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   // the discreet control swaps to recency within the loaded slice
   const [sort, setSort] = useState<"authority" | "newest" | "oldest">("authority");
   const [page, setPage] = useState(0);
+  // which citing documents have their extra passages disclosed
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const PER = 50;
 
   // Cross-section tokens — "UK cases 7 | EU legislation 35". A citing body reads
@@ -1799,10 +1867,16 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
     ? incoming.filter((r) => `${r.src_jurisdiction}|${r.src_kind}` === slice)
     : incoming;
 
-  const shown = [...filtered].sort((a, b) =>
+  const sorted = [...filtered].sort((a, b) =>
     sort === "authority" ? (b.src_authority || 0) - (a.src_authority || 0)
     : sort === "newest" ? String(b.src_date || "").localeCompare(String(a.src_date || ""))
     : String(a.src_date || "9999").localeCompare(String(b.src_date || "9999")));
+  // The server sends one row per citing DOCUMENT (strongest treatment wins) and hands
+  // over the document's other citing passages alongside, so a judgment that engaged
+  // with this authority five times reads as one citer that did so five times.
+  const shown = sorted.map((r, i) => ({
+    key: r.src_id || String(i), head: r, rest: (r.other_passages || []) as any[],
+  }));
   const byType: Record<string, number> = {};
   for (const r of incoming) byType[r.relationship_type] = (byType[r.relationship_type] || 0) + 1;
   const order = ["overrules", "distinguishes", "applies", "follows", "considers", "mentions"];
@@ -1857,14 +1931,42 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
         </div>
       )}
       <table><tbody>
-        {shown.slice(page * PER, (page + 1) * PER).map((r, i) => (
-          <tr key={i}>
-            <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
-            <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
-              {r.dst_anchor && <span className="muted"> → {r.dst_anchor}</span>}</td>
-            <td className="muted" style={{ whiteSpace: "nowrap" }}>{r.src_date ? String(r.src_date).slice(0, 4) : ""}</td>
-          </tr>
-        ))}
+        {shown.slice(page * PER, (page + 1) * PER).map((g) => {
+          const r = g.head;
+          const opened = expanded.has(g.key);
+          return (
+          <Fragment key={g.key}>
+            <tr>
+              <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
+              <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
+                {r.dst_anchor && <span className="muted"> → {r.dst_anchor}</span>}
+                {r.src_cited_by ? <span className="muted" style={{ fontSize: 11 }}>
+                  {" "}[cited by {r.src_cited_by.toLocaleString()}]</span> : null}
+                {g.rest.length > 0 && (
+                  <div><a className="mini-link" style={{ fontSize: 12 }}
+                    title="Show the other passages in this document that cite this authority"
+                    onClick={() => setExpanded((s) => {
+                      const n = new Set(s); n.has(g.key) ? n.delete(g.key) : n.add(g.key); return n;
+                    })}>
+                    {opened ? "▾ hide" : `▸ and ${g.rest.length} other place${g.rest.length === 1 ? "" : "s"}`}</a></div>
+                )}</td>
+              <td className="muted" style={{ whiteSpace: "nowrap" }}>{r.src_date ? String(r.src_date).slice(0, 4) : ""}</td>
+            </tr>
+            {opened && g.rest.map((o, j) => (
+              <tr key={g.key + ":" + j} className="cited-by-passage">
+                <td />
+                <td style={{ paddingLeft: 18 }}>
+                  <a onClick={() => open(o.src_id, o.dst_anchor)} className="muted">
+                    {o.dst_anchor ? `→ ${o.dst_anchor}` : "→ another passage"}</a>
+                  {o.relationship_type !== r.relationship_type && (
+                    <span className="muted" style={{ fontSize: 11 }}> · {treat(o.relationship_type)}</span>)}
+                </td>
+                <td />
+              </tr>
+            ))}
+          </Fragment>
+          );
+        })}
       </tbody></table>
       {shown.length > PER && (
         <div className="row" style={{ justifyContent: "center", alignItems: "baseline", marginTop: 8 }}>
@@ -3440,6 +3542,60 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
   );
 }
 
+// A compact multi-select: a button showing the current selection, opening a checklist
+// popover. Used where a row of loose checkboxes would sprawl across the toolbar and
+// still not say, at a glance, what is selected.
+function MultiSelect({ options, value, onChange, placeholder = "none", title }: {
+  options: { key: string; label: string }[];
+  value: string[];
+  onChange: (next: string[]) => void;
+  placeholder?: string; title?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement | null>(null);
+  // click-away and Escape both close it — a popover that can only be dismissed by
+  // re-clicking the trigger feels stuck
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  const chosen = options.filter((o) => value.includes(o.key));
+  const summary = chosen.length === 0 ? placeholder
+    : chosen.length === options.length ? "all"
+    : chosen.length <= 2 ? chosen.map((o) => o.label).join(", ")
+    : `${chosen.length} selected`;
+  const toggle = (k: string) =>
+    onChange(value.includes(k) ? value.filter((v) => v !== k) : [...value, k]);
+  return (
+    <div ref={box} className="multiselect" style={{ position: "relative", display: "inline-block" }}>
+      <button type="button" className="multiselect-trigger" title={title}
+        aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        {summary} <span className="muted" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="multiselect-menu" role="listbox" aria-multiselectable="true">
+          {options.map((o) => (
+            <label key={o.key} className="multiselect-item">
+              <input type="checkbox" checked={value.includes(o.key)} onChange={() => toggle(o.key)} />
+              <span>{o.label}</span>
+            </label>
+          ))}
+          <div className="multiselect-actions">
+            <button type="button" className="mini" onClick={() => onChange(options.map((o) => o.key))}>all</button>
+            <button type="button" className="mini" onClick={() => onChange([])}>none</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Export the unfetchable frontier as mention-ranked, ≤100-per-batch citation lists to
 // paste into Westlaw UK "Find & Print" or Lexis+ UK "Get & Print" — the report-only
 // authorities BAILII + Find Case Law don't hold, which those subscriptions usually do.
@@ -3450,9 +3606,13 @@ function RetrievalExportPanel() {
   const [names, setNames] = useState(false);
   // Westlaw UK / Lexis+ UK are UK subscriptions: an Irish or Commonwealth report in the
   // batch can't retrieve and just burns one of the 100 slots — so default to UK only.
-  const JURS: [string, string][] = [["uk", "UK"], ["ie", "Ireland"], ["eu", "EU (CMLR…)"], ["commonwealth", "Commonwealth"], ["us", "US"]];
-  const [jurs, setJurs] = useState<Record<string, boolean>>({ uk: true, ie: false, eu: false, commonwealth: false });
-  const jurCsv = JURS.filter(([k]) => jurs[k]).map(([k]) => k).join(",");
+  // The bucket vocabulary comes from the server (it's what the filter resolves into),
+  // so a new bucket shows up here without a frontend change.
+  const [facets] = useAsync(() => api.facetValues(), []);
+  const JURS: { key: string; label: string }[] =
+    facets?.retrieval_jurisdictions || [{ key: "uk", label: "United Kingdom" }];
+  const [jurs, setJurs] = useState<string[]>(["uk"]);
+  const jurCsv = jurs.join(",");
   const [data, setData] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -3492,16 +3652,10 @@ function RetrievalExportPanel() {
           <input type="checkbox" checked={names} onChange={(e) => setNames(e.target.checked)} />
           include cases cited by name (won't retrieve without a citation)
         </label>
-        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13,
-                       flexWrap: "wrap", minWidth: 0 }}
-          title="Which report-series jurisdictions to include. A UK subscription can't retrieve Irish or Commonwealth reports — they'd burn slots in the 100-citation batch.">
+        <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
           <span className="muted">jurisdictions:</span>
-          {JURS.map(([k, label]) => (
-            <label key={k} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-              <input type="checkbox" checked={!!jurs[k]} onChange={(e) => setJurs({ ...jurs, [k]: e.target.checked })} />
-              {label}
-            </label>
-          ))}
+          <MultiSelect options={JURS} value={jurs} onChange={setJurs} placeholder="all"
+            title="Which report-series jurisdictions to include. A UK subscription can't retrieve Irish or Commonwealth reports — they'd burn slots in the 100-citation batch." />
         </span>
         <button className="primary" disabled={busy} onClick={run}>{busy ? "building…" : "Build citation batches"}</button>
         {data && <a className="mini" href={`/api/export/retrieval-citations.txt?${qs}`} target="_blank" rel="noopener noreferrer">⬇ download all as .txt</a>}
@@ -3536,7 +3690,11 @@ function RetrievalExportPanel() {
 // cases by name, courts with no adapter. Each carries a BAILII link (direct RTF where a
 // neutral citation exists, else a citation search) and an upload that resolves it in place.
 function UnfetchablePanel() {
-  const [data, err, reload] = useAsync(() => api.unfetchable(200), []);
+  // The floor is the main cost control: ~70% of hanging references are cited exactly
+  // once, and classifying that tail is most of the build time. 2 by default, with the
+  // long tail one click away rather than silently dropped.
+  const [minCiting, setMinCiting] = useState(2);
+  const [data, err, reload] = useAsync(() => api.unfetchable(200, minCiting), [minCiting]);
   useEffect(() => {
     if (!data?._warming) return;
     const iv = setInterval(() => reload(), 2500);
@@ -3545,7 +3703,18 @@ function UnfetchablePanel() {
   const [upRef, setUpRef] = useState<string | null>(null);
   const [linkRef, setLinkRef] = useState<string | null>(null);
   const [holMsg, setHolMsg] = useState("");
-  const refs: any[] = data?.references || [];
+  const [jur, setJur] = useState<string | null>(null);
+  const all: any[] = data?.references || [];
+  // Facet over the WHOLE set so the token counts stay honest while one is selected.
+  // A reference with no jurisdiction of its own is bucketed by where it is cited FROM.
+  const jurOf = (r: any): string | null => r.jurisdiction || r.cited_from?.[0] || null;
+  const jurCounts = new Map<string, number>();
+  for (const r of all) {
+    const j = jurOf(r);
+    if (j) jurCounts.set(j, (jurCounts.get(j) || 0) + 1);
+  }
+  const jurTokens = [...jurCounts.entries()].sort((a, b) => b[1] - a[1]);
+  const refs = jur ? all.filter((r) => jurOf(r) === jur) : all;
   if (err) return null;
   return (
     <div className="panel">
@@ -3563,11 +3732,33 @@ function UnfetchablePanel() {
           ⚖ scrape House of Lords + match</button>
       </div>
       {holMsg && <p className={holMsg.startsWith("✗") ? "err" : "ok"} style={{ fontSize: 12 }}>{holMsg}</p>}
+      <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+        <label style={{ fontSize: 13 }}
+          title="How many documents must cite a reference for it to appear. Most hanging references are cited exactly once; including them makes this list much slower to build.">
+          <span className="muted">cited by at least </span>
+          <select value={minCiting} onChange={(e) => { setMinCiting(+e.target.value); setJur(null); }}>
+            <option value={2}>2 documents</option>
+            <option value={3}>3 documents</option>
+            <option value={5}>5 documents</option>
+            <option value={1}>1 — the whole tail (slow)</option>
+          </select>
+        </label>
+        {jurTokens.length > 1 && (
+          <span className="active-chips" style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+            title="Filter by jurisdiction. Taken from the report series or neutral citation where it can be; otherwise from where the reference is cited.">
+            {jurTokens.map(([k, n]) => (
+              <button key={k} className={`tag tag-btn${jur === k ? " on" : ""}`}
+                onClick={() => setJur(jur === k ? null : k)}>{k} <b>{n}</b></button>
+            ))}
+            {jur && <button className="tag tag-btn tag-clear" onClick={() => setJur(null)}>clear ✕</button>}
+          </span>
+        )}
+      </div>
       {data?._warming && <p className="muted loading-pulse">⏳ ranking the unfetchable frontier…</p>}
       {!data?._warming && refs.length === 0 && <p className="muted">Nothing recognised as unfetchable. ✓</p>}
       {refs.length > 0 && (
         <table className="grid">
-          <thead><tr><th>cites</th><th>reference</th><th>looks like</th><th>source</th><th></th></tr></thead>
+          <thead><tr><th>cites</th><th>reference</th><th>looks like</th><th>jurisdiction</th><th>source</th><th></th></tr></thead>
           <tbody>
             {refs.map((r) => (
               <Fragment key={r.ref}>
@@ -3575,6 +3766,17 @@ function UnfetchablePanel() {
                   <td className="num" style={{ whiteSpace: "nowrap" }}>{r.citing_count}</td>
                   <td style={{ fontFamily: "var(--mono, monospace)", fontSize: 12 }}>{r.raw || r.ref}</td>
                   <td className="muted">{r.form}</td>
+                  {/* Its own jurisdiction where the citation states one; otherwise the
+                      jurisdictions it is CITED FROM, marked as inference not fact. */}
+                  <td className="muted" style={{ whiteSpace: "nowrap", fontSize: 12 }}>
+                    {r.jurisdiction
+                      ? r.jurisdiction
+                      : r.cited_from?.length
+                        ? <span title={`Not stated in the citation — inferred from the ${r.cited_from.length > 1 ? "documents that cite it" : "document that cites it"}: ${r.cited_from.join(", ")}`}>
+                            <i>cited from</i> {r.cited_from.slice(0, 2).join(", ")}
+                            {r.cited_from.length > 2 ? ` +${r.cited_from.length - 2}` : ""}</span>
+                        : "—"}
+                  </td>
                   <td style={{ whiteSpace: "nowrap" }}>
                     {r.link
                       ? <a href={r.link.url} target="_blank" rel="noopener noreferrer">{r.link.label}</a>
@@ -3589,17 +3791,17 @@ function UnfetchablePanel() {
                   </td>
                 </tr>
                 {(r.suggestions || []).length > 0 && (
-                  <tr><td /><td colSpan={4} style={{ borderBottom: "none", paddingTop: 0 }}>
+                  <tr><td /><td colSpan={5} style={{ borderBottom: "none", paddingTop: 0 }}>
                     {r.suggestions.slice(0, 2).map((s: any, i: number) => <SuggestionRow key={i} s={s} onDone={reload} />)}
                   </td></tr>
                 )}
                 {upRef === r.ref && (
-                  <tr><td colSpan={5}>
+                  <tr><td colSpan={6}>
                     <UnfetchableUpload r={r} onDone={() => { setUpRef(null); reload(); }} />
                   </td></tr>
                 )}
                 {linkRef === r.ref && (
-                  <tr><td colSpan={5}>
+                  <tr><td colSpan={6}>
                     <LinkExisting refKey={r.ref} onDone={() => { setLinkRef(null); reload(); }} />
                   </td></tr>
                 )}

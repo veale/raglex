@@ -91,7 +91,10 @@ def test_unfetchable_gives_a_direct_rtf_link_for_a_neutral_citation_court_with_n
     _cite(f, "case-1", ["[2006] EWCA Civ 717"])  # held? no → routable via uk-caselaw, so NOT unfetchable
     # a genuinely adapter-less neutral citation (unknown court) lands here with a search link
     _cite(f, "case-2", ["[2019] FooCt 3"])
-    res = f._unfetchable_uncached(50)
+    # min_citing=1: this is about CLASSIFICATION, not ranking. The panel's default floor
+    # is 2 (70% of hanging references are cited once and can never reach a most-cited
+    # list), which would otherwise hide this single-citation fixture.
+    res = f._unfetchable_uncached(50, min_citing=1)
     assert any(r["ref"] == "fooct/2019/3" or "FooCt" in (r["raw"] or "") for r in res["references"])
 
 

@@ -220,6 +220,19 @@ _CATEGORY_JURISDICTION: dict[str, str] = {
     "us-caselaw": "us",
 }
 
+# The canonical retrieval-jurisdiction buckets, in the order a UK-subscription user
+# reads them (their own first). This is a COARSE bucket vocabulary, not a country list:
+# the report-series and candidate-court lookups both resolve into exactly these, so the
+# Westlaw/Lexis filter can only ever offer these. Served to the UI rather than
+# duplicated there, so a new bucket appears in the picker automatically.
+RETRIEVAL_JURISDICTIONS: tuple[tuple[str, str], ...] = (
+    ("uk", "United Kingdom"),
+    ("ie", "Ireland"),
+    ("eu", "EU (CMLR, ECR…)"),
+    ("commonwealth", "Commonwealth"),
+    ("us", "United States"),
+)
+
 
 def _candidate_jurisdiction(candidate: str | None) -> str:
     """The jurisdiction bucket (uk / ie / eu / commonwealth) of a non-report reference,
@@ -545,12 +558,32 @@ class Facade:
             # (heuristic carry-forwards) are excluded there and counted apart.
             ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
             best: dict[str, dict] = {}
+            # A document may cite this authority in several passages. The row shown is
+            # the strongest treatment among them, but the OTHER passages are kept as
+            # anchors (not discarded) so the reader can open each place it was engaged
+            # with — "and 3 other places" is a signal about depth of engagement that a
+            # single collapsed row throws away.
+            others: dict[str, list[dict]] = {}
             for r in cat.top_citing_edges(ids_self, limit=600):
-                cur = best.get(r["src_id"])
-                if cur is None or _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
-                    best[r["src_id"]] = dict(r)
+                sid = r["src_id"]
+                cur = best.get(sid)
+                if cur is None:
+                    best[sid] = dict(r)
+                    others.setdefault(sid, [])
+                    continue
+                if _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
+                    best[sid] = dict(r)
+                    demoted = cur
+                else:
+                    demoted = dict(r)
+                others.setdefault(sid, []).append(
+                    {"dst_anchor": demoted.get("dst_anchor"),
+                     "relationship_type": demoted.get("relationship_type")})
             incoming = []
-            for sid, r in list(best.items())[:200]:
+            page_ids = list(best.items())[:200]
+            # one grouped aggregate for the whole page, not one query per row
+            citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
+            for sid, r in page_ids:
                 src = cat.get_document(sid)
                 # OSCOLA citation for the citing document, so "cited by / mentioned by"
                 # reads in proper form. meta_json is on the row → no extra query.
@@ -566,7 +599,12 @@ class Facade:
                                      src["source"], src["court"]) if src else None,
                                  "src_kind": self._doc_kind(
                                      src["source"], src["doc_type"], src["court"]) if src else None,
-                                 "src_oscola": src_oscola})
+                                 # how heavily THIS citer is itself cited — a subtle
+                                 # authority cue next to each name
+                                 "src_cited_by": citer_counts.get(sid),
+                                 "src_oscola": src_oscola,
+                                 # the other passages in this document that cite it
+                                 "other_passages": others.get(sid) or []})
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
             inferred_total = cat.inferred_citer_count(ids_self)
             meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
@@ -983,6 +1021,9 @@ class Facade:
                 "doc_types": [{"key": k, "n": v} for k, v in cat._count_by("doc_type").items()],
                 "courts": [{"key": r["k"], "n": r["n"]} for r in cat.distinct_courts()],
                 "tags": [{"key": k, "n": v} for k, v in cat.tag_counts().items()],
+                # the Westlaw/Lexis retrieval filter's bucket vocabulary
+                "retrieval_jurisdictions": [{"key": k, "label": lb}
+                                            for k, lb in RETRIEVAL_JURISDICTIONS],
             }
 
     def count_documents(self, **filters) -> dict:
@@ -1199,7 +1240,10 @@ class Facade:
         "nl-rechtspraak": "Rechtspraak.nl", "nl-legislation": "wetten.overheid.nl",
         "ie-legislation": "eISB (Ireland)", "ie-caselaw": "Irish courts",
         "au-caselaw": "Open Australian Legal Corpus", "au-legislation": "Federal Register (AU)",
-        "ca-caselaw": "CanLII (A2AJ)", "ca-legislation": "Justice Laws (Canada)",
+        # A2AJ publish their own bulk corpus; it is not a CanLII scrape, so naming
+        # CanLII here credited the wrong service. (CanLII *links* are unaffected —
+        # those come from _HOST_LABELS, keyed on where a URL points.)
+        "ca-caselaw": "A2AJ", "ca-legislation": "Justice Laws (Canada)",
         "nz-caselaw": "NZ courts", "nz-legislation": "NZ Legislation",
         "us-caselaw": "CourtListener",
         "sg-legislation": "Singapore Statutes Online", "hk-legislation": "HK e-Legislation",
@@ -1217,7 +1261,12 @@ class Facade:
         if source in self._SOURCE_LABELS:
             return self._SOURCE_LABELS[source]
         words = (source or "").replace("_", "-").split("-")
+        # `capitalize()` LOWERCASES everything after the first letter, so a value that
+        # is already a proper name comes back mangled — "Court of Justice" (which is
+        # what the corpus actually stores for CJEU judgments) rendered "Court of
+        # justice". Only case a token that carries no capitals of its own.
         return " ".join(w.upper() if w.lower() in self._ACRONYM_TOKENS or len(w) <= 2
+                        else w if any(c.isupper() for c in w)
                         else w.capitalize() for w in words if w)
 
     # An external link is labelled by WHERE IT POINTS, never by the source that
@@ -1324,8 +1373,11 @@ class Facade:
             if cc in self._DPA_PROPER_NAME:
                 return self._DPA_PROPER_NAME[cc]
             country = self._DPA_COUNTRY.get(cc)
-            return f"Data protection authority · {country}" if country \
-                else "Data protection authority"
+            # The country is deliberately part of the label: in a courts rail, thirty
+            # rows all reading "Data Protection Authority" would be unusable. Surfaces
+            # that print the jurisdiction alongside drop the duplicate themselves.
+            return f"Data Protection Authority · {country}" if country \
+                else "Data Protection Authority"
         # bracketless-citation jurisdictions (Canada, US) vs bracketed (AU, NZ, UK)
         src = (source or "").lower()
         hint = False if src.startswith(("ca-", "ca/")) else True if src.startswith(
@@ -2209,7 +2261,14 @@ class Facade:
                     r["citing_documents"] = citing.get(r["ref"], [])
             return out
 
-    def unfetchable_references(self, *, limit: int = 200) -> dict:
+    # A "most-cited" panel can never surface a reference cited once, and 70% of the
+    # ~517k hanging references are — so they are filtered in SQL rather than regex-
+    # classified in Python and then thrown away. The export path overrides this
+    # (it legitimately wants the long tail), which is why it's a parameter.
+    _UNFETCHABLE_MIN_CITING = 2
+
+    def unfetchable_references(self, *, limit: int = 200,
+                               min_citing: int | None = None) -> dict:
         """The **most-cited references the system cannot fetch** — the pre-neutral-citation
         frontier (§5). Distinct from the routable worklist: these have no adapter route at
         all — a classic law report ("[1982] AC 1"), a case cited only by name, or a court
@@ -2219,18 +2278,25 @@ class Facade:
 
         This is the answer to "what heavily-cited authority am I missing that I'll have to
         source by hand?" — the thing a completeness-minded corpus most needs to surface."""
-        return self._cached(f"unfetchable:{limit}", 300,
-                            lambda: self._unfetchable_uncached(limit),
+        floor = self._UNFETCHABLE_MIN_CITING if min_citing is None else max(1, int(min_citing))
+        return self._cached(f"unfetchable:{limit}:{floor}", 300,
+                            lambda: self._unfetchable_uncached(limit, min_citing=floor),
                             placeholder={"total": None, "references": []})
 
-    def _unfetchable_uncached(self, limit: int) -> dict:
+    def _unfetchable_uncached(self, limit: int, *, min_citing: int | None = None,
+                              scan_limit: int | None = None) -> dict:
         from .citations.frontier import classify as _frontier_classify
         from .citations.snowball import _classify
         from .adapters.bailii import external_link
+        from .citations.reporters import report_series, series_jurisdiction
 
+        floor = self._UNFETCHABLE_MIN_CITING if min_citing is None else min_citing
         rows = []
         with self._open() as (cat, _rs, _ts):
-            for g in cat.pending_reference_groups():
+            # echr_citing is only consulted by the routable worklist; skipping it here
+            # drops a nested-loop join over 1.8M rows.
+            for g in cat.pending_reference_groups(min_citing=floor, limit=scan_limit,
+                                                  need_echr=False):
                 ref, raw, cand = g["ref"], g["raw"], g["candidate"]
                 if not ref or _is_junk_ref(ref):
                     continue
@@ -2254,19 +2320,41 @@ class Facade:
                     if raw and raw.startswith("http"):
                         continue
                     form, link, is_report = "case (by name)", external_link(cand, raw), False
+                # Where this authority BELONGS, as far as it can be told from the
+                # citation itself: a recognised report series names its jurisdiction
+                # outright ("[1982] AC 1" → uk), otherwise the candidate's court token
+                # does ("[2019] IESC 4" → ie). Neither fires for a bare case name — those
+                # fall back to where the reference is CITED FROM, below.
+                series = report_series((raw or ref or "").strip())
+                jur = series_jurisdiction(series) if series else _candidate_jurisdiction(cand)
                 rows.append({
                     "ref": ref, "raw": raw, "candidate": cand, "form": form,
                     "is_report": is_report, "citing_count": g["citing_count"], "link": link,
+                    "series": series, "jurisdiction": jur,
                 })
             rows.sort(key=lambda r: r["citing_count"], reverse=True)
             out = rows[:limit]
             refs = [r["ref"] for r in out]
             citing = cat.citing_documents_for(refs) if refs else {}
             sugg = cat.suggestions_for(refs) if refs else {}
+            # Where the reference is CITED FROM. For a bare case name ("Cooper v Hobart")
+            # nothing in the citation itself gives a jurisdiction, but the documents
+            # reaching for it usually do — a name cited only by Canadian judgments is
+            # almost certainly Canadian. Shown as evidence, never as a hard claim.
+            all_citers = {sid for ids in citing.values() for sid in ids}
+            src_court = cat.source_court_for(sorted(all_citers)) if all_citers else {}
         for r in out:
             r["citing_documents"] = citing.get(r["ref"], [])
             r["suggestions"] = sugg.get(r["ref"], [])
-        return {"total": len(rows), "references": out}
+            buckets: dict[str, int] = {}
+            for sid in r["citing_documents"]:
+                source, court = src_court.get(sid, ("", ""))
+                b = self._doc_bucket(source, court)
+                if b:
+                    buckets[b] = buckets.get(b, 0) + 1
+            r["cited_from"] = [b for b, _ in sorted(buckets.items(), key=lambda kv: -kv[1])]
+        return {"total": len(rows), "references": out,
+                "min_citing": floor}
 
     # -- export the unfetchable frontier for Westlaw / Lexis batch retrieval ----
     def export_retrieval_citations(self, *, min_citing: int = 2, batch_size: int = 100,
@@ -2300,12 +2388,14 @@ class Facade:
         seen: set[str] = set()
         items: list[dict] = []
         # reuse the frontier computation (uncapped), then filter to pasteable cites
-        frontier = self._unfetchable_uncached(scan_limit)
+        # min_citing is applied per-item below, so push the caller's own floor into SQL
+        # rather than the panel's default — the export legitimately wants the long tail.
+        frontier = self._unfetchable_uncached(scan_limit, min_citing=max(1, min_citing))
         for r in frontier["references"]:
             if r["citing_count"] < min_citing:
                 continue
             raw = (r["raw"] or r["ref"] or "").strip()
-            series = report_series(raw)
+            series = r.get("series")          # computed once, on the frontier row
             if series and series.upper() in ("ECR", "EHRR"):
                 continue  # own sources (CELLAR / HUDOC), not a Westlaw/Lexis target
             is_cite = bool(r["is_report"]) or is_report_citation(raw) or bool(cite_shape.search(raw))
@@ -2319,10 +2409,7 @@ class Facade:
             # jurisdiction is read from the candidate's court token — so Irish (IESC/
             # IECA/IEHC) and Commonwealth neutral citations don't default to "uk" and
             # leak into a UK-only Westlaw batch.
-            if series:
-                jur = series_jurisdiction(series)
-            else:
-                jur = _candidate_jurisdiction(r.get("candidate"))
+            jur = r.get("jurisdiction")
             if want_jur and jur not in want_jur:
                 continue
             key = _re.sub(r"[\s.'’\[\]()]+", "", raw).upper()  # fold for dedup

@@ -85,3 +85,66 @@ def test_legislation_uses_title_verbatim():
 def test_fallback_to_stable_id():
     out = cite({"stable_id": "misc/thing", "source": "other", "doc_type": "commentary", "title": None})
     assert out["text"] == "misc/thing"
+
+
+# -- neutral-citation jurisdictions beyond the UK ----------------------------
+
+def test_canadian_neutral_citations_are_not_bracketed():
+    """Canada writes "2001 SCC 79" bare where the UK writes "[2021] UKSC 12". Routing
+    Canadian cases through the UK formatter would bracket every one of them."""
+    out = cite({"stable_id": "scc/2001/79", "source": "ca-caselaw",
+                "doc_type": "judgment", "title": "Cooper v. Hobart"})
+    assert out["text"] == "Cooper v Hobart 2001 SCC 79"
+    assert _italic(out) == "Cooper v Hobart"      # OSCOLA italicises the case name only
+
+
+def test_australian_and_nz_cases_keep_their_brackets():
+    assert cite({"stable_id": "hca/2020/1", "source": "au-caselaw", "doc_type": "judgment",
+                 "title": "Smith v Jones"})["text"] == "Smith v Jones [2020] HCA 1"
+    assert cite({"stable_id": "nzsc/2005/1", "source": "nz-caselaw", "doc_type": "judgment",
+                 "title": "Brown v Crown"})["text"] == "Brown v Crown [2005] NZSC 1"
+
+
+def test_an_unknown_court_code_falls_back_to_the_title():
+    """Better a bare title than a confidently wrong citation in an unregistered style."""
+    out = cite({"stable_id": "zzzz/2020/1", "source": "xx-caselaw", "doc_type": "judgment",
+                "title": "Anonymous v Anonymous"})
+    assert out["text"] == "Anonymous v Anonymous"
+
+
+# -- CJEU titles carrying BAILII's markers -----------------------------------
+
+def test_bailii_document_type_and_database_markers_are_stripped():
+    """"(Judgment)", "French Text" and the trailing "[2015] EUECJ T-372/12" are BAILII
+    apparatus, not the case name — OSCOLA wants "Case T-372/12 … EU:T:…"."""
+    out = cite({"stable_id": "ECLI:EU:T:2018:370", "source": "eu-cellar",
+                "doc_type": "judgment",
+                "title": "Haverkamp IP v EUIPO - Sissel (Tapis de sol) (Judgment) "
+                         "French Text [2018] EUECJ T-521/16"})
+    assert out["text"] == "Case T-521/16 Haverkamp IP v EUIPO - Sissel (Tapis de sol) EU:T:2018:370"
+
+
+def test_the_case_number_is_recovered_from_the_stripped_euecj_tail():
+    """The BAILII-archive CJEU documents carry no CELEX and no ECLI, so that discarded
+    tail is the only place their case number appears."""
+    out = cite({"stable_id": "euecj/2003/t21298", "source": "eu-cellar",
+                "doc_type": "judgment",
+                "title": "Atlantic Container Line & Ors v Commission (Competition) "
+                         "[2003] EUECJ T-212/98"})
+    assert out["text"] == "Case T-212/98 Atlantic Container Line & Ors v Commission (Competition)"
+
+
+def test_a_case_number_already_in_the_title_is_not_printed_twice():
+    out = cite({"stable_id": "euecj/2015/t37212", "source": "eu-cellar",
+                "doc_type": "judgment",
+                "title": "Case T-372/12 El Corte Ingles v OHMI - Apro Tech (APRO) "
+                         "(Judgment) [2015] EUECJ T-372/12"})
+    assert out["text"] == "Case T-372/12 El Corte Ingles v OHMI - Apro Tech (APRO)"
+
+
+def test_an_ecli_keyed_stable_id_supplies_the_ecli_when_the_column_is_null():
+    """4,180 CJEU rows are keyed by ECLI but never had the ecli column populated;
+    without this they cite as though they had no identifier at all."""
+    out = cite({"stable_id": "ECLI:EU:C:2020:559", "source": "eu-cellar",
+                "doc_type": "judgment", "title": "Schrems"})
+    assert "EU:C:2020:559" in out["text"]

@@ -170,3 +170,28 @@ def test_cite_count_ranks_worklist(catalogue):
 
 def test_string_hash_folds_variants_together():
     assert string_hash("Schrems II") == string_hash("schrems ii")
+
+
+def test_dotted_reporter_abbreviations_resolve_to_the_undotted_alias(catalogue):
+    """"[1948] 1 K.B. 223" and "[1948] 1 KB 223" are the same report, but plain
+    case-folding keeps the stops, so the dotted form landed on a different alias key
+    and silently failed to link. Wednesbury is held under the undotted form, so every
+    dotted citation of it went unresolved."""
+    catalogue.put_alias("[1948] 1 kb 223", "ewca/civ/1947/1", source="parallel")
+    assert catalogue.get_alias("[1948] 1 k.b. 223") == "ewca/civ/1947/1"
+    assert catalogue.get_alias("(1948) 1 kb 223") is None   # bracket style still distinct
+
+
+def test_aliases_are_stored_de_dotted_so_both_spellings_converge(catalogue):
+    """The write path normalises too, so a dotted alias and its undotted twin are one
+    row rather than two — otherwise only whichever was minted first would resolve."""
+    catalogue.put_alias("[1948] 1 K.B. 223", "ewca/civ/1947/1", source="parallel")
+    assert catalogue.get_alias("[1948] 1 kb 223") == "ewca/civ/1947/1"
+    assert catalogue.get_alias("[1948] 1 k.b. 223") == "ewca/civ/1947/1"
+
+
+def test_citation_folding_keeps_decimal_pinpoints_intact(catalogue):
+    """The de-dotting must not eat a decimal point: "5.2" is a pinpoint, not an
+    abbreviation, and collapsing it to "52" would point at a different paragraph."""
+    catalogue.put_alias("practice direction 5.2", "pd/5-2", source="named")
+    assert catalogue.get_alias("practice direction 5.2") == "pd/5-2"

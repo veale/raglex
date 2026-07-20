@@ -17,6 +17,7 @@ from raglex.adapters.ca_legislation import (
 )
 from raglex.adapters.hk_legislation import HKLegislationAdapter, scan_bulk_dir, sitemap_caps
 from raglex.adapters.nz_legislation import NZLegislationAdapter, parse_work_id
+from raglex.core.errors import RateLimitException
 from raglex.core.models import DocType, RelationshipType
 from raglex.formats.hklm_xml import hk_id, parse_hklm_xml
 from raglex.formats.lims_xml import ca_id, parse_lims_xml
@@ -405,7 +406,7 @@ def test_nz_adapter_pages_works_and_builds_stubs_with_format_urls():
     calls: list[tuple[str, dict]] = []
 
     class FakeClient:
-        def get(self, url, params=None, headers=None):
+        def get(self, url, params=None, headers=None, **kwargs):
             calls.append((url, params or {}))
             page = (params or {}).get("page", 1)
             body = {"total": 2, "page": page, "per_page": 1, "results": [{
@@ -417,7 +418,8 @@ def test_nz_adapter_pages_works_and_builds_stubs_with_format_urls():
                     "version_id": "act_public_1990_109_en_2022-08-30",
                     "formats": [{"type": "xml", "url": "https://example/x.xml"}]},
             }] if page <= 2 else []}
-            return type("R", (), {"content": json.dumps(body).encode()})()
+            return type("R", (), {"content": json.dumps(body).encode(),
+                                  "status_code": 200, "headers": {}})()
 
     adapter = NZLegislationAdapter(api_key="k", client=FakeClient(), per_page=1)
     stubs = list(adapter.discover(None, max_pages=2))
@@ -430,9 +432,10 @@ def test_nz_adapter_pages_works_and_builds_stubs_with_format_urls():
 
 def test_nz_adapter_fetches_xml_and_records_the_point_in_time_edge():
     class FakeClient:
-        def get(self, url, params=None, headers=None):
+        def get(self, url, params=None, headers=None, **kwargs):
             assert headers["X-Api-Key"] == "k"
-            return type("R", (), {"content": NZ_XML})()
+            return type("R", (), {"content": NZ_XML,
+                                  "status_code": 200, "headers": {}})()
 
     adapter = NZLegislationAdapter(api_key="k", client=FakeClient())
     stub = type("S", (), {
@@ -472,3 +475,96 @@ def test_nz_parser_expands_internal_dtd_entities():
     xml = (b'<?xml version="1.0"?><!DOCTYPE act [<!ENTITY yr "1990">]>'
            b"<act><cover><title>Bill of Rights &yr;</title></cover></act>")
     assert "1990" in (parse_nz_pco_xml(xml).title or "")
+
+
+# A miniature file in the *verified* PCO shape (checked against the live Income Tax Act
+# 2007 on 2026-07-20): a provision whose operative text is wrapped in subprov/label-para,
+# trailed by the editorial apparatus that makes up ~35% of a real act.
+NZ_XML_WITH_APPARATUS = b"""<?xml version="1.0" encoding="utf-8"?>
+<act id="DLM224791" act.no="109" act.type="public" date.as.at="2022-08-30"
+     date.assent="1990-08-28">
+  <cover><title>New Zealand Bill of Rights Act 1990</title></cover>
+  <contents><row><entry>3 Application</entry></row></contents>
+  <body>
+    <prov id="DLM224799"><label>3</label><heading>Application</heading>
+      <prov.body>
+        <subprov><label>1</label><para><text>This Bill of Rights applies to acts done by\xe2\x80\x94</text>
+          <label-para><label>a</label><para><text>the legislative branch:</text></para></label-para>
+          <label-para><label>b</label><para><text>the judicial branch.</text></para></label-para>
+        </para></subprov>
+      </prov.body>
+      <cf><citation jurisdiction="nz">1688 No 2 s 1</citation></cf>
+      <ird.aids><term.list><term href="DLM1">branch</term></term.list></ird.aids>
+      <notes><history>
+        <history-note id="DLM9"><amended-provision>Section 3(1)(b)</amended-provision>:
+          <amending-operation>replaced</amending-operation>, on
+          <amendment-date>1 April 2008</amendment-date>, by
+          <amending-provision href="DLM1172356">section 307</amending-provision> of the
+          <amending-leg>Statutes Amendment Act 2007</amending-leg> (2007 No 109)</history-note>
+      </history></notes>
+    </prov>
+  </body>
+  <end><skeletons><act><cover><title>Statutes Amendment Act 2007</title></cover></act></skeletons></end>
+</act>"""
+
+
+def test_nz_parser_keeps_editorial_apparatus_out_of_the_operative_text():
+    """~35% of a real PCO act is annotation about the law rather than the law. Ingesting
+    it strands amendment notes and IRD index terms mid-provision, which pollutes both
+    retrieval snippets and embeddings."""
+    doc = parse_nz_pco_xml(NZ_XML_WITH_APPARATUS)
+    text = doc.text or ""
+    assert "This Bill of Rights applies to acts done by" in text
+    # amendment annotation, comparative reference, IRD index term, table of contents,
+    # and the text of the *amending* act — none of them are this act's operative text
+    assert "Statutes Amendment Act 2007" not in text
+    assert "1688 No 2" not in text
+    assert "branch</term>" not in text and "\nbranch" not in text
+    assert text.count("Application") <= 1
+
+
+def test_nz_parser_recovers_amendment_notes_as_edges_with_constructible_targets():
+    """The notes are pruned from the body but not discarded: the trailing "(2007 No 109)"
+    maps onto the PCO work-id grammar, so each note becomes an AMENDED_BY edge whose
+    dst_id is a real candidate the resolver activates once that act is harvested."""
+    doc = parse_nz_pco_xml(NZ_XML_WITH_APPARATUS)
+    amendments = [r for r in doc.relations
+                  if r.relationship_type is RelationshipType.AMENDED_BY]
+    assert len(amendments) == 1
+    edge = amendments[0]
+    assert edge.dst_id == "nz/act/public/2007/109"
+    assert edge.src_anchor == "Section 3(1)(b)"      # which provision changed
+    assert edge.dst_anchor == "section 307"          # what changed it
+    assert "replaced" in (edge.raw_citation_string or "")
+    assert doc.metadata["amendment_notes"] == 1
+    assert doc.metadata["dlm_id"] == "DLM224791"
+
+
+def test_nz_parser_reads_enumerated_provisions_as_lines_not_stranded_labels():
+    """subprov/label-para are the enumerated units; `para` merely wraps text. Treating
+    `para` as a line break too would strand every number on a line of its own."""
+    text = parse_nz_pco_xml(NZ_XML_WITH_APPARATUS).text or ""
+    assert "a the legislative branch:" in text
+    assert "b the judicial branch." in text
+
+
+def test_nz_adapter_normalises_the_hyphenated_legislation_type():
+    """Work ids hyphenate (`secondary-legislation_pco-drafted_2026_209`) but the API's
+    filter enum underscores. The UI suggests the hyphenated spelling, which would
+    otherwise silently return an empty result set."""
+    adapter = NZLegislationAdapter(api_key="k", legislation_type="secondary-legislation")
+    assert adapter.legislation_type == "secondary_legislation"
+
+
+def test_nz_adapter_raises_rather_than_truncating_when_the_daily_quota_is_spent():
+    """The catalogue is ~38k works against a 10,000/day key, so a backfill spans days.
+    Swallowing exhaustion would end discovery early and look like a clean finish —
+    writing a watermark over a half-built corpus."""
+    class SpentClient:
+        def get(self, url, params=None, headers=None, **kwargs):
+            return type("R", (), {"content": b"{}", "status_code": 200,
+                                  "headers": {"x-ratelimit-remaining": "0"}})()
+
+    adapter = NZLegislationAdapter(api_key="k", client=SpentClient())
+    with pytest.raises(RateLimitException):
+        list(adapter.discover(None))

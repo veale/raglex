@@ -1,15 +1,9 @@
-"""New Zealand PCO legislation XML parser — schema-tolerant by design.
+"""New Zealand PCO legislation XML parser — shape-inferring, schema-verified.
 
 The Parliamentary Counsel Office publishes NZ legislation in a **PCO-specific,
-DTD-defined schema**, and this parser could not be verified against a live sample: the
-legislation website returns an HTTP 405 human-verification wall to plain *and* stealth
-requests, and ``catalogue.data.govt.nz`` (which hosts the bulk XML) sits behind the same
-kind of interstitial. Defeating either is both fragile and discourteous, and the
-sanctioned channel — the Developer API — needs a key that is still pending.
-
-So rather than hard-code guesses at element names that may well be wrong, this parser
-**infers structure from shape**, which holds across DTD revisions and is exactly the
-property an unverified schema needs:
+DTD-defined schema**. This parser was originally written blind (the website is
+bot-walled and the Developer API key was pending), so it **infers structure from
+shape** rather than hard-coding element names:
 
 * a **unit** (a citable provision) is any element carrying a numbering child
   (``label``/``num``/``number``) — that is what makes a provision addressable;
@@ -17,14 +11,29 @@ property an unverified schema needs:
   heading child but no numbering of its own;
 * everything else is descended through.
 
-Known PCO names (``prov``, ``subprov``, ``crosshead``, ``sched``…) are supplied as hints
-that reinforce the inference, not as the sole basis for it. The critical guarantee is the
-**fallback**: if nothing structural is recognised, the whole document's text is still
-captured as one block, so an unexpected schema costs structure, never content.
+**Verified against live PCO XML on 2026-07-20** (Income Tax Act 2007, 20MB, the largest
+act in the corpus). The shape inference held: Parts, Subparts and provisions all came out
+correctly labelled. Two things it could not have known are now encoded here.
 
-When the API key arrives, verify against a real file and tighten this — the metadata it
-emits (``inferred_structure``) says whether inference or the fallback did the work, so a
-corpus parsed before verification is auditable rather than silently suspect.
+**1. Most of a PCO file is not the law.** In the Income Tax Act, 3.0M of 8.5M characters
+are editorial apparatus, and naively ingesting it puts ~40% non-operative text into
+retrieval and embeddings — every section trailing a wall of "inserted, on 1 April 2008,
+by section 307 of…". These subtrees are pruned (``_NON_OPERATIVE``):
+
+* ``notes/history/history-note`` — amendment annotations (14,308 in the ITA alone);
+* ``ird.aids``/``term.list`` — Inland Revenue indexing markers, which otherwise strand
+  bare keywords ("income year tax") mid-sentence;
+* ``cf`` — comparative references to the 2004 Act;
+* ``contents`` — per-Part tables of contents, duplicating headings;
+* ``end/skeletons`` — the text of *amending* acts, which is not this act's text at all.
+
+**2. The amendment notes are structured data, and worth keeping.** They are pruned from
+the body but recovered as ``AMENDED_BY`` relations rather than discarded — see
+``amendment_relations``.
+
+The **fallback** still stands: if nothing structural is recognised, the whole document's
+text is captured as one block, so an unexpected schema costs structure, never content.
+``metadata["inferred_structure"]`` records which path ran.
 """
 
 from __future__ import annotations
@@ -34,7 +43,13 @@ from dataclasses import dataclass
 from datetime import date
 from xml.etree import ElementTree as ET
 
-from ..core.models import Segment
+from ..core.models import (
+    ExtractedVia,
+    RelationshipType,
+    ResolutionStatus,
+    Segment,
+    TypedRelation,
+)
 from ..core.segmentation import SEP, flow_text, localname
 from .base import ParsedDoc, register
 
@@ -51,10 +66,27 @@ _UNIT_HINTS = {"prov", "provision", "subprov", "section", "sec", "clause", "cl",
 # Structural wrappers descended through silently.
 _PASS_HINTS = {"legislation", "act", "bill", "sop", "amendment-paper", "instrument",
                "body", "front", "cover", "main", "contents", "schedules", "prelim"}
-# Sub-units that start a new line so enumerated provisions read as a list.
-_LINES = {"subprov", "para", "subpara", "item", "def", "p", "label", "list-item"}
+# Sub-units that start a new line so enumerated provisions read as a list. `label` is
+# deliberately absent: a subsection's number should open its own line ("1 This Act comes
+# into force…") rather than be stranded on a line of its own. `subprov.crosshead` is the
+# PCO's mid-provision heading, which otherwise runs into the preceding sentence.
+_LINES = {"subprov", "label-para", "def-para", "subprov.crosshead", "crosshead",
+          "proviso", "item", "list-item"}
+
+# Editorial apparatus, pruned from the body before the structure walk. Everything here
+# is *about* the law rather than being it; see the module docstring for the measured cost
+# of leaving it in. Pruning is recursive because `notes` also nests inside `para`.
+_NON_OPERATIVE = {"notes", "cf", "ird.aids", "term.list", "contents", "skeletons",
+                  "end.reprint-note"}
 
 _DOCTYPE_RE = re.compile(r"<!DOCTYPE.*?(?:\[.*?\])?\s*>", re.S)
+# "(2007 No 109)" closing an amendment note — the amending act's year and number, which
+# map directly onto the PCO work-id grammar and so onto a corpus stable_id.
+_AMENDING_ACT_RE = re.compile(r"\((\d{4})\s*No\s*(\d+)\)")
+# "(with effect on 1 April 2008)" — a retrospective amendment, where the legal effect
+# predates the amending act. Worth flagging: it changes what the law *was*.
+_RETROSPECTIVE_RE = re.compile(r"\(with effect on ([^)]+)\)")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"[ \t]+([,;:.\)\]])")
 _ENTITY_DECL_RE = re.compile(r'<!ENTITY\s+(?P<name>[A-Za-z_][\w.-]*)\s+"(?P<value>[^"]*)"\s*>')
 _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
@@ -94,6 +126,104 @@ def expand_entities(text: str) -> str:
     for name, value in entities.items():
         body = body.replace(f"&{name};", value)
     return body
+
+
+def _tidy(text: str) -> str:
+    """Close up the space that inline markup leaves before punctuation.
+
+    PCO wraps phrases in `insertwords`/`emphasis`/`extref`, and flattening an element
+    boundary inserts a space — so the source's "income:" comes out "income :" and an
+    amendment note reads "inserted , on 1 April 2008 ,". Cosmetic in isolation, but it
+    breaks phrase search and looks like a transcription error in quoted text."""
+    return _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+
+
+def _norm(elem: ET.Element | None) -> str:
+    if elem is None:
+        return ""
+    # PCO uses NBSP inside dates and act numbers ("1&#160;April"); fold it so the
+    # regexes above see ordinary spaces.
+    return _tidy(" ".join(" ".join(elem.itertext()).replace("\xa0", " ").split()))
+
+
+def amendment_relations(root: ET.Element) -> tuple[list[TypedRelation], dict]:
+    """Recover the ``history-note`` apparatus as ``AMENDED_BY`` edges.
+
+    A PCO amendment note is already structured — it names the provision amended, the
+    operation, the date, and the amending provision and act::
+
+        <history-note><amended-provision>Section A 2(1B) heading</amended-provision>:
+        <amending-operation>inserted</amending-operation>, on
+        <amendment-date>1 April 2008</amendment-date>, by
+        <amending-provision href="DLM1172356">section 307</amending-provision> of the
+        <amending-leg>Taxation (Business Taxation and Remedial Matters) Act 2007</amending-leg>
+        (2007 No 109)</history-note>
+
+    so throwing it away to clean up the body text would discard a real amendment graph.
+    Across the Income Tax Act, 14,307/14,308 notes carry an ``amending-leg`` and 99.8%
+    close with "(YYYY No N)" — regular enough to key on.
+
+    That trailing "(2007 No 109)" is the whole reason these become *edges* rather than a
+    metadata blob: it maps straight onto the PCO work-id grammar, so the amending act
+    gets a real ``nz/act/public/2007/109`` candidate id and the note becomes a live graph
+    edge once that act is harvested.
+
+    The **subtype is guessed as ``public``**, which is right for the overwhelming
+    majority but wrong for local and private acts (a handful — "New Plymouth District
+    Council (Waitara Lands) Act 2018"). That guess is safe here and must stay that way:
+    ``dst_id`` is only ever a *candidate*, and ``resolve_pending`` flips an edge live
+    only when the id actually exists in the corpus, so a bad guess stays pending forever
+    instead of minting a phantom edge.
+    """
+    relations: list[TypedRelation] = []
+    operations: dict[str, int] = {}
+    retrospective = 0
+    for note in root.iter():
+        if localname(note.tag).lower() != "history-note":
+            continue
+        text = _norm(note)
+        if not text:
+            continue
+        provision = _norm(note.find("amended-provision"))
+        operation = _norm(note.find("amending-operation"))
+        amending = note.find("amending-provision")
+        leg = note.find("amending-leg")
+        if operation:
+            operations[operation] = operations.get(operation, 0) + 1
+        if _RETROSPECTIVE_RE.search(text):
+            retrospective += 1
+
+        m = _AMENDING_ACT_RE.search(text)
+        dst_id = nz_id("act", "public", m.group(1), m.group(2)) if m else None
+        relations.append(TypedRelation(
+            relationship_type=RelationshipType.AMENDED_BY,
+            # The note verbatim: it is the human-readable annotation, and carries the
+            # operation, date and any retrospective effect that the typed fields below
+            # have no room for.
+            raw_citation_string=text,
+            dst_id=dst_id,
+            # Which provision of *this* act was changed, so the annotation can be shown
+            # against the section a reader is looking at.
+            src_anchor=provision or None,
+            dst_anchor=_norm(amending) or (_norm(leg) if leg is not None else None),
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.PENDING,
+        ))
+    summary = {
+        "amendment_notes": len(relations) or None,
+        "amendment_operations": operations or None,
+        "retrospective_amendments": retrospective or None,
+    }
+    return relations, summary
+
+
+def _prune(elem: ET.Element) -> None:
+    """Drop non-operative subtrees in place, depth-first."""
+    for child in list(elem):
+        if localname(child.tag).lower() in _NON_OPERATIVE:
+            elem.remove(child)
+        else:
+            _prune(child)
 
 
 def _child_by(elem: ET.Element, names: set[str]) -> ET.Element | None:
@@ -164,7 +294,7 @@ def _walk(elem: ET.Element, level: int, blocks: list[_Block]) -> None:
         role = _classify(child)
         name = localname(child.tag).lower()
         if role == "unit":
-            text = flow_text(child, skip_tags=_LABELS | _HEADINGS, line_tags=_LINES)
+            text = _tidy(flow_text(child, skip_tags=_LABELS | _HEADINGS, line_tags=_LINES))
             if text.strip():
                 blocks.append(_Block(_label(child), "section", text, level))
         elif role == "container":
@@ -177,7 +307,7 @@ def _walk(elem: ET.Element, level: int, blocks: list[_Block]) -> None:
             if len(blocks) == before:
                 # A container whose body is loose prose rather than numbered provisions —
                 # emit its text so nothing is dropped on the floor.
-                text = flow_text(child, skip_tags=_HEADINGS, line_tags=_LINES)
+                text = _tidy(flow_text(child, skip_tags=_HEADINGS, line_tags=_LINES))
                 if text.strip():
                     blocks.append(_Block(header or name, "section", text, level + 1))
         else:
@@ -185,11 +315,18 @@ def _walk(elem: ET.Element, level: int, blocks: list[_Block]) -> None:
 
 
 def parse_nz_pco_xml(data: bytes) -> ParsedDoc:
-    source = data.decode("utf-8", errors="replace")
+    # PCO peppers the text with zero-width no-break spaces inside cross-references
+    # ("CW 42(1)﻿(b)"), which would otherwise survive into the indexed text and stop
+    # a search for "CW 42(1)(b)" matching.
+    source = data.decode("utf-8", errors="replace").replace("﻿", "")
     try:
         root = ET.fromstring(expand_entities(source))
     except ET.ParseError:
         return ParsedDoc()
+
+    # Recover the amendment apparatus *before* pruning it out of the body.
+    relations, amendments = amendment_relations(root)
+    _prune(root)
 
     blocks: list[_Block] = []
     _walk(root, 0, blocks)
@@ -234,16 +371,27 @@ def parse_nz_pco_xml(data: bytes) -> ParsedDoc:
     return ParsedDoc(
         text=SEP.join(parts) or None,
         segments=segments,
-        relations=[],   # NZ cross-reference markup is unverified — see module docstring
+        relations=relations,
         title=title,
         decision_date=as_at,
         metadata={
             "root": localname(root.tag).lower(),
             "as_at": as_at,
             # Whether shape-inference found structure, or the whole-text fallback ran.
-            # Lets a pre-verification corpus be audited once a real sample is available.
             "inferred_structure": inferred,
-            "unverified_schema": True,
+            # The PCO's own document id. Every provision carries one too, and the
+            # cross-reference markup (`extref href="DLM245345"`) addresses them — so
+            # recording it builds a DLM→stable_id index across the corpus as it
+            # harvests, which is what a later cross-reference pass needs.
+            "dlm_id": root.get("id"),
+            "act_no": root.get("act.no"),
+            "act_type": root.get("act.type"),
+            "date_assent": root.get("date.assent"),
+            "date_first_valid": root.get("date.first.valid"),
+            # The `end.reprint-note` "amendments incorporated" list is deliberately NOT
+            # stored: it runs to ~10KB on a large act (170MB of meta_json across the
+            # 17k-act corpus) and is the prose form of the amendment edges above.
+            **{k: v for k, v in amendments.items() if v is not None},
         },
     )
 

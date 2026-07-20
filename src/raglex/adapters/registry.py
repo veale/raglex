@@ -481,8 +481,9 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "source yields nothing by design: the legislation website is bot-walled (HTTP "
         "405 human-verification), so there is deliberately no scraping fallback. "
         "Point-in-time is native (each consolidation is its own addressable version). "
-        "Title keywords are searched at the API. Note the XML schema is not yet verified "
-        "against a live sample — text is always captured, structure is inferred.",
+        "Title keywords are searched at the API. The PCO's amendment annotations are "
+        "kept out of the body text (they are ~35% of a large act) and recorded as "
+        "amendment edges instead.",
         (SourceOption("legislation_type", "Type", "act (default) | secondary-legislation | bill"),
          SourceOption("query", "Title search", "e.g. privacy"),
          SourceOption("ids", "Work ids", "act_public_1990_109"),

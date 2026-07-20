@@ -26,9 +26,15 @@ The API mirrors FRBR, which maps directly onto the corpus model used throughout:
 per-IP burst ceiling that returns 403 (not 429). ``min_interval`` is set to keep a
 long backfill inside the burst ceiling by construction.
 
-The XML schema itself is PCO-specific and, as of writing, **unverified against a live
-sample** — see ``formats.nz_pco_xml``, which infers structure by shape and always falls
-back to whole-text capture so an unexpected schema costs structure, never content.
+The format URLs the API hands back point at ``www.legislation.govt.nz`` — the bot-walled
+host — but **the API key gets through them**, which is why content is fetched by
+following what the API returns rather than by constructing website URLs.
+
+The XML schema was **verified against live PCO XML on 2026-07-20**; see
+``formats.nz_pco_xml``. The headline finding is that a large fraction of a PCO file is
+editorial apparatus rather than law (35% of the Income Tax Act is amendment annotation),
+so the parser prunes it from the body and re-emits the amendment notes as ``AMENDED_BY``
+relations instead of discarding them.
 """
 
 from __future__ import annotations
@@ -36,12 +42,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter
-from ..core.errors import FetchError
+from ..core.errors import FetchError, RateLimitException
 from ..core.http import RateLimitedClient
 from ..core.models import (
     DocType,
@@ -133,7 +140,11 @@ class NZLegislationAdapter(BaseAdapter):
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
         self.ids = tuple(ids) if ids else ()
-        self.legislation_type = (legislation_type or "").strip().lower() or None
+        # The API's enum is underscored (`secondary_legislation`, `amendment_paper`)
+        # while the work-id grammar hyphenates the same words, so accept either spelling
+        # rather than silently returning an empty result set for the wrong one.
+        self.legislation_type = (
+            (legislation_type or "").strip().lower().replace("-", "_") or None)
         self.query = (query or "").strip() or None
         self.status = (status or "").strip() or None
         self.agency = (agency or "").strip() or None
@@ -148,12 +159,31 @@ class NZLegislationAdapter(BaseAdapter):
     def _get(self, path: str, params: dict | None = None) -> dict | None:
         """One API call. The key goes in the ``X-Api-Key`` header rather than the
         ``api_key`` query parameter (both are accepted) so it never lands in a URL that
-        might be logged."""
+        might be logged.
+
+        Quota exhaustion is raised, never swallowed. The full catalogue is ~38k works
+        against a 10,000/day key limit, so a backfill necessarily spans several days —
+        and if running out of quota merely returned ``None``, ``discover`` would stop
+        paging and the run would look like a *clean finish*, writing a watermark over a
+        half-built corpus. Raising ``RateLimitException`` instead makes the orchestrator
+        pause this source and resume it later.
+        """
         try:
             resp = self._client.get(f"{API}{path}", params=params or {},
-                                    headers={"X-Api-Key": self.api_key or ""})
+                                    headers={"X-Api-Key": self.api_key or ""},
+                                    raise_for_4xx=False)
+        except FetchError:
+            return None
+        # The PCO signals its 2,000-per-5-min burst ceiling with 403, not 429, so the
+        # client's own 429/503 handling never sees it; and a spent daily quota reports
+        # x-ratelimit-remaining: 0. Both mean "come back later", not "no such document".
+        if resp.status_code in (403, 429) or _quota_spent(resp):
+            raise RateLimitException(self.source, retry_after=_reset_in(resp))
+        if resp.status_code >= 400:
+            return None
+        try:
             return json.loads(resp.content)
-        except (FetchError, json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError):
             return None
 
     # -- discovery -----------------------------------------------------------
@@ -263,7 +293,9 @@ class NZLegislationAdapter(BaseAdapter):
             return None
 
         version = parse_work_id(h.get("version_id") or "")
-        relations: list[TypedRelation] = []
+        # The parser recovers the PCO's amendment apparatus as AMENDED_BY edges (their
+        # dst_ids are candidates the resolver activates once the amending act lands).
+        relations: list[TypedRelation] = list(doc.relations or [])
         # The version is a point-in-time Expression of the Work; record that edge so an
         # older case can cite the text as it then stood rather than today's.
         if version and version.version_date:
@@ -294,9 +326,14 @@ class NZLegislationAdapter(BaseAdapter):
             # PCO "~" ids are not permanent and may change upstream — never present one
             # as a settled identifier.
             "ephemeral_id": h.get("ephemeral") or None,
-            # the schema wasn't verifiable pre-API-key; says how the text was recovered
+            # says whether shape-inference found structure or the whole-text fallback ran
             "inferred_structure": doc.metadata.get("inferred_structure"),
-            "unverified_schema": doc.metadata.get("unverified_schema"),
+            # The PCO document id. Cross-reference markup addresses provisions by DLM id,
+            # so carrying it builds a DLM→stable_id index as the corpus harvests.
+            "dlm_id": doc.metadata.get("dlm_id"),
+            "date_assent": doc.metadata.get("date_assent"),
+            "amendment_notes": doc.metadata.get("amendment_notes"),
+            "retrospective_amendments": doc.metadata.get("retrospective_amendments"),
         }
 
         return Record(
@@ -312,6 +349,22 @@ class NZLegislationAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in extra.items() if v is not None},
         )
+
+
+def _quota_spent(resp) -> bool:
+    """True when the key's daily allowance is gone (``x-ratelimit-remaining: 0``)."""
+    try:
+        return int(resp.headers.get("x-ratelimit-remaining", "1")) <= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _reset_in(resp) -> float | None:
+    """Seconds until the daily quota resets, from the ``x-ratelimit-reset`` epoch."""
+    try:
+        return max(0.0, float(resp.headers["x-ratelimit-reset"]) - time.time())
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _api_work_id(raw: str) -> str:
