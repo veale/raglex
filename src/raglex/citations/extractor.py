@@ -528,7 +528,7 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # list so the stable longest-match dedupe keeps them on a span tie.
     cites = alias_citations(text, aliases) if aliases else []
     cites += grammar_citations(text)
-    # US reporter citations (eyecite), gated to text that looks American — recognises
+    # US reporter citations (self-contained matcher), gated to text that looks American — recognises
     # "135 S. Ct. 2401" so it clusters as a case instead of being misread as statutory
     # material. Added before the dedupe so a genuine overlap resolves by span.
     from .us_cases import us_case_citations

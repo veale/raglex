@@ -160,7 +160,7 @@ def test_scanner_flags_uncovered_citation_residue():
 
 
 def test_us_citations_are_now_covered_not_flagged_as_residue():
-    # US reporter citations used to be unhandled residue; eyecite now recognises
+    # US reporter citations used to be unhandled residue; the reporter matcher now recognises
     # them, so a US authority is a covered case, not an unconsumed miss
     text = "It also discussed 425 U.S. 748 and 519 U.S. 452 (1997) in passing."
     cites = extract_citations(text)

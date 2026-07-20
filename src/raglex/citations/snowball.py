@@ -131,7 +131,7 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
     # *before* the neutral-citation regex so they aren't mistaken for a court.
     if "/" in candidate and candidate.split("/")[0] in _UK_LEG_TYPES:
         return "UK legislation", "GB", "uk-legislation"
-    # US reporter citations (eyecite): recognised and clustered, but the corpus
+    # US reporter citations: recognised and clustered, but the corpus
     # holds no US case law and has no adapter — so it reads as a US case in the
     # frontier and stays OUT of the routable harvest worklist.
     if head == "us":

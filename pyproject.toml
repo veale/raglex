@@ -10,13 +10,6 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
     "socksio>=1.0.0",
-    # US case-citation recognition (reporter DB + court DB). RagLex's own grammars
-    # cover the common-law + EU systems it harvests; US reporters ("135 S. Ct. 2401",
-    # "325 U.S. 410") are a long tail cited heavily by Canadian and UK-apex judgments,
-    # and eyecite (Free Law Project, actively maintained) carries the whole reporter
-    # gazetteer. Gated at extraction to text that actually looks American, so the
-    # cost is paid only on the ~1% of documents that cite US cases.
-    "eyecite>=2.7",
 ]
 
 [project.optional-dependencies]

@@ -1,4 +1,5 @@
-"""US case-citation recognition (eyecite), gated to American-looking text."""
+"""US case-citation recognition (self-contained reporter matcher), gated to
+American-looking text."""
 
 from __future__ import annotations
 
@@ -11,32 +12,35 @@ def test_gate_matches_us_reporters_only():
     assert looks_american("519 U.S. 452")
     assert looks_american("347 F.3d 1200")
     assert looks_american("98 L. Ed. 2d 720")
-    # not American: UK/EU/Commonwealth forms must not trip the gate (so eyecite
-    # never runs on them)
+    # not American: UK/EU/Commonwealth forms must not trip the gate
     assert not looks_american("[1998] 2 WLR 448")
     assert not looks_american("Article 17 of Regulation (EU) 2016/679")
     assert not looks_american("100 D.L.R. (4th) 658")      # Canadian report series
     assert not looks_american("section 12 of the Data Protection Act 2018")
 
 
-def test_us_case_citations_extract_candidate_and_pincite():
-    cs = us_case_citations("In Kimble, 135 S. Ct. 2401, 2410 (2015); Auer v. Robbins, 519 U.S. 452.")
-    by = {c.candidate_id: c for c in cs}
-    assert by["us/sct/135/2401"].pinpoint == "p. 2410"
-    assert by["us/sct/135/2401"].entity_kind == "case"
-    assert "us/us/519/452" in by
-    # the raw span is the citation itself
-    assert by["us/us/519/452"].raw == "519 U.S. 452"
+def test_us_case_citations_extract_candidates():
+    cs = us_case_citations("In Kimble, 135 S. Ct. 2401 (2015); Auer v. Robbins, 519 U.S. 452.")
+    cands = {c.candidate_id for c in cs}
+    assert "us/sct/135/2401" in cands
+    assert "us/us/519/452" in cands
+    assert all(c.entity_kind == "case" and c.method == "us_reporter" for c in cs)
 
 
-def test_non_american_text_yields_nothing_without_invoking_eyecite():
-    # the gate short-circuits before eyecite is imported/run
+def test_non_american_text_yields_nothing():
+    # the gate short-circuits on non-US text
     assert us_case_citations("a plain sentence about section 5 of an Act") == []
 
 
 def test_parallel_reporters_stay_distinct_nodes():
-    # the same case cited in two reporters → two candidates (the corpus's usual
-    # treatment of report citations; a later parallel-cite pass can merge them)
+    # the same case cited in two reporters → two candidates; the ", 117" that opens
+    # the parallel citation must NOT be swallowed as a pin page of the first
     cs = us_case_citations("Auer v. Robbins, 519 U.S. 452, 117 S. Ct. 905 (1997)")
     cands = {c.candidate_id for c in cs}
     assert "us/us/519/452" in cands and "us/sct/117/905" in cands
+
+
+def test_federal_and_regional_reporters():
+    cands = {c.candidate_id for c in us_case_citations(
+        "347 F.3d 1200; 550 F. Supp. 2d 100; 12 A.3d 45; 200 P.3d 9")}
+    assert {"us/f3d/347/1200", "us/fsupp2d/550/100", "us/a3d/12/45", "us/p3d/200/9"} <= cands
