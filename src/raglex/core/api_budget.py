@@ -104,7 +104,11 @@ class RequestBudget:
             # so don't assume the directory exists — sqlite would fail to open rather
             # than create it, and the adapter would be unusable for a missing folder.
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        # A busy timeout, because this file is shared by design: the scheduler tick,
+        # the web app and a CLI run all spend the same account's quota concurrently.
+        # sqlite's default is to fail instantly on a held write lock, which would turn
+        # routine contention into "database is locked" in the middle of a harvest.
+        self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10.0)
         self._conn.row_factory = sqlite3.Row
         # WAL so the scheduler tick and a web request can spend the same budget
         # concurrently without one blocking the other into a timeout.
@@ -131,9 +135,12 @@ class RequestBudget:
         not "full", but it still blocks a spend of 4, and the operator needs to be told
         *which* window and *when* — "budget exhausted (None window), retry in 0s" is
         the failure this parameter exists to prevent.
+
+        Read-only. Pruning happens in ``spend`` instead: a dashboard polling the budget
+        must not need the write lock, or a UI refresh can collide with a running
+        harvest and fail as "database is locked".
         """
         now = self._now()
-        self._prune(now)
         used: dict[str, tuple[int, int]] = {}
         blocked_by: str | None = None
         retry_after = 0.0
@@ -174,6 +181,9 @@ class RequestBudget:
         if not state.allowed:
             raise BudgetExhausted(self.source, state)
         now = self._now()
+        # Prune and insert in the one transaction, so the write lock is taken once per
+        # spend rather than on every read of the budget.
+        self._prune(now)
         self._conn.executemany(
             "INSERT INTO api_requests (source, at) VALUES (?, ?)",
             [(self.source, now)] * n)

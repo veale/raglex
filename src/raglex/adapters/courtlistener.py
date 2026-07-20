@@ -494,19 +494,25 @@ class CourtListenerAdapter(BaseAdapter):
         Reports the ledger's own counts rather than an estimate. ``queue_allowance``
         is the separate, smaller number that governs the unattended backlog drip: the
         share of the day's requests background work may spend, so interactive lookups
-        still have room at 10am after a queue ran all night.
+        still have room at 10am after a queue ran all night. It is ``None`` when the
+        daily window is uncapped — a reserved *share* of an unbounded quota is not a
+        number, and rendering the sentinel would show "600000000 requests reserved".
         """
         state = self.budget.state()
         day_used, day_limit = state.windows.get("day", (0, 0))
+        uncapped = day_limit >= _UNLIMITED
         return {
             "configured": self.configured,
             "allowed_now": state.allowed,
             "blocked_by": state.blocked_by,
             "retry_after_seconds": round(state.retry_after),
-            "remaining": state.remaining,
-            "windows": {name: {"used": used, "limit": limit}
+            "remaining": None if state.remaining >= _UNLIMITED else state.remaining,
+            "windows": {name: {"used": used,
+                               "limit": None if limit >= _UNLIMITED else limit}
                         for name, (used, limit) in state.windows.items()},
-            "queue_allowance": max(0, int(day_limit * queue_reserve()) - day_used),
+            "queue_allowance": None if uncapped
+                               else max(0, int(day_limit * queue_reserve()) - day_used),
+            "daily_cap": not uncapped,
             "tier": "free" if configured_windows() == FREE_TIER_WINDOWS else "custom",
         }
 

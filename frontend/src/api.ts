@@ -49,6 +49,26 @@ export interface SourceHealth {
   key: string; documents: number; consecutive_failures: number;
   watermark: string | null; last_yield_at: string | null;
 }
+// CourtListener is the one source with a hard *daily* request ceiling, so "how much is
+// left today" is the difference between a queue that is stalled and one that is simply
+// waiting for the window to roll.
+export interface UsCaselawBudget {
+  configured: boolean;            // false = no API token set
+  allowed_now: boolean;
+  blocked_by: string | null;      // which window is binding ("minute" | "hour" | "day")
+  retry_after_seconds: number;
+  // null wherever the daily window is uncapped — a share of an unbounded quota is not
+  // a number, and the sentinel limit would render as "600000000 requests reserved"
+  remaining: number | null;       // the tightest window's headroom
+  windows: Record<string, { used: number; limit: number | null }>;
+  queue_allowance: number | null; // today's share reserved for the unattended queue
+  queue_reserve: number;
+  daily_cap: boolean;
+  tier: "free" | "custom";
+  pending_us_references: number;  // the US backlog waiting on this quota
+  estimated_cases_today: number | null;
+  estimated_days_to_clear: number | null;
+}
 export interface Alert { code: string; severity: string; subject: string; message: string; }
 // A constructed link to the institute that publishes a case. `certainty` is "recorded"
 // when the URL is one the importer actually stored, "derived" when every path segment was
@@ -129,6 +149,7 @@ export const api = {
   graph: (id: string) => req<any>(`/graph/${encodeURIComponent(id)}`),
   stats: () => req<any>("/stats"),
   sources: () => req<SourceHealth[]>("/sources"),
+  usCaselawBudget: () => req<UsCaselawBudget>("/sources/us-caselaw/budget"),
   queues: () => req<Record<string, number>>("/queues"),
   alerts: () => req<Alert[]>("/alerts"),
   worklist: (limit = 30) => req<any[]>(`/worklist?limit=${limit}`),

@@ -1971,18 +1971,25 @@ class Facade:
         status = get_adapter("us-caselaw").budget_status()
         pending = sum(1 for r in self.unresolved_references(limit=None)
                       if r["suggested_adapter"] == "us-caselaw")
-        day = status["windows"].get("day", {})
         allowance = status["queue_allowance"]
+        day_limit = (status["windows"].get("day") or {}).get("limit")
+        # A case costs one request per opinion in its cluster; 2 is a fair average
+        # across SCOTUS + circuits (a lead opinion, sometimes a separate one).
+        per_case = 2
+        # Both projections are None when there is no daily cap: without one the queue
+        # is paced by the minute/hour windows instead, and "days to clear" would be a
+        # confident number derived from a limit that doesn't exist.
+        daily_cases = None if allowance is None else allowance // per_case
+        days_to_clear = None
+        if pending and day_limit:
+            cases_per_day = max(1, (day_limit * queue_reserve()) / per_case)
+            days_to_clear = round(pending / cases_per_day, 1)
         return {
             **status,
             "queue_reserve": queue_reserve(),
             "pending_us_references": pending,
-            # A case costs one request per opinion in its cluster; 2 is a fair average
-            # across SCOTUS + circuits (a lead opinion, sometimes a separate one).
-            "estimated_cases_today": allowance // 2,
-            "estimated_days_to_clear": (
-                round(pending / max(1, (day.get("limit", 125) * queue_reserve()) / 2), 1)
-                if pending else 0),
+            "estimated_cases_today": daily_cases,
+            "estimated_days_to_clear": days_to_clear,
         }
 
     def alerts(self) -> list[dict]:

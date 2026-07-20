@@ -1,5 +1,5 @@
 import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, Hit, LIIScope, LIITarget, Setting } from "./api";
+import { api, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -2040,9 +2040,54 @@ function RelationRow({ r, open, onDone }: { r: any; open: (id: string) => void; 
   );
 }
 
+// CourtListener quota, shown under the us-caselaw source row. US case law is the only
+// source with a hard *daily* ceiling, so a stalled-looking queue is usually a spent
+// budget rather than a fault — this row is what tells the two apart.
+function UsBudgetRow({ budget }: { budget: UsCaselawBudget | null | undefined }) {
+  if (!budget) return null;
+  if (!budget.configured) {
+    return (
+      <tr><td colSpan={4} className="muted" style={{ fontSize: 12, paddingLeft: 12 }}>
+        ↳ no API token — set <span className="kbd">RAGLEX_COURTLISTENER_TOKEN</span> in Settings to fetch US cases
+      </td></tr>
+    );
+  }
+  const wait = budget.retry_after_seconds;
+  const waitLabel = wait >= 3600 ? `${Math.round(wait / 3600)}h` : wait >= 60 ? `${Math.round(wait / 60)}m` : `${wait}s`;
+  return (
+    <tr><td colSpan={4} style={{ fontSize: 12, paddingLeft: 12 }}>
+      <span className="muted">↳ quota </span>
+      {Object.entries(budget.windows).map(([name, w]) => (
+        // limit === null means this window doesn't bind for the account — show the
+        // usage without a denominator rather than a ratio against a sentinel
+        <span className="tag" key={name}
+          title={w.limit === null
+            ? `${w.used} requests in the rolling ${name}; no ${name} limit set`
+            : `${w.used} of ${w.limit} requests used in the rolling ${name}`}>
+          {name}: {w.limit === null ? `${w.used} · uncapped` : `${w.used}/${w.limit}`}
+        </span>
+      ))}
+      {budget.tier === "custom" && <span className="tag" title="raised limits set in Settings">membership</span>}
+      {budget.allowed_now
+        ? <span className="ok"> ready</span>
+        : <span className="err"> {budget.blocked_by} limit reached — resumes in {waitLabel}</span>}
+      {budget.pending_us_references > 0 && (
+        <span className="muted">
+          {" · "}{budget.pending_us_references.toLocaleString()} US citations queued
+          {budget.estimated_days_to_clear !== null && budget.estimated_days_to_clear > 0 &&
+            <> · ~{budget.estimated_days_to_clear}d to clear at {Math.round(budget.queue_reserve * 100)}% of quota</>}
+        </span>
+      )}
+    </td></tr>
+  );
+}
+
 // --- Dashboard -------------------------------------------------------------
 export function Dashboard({ open: _open, navigate }: { open: (id: string) => void; navigate?: (f: Record<string, string>) => void }) {
   const [sources, , reloadSources] = useAsync(() => api.sources(), []);
+  // Its own call, not a field on /sources: counting the pending US backlog is a scan,
+  // and /sources is polled on every dashboard refresh.
+  const [usBudget, , reloadUsBudget] = useAsync(() => api.usCaselawBudget(), []);
   const [queues, , reloadQueues] = useAsync(() => api.queues(), []);
   const [alerts, , reloadAlerts] = useAsync(() => api.alerts(), []);
   const [stats, , reloadStats] = useAsync(() => api.stats(), []);
@@ -2055,7 +2100,7 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
   const [backfill, setBackfill] = useState(false);
   const [pages, setPages] = useState(1);
 
-  const refresh = () => { reloadSources(); reloadQueues(); reloadAlerts(); reloadStats(); reloadWork(); reloadBacklog(); };
+  const refresh = () => { reloadSources(); reloadUsBudget(); reloadQueues(); reloadAlerts(); reloadStats(); reloadWork(); reloadBacklog(); };
   async function act(p: Promise<any>, label: string) {
     setMsg(label + "…");
     try { const r = await p; setMsg(`${label}: ` + JSON.stringify(r)); refresh(); }
@@ -2114,9 +2159,12 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
           <h3>Sources</h3>
           <table><thead><tr><th>source</th><th>docs</th><th>fails</th><th>last yield</th></tr></thead><tbody>
             {(sources ?? []).map((s) => (
-              <tr key={s.key}><td>{s.key}</td><td>{s.documents}</td>
-                <td className={s.consecutive_failures ? "err" : ""}>{s.consecutive_failures}</td>
-                <td className="muted">{s.last_yield_at?.slice(0, 10) || "—"}</td></tr>
+              <Fragment key={s.key}>
+                <tr><td>{s.key}</td><td>{s.documents}</td>
+                  <td className={s.consecutive_failures ? "err" : ""}>{s.consecutive_failures}</td>
+                  <td className="muted">{s.last_yield_at?.slice(0, 10) || "—"}</td></tr>
+                {s.key === "us-caselaw" && <UsBudgetRow budget={usBudget} />}
+              </Fragment>
             ))}
           </tbody></table>
         </div>

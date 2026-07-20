@@ -1221,6 +1221,17 @@ def create_app(config: Config | None = None) -> FastAPI:
     def resolve_ep() -> dict:
         return facade.resolve()
 
+    @app.get("/sources/us-caselaw/budget")
+    def us_caselaw_budget() -> dict:
+        """CourtListener's remaining quota + the US backlog waiting on it.
+
+        Its own endpoint rather than a field on ``/sources``: US case law is the only
+        source with a hard daily ceiling, and the dashboard polls ``/sources`` often —
+        counting pending references on every poll would make a cheap call expensive for
+        one source's benefit.
+        """
+        return facade.us_caselaw_budget()
+
     # -- settings (UI-editable secrets; env overrides file) ---------------
     @app.get("/settings")
     def get_settings() -> dict:

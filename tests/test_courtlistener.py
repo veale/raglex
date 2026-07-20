@@ -129,6 +129,24 @@ def test_budget_persists_across_processes(tmp_path):
         second.spend()
 
 
+def test_reading_the_budget_does_not_need_the_write_lock(tmp_path):
+    """The dashboard polls the budget while a harvest is spending it. If reading took
+    the write lock, a UI refresh mid-harvest would fail as "database is locked"."""
+    path = tmp_path / "budget.sqlite"
+    clock = _Clock()
+    harvester = _budget(clock, path=path)      # the running job
+    dashboard = _budget(clock, path=path)      # the polling UI
+
+    # hold an open write transaction, as a spend in progress would
+    harvester._conn.execute("BEGIN IMMEDIATE")
+    harvester._conn.execute("INSERT INTO api_requests (source, at) VALUES (?, ?)",
+                            ("us-caselaw", clock()))
+    # the dashboard must still be able to read the state
+    assert dashboard.state().allowed is True
+    harvester._conn.commit()
+    assert dashboard.state().windows["minute"][0] == 1
+
+
 def test_budget_reset_clears_the_ledger(tmp_path):
     clock = _Clock()
     b = _budget(clock, path=tmp_path / "b.sqlite")
@@ -182,6 +200,20 @@ def test_pacing_follows_the_per_minute_allowance(monkeypatch):
     # and the adapter actually adopts it
     adapter = CourtListenerAdapter(token="t", client=_FakeClient({}))
     assert adapter.min_interval == 3.0
+
+
+def test_budget_status_reports_uncapped_windows_as_null(monkeypatch):
+    """The "no limit" sentinel is an implementation detail. Leaking it would render as
+    "0/1000000000 requests" and a queue allowance of 600 million."""
+    monkeypatch.setenv("RAGLEX_COURTLISTENER_PER_DAY", "none")
+    adapter = CourtListenerAdapter(token="t", client=_FakeClient({}),
+                                   budget=_budget(_Clock(), day=10**9))
+    status = adapter.budget_status()
+    assert status["windows"]["day"]["limit"] is None
+    assert status["queue_allowance"] is None
+    assert status["daily_cap"] is False
+    # the capped windows still report real numbers
+    assert status["windows"]["minute"]["limit"] == 5
 
 
 def test_queue_reserve_is_bounded(monkeypatch):
