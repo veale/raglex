@@ -738,3 +738,6 @@ register(Grammar(
 # numbers. Imported last so its (longer, more specific) patterns are registered
 # alongside the generic ones; the extractor's longest-match dedupe does the rest.
 from . import commonwealth as _commonwealth  # noqa: E402,F401  (registers on import)
+
+# Imported last so the French module can reuse the registry primitives above.
+from . import french as _french  # noqa: E402,F401  (registers on import)

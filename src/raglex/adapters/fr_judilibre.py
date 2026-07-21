@@ -41,6 +41,7 @@ from ..core.models import (
     TypedRelation,
 )
 from ._piste import PisteClient, piste_api_root
+from ..citations.french import pourvoi_alias
 
 _APP = "cassation/judilibre/v1.0"
 
@@ -274,5 +275,8 @@ class FrJudilibreAdapter(BaseAdapter):
                 "number": parsed.number, "formation": parsed.formation,
                 "solution": parsed.solution, "nac": parsed.nac,
                 "publication": parsed.publication or None,
+                "aliases": [x for x in (decision.get("id"),
+                                         pourvoi_alias(parsed.number) if parsed.number else None)
+                            if x],
             }.items() if v},
         )

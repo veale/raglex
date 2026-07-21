@@ -139,7 +139,8 @@ RUNNERS: dict[str, Callable] = {
     # Harvest one source in the background — the "backfill this whole source" action.
     # Long-running by design (a full catalogue walk), so it belongs in the job table
     # rather than a request that has to return.
-    "harvest-source": lambda f, p, cb, cancel: f.harvest(**p, on_progress=cb),
+    "harvest-source": lambda f, p, cb, cancel: f.harvest(
+        **p, on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
 }
 

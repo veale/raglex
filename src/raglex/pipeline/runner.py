@@ -48,6 +48,9 @@ class RunStats:
     # stable_ids re-fetched because the source said the content CHANGED (e.g. Find Case
     # Law's contenthash) — not new documents, but they need re-extraction like new ones.
     refreshed_ids: list[str] = field(default_factory=list)
+    # Internal hand-off to the facade's extraction pass.  Avoids two full-table
+    # all_stable_ids() scans (and a million-element set diff) after a large bulk seed.
+    stored_ids: list[str] = field(default_factory=list)
 
     @property
     def outcome(self) -> str:
@@ -97,6 +100,7 @@ class Pipeline:
         record_health: bool = True,
         watermark_key: str | None = None,
         on_progress=None,
+        cancel_check=None,
     ) -> RunStats:
         """Run one source. ``backfill`` ignores the stored watermark and pages deep
         from ``since`` (§5); it now SKIPS already-held documents (unchanged) so a
@@ -123,6 +127,9 @@ class Pipeline:
 
         try:
             for stub in adapter.discover(watermark, max_pages=max_pages):
+                if cancel_check and cancel_check():
+                    stats.notes.append("cancelled")
+                    break
                 stats.discovered += 1
                 # Per-stub heartbeat so a long crawl (the EDPB backfill fetches hundreds
                 # of PDFs at a slow, WAF-safe pace) keeps the job alive and shows live
@@ -229,6 +236,7 @@ class Pipeline:
 
                 if self._ingest(record, stats):
                     stats.stored += 1
+                    stats.stored_ids.append(record.stable_id)
                     if refreshed:
                         stats.refreshed_ids.append(record.stable_id)
 

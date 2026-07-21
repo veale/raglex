@@ -1584,7 +1584,7 @@ class Catalogue:
             appno_expr = "meta_json::jsonb ->> 'appno'"
         else:
             appno_expr = "json_extract(meta_json, '$.appno')"
-        minted = {"echr_appno": 0}
+        minted = {"echr_appno": 0, "fr_number": 0, "fr_code_article": 0}
         rows = self.conn.execute(
             f"SELECT ecli, {appno_expr} AS appno FROM documents "
             "WHERE source = 'echr' AND ecli IS NOT NULL AND meta_json IS NOT NULL"
@@ -1602,6 +1602,42 @@ class Catalogue:
                             (a, r["ecli"], "echr-appno"),
                         )
                         minted["echr_appno"] += 1
+            # French bulk imports predate adapter-declared aliases.  Reconstruct the
+            # deterministic keys from their persisted metadata so the new extractor can
+            # immediately link against the already-held million-document corpus.
+            from ..citations.french import code_article_alias, decision_alias, pourvoi_alias
+
+            fr_rows = self.conn.execute(
+                "SELECT stable_id, source, doc_type, title, landing_url, meta_json FROM documents "
+                "WHERE source LIKE 'fr-%' AND meta_json IS NOT NULL"
+            )
+            for r in fr_rows:
+                try:
+                    meta = json.loads(r["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                aliases: list[tuple[str, str]] = []
+                native = _re.search(
+                    r"/(?:juri|ceta|cons)/id/((?:JURI|CETA|CONS|CNIL)TEXT\d+)",
+                    r["landing_url"] or "", _re.I)
+                if native and native.group(1).upper() != r["stable_id"]:
+                    aliases.append((native.group(1).upper(), "fr-legifrance-id"))
+                number, fond = meta.get("number"), str(meta.get("fond") or "").upper()
+                if number and (r["source"] == "fr-judilibre" or fond in ("CASS", "INCA")):
+                    aliases.append((pourvoi_alias(str(number)), "fr-pourvoi"))
+                elif number and fond in ("JADE", "CONSTIT", "CNIL"):
+                    aliases.append((decision_alias(str(number)), "fr-decision"))
+                if r["doc_type"] == "legislation":
+                    m = _re.match(r"(.+?)\s+[—-]\s+Article\s+(.+)$", r["title"] or "", _re.I)
+                    alias = code_article_alias(m.group(1), m.group(2)) if m else None
+                    if alias:
+                        aliases.append((alias, "fr-code-article"))
+                for alias, source in aliases:
+                    self.conn.execute(
+                        "INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?) "
+                        "ON CONFLICT(alias) DO NOTHING", (alias.casefold(), r["stable_id"], source)
+                    )
+                    minted["fr_code_article" if source == "fr-code-article" else "fr_number"] += 1
         return minted
 
     def held_key_set(self) -> set[str]:

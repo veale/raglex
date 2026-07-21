@@ -218,6 +218,7 @@ _CATEGORY_JURISDICTION: dict[str, str] = {
     "ie-caselaw": "ie", "ie-legislation": "ie",
     "eu-cellar": "eu", "eu-legislation": "eu", "echr": "eu",
     "us-caselaw": "us",
+    "fr-caselaw": "fr", "fr-legislation": "fr",
     "ca-caselaw": "ca", "ca-legislation": "ca",
     "au-caselaw": "au", "au-legislation": "au",
     "nz-caselaw": "nz", "nz-legislation": "nz",
@@ -238,6 +239,7 @@ RETRIEVAL_JURISDICTIONS: tuple[tuple[str, str], ...] = (
     ("uk", "United Kingdom"),
     ("ie", "Ireland"),
     ("eu", "EU (CMLR, ECR…)"),
+    ("fr", "France"),
     ("us", "United States"),
     ("ca", "Canada"),
     ("au", "Australia"),
@@ -258,7 +260,7 @@ RETRIEVAL_JURISDICTIONS: tuple[tuple[str, str], ...] = (
 # bucket. The majors pass through unchanged; the long tail of individual African / Pacific /
 # Caribbean / offshore jurisdictions folds into a regional bucket so the picker stays short.
 _RETRIEVAL_BUCKET: dict[str, str] = {
-    "gb": "uk", "uk": "uk", "ie": "ie", "eu": "eu", "us": "us",
+    "gb": "uk", "uk": "uk", "ie": "ie", "eu": "eu", "fr": "fr", "us": "us",
     "ca": "ca", "au": "au", "nz": "nz", "in": "in", "sg": "sg", "hk": "hk",
     "za": "za", "my": "my",
     **{c: "africa" for c in ("ke", "gh", "ng", "zw", "zm", "na", "ug", "tz", "mw",
@@ -1457,6 +1459,7 @@ class Facade:
         (("uk-", "bailii", "westlaw", "ofcom", "ico", "hol"), "United Kingdom"),
         (("eu-", "edpb", "a29wp", "dma", "cellar", "eur-lex"), "European Union"),
         (("echr",), "Council of Europe"),
+        (("fr-",), "France"),
         (("nl-",), "Netherlands"),
         (("ie-", "eisb"), "Ireland"),
         (("au-",), "Australia"),
@@ -1492,6 +1495,9 @@ class Facade:
         "us-caselaw": "CourtListener",
         "sg-legislation": "Singapore Statutes Online", "hk-legislation": "HK e-Legislation",
         "in-caselaw": "Indian Kanoon", "user-import": "Manual imports",
+        "fr-dila": "DILA open data", "fr-judilibre": "Judilibre",
+        "fr-legislation": "Légifrance", "fr-conseil-etat": "Conseil d'État",
+        "fr-cnil": "CNIL", "fr-constit": "Conseil constitutionnel",
         "ci-caselaw": "Channel Islands", "offshore-caselaw": "Offshore courts",
         "uk-grc": "FTT (General Regulatory Chamber)",
     }
@@ -1566,6 +1572,8 @@ class Facade:
         "elegislation.gov.hk": "HK e-Legislation",
         "sso.agc.gov.sg": "Singapore Statutes Online",
         "indian-supreme-court-judgments.s3.amazonaws.com": "Supreme Court of India",
+        "legifrance.gouv.fr": "Légifrance", "courdecassation.fr": "Cour de cassation",
+        "conseil-etat.fr": "Conseil d'État",
     }
 
     def link_label(self, url: str | None, source: str | None = None) -> str | None:
@@ -7653,7 +7661,7 @@ class Facade:
         self, source: str, *, backfill: bool = False, since: str | None = None,
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
-        on_progress=None,
+        on_progress=None, cancel_check=None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
         "trigger a backfill / re-run a source from the browser" action. ``options``
@@ -7671,22 +7679,26 @@ class Facade:
             return {"error": str(exc)}
         with self._open() as (cat, rs, ts):
             pipe = Pipeline(cat, rs, textstore=ts)
-            before = cat.all_stable_ids()
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,
-                             on_progress=on_progress)
+                             on_progress=on_progress, cancel_check=cancel_check)
             # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.
             # (Re-extracting all ~20k docs on every harvest was O(minutes) of pure-CPU
             # grammar work; resolution already links existing pending edges to the new
             # nodes without re-mining their text.) Upstream-REVISED documents the crawl
             # re-fetched (contenthash changed) aren't "new" but their text changed, so
             # they get the same re-extract/classify pass.
-            new_ids = list((cat.all_stable_ids() - before) | set(stats.refreshed_ids))
+            new_ids = list(dict.fromkeys([*stats.stored_ids, *stats.refreshed_ids]))
             from .citations import extract_document
             from .treatment import classify_corpus
             llm_cite, classifier = self._llm_passes(None)  # auto: LLM iff configured
             aliases = cat.named_alias_map()
-            for sid in new_ids:
+            total_new = len(new_ids)
+            for i, sid in enumerate(new_ids, 1):
+                if cancel_check and cancel_check():
+                    break
+                if on_progress:
+                    on_progress(stage="extracting citations", done=i, total=total_new, item=sid)
                 extract_document(cat, ts, sid, llm=llm_cite, aliases=aliases)
                 classify_corpus(cat, ts, classifier=classifier, stable_id=sid)
             # Guidance classification (§1.9/§4a): every guidance-typed document — and
@@ -7703,7 +7715,9 @@ class Facade:
             resolved_n = Resolver(cat).run().resolved if resolve else 0
             if resolve:
                 RuleEngine(cat).run_all(enabled_only=True)
-            return {**asdict(stats), "resolved_edges": resolved_n,
+            result = asdict(stats)
+            result.pop("stored_ids", None)  # internal and potentially hundreds of thousands
+            return {**result, "resolved_edges": resolved_n,
                     "new_documents": len(new_ids)}
 
     def list_sources(self) -> list[str]:

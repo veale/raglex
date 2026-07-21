@@ -26,6 +26,7 @@ from xml.etree import ElementTree as ET
 from ..core.adapter import BaseAdapter
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..formats.dila_xml import dila_root_kind, parse_dila_article, parse_dila_juri
+from ..citations.french import code_article_alias, decision_alias, pourvoi_alias
 
 # fund → (DocType for its jurisprudence, default court label). LEGI is legislation and
 # handled separately (article-level).
@@ -90,6 +91,7 @@ class FrDilaAdapter(BaseAdapter):
 
     def _article_record(self, root: ET.Element, data: bytes, stub: Stub) -> Record | None:
         art = parse_dila_article(root)
+        article_alias = code_article_alias(art.code_title or "", art.num or "")
         stable_id = art.art_id or f"fr/legi/{stub.stable_id}"
         title = f"{art.code_title} — Article {art.num}" if art.code_title and art.num else (
             f"Article {art.num}" if art.num else art.code_title)
@@ -109,6 +111,7 @@ class FrDilaAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in {
                 "fond": "LEGI", "etat": art.etat, "code_cid": art.code_cid,
+                "aliases": [article_alias] if article_alias else None,
                 "date_debut": art.date_debut.isoformat() if art.date_debut else None,
                 "date_fin": art.date_fin.isoformat() if art.date_fin else None,
             }.items() if v},
@@ -119,6 +122,11 @@ class FrDilaAdapter(BaseAdapter):
         doc_type, default_court = _FUND_JURI.get(self.fond, (DocType.JUDGMENT, None))
         ecli = j.ecli if (j.ecli and j.ecli.startswith("ECLI:")) else None
         stable_id = ecli or f"fr/{self.fond.lower()}/{j.doc_id or stub.stable_id}"
+        aliases = [j.doc_id] if j.doc_id and j.doc_id != stable_id else []
+        if j.number and self.fond in ("CASS", "INCA"):
+            aliases.append(pourvoi_alias(j.number))
+        elif j.number and self.fond in ("JADE", "CONSTIT", "CNIL"):
+            aliases.append(decision_alias(j.number))
         return Record(
             source=self.source,
             stable_id=stable_id,
@@ -138,5 +146,8 @@ class FrDilaAdapter(BaseAdapter):
             extra={k: v for k, v in {
                 "fond": self.fond, "number": j.number, "solution": j.solution,
                 "formation": j.formation,
+                # Pourvoi numbers are corpus-unique in the Cassation funds.  Ordinary
+                # appeal-court docket numbers collide between courts, so never alias CAPP.
+                "aliases": aliases or None,
             }.items() if v},
         )

@@ -103,6 +103,13 @@ class Frontier:
 
 def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
     """(form, jurisdiction, adapter) for a candidate id, from its shape alone."""
+    low = candidate.lower()
+    if low.startswith("fr:code:") or low.startswith("fr:text:") or candidate.upper().startswith(("LEGIARTI", "LEGITEXT", "JORFARTI", "JORFTEXT")):
+        return "French legislation", "FR", "fr-legislation"
+    if low.startswith("fr:pourvoi:") or candidate.upper().startswith("JURITEXT"):
+        return "French judicial decision", "FR", "fr-judilibre"
+    if low.startswith("fr:decision:") or candidate.upper().startswith(("CETATEXT", "CONSTEXT", "CNILTEXT")):
+        return "French national decision", "FR", None
     # An ECtHR case cited by name (EHRR grammar) — the candidate is "echr:<case name>",
     # resolved via a HUDOC docname search by the echr adapter (inferred, fuzzy).
     if kind == "echr_case" or candidate.lower().startswith("echr:"):
