@@ -128,6 +128,8 @@ def _sniff_format(raw: bytes) -> str | None:
         return "formex-legislation"
     if b"toestand" in low or b"<wetgeving" in low:
         return "bwb"
+    if b'id="fragview"' in low or b"topheadingparagraph" in low or b"headingparagraph" in low:
+        return "lawmaker-html"
     return None
 
 
@@ -3085,7 +3087,12 @@ class Facade:
                 fmt = _sniff_format(raw)
                 if fmt is None:
                     return {"stable_id": stable_id, "reparsed": False, "reason": "no structural format"}
-                pd = parse_format(fmt, raw)
+                if fmt == "lawmaker-html":
+                    from .formats.lawmaker_html import parse_lawmaker_html
+                    parts = stable_id.split("/")
+                    pd = parse_lawmaker_html(raw, jurisdiction=parts[1] if len(parts) > 1 else "")
+                else:
+                    pd = parse_format(fmt, raw)
                 text, segments = pd.text, pd.segments
             if not text:
                 return {"stable_id": stable_id, "reparsed": False, "reason": "parser produced no text"}

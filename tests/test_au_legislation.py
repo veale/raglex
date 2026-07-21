@@ -453,3 +453,8 @@ def test_lawmaker_nested_notes_recover_line_breaks():
     </div></body></html>'''
     doc = parse_lawmaker_html(raw, jurisdiction="tas")
     assert "Note 1 First note\nNote 2 Second note" in (doc.text or "")
+
+
+def test_reparse_sniffer_recognises_lawmaker_html():
+    from raglex.facade import _sniff_format
+    assert _sniff_format(LAWMAKER_TAS_HTML) == "lawmaker-html"
