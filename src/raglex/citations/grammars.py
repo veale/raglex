@@ -523,7 +523,7 @@ _EU_TREATIES = (
     (r"(?:the\s+)?Treaty\s+on\s+the\s+Functioning\s+of\s+the\s+European\s+Union|TFEU", "12016E"),
     (r"(?:the\s+)?Treaty\s+on\s+European\s+Union|TEU", "12016M"),
     (r"(?:the\s+)?Charter\s+of\s+Fundamental\s+Rights(?:\s+of\s+the\s+European\s+Union)?"
-     r"|(?:the\s+)?EU\s+Charter|the\s+Charter", "12012P"),
+     r"|(?:the\s+)?EU\s+Charter|CFREU|the\s+Charter", "12012P"),
 )
 for _i, (_names, _celex) in enumerate(_EU_TREATIES):
     register(Grammar(

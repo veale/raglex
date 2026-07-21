@@ -298,7 +298,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "fetch specific instruments (Formex; articles + recitals). EU primary-law "
         "documents (Charter, TEU, TFEU) are importable by CELEX and retain their ELI + names.",
         (SourceOption("celex", "CELEX ids", "32016R0679,12012P,12016M,12016E"),
-         SourceOption("types", "Descriptors to enumerate", "R,L,D (default)"),
+         SourceOption("types", "Descriptors to enumerate", "R,L,D,TREATY (default)"),
          SourceOption("years", "Year range", "1990-2026")),
         ("CELEX (32016R0679)", "Treaty/Charter CELEX (12012P)", "Directive/Regulation number"),
     ),

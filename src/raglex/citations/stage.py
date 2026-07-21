@@ -192,6 +192,13 @@ def _is_eu_guidance(doc) -> bool:
     return doc["source"] in _EU_GUIDANCE_SOURCES
 
 
+def _is_eu_material(doc) -> bool:
+    """EU-origin texts in which bare "the Charter" unambiguously means CFREU."""
+    source = (doc["source"] or "").lower()
+    return (_is_cjeu(doc) or source.startswith("eu-") or source in
+            _EU_GUIDANCE_SOURCES | {"dma-cases"})
+
+
 _UK_COUNTRY_RE = re.compile(r"united\s+kingdom|\bgreat\s+britain\b|\bGB\b|\bUK\b", re.IGNORECASE)
 
 
@@ -393,6 +400,15 @@ def extract_document(
     # there a "Data Protection Act 2018" reference IS to the national statute.
     if _is_eu_guidance(doc):
         cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
+                 for c in cites]
+
+    # Bare "the Charter" is EU-local shorthand: in a national text it may mean a
+    # domestic constitutional charter. Explicit "EU Charter", CFREU and the formal
+    # name remain globally unambiguous.
+    if not _is_eu_material(doc):
+        cites = [replace(c, candidate_id=None)
+                 if c.method == "eu_treaty_12012P"
+                 and re.search(r"(?i)\bthe\s+Charter\s*$", c.raw.strip()) else c
                  for c in cites]
 
     # Corpus-wide shorthands: apply the ones learned elsewhere whose parent this

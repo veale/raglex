@@ -644,3 +644,8 @@ def test_case_shortnames_handle_lowercase_accents_and_parenthesised_parties():
         ("Saguenay", "scc/2015/16", "para 46"),
         ("Tervita", "scc/2015/3", "para 35"),
     }
+
+
+def test_cfreu_is_an_unambiguous_charter_name():
+    c = next(c for c in extract_citations("Article 47 CFREU") if c.candidate_id == "12012P")
+    assert c.pinpoint == "Article 47"

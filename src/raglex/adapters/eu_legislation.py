@@ -38,7 +38,7 @@ CDM = "http://publications.europa.eu/ontology/cdm#"
 # Sector 3 = legal acts. R = Regulation, L = Directive, D = Decision — the legislative
 # mass. The trailing anchor drops corrigenda (``32019L1153R(02)``), which are not
 # separate instruments.
-DEFAULT_TYPES = ("R", "L", "D")
+DEFAULT_TYPES = ("R", "L", "D", "TREATY")
 
 # Consolidated EU primary-law documents. Citations use the CELEX stem (12016E),
 # EUR-Lex displays /TXT, and ELI supplies the durable web identity. All forms and
@@ -48,7 +48,7 @@ PRIMARY_LAW: dict[str, dict[str, object]] = {
         "title": "Charter of Fundamental Rights of the European Union",
         "eli": "https://eur-lex.europa.eu/eli/treaty/char_2012/oj/eng",
         "aliases": ("12012P/TXT", "Charter of Fundamental Rights of the European Union",
-                    "Charter of Fundamental Rights", "EU Charter", "the Charter"),
+                    "Charter of Fundamental Rights", "EU Charter", "CFREU"),
     },
     "12016M": {
         "title": "Consolidated version of the Treaty on European Union",
@@ -154,8 +154,18 @@ class EULegislationAdapter(BaseAdapter):
         return [{k: v["value"] for k, v in row.items()} for row in bindings]
 
     def _enumerate_query(self, since: str | None, offset: int) -> str:
-        descriptors = "".join(self.types)
-        filters = [f'REGEX(STR(?celex), "^3[0-9]{{4}}[{descriptors}][0-9]{{4}}$")']
+        descriptors = "".join(t for t in self.types if len(t) == 1)
+        branches = []
+        if descriptors:
+            branches.append(f'{{ ?work cdm:resource_legal_id_celex ?celex . '
+                            f'FILTER(REGEX(STR(?celex), "^3[0-9]{{4}}[{descriptors}][0-9]{{4}}$")) }}')
+        if "TREATY" in self.types:
+            # Public CELLAR equivalent of EUR-Lex expert-search
+            # ``PS_ID=treaty OR FM_CODED=TREATY``. Whole instruments have a sector-1
+            # CELEX ending at the descriptor; article fragments continue with digits.
+            branches.append('{ ?work a cdm:treaty ; cdm:resource_legal_id_celex ?celex . '
+                            'FILTER(REGEX(STR(?celex), "^1[0-9]{4}[A-Z]{1,2}$")) }')
+        filters = []
         if since:
             filters.append(f'STR(?date) > "{since[:10]}"')
         if self.years:
@@ -165,9 +175,9 @@ class EULegislationAdapter(BaseAdapter):
         return f"""
 PREFIX cdm: <{CDM}>
 SELECT DISTINCT ?celex ?date WHERE {{
-  ?work cdm:resource_legal_id_celex ?celex .
+  {' UNION '.join(branches)}
   OPTIONAL {{ ?work cdm:work_date_document ?date }}
-  FILTER({where})
+  {f'FILTER({where})' if where else ''}
 }}
 ORDER BY DESC(?date)
 LIMIT {self.page_size} OFFSET {offset}
