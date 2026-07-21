@@ -156,6 +156,10 @@ def parse_lawmaker_html(data: bytes, *, jurisdiction: str = "") -> ParsedDoc:
             buffer.append(body)
             add_links(m.group("body"), label)
         elif any(k in classes for k in ("flatparagraph", "paragraph", "listnumber", "note")):
+            if "note" in classes:
+                # Nested LawMaker note wrappers flatten several NoteParagraphs into
+                # one whitespace-normalised string. Restore the visible note breaks.
+                body = re.sub(r"\s+(?=Note\s+\d+\b)", "\n", body)
             # a body block — but skip if it's the wrapper duplicate of the last append
             if not buffer or buffer[-1] != body:
                 buffer.append(body)

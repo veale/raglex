@@ -2486,9 +2486,15 @@ class Facade:
         per-reference citing-document list costs a query each, so it's only filled for
         the rows a human will actually look at (``with_citing``)."""
         from .citations.snowball import ECHR_APPNO_RE, _classify, uk_leg_category as _uk_leg_category
+        from .citations.taxonomy import classify_candidate
         from .adapters.bailii import bailii_url as _bailii_url
 
         with self._open() as (cat, _rs, _ts):
+            import os as _os
+            miss_ttl = float(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
+            retry_ttl = float(_os.environ.get("RAGLEX_RETRY_TTL_HOURS") or 6) / 24.0
+            absent = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
+            retry = cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl)
             rows = []
             for g in cat.pending_reference_groups():
                 ref = g["ref"]
@@ -2516,10 +2522,16 @@ class Facade:
                 low = (needs_identifier or "llm" in methods or adapter is None
                        or misrouted_appno
                        or (cand or "").lower().startswith("echr:"))
+                cooling_reason = ("source reported absent" if cand in absent else
+                                  "temporary retrieval failure" if cand in retry else None)
+                tax = classify_candidate(cand or "", "" if cand else "case")
                 rows.append({
                     "ref": ref, "candidate": cand, "raw": g["raw"],
                     "pinpoint": g["anchor"], "form": form, "jurisdiction": juris,
                     "suggested_adapter": adapter, "needs_identifier": needs_identifier,
+                    "category": tax.category,
+                    "cooling": cooling_reason is not None,
+                    "cooling_reason": cooling_reason,
                     # UK legislation sub-category, so the worklist can filter/harvest
                     # primary vs secondary vs assimilated separately
                     "leg_kind": _uk_leg_category(cand) if adapter == "uk-legislation" else None,

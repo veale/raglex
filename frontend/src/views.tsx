@@ -3474,7 +3474,7 @@ function summariseRun(r: any): string {
 // by supplying the missing identifier, linking to an existing item, scraping a
 // URL, or uploading the source file (§5b).
 export function UnresolvedView({ open, navigate }: { open: (id: string) => void; navigate?: (f: Record<string, string>) => void }) {
-  const [rows, err, reload] = useAsync(() => api.unresolved(200), []);
+  const [rows, err, reload] = useAsync(() => api.unresolved(5000), []);
   const [cov, , reloadCov] = useAsync(() => api.coverage(), []);
   // after any harvest/resolve, refresh BOTH the list and the per-source "remaining"
   // counts (which come from coverage — the server invalidates its cache on harvest)
@@ -3489,6 +3489,14 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
   const [bulk, setBulk] = useState("");
   const [srcFilter, setSrcFilter] = useState("");   // suggested_adapter, or "" = all
   const [legFilter, setLegFilter] = useState("");    // primary|secondary|assimilated, or ""
+  const [bucketFilter, setBucketFilter] = useState<"" | "pending" | "cooling" | "name_only">("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const showWorklist = (bucket: "pending" | "cooling" | "name_only", category = "", subtype = "") => {
+    setBucketFilter(bucket); setCategoryFilter(category);
+    setSrcFilter(category && category !== "other" ? category : "");
+    setLegFilter(category === "uk-legislation" ? subtype.split(":")[0] : "");
+    requestAnimationFrame(() => document.getElementById("harvest-worklist")?.scrollIntoView({ behavior: "smooth" }));
+  };
   if (err) return <div className="panel"><p className="err">{err}</p></div>;
   const all = rows ?? [];
   // source options come from the corpus-wide routable breakdown (so even sources not on
@@ -3499,7 +3507,11 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
   // filter the displayed rows by the selected source / UK-legislation sub-category
   const list = all.filter((r) =>
     (!srcFilter || r.suggested_adapter === srcFilter) &&
-    (!legFilter || r.leg_kind === legFilter));
+    (!categoryFilter || r.category === categoryFilter) &&
+    (!legFilter || r.leg_kind === legFilter) &&
+    (!bucketFilter || (bucketFilter === "name_only" ? (r.needs_identifier || r.confidence === "low" || !r.suggested_adapter)
+      : bucketFilter === "cooling" ? r.cooling
+      : (!r.cooling && !r.needs_identifier && r.confidence !== "low" && !!r.suggested_adapter))));
   // the routable count for the CURRENT filter (corpus-wide), for the harvest button
   const catKey = showLeg && legFilter ? `uk-legislation:${legFilter}` : srcFilter;
   const routableCount = catKey ? (byCat[catKey] ?? 0)
@@ -3543,15 +3555,22 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
   const ready = cov?.ready_references;
   return (
     <div>
-    <CorpusMap cov={cov} navigate={navigate} />
-    <div className="panel">
+    <CorpusMap cov={cov} navigate={navigate} showWorklist={showWorklist} />
+    <div className="panel" id="harvest-worklist">
       <div className="row worklist-head" style={{ justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap" }}>
         <h3 style={{ margin: 0, flex: "1 1 100%", minWidth: 0 }}>Harvest worklist <span className="muted">— citations the corpus can’t find (yet), most-cited first. Resolve by harvest, identifier, existing item, scrape, or upload.</span></h3>
         <div className="row" style={{ flex: "1 1 auto", alignItems: "center", minWidth: 0 }}>
           <select className="theme-select" value={srcFilter}
-            onChange={(e) => { setSrcFilter(e.target.value); setLegFilter(""); }} title="Filter by source">
+            onChange={(e) => { setSrcFilter(e.target.value); setCategoryFilter(e.target.value); setLegFilter(""); }} title="Filter by source">
             <option value="">All sources</option>
             {sources.map((s) => <option key={s} value={s}>{s} ({byCat[s]})</option>)}
+          </select>
+          <select className="theme-select" value={bucketFilter}
+            onChange={(e) => setBucketFilter(e.target.value as any)} title="Filter by queue state">
+            <option value="">All states</option>
+            <option value="pending">Pending / untried</option>
+            <option value="cooling">Cooling</option>
+            <option value="name_only">Name-only / manual</option>
           </select>
           {showLeg && <select className="theme-select" value={legFilter}
             onChange={(e) => setLegFilter(e.target.value)} title="UK legislation type">
@@ -4260,7 +4279,8 @@ function CitesPanel({ category }: { category: string }) {
 
 // The Corpus Map — held-vs-pending by legal category & sub-type, with per-row actions.
 // Replaces the old prose coverage panel (IBM Carbon table, Swiss numeric hierarchy).
-function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, string>) => void }) {
+function CorpusMap({ cov, navigate, showWorklist }: { cov: any; navigate?: (f: Record<string, string>) => void;
+  showWorklist?: (bucket: "pending" | "cooling" | "name_only", category?: string, subtype?: string) => void }) {
   const [map, err, reload] = useAsync(() => api.corpusMap(), []);
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [msg, setMsg] = useState("");
@@ -4294,9 +4314,9 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
       </div>
       <div className="row stat-strip" style={{ flexWrap: "wrap", gap: 20 }}>
         <div><b>{(totals.held ?? s.total ?? 0).toLocaleString()}</b><div className="muted">held <Info t="Documents currently in the corpus." /></div></div>
-        <div><b>{(totals.pending ?? cov?.routable_references ?? 0).toLocaleString()}</b><div className="muted">pending <Info t="Routable items we cite but don’t yet hold and have NOT tried — the one-click ‘untried’ harvest targets (a known adapter, high confidence)." /></div></div>
-        <div><b>{(totals.cooling ?? 0).toLocaleString()}</b><div className="muted">cooling <Info t="Routable references the harvester recently tried and parked — waiting out a retry (hours) or miss (up to 90 days) cool-down. ‘Harvest all’ re-attempts them." /></div></div>
-        <div><b>{(totals.name_only ?? cov?.needs_identifier ?? 0).toLocaleString()}</b><div className="muted">name-only <Info t="References recognised but not routable — recognised by name with no identifier, or a form we can’t fetch yet. Need a human (upload / identifier / link)." /></div></div>
+        <div><b><a onClick={() => showWorklist?.("pending")}>{(totals.pending ?? cov?.routable_references ?? 0).toLocaleString()}</a></b><div className="muted">pending <Info t="Click for the routable untried references and identifiers planned for retrieval." /></div></div>
+        <div><b><a onClick={() => showWorklist?.("cooling")}>{(totals.cooling ?? 0).toLocaleString()}</a></b><div className="muted">cooling <Info t="Click for references parked after a recent source miss or temporary retrieval failure." /></div></div>
+        <div><b><a onClick={() => showWorklist?.("name_only")}>{(totals.name_only ?? cov?.needs_identifier ?? 0).toLocaleString()}</a></b><div className="muted">name-only <Info t="Click for recognised references that still need a canonical identifier or manual link." /></div></div>
         {pct != null && <div><b>{pct}%</b><div className="muted">citations resolved <Info t="Share of all citation edges whose target is held in the corpus." /></div></div>}
         <div><b>{(cov?.hanging_references ?? 0).toLocaleString()}</b><div className="muted">hanging total <Info t="Every distinct cited-but-not-held reference, routable or not." /></div></div>
       </div>
@@ -4323,12 +4343,11 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
                       <a className="caret" onClick={() => toggle(c.key)}>{isOpen ? "▾" : "▸"}</a>
                       <b>{c.label}</b>
                     </td>
-                    <td className="num">{c.held.toLocaleString()}</td>
-                    <td className="num">{c.pending ? c.pending.toLocaleString() : <span className="muted">0</span>}</td>
-                    <td className="num">{c.cooling ? c.cooling.toLocaleString() : <span className="muted">0</span>}</td>
-                    <td className="num">{c.name_only ? c.name_only.toLocaleString() : <span className="muted">0</span>}</td>
+                    <td className="num">{navigate && c.held ? <a onClick={() => see({ source: c.key })}>{c.held.toLocaleString()}</a> : c.held.toLocaleString()}</td>
+                    <td className="num">{c.pending ? <a onClick={() => showWorklist?.("pending", c.key)}>{c.pending.toLocaleString()}</a> : <span className="muted">0</span>}</td>
+                    <td className="num">{c.cooling ? <a onClick={() => showWorklist?.("cooling", c.key)}>{c.cooling.toLocaleString()}</a> : <span className="muted">0</span>}</td>
+                    <td className="num">{c.name_only ? <a onClick={() => showWorklist?.("name_only", c.key)}>{c.name_only.toLocaleString()}</a> : <span className="muted">0</span>}</td>
                     <td className="actions">
-                      {navigate && c.held > 0 && <button className="mini" title="Browse these held documents in the Corpus pane" onClick={() => see({ source: c.key })}>👁 list</button>}
                       {c.pending > 0 && c.key !== "other" && <button className="mini" title={`Harvest the ${c.pending} UNTRIED routable references in this category (runs in the background, cancellable, skips items that fail)`} onClick={() => fireJob("harvest-all", { adapter: c.key, limit: 1000000 }, setMsg)}>⤓ untried ({c.pending.toLocaleString()})</button>}
                       {(c.cooling > 0 || (c.pending > 0 && c.key !== "other")) && c.key !== "other" && <button className="mini" title={`Harvest ALL ${(c.pending + c.cooling).toLocaleString()} routable references in this category, including the ${c.cooling.toLocaleString()} on a retry/miss cool-down (re-attempts items previously parked as unavailable)`} onClick={() => fireJob("harvest-all", { adapter: c.key, limit: 1000000, retry_cooled: true }, setMsg)}>⤓ all ({(c.pending + c.cooling).toLocaleString()})</button>}
                     </td>
@@ -4336,13 +4355,11 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
                   {isOpen && (c.subtypes || []).map((st: any) => (
                     <tr key={c.key + ":" + st.key} className="sub-row">
                       <td className="sub-label">{st.label}</td>
-                      <td className="num">{st.held.toLocaleString()}</td>
-                      <td className="num">{st.pending ? st.pending.toLocaleString() : <span className="muted">0</span>}</td>
-                      <td className="num">{st.cooling ? st.cooling.toLocaleString() : <span className="muted">0</span>}</td>
-                      <td className="num">{st.name_only ? st.name_only.toLocaleString() : <span className="muted">0</span>}</td>
+                      <td className="num">{navigate && st.held && Object.keys(st.filter || {}).length ? <a onClick={() => see(st.filter)}>{st.held.toLocaleString()}</a> : st.held.toLocaleString()}</td>
+                      <td className="num">{st.pending ? <a onClick={() => showWorklist?.("pending", c.key, st.key)}>{st.pending.toLocaleString()}</a> : <span className="muted">0</span>}</td>
+                      <td className="num">{st.cooling ? <a onClick={() => showWorklist?.("cooling", c.key, st.key)}>{st.cooling.toLocaleString()}</a> : <span className="muted">0</span>}</td>
+                      <td className="num">{st.name_only ? <a onClick={() => showWorklist?.("name_only", c.key, st.key)}>{st.name_only.toLocaleString()}</a> : <span className="muted">0</span>}</td>
                       <td className="actions">
-                        {navigate && st.held > 0 && Object.keys(st.filter || {}).length > 0 &&
-                          <button className="mini" title="Browse these held documents" onClick={() => see(st.filter)}>👁 list</button>}
                         {st.pending > 0 && c.key === "uk-legislation" &&
                           <button className="mini" title={`Harvest the ${st.pending} untried references of this type`} onClick={() => fireJob("harvest-all", { adapter: "uk-legislation", leg_kind: st.key.split(":")[0], limit: 1000000 }, setMsg)}>⤓ untried ({st.pending.toLocaleString()})</button>}
                         {st.cooling > 0 && c.key === "uk-legislation" &&
@@ -4409,7 +4426,9 @@ function ResolveRow({ r, open, active, toggle, onDone }:
     <>
       <tr>
         <td>{r.citing_count}×</td>
-        <td><code>{r.raw || r.ref}</code>{r.pinpoint && <span className="muted"> ◆ {r.pinpoint}</span>}</td>
+        <td><code>{r.raw || r.ref}</code>{r.pinpoint && <span className="muted"> ◆ {r.pinpoint}</span>}
+          {r.candidate && <div className="muted" style={{ fontSize: 11 }}>planned identifier: <code>{r.candidate}</code></div>}
+          {r.cooling_reason && <div className="muted" style={{ fontSize: 11 }}>cooling: {r.cooling_reason}</div>}</td>
         <td>{r.form}{r.jurisdiction ? ` [${r.jurisdiction}]` : ""}
           {r.confidence === "low" && <span className="err"> · low-confidence</span>}</td>
         <td>{r.suggested_adapter

@@ -79,3 +79,5 @@ def test_federal_and_regional_reporters():
     cands = {c.candidate_id for c in us_case_citations(
         "347 F.3d 1200; 550 F. Supp. 2d 100; 12 A.3d 45; 200 P.3d 9")}
     assert {"us/f3d/347/1200", "us/fsupp2d/550/100", "us/a3d/12/45", "us/p3d/200/9"} <= cands
+def test_official_journal_page_is_not_a_us_pacific_reporter():
+    assert us_case_citations("published in OJ L 159 p. 1 and OJ L 143, p. 6") == []

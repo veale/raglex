@@ -159,6 +159,12 @@ def us_case_citations(text: str) -> list[Citation]:
         return []
     out: list[Citation] = []
     for m in _US_CITE_RE.finditer(text):
+        # Official Journal references such as "OJ L 159, p. 1" occur throughout
+        # EU judgments. Their "159 p. 1" tail has the shape of the US Pacific
+        # Reporter, but is a page in the OJ, not an American case.
+        before = text[max(0, m.start() - 12):m.start()]
+        if re.search(r"(?i)\bOJ\s+L\s*$", before):
+            continue
         if not plausible_us_volume(m.group("vol")):
             continue  # a year in the volume slot → a bracket-year misparse, not US
         cand = us_candidate_id(m.group("vol"), m.group("rep"), m.group("page"))

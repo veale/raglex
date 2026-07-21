@@ -446,3 +446,10 @@ def test_a_non_zip_response_is_not_mistaken_for_a_document():
     client = _Client({"documents/find(": "<html><body>Just a moment…</body></html>"})
     doc, as_at = CommonwealthAdapter(client=client).fetch_body_api("C2004A00250")
     assert doc is None and as_at is None
+def test_lawmaker_nested_notes_recover_line_breaks():
+    raw = b'''<html><body><div id="fragview">
+    <P class="HeadingParagraph"><B class="HeadingStyle">1</B>Rule</P>
+    <blockquote class="NoteParagraph">Note 1 First note <span>Note 2 Second note</span></blockquote>
+    </div></body></html>'''
+    doc = parse_lawmaker_html(raw, jurisdiction="tas")
+    assert "Note 1 First note\nNote 2 Second note" in (doc.text or "")

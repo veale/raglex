@@ -486,7 +486,7 @@ register(Grammar(
     re.compile(
         r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?"
         r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
-        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})",
+        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC))?\b",
         re.IGNORECASE,
     ),
     lambda m: (
@@ -557,7 +557,7 @@ def instrument_at(text: str) -> tuple[str | None, str | None]:
     if m:
         return _name_to_celex(m.group("name")), "regulation"
     m = re.match(r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
-                 r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})", text, re.IGNORECASE)
+                 r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC))?\b", text, re.IGNORECASE)
     if m:
         return _eu_celex(m.group("kind"), m.group("a"), m.group("b")), m.group("kind").lower()
     return None, None
@@ -640,7 +640,7 @@ register(Grammar(
     re.compile(
         _RECITAL + r"\s+(?:of\s+)?(?:the\s+)?"
         r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
-        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})",
+        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC))?\b",
         re.IGNORECASE,
     ),
     lambda m: (_eu_celex(m.group("kind"), m.group("a"), m.group("b")),

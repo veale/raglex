@@ -618,3 +618,11 @@ def test_multi_article_lists_link_every_article_to_the_instrument():
     # so the list pass must resolve the Charter itself
     cs = extract_citations("Articles 4 and 6 of the Charter of Fundamental Rights")
     assert {c.pinpoint for c in cs if c.candidate_id == "12012P"} == {"Article 4", "Article 6"}
+def test_eu_directive_suffix_is_preserved_and_that_directive_range_expands():
+    text = ("Directive 2000/31/EC applies. Articles 12 to 15 of that Directive "
+            "provide the relevant safeguards.")
+    cs = extract_citations(text)
+    numeric = next(c for c in cs if c.method == "eu_instrument_numeric")
+    assert numeric.raw == "Directive 2000/31/EC"
+    assert {c.pinpoint for c in cs if c.candidate_id == "32000L0031"} >= {
+        "Article 12", "Article 13", "Article 14", "Article 15"}

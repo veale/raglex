@@ -370,7 +370,7 @@ _ARTICLE_IN_LIST = re.compile(
 _ARTICLE_LIST = re.compile(
     r"\bArt(?:icle|\.)?s?\.?\s+"
     r"(?P<list>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*"
-    r"(?:\s*(?:,|and|&)\s*(?:Art(?:icle|\.)?s?\.?\s+)?\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)+)"
+    r"(?:\s*(?:,|and|&|to|through|–|—|-)\s*(?:Art(?:icle|\.)?s?\.?\s+)?\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)+)"
     r"\s+(?:of\s+)?(?:the\s+)?",
     re.IGNORECASE)
 
@@ -387,21 +387,38 @@ def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
     occupied = [(c.char_start, c.char_end) for c in kept]
     for m in _ARTICLE_LIST.finditer(text):
         cand, kind = instrument_at(text[m.end(): m.end() + 120])
+        # EU drafting frequently uses "Articles 12 to 15 of that Directive" after
+        # naming the directive in the preceding sentence. Resolve the demonstrative
+        # to the nearest earlier directive rather than leaving the whole range blank.
+        if not cand and re.match(r"that\s+Directive\b", text[m.end():], re.IGNORECASE):
+            prior = [c for c in kept if c.char_end <= m.start() and c.candidate_id
+                     and c.entity_kind == "directive"]
+            if prior:
+                cand, kind = prior[-1].candidate_id, "directive"
         if not cand:
             continue
-        for am in _ARTICLE_IN_LIST.finditer(m.group("list")):
-            num = am.group("n")
-            s = m.start() + am.start("n")
-            e = m.start() + am.end("n")
+        article_matches = list(_ARTICLE_IN_LIST.finditer(m.group("list")))
+        expanded: list[tuple[str, int, int]] = []
+        for i, am in enumerate(article_matches):
+            expanded.append((am.group("n"), am.start("n"), am.end("n")))
+            if i + 1 < len(article_matches) and am.group("n").isdigit():
+                gap = m.group("list")[am.end():article_matches[i + 1].start()]
+                nxt = article_matches[i + 1].group("n")
+                if re.search(r"(?i)\b(?:to|through)\b|[–—-]", gap) and nxt.isdigit() \
+                        and 0 < int(nxt) - int(am.group("n")) <= 20:
+                    expanded.extend((str(n), am.start("n"), article_matches[i + 1].end("n"))
+                                    for n in range(int(am.group("n")) + 1, int(nxt)))
+        for num, ns, ne in expanded:
+            s = m.start("list") + ns
+            e = m.start("list") + ne
             # skip any article the grammar already linked (avoid a duplicate edge)
             if any(os < e and s < oe for os, oe in occupied):
                 continue
             out.append(Citation(
-                raw=am.group(0), entity_kind=kind or "regulation",
+                raw=text[s:e], entity_kind=kind or "regulation",
                 candidate_id=cand, pinpoint=f"Article {num}",
                 char_start=s, char_end=e, method="article_list", confidence=0.75,
             ))
-            occupied.append((s, e))
     return out
 
 
