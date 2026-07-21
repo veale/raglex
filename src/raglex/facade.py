@@ -2653,7 +2653,10 @@ class Facade:
         for r in frontier["references"]:
             if r["citing_count"] < min_citing:
                 continue
-            raw = (r["raw"] or r["ref"] or "").strip()
+            # Collapse internal whitespace: a citation extracted across a PDF line break
+            # ("[1991] ATPR\n   41") is stored with the newline, and pasted verbatim it
+            # spans two lines and won't retrieve. One space between tokens is the paste form.
+            raw = " ".join((r["raw"] or r["ref"] or "").split())
             series = r.get("series")          # computed once, on the frontier row
             if series and series.upper() in ("ECR", "EHRR"):
                 continue  # own sources (CELLAR / HUDOC), not a Westlaw/Lexis target

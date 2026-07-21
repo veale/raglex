@@ -22,6 +22,19 @@ def test_quoted_out_of_sequence_numbers_stay_inside_the_paragraph():
     assert _labels(t) == ["[1]", "[2]", "[3]", "[4]"]
 
 
+def test_heading_flattened_onto_paragraph_line_still_found():
+    # A2AJ/CanLII flat text merges a section heading onto the following paragraph's line
+    # ("II. Analysis A. Standard of Review [9] ...") — the marker isn't at the line start,
+    # but the paragraph must still be recovered, or the run dies at the first heading and
+    # the rest of the judgment collapses into one segment (Tufail v Canada 2026 FC 914).
+    t = ("[1] first\n[2] second, citing Vavilov, 2019 SCC 65, [2019] 4 SCR 653.\n"
+         "[3] third\nI. Background to this application [4] fourth\n[5] fifth\n"
+         "II. Analysis A. Standard of Review [6] sixth")
+    assert _labels(t) == ["[1]", "[2]", "[3]", "[4]", "[5]", "[6]"]
+    # the citation year [2019] must NOT be taken as a paragraph
+    assert "[2019]" not in _labels(t)
+
+
 def test_dotted_paragraphs_recovered_when_brackets_absent():
     # High Court of Australia style: "1.", "2." at line start, no brackets
     t = "HIGH COURT OF AUSTRALIA\n1. The first paragraph of the judgment.\n" \

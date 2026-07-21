@@ -167,6 +167,17 @@ def test_fcr_disambiguated_by_bracket_style():
     assert series_jurisdiction("FCR") == "uk"
 
 
+def test_flr_disambiguated_by_bracket_style():
+    # FLR collides too: English Family Law Reports [1996] 1 FLR vs Australian Federal Law
+    # Reports (1979) 46 FLR. Bracket style is the tell.
+    from raglex.citations.reporters import report_series, series_jurisdiction
+
+    au = "(1979) 46 FLR 386"
+    en = "[1996] 1 FLR 644"
+    assert series_jurisdiction(report_series(au), au) == "au"
+    assert series_jurisdiction(report_series(en), en) == "uk"
+
+
 # ── display casing of stored (folded) aliases ───────────────────────────────
 # Aliases live in citation_aliases casefolded so they compare reliably, which is
 # why the case-SENSITIVE report matchers never fire on them. display_citation is

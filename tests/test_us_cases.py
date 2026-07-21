@@ -6,6 +6,26 @@ from __future__ import annotations
 from raglex.citations.us_cases import looks_american, us_case_citations, us_court_name
 
 
+def test_year_as_volume_is_not_a_us_citation():
+    # English "[1958] P 561" (Probate) must never be read as US "1958 P. 561": no US
+    # reporter reaches volume 1500, so a year-in-the-volume-slot is a misparse that would
+    # burn the CourtListener budget on a guaranteed 404.
+    from raglex.citations.us_cases import plausible_us_volume, us_case_citations
+
+    assert plausible_us_volume("325") and not plausible_us_volume("1958")
+    assert us_case_citations("1958 P. 561") == []           # year volume → rejected
+    assert us_case_citations("325 U.S. 410") and us_case_citations("561 P.2d 1234")
+
+
+def test_misparsed_us_year_volume_is_not_routable():
+    # …and if such a candidate is already in the graph (minted by an older extractor), it
+    # must not be routed to the us-caselaw adapter.
+    from raglex.citations.snowball import _classify
+
+    assert _classify("us/p/1958/561", "case")[2] is None          # no adapter
+    assert _classify("us/us/325/410", "case")[2] == "us-caselaw"  # a real one still routes
+
+
 def test_us_court_names_from_courtlistener_slugs():
     # the seed set gets explicit names…
     assert us_court_name("scotus") == "Supreme Court of the United States"

@@ -374,8 +374,11 @@ _EXPORT_SERIES_JURISDICTION: dict[str, str] = {**REPORTER_JURISDICTION, **_EXPOR
 _SERIES_EDITION_RE = re.compile(r"\s*\((?:\d+(?:st|nd|rd|th|d))\)\s*$", re.I)
 # A round-bracketed year is the Australian-FCR signal; a square-bracketed one is English.
 _ROUND_YEAR_RE = re.compile(r"\((?:1[6-9]|20)\d{2}\)")
-# Report series whose jurisdiction is carried by bracket style, not the token itself.
-_BRACKET_AMBIGUOUS: frozenset[str] = frozenset({"FCR"})
+# Report series whose jurisdiction is carried by bracket style, not the token itself:
+# FCR — English Family Court Reports [1993] 1 FCR vs Australian Federal Court Reports
+#       (1993) 43 FCR; FLR — English Family Law Reports [1996] 1 FLR vs Australian Federal
+#       Law Reports (1979) 46 FLR. Round-bracketed (volume-numbered) year → Australian.
+_BRACKET_AMBIGUOUS: frozenset[str] = frozenset({"FCR", "FLR"})
 
 
 def series_jurisdiction(series: str | None, raw: str | None = None) -> str:

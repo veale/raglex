@@ -135,6 +135,23 @@ def us_candidate_id(volume: str | int, reporter: str, page: str | int) -> str:
     return f"us/{reporter_slug(reporter)}/{volume}/{page}"
 
 
+# No US reporter series reaches volume 1500 (the largest — F. Supp., the regional 2ds —
+# top out under ~1000). A 4-digit "volume" in the year range is therefore a misparsed
+# bracket-year citation — English "[1958] P 561" (Probate) read as US "1958 P. 561" — which
+# CourtListener can never resolve, so it must not become a routable us-caselaw candidate
+# (it burns the daily API budget on guaranteed 404s).
+US_MAX_VOLUME = 1500
+
+
+def plausible_us_volume(volume: str | int) -> bool:
+    """Whether ``volume`` is a real US reporter volume (< 1500) rather than a year-in-the-
+    volume-slot misparse of a bracket-year citation."""
+    try:
+        return 0 < int(volume) < US_MAX_VOLUME
+    except (TypeError, ValueError):
+        return False
+
+
 def us_case_citations(text: str) -> list[Citation]:
     """US case citations in ``text`` as RagLex ``Citation``s. Empty when the text
     isn't American (the gate)."""
@@ -142,6 +159,8 @@ def us_case_citations(text: str) -> list[Citation]:
         return []
     out: list[Citation] = []
     for m in _US_CITE_RE.finditer(text):
+        if not plausible_us_volume(m.group("vol")):
+            continue  # a year in the volume slot → a bracket-year misparse, not US
         cand = us_candidate_id(m.group("vol"), m.group("rep"), m.group("page"))
         out.append(Citation(
             raw=m.group(0),

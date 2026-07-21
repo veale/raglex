@@ -139,7 +139,16 @@ def blocks_by_localname(
 # still carry their paragraph numbers in the prose — "[15] The applicant…" at
 # line starts. Synthesising segments from those makes pinpoints ("at para 15")
 # land, the minimap work, and peeks scroll — without re-importing anything.
-_NUM_PARA_RE = re.compile(r"^\s{0,8}\[(\d{1,4})\]\s", re.MULTILINE)
+# "[15] The applicant…" at a line start — but the A2AJ/CanLII flat text FLATTENS a
+# section heading onto the following paragraph's line ("II. Analysis A. Standard of Review
+# [9] On an application…"), so the marker isn't always the first thing on its line. The
+# optional prefix allows a short heading run (letters/roman numerals/subsection letters, no
+# bracket, ≤80 chars) before the "[N]", so those paragraphs are still found and the
+# strict-sequential run doesn't die at the first heading (collapsing the rest of a judgment
+# into one segment — the Tufail v Canada 2026 FC 914 break). The from-1 sequence guard keeps
+# citation years ("[2019] 4 SCR 653") and mid-prose cross-references out.
+_NUM_PARA_RE = re.compile(
+    r"^[ \t]{0,8}(?:[A-Za-z0-9(][^\n\[]{0,80}?[ \t])?\[(\d{1,4})\]\s", re.MULTILINE)
 # The dotted form — "1.", "2." at a line start — used by the High Court of
 # Australia and other courts that don't bracket their paragraph numbers. Much
 # noisier than the bracket form (a line can open "51." for all sorts of reasons),

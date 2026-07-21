@@ -216,6 +216,24 @@ COURTS: tuple[Court, ...] = (
     Court("WASCA", "WA Court of Appeal", "AU"),
     Court("WASC", "Supreme Court of Western Australia", "AU"),
     Court("WADC", "District Court of Western Australia", "AU"),
+    # NSW / Vic / Qld tribunals and older court databases that turn up cited in UK/AU
+    # judgments — registered so their citations classify as Australian rather than
+    # falling through to "other" and then leaking into a UK-only retrieval batch.
+    Court("NSWCATAP", "NSW Civil & Administrative Tribunal (Appeal Panel)", "AU"),
+    Court("NSWCATAS", "NSW Civil & Administrative Tribunal (Admin & Equal Opp)", "AU"),
+    Court("NSWADT", "NSW Administrative Decisions Tribunal", "AU"),
+    Court("NSWADTAP", "NSW Administrative Decisions Tribunal (Appeal Panel)", "AU"),
+    Court("NSWSCA", "NSW Supreme Court (Court of Appeal, legacy code)", "AU"),
+    Court("NSWFTT", "NSW Fair Trading Tribunal", "AU"),
+    Court("VicRp", "Victorian Reports (AustLII database)", "AU"),
+    Court("QICmr", "Queensland Information Commissioner", "AU"),
+    # Australian report series that mint a neutral-citation-shaped candidate (a court
+    # token) rather than resolving through the reporter tables — registered here so that
+    # candidate reads as Australian.
+    Court("ATPR", "Australian Trade Practices Reports", "AU"),
+    Court("AIPC", "Australian Intellectual Property Cases", "AU"),
+    Court("NSWR", "New South Wales Reports", "AU"),
+    Court("QWN", "Queensland Weekly Notes", "AU"),
 
     # ---- Canada (bracketless: 2024 SCC 1) ---------------------------------
     # Several provinces flipped Queen's Bench → King's Bench in 2022–23, so BOTH the

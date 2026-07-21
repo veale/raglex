@@ -136,6 +136,15 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
     # 125 requests/day, so the adapter's budget ledger (not this classifier) is what
     # meters them: the drain simply stops for the day when the budget says stop.
     if head == "us":
+        # Guard the year-as-volume misparse (English "[1958] P 561" → us/p/1958/561): no US
+        # reporter reaches volume 1500, so such a candidate can never resolve at CourtListener
+        # — keep it OUT of the routable worklist so it doesn't burn the daily API budget on
+        # guaranteed 404s (these were minted by an older extractor and persist in the graph).
+        from .us_cases import plausible_us_volume
+
+        parts = candidate.split("/")
+        if len(parts) == 4 and not plausible_us_volume(parts[2]):
+            return "US citation (misparsed — year as volume)", "US", None
         return "US case (reporter)", "US", "us-caselaw"
     m = _NEUTRAL_RE.match(candidate)
     if m:

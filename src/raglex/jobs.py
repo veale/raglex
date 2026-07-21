@@ -37,9 +37,6 @@ log = logging.getLogger("raglex.jobs")
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "backfill-eu-stubs",
-    # one whole-queue drain at a time — the nightly idle harvest and a manual "harvest all
-    # routable" would otherwise race over the same hanging-reference queue.
-    "harvest-all",
     "rebuild-citation-counts", "rebuild-authority", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
@@ -47,8 +44,13 @@ SINGLETON_KINDS = frozenset({
     "embed",
 })
 MAX_CONCURRENT_JOBS = 6
-# Keyed jobs deduped by (kind, params): don't start an identical one while it's in flight.
-DEDUP_KINDS = frozenset({"run-watch", "gap-scan", "harvest-source"})
+# Keyed jobs deduped by (kind, params): don't start an IDENTICAL one while it's in flight,
+# but different-parameter runs proceed. harvest-all is here (not a blanket singleton): each
+# click targets ONE adapter (a corpus-map category) and drains a disjoint candidate set, so
+# a us-caselaw harvest must not be blocked by a running uk-legislation one. Two clicks of the
+# SAME category still dedup, and the nightly whole-queue drain (no adapter → distinct params)
+# dedups against a second whole-queue drain but no longer blocks the per-category buttons.
+DEDUP_KINDS = frozenset({"run-watch", "gap-scan", "harvest-source", "harvest-all"})
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
 # its worker thread is parked on a network socket that died when the host slept/woke. We
 # can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
