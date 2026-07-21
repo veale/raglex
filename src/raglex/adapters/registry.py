@@ -205,7 +205,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "nl-rechtspraak", "NL Rechtspraak (Open Data)", "caselaw", "NL", False,
         "Dutch case law, ECLI-native, with a built-in citation graph. The API indexes "
         "by date/court, so keywords filter the harvested results (Dutch terms work).",
-        (SourceOption("court", "Court filter", "e.g. Hoge Raad"),),
+        (SourceOption("path", "Bulk archive path", "OpenDataUitspraken.zip or extracted folder"),
+         SourceOption("lido_links", "Import LiDO graph", "true — structured outgoing links")),
         ("ECLI:NL:…",),
     ),
     "eu-cellar": SourceInfo(
@@ -528,7 +529,10 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "nl-legislation", "NL legislation (KOOP / BWB)", "legislation", "NL", False,
         "Dutch consolidated legislation via the KOOP SRU service; supports topic "
         "discovery by rechtsgebied. Keywords post-filter the results.",
-        (SourceOption("rechtsgebied", "Legal area", "e.g. staats- en bestuursrecht"),),
+        (SourceOption("rechtsgebied", "Legal area", "e.g. staats- en bestuursrecht"),
+         SourceOption("all_records", "Entire BWB", "true — paginate every SRU record"),
+         SourceOption("ids", "BWB identifiers", "BWBR0040940,BWBR0045754"),
+         SourceOption("version_date", "Exact historical date", "YYYY-MM-DD")),
     ),
     "fr-legislation": SourceInfo(
         "fr-legislation", "France — Légifrance (codes, PISTE)", "legislation", "FR", False,

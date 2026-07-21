@@ -1668,6 +1668,42 @@ class Catalogue:
                     minted["de_law" if source == "de-law" else "de_case"] += 1
         return minted
 
+    def backfill_dutch_aliases(self) -> dict:
+        """Mint Dutch aliases for records imported before the Dutch graph support.
+
+        Kept separate from the general historical migration so deploying Dutch support
+        does not repeat the multi-million-row French pass.
+        """
+        import re as _re
+        from ..citations.dutch import law_name_alias, ljn_alias
+
+        minted = {"ljn": 0, "bwb": 0, "law_name": 0}
+        rows = self.conn.execute(
+            "SELECT stable_id, source, doc_type, title, meta_json FROM documents "
+            "WHERE source IN ('nl-rechtspraak','nl-legislation')"
+        )
+        with self._atomic():
+            for r in rows:
+                aliases: list[tuple[str, str]] = []
+                if r["source"] == "nl-rechtspraak":
+                    tail = r["stable_id"].rsplit(":", 1)[-1]
+                    if _re.fullmatch(r"[A-Z]{2}\d{4}", tail, _re.I):
+                        aliases.append((ljn_alias(tail), "ljn"))
+                elif r["doc_type"] == "legislation":
+                    base = r["stable_id"].split("@", 1)[0].upper()
+                    if _re.fullmatch(r"BWB[RV]\d{7}", base):
+                        aliases.append((f"jci1.3:c:{base}", "bwb"))
+                    if r["title"]:
+                        aliases.append((law_name_alias(r["title"]), "law_name"))
+                for alias, kind in aliases:
+                    self.conn.execute(
+                        "INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?) "
+                        "ON CONFLICT(alias) DO NOTHING",
+                        (alias.casefold(), r["stable_id"], f"nl-{kind}"),
+                    )
+                    minted[kind] += 1
+        return minted
+
     def held_key_set(self) -> set[str]:
         """Every string that identifies a held document — stable_id, ECLI, and the aliases
         pointing at one (CELEX/chamber-less/named). The snowball tests ~165k frontier

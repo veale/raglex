@@ -19,6 +19,7 @@ pinpoint links §1.9 supports).
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from typing import Iterator
 from xml.etree import ElementTree as ET
 
@@ -27,6 +28,7 @@ from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..core.segmentation import element_text, localname
+from ..citations.dutch import law_name_alias
 from ..formats import parse
 
 BASE_URL = "https://wetten.overheid.nl"
@@ -36,6 +38,15 @@ DEFAULT_IDS = (
     "BWBR0040940",  # Uitvoeringswet AVG (GDPR implementation)
     "BWBR0045754",  # Wet open overheid (Woo) — NL FOI act
 )
+
+
+def _date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 class NLLegislationAdapter(BaseAdapter):
@@ -49,29 +60,34 @@ class NLLegislationAdapter(BaseAdapter):
         *,
         ids: str | tuple[str, ...] | None = None,
         rechtsgebied: str | None = None,
+        all_records: bool = False,
+        version_date: str | None = None,
         use_sru: bool = True,
         client: RateLimitedClient | None = None,
     ) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
-        self.ids = tuple(ids) if ids else (DEFAULT_IDS if not rechtsgebied else ())
+        self.all_records = bool(all_records)
+        self.ids = tuple(ids) if ids else (DEFAULT_IDS if not rechtsgebied and not all_records else ())
         # rechtsgebied (e.g. 'staats- en bestuursrecht') enables topic discovery;
         # otherwise a configured BWB-id list. SRU also drives delta sync.
         self.rechtsgebied = rechtsgebied
+        self.version_date = version_date
         self.use_sru = use_sru
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     # -- SRU discovery (KOOP, x-connection=BWB) ----------------------------
-    def _sru_query(self, cql: str, *, max_records: int = 50) -> list[dict]:
+    def _sru_query(self, cql: str, *, start_record: int = 1,
+                   max_records: int = 500) -> tuple[list[dict], int | None]:
         params = {
             "operation": "searchRetrieve", "version": "1.2", "x-connection": "BWB",
-            "query": cql, "maximumRecords": max_records,
+            "query": cql, "startRecord": start_record, "maximumRecords": max_records,
         }
         try:
             resp = self._client.get(SRU_URL, params=params)
         except FetchError:
-            return []
-        return _parse_sru(resp.content)
+            return [], None
+        return _parse_sru_page(resp.content)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         # 1) SRU path (topic discovery + delta sync via dcterms.modified).
@@ -83,28 +99,36 @@ class NLLegislationAdapter(BaseAdapter):
                 clauses.append(f"overheidbwb.rechtsgebied=={self.rechtsgebied}")
             if since:
                 clauses.append(f"dcterms.modified>={since}")  # incremental cursor
-            cql = " and ".join(clauses) if clauses else "dcterms.modified>=2024-01-01"
-            records = self._sru_query(cql)
-            if records:
-                # SRU returns one record per *toestand* (version); keep the latest
-                # per BWB-id (the in-force consolidated text).
-                latest: dict[str, dict] = {}
+            cql = " and ".join(clauses) if clauses else "dcterms.modified>=1900-01-01"
+            latest: dict[str, dict] = {}
+            start, pages = 1, 0
+            while True:
+                records, next_record = self._sru_query(cql, start_record=start)
                 for rec in records:
                     cur = latest.get(rec["identifier"])
                     if cur is None or (rec.get("modified") or "") >= (cur.get("modified") or ""):
                         latest[rec["identifier"]] = rec
+                pages += 1
+                if not next_record or not records or (max_pages is not None and pages >= max_pages):
+                    break
+                start = next_record
+            if latest:
                 for rec in latest.values():
+                    date = self.version_date or rec.get("geldigheidsdatum")
+                    sid = f"{rec['identifier']}@{self.version_date}" if self.version_date else rec["identifier"]
                     yield Stub(
-                        stable_id=rec["identifier"],
+                        stable_id=sid,
                         landing_url=f"{BASE_URL}/{rec['identifier']}",
                         title=rec.get("title"),
-                        hint_date=rec.get("modified"),  # watermark on modified
-                        hints={"geldig": rec.get("geldigheidsdatum")},
+                        hint_date=_date(rec.get("modified")),  # watermark on modified
+                        hints={"geldig": date, "bwbid": rec["identifier"]},
                     )
                 return
         # 2) Fallback: the configured id list, date resolved at fetch.
         for bwbid in self.ids:
-            yield Stub(stable_id=bwbid, landing_url=f"{BASE_URL}/{bwbid}")
+            sid = f"{bwbid}@{self.version_date}" if self.version_date else bwbid
+            yield Stub(stable_id=sid, landing_url=f"{BASE_URL}/{bwbid}",
+                       hints={"bwbid": bwbid, "geldig": self.version_date})
 
     def _resolve_date(self, bwbid: str) -> str | None:
         """Find the current in-force *toestand* date from the work landing page
@@ -117,7 +141,7 @@ class NLLegislationAdapter(BaseAdapter):
         return m.group(1) if m else None
 
     def fetch(self, stub: Stub) -> Record | None:
-        bwbid = stub.stable_id
+        bwbid = stub.hints.get("bwbid") or stub.stable_id.split("@", 1)[0]
         # prefer the in-force date SRU already gave us; else resolve from the page
         date = stub.hints.get("geldig") or self._resolve_date(bwbid)
         if not date:
@@ -132,7 +156,7 @@ class NLLegislationAdapter(BaseAdapter):
             return None
         return Record(
             source=self.source,
-            stable_id=bwbid,
+            stable_id=stub.stable_id,
             doc_type=DocType.LEGISLATION,
             title=parsed.title or bwbid,
             language="nl",
@@ -144,17 +168,25 @@ class NLLegislationAdapter(BaseAdapter):
             segments=parsed.segments,
             relations=parsed.relations,
             extracted_via=ExtractedVia.STRUCTURED,
-            extra={"format": "bwb", "geldigheidsdatum": date},
+            extra={k: v for k, v in {
+                "format": "bwb", "geldigheidsdatum": date, "bwb_id": bwbid,
+                "point_in_time": date if "@" in stub.stable_id else None,
+                # A bare Juriconnect pointer means current law and must never be
+                # redirected to an historical copy. Dated copies get dated aliases.
+                "aliases": ([f"jci1.3:c:{bwbid}&g={date}", f"{bwbid}@{date}"]
+                            if "@" in stub.stable_id else
+                            [f"jci1.3:c:{bwbid}", law_name_alias(parsed.title or bwbid)]),
+            }.items() if v},
         )
 
 
-def _parse_sru(xml_bytes: bytes) -> list[dict]:
+def _parse_sru_page(xml_bytes: bytes) -> tuple[list[dict], int | None]:
     """Parse a KOOP SRU BWB response into {identifier, title, modified,
     geldigheidsdatum} per record (namespace-agnostic by local-name)."""
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
-        return []
+        return [], None
     out: list[dict] = []
     for record in (e for e in root.iter() if localname(e.tag) == "record"):
         fields: dict[str, str] = {}
@@ -169,4 +201,11 @@ def _parse_sru(xml_bytes: bytes) -> list[dict]:
         if m:
             fields["identifier"] = m.group(0)
             out.append(fields)
-    return out
+    nxt = next((element_text(e).strip() for e in root.iter()
+                if localname(e.tag) == "nextRecordPosition" and element_text(e).strip()), None)
+    return out, int(nxt) if nxt and nxt.isdigit() else None
+
+
+def _parse_sru(xml_bytes: bytes) -> list[dict]:
+    """Backward-compatible page parser used by existing callers/tests."""
+    return _parse_sru_page(xml_bytes)[0]

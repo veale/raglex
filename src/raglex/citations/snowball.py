@@ -41,6 +41,7 @@ _NEUTRAL_RE = re.compile(r"^(?P<court>[a-z]+)(?:/[a-z]+)?/(?:19|20)\d{2}/\d+$")
 # (Council of Europe) is the ECtHR — ECLI:CE:ECHR:… → the HUDOC adapter.
 _ECLI_ADAPTER = {"EU": "eu-cellar", "NL": "nl-rechtspraak", "GB": "uk-caselaw", "CE": "echr",
                  "FR": "fr-judilibre", "DE": "de-neuris"}
+_NL_BWB_RE = re.compile(r"^BWBR\d{7}(?:@\d{4}-\d{2}-\d{2})?$", re.I)
 # A bare ECHR application number (4451/70, 36022/97) — the resolvable key for an ECtHR
 # case (the HUDOC adapter looks it up). Distinct from a CJEU number, which has a C-/T- prefix.
 ECHR_APPNO_RE = re.compile(r"^\d{1,5}/\d{2}$")  # app-number year is always 2 digits
@@ -114,6 +115,12 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         return "German federal legislation", "DE", "de-gii"
     if low.startswith("de:case:"):
         return "German federal decision", "DE", "de-neuris"
+    if _NL_BWB_RE.match(candidate):
+        return "Dutch BWB legislation", "NL", "nl-legislation"
+    if low.startswith("nl:law:"):
+        return "Dutch legislation (named)", "NL", None
+    if low.startswith("nl:ljn:"):
+        return "Dutch case law (LJN)", "NL", None
     # An ECtHR case cited by name (EHRR grammar) — the candidate is "echr:<case name>",
     # resolved via a HUDOC docname search by the echr adapter (inferred, fuzzy).
     if kind == "echr_case" or candidate.lower().startswith("echr:"):

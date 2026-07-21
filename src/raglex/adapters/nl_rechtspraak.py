@@ -21,10 +21,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 from typing import Iterator
+import re
+import zipfile
 from xml.etree import ElementTree as ET
 
 from ..core.adapter import BaseAdapter
+from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
     DocType,
@@ -40,6 +44,7 @@ from ..core.segmentation import assemble, blocks_by_localname, element_text
 
 ZOEKEN_URL = "https://data.rechtspraak.nl/uitspraken/zoeken"
 CONTENT_URL = "https://data.rechtspraak.nl/uitspraken/content"
+LIDO_LINKS_URL = "https://linkeddata.overheid.nl/service/get-links"
 
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
@@ -203,6 +208,51 @@ def parse_content(xml_bytes: bytes) -> ParsedContent:
     )
 
 
+def parse_lido_links(xml_bytes: bytes, source_ecli: str) -> list[TypedRelation]:
+    """Turn LiDO's government-maintained outgoing graph into RagLex edges."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return []
+    subjects = {e.attrib.get("id"): e for e in root.iter()
+                if _localname(e.tag) == "subject" and e.attrib.get("id")}
+    source = next((e for ident, e in subjects.items() if source_ecli in ident), None)
+    if source is None:
+        return []
+    refs = next((e for e in source if _localname(e.tag) == "uitgaande-links"), None)
+    out: list[TypedRelation] = []
+    for ref in list(refs) if refs is not None else []:
+        ident = ref.attrib.get("idref", "")
+        target = subjects.get(ident)
+        externals = []
+        if target is not None:
+            externals = [(e.text or "").strip() for e in target.iter()
+                         if _localname(e.tag) == "identifier"
+                         and _attr_by_suffix(e, "type") == "extern"]
+        candidate = next((x for x in externals if x.startswith("ECLI:")), None)
+        anchor = None
+        if candidate is None:
+            url = next((x for x in externals if "BWBR" in x or "BWBV" in x), ident)
+            m = re.search(r"\b(BWB[RV]\d{7})\b", url, re.I)
+            candidate = m.group(1).upper() if m else None
+            art = re.search(r"(?:Artikel|artikel=)(\d+(?::\d+)?[a-z]?)", url, re.I)
+            dated = re.search(r"/(\d{4}-\d{2}-\d{2})/", url)
+            if candidate and dated:
+                candidate += "@" + dated.group(1)
+            anchor = f"Artikel {art.group(1)}" if art else None
+            if anchor and dated:
+                anchor += f" (geldend op {dated.group(1)})"
+        if candidate and candidate != source_ecli:
+            out.append(TypedRelation(
+                relationship_type=RelationshipType.MENTIONS,
+                raw_citation_string=ref.attrib.get("label") or candidate,
+                dst_id=candidate, dst_anchor=anchor,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING,
+            ))
+    return out
+
+
 class NLRechtspraakAdapter(BaseAdapter):
     source = "nl-rechtspraak"
     # 10 req/s allowed; pace under it (§1.8, §A).
@@ -210,11 +260,30 @@ class NLRechtspraakAdapter(BaseAdapter):
     requires_js = False
     requires_proxy = False
 
-    def __init__(self, *, per_page: int = 100, client: RateLimitedClient | None = None) -> None:
+    def __init__(self, *, per_page: int = 1000, path: str | None = None,
+                 lido_links: bool = False,
+                 client: RateLimitedClient | None = None) -> None:
         self.per_page = per_page
+        self.path = Path(path) if path else None
+        self.lido_links = bool(lido_links)
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        if self.path is not None:
+            archives = [self.path] if self.path.is_file() else sorted(self.path.glob("*.zip"))
+            for archive in archives:
+                try:
+                    with zipfile.ZipFile(archive) as zf:
+                        for member in zf.namelist():
+                            if member.lower().endswith(".xml"):
+                                yield Stub(stable_id=Path(member).stem,
+                                           hints={"archive": str(archive), "member": member})
+                except (OSError, zipfile.BadZipFile):
+                    continue
+            if self.path.is_dir() and not archives:
+                for xml in sorted(self.path.rglob("*.xml")):
+                    yield Stub(stable_id=xml.stem, hints={"file": str(xml)})
+            return
         offset = 0
         pages = 0
         while True:
@@ -232,13 +301,37 @@ class NLRechtspraakAdapter(BaseAdapter):
                 return
 
     def fetch(self, stub: Stub) -> Record | None:
-        resp = self._client.get(stub.raw_url)
-        raw = resp.content
+        if stub.hints.get("archive"):
+            try:
+                with zipfile.ZipFile(stub.hints["archive"]) as zf:
+                    raw = zf.read(stub.hints["member"])
+            except (OSError, KeyError, zipfile.BadZipFile):
+                return None
+        elif stub.hints.get("file"):
+            raw = Path(stub.hints["file"]).read_bytes()
+        else:
+            resp = self._client.get(stub.raw_url)
+            raw = resp.content
         parsed = parse_content(raw)
+        stable_id = parsed.ecli or stub.stable_id
+        aliases = []
+        # Pre-2013 LJN is normally the final ECLI component (two letters + four digits).
+        tail = stable_id.rsplit(":", 1)[-1]
+        if re.fullmatch(r"[A-Z]{2}\d{4}", tail, re.I):
+            from ..citations.dutch import ljn_alias
+            aliases.append(ljn_alias(tail))
+        relations = list(parsed.relations)
+        if self.lido_links and parsed.ecli:
+            try:
+                lido = self._client.get(LIDO_LINKS_URL, params={
+                    "ext-id": parsed.ecli, "output": "xml", "rows": 250})
+                relations.extend(parse_lido_links(lido.content, parsed.ecli))
+            except FetchError:
+                pass  # LiDO enrichment must never prevent storing the judgment itself.
         return Record(
             source=self.source,
-            stable_id=parsed.ecli or stub.stable_id,  # ECLI is the primary key (§1.1)
-            ecli=parsed.ecli or stub.stable_id,
+            stable_id=stable_id,  # ECLI is the primary key (§1.1)
+            ecli=parsed.ecli or (stable_id if stable_id.startswith("ECLI:") else None),
             doc_type=DocType.JUDGMENT,
             title=parsed.title or stub.title,
             court=parsed.court or stub.court,
@@ -250,7 +343,8 @@ class NLRechtspraakAdapter(BaseAdapter):
             raw_ext="xml",
             text=parsed.text,
             segments=parsed.segments,
-            relations=parsed.relations,
+            relations=relations,
             extracted_via=ExtractedVia.STRUCTURED,
-            extra={"rechtsgebied": parsed.rechtsgebied} if parsed.rechtsgebied else {},
+            extra={k: v for k, v in {"rechtsgebied": parsed.rechtsgebied,
+                                      "aliases": aliases or None}.items() if v},
         )

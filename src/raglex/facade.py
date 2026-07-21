@@ -407,6 +407,17 @@ def _targeted_nl_rechtspraak(candidate: str):
     return _SingleStubAdapter(base, stub)
 
 
+def _targeted_nl_legislation(candidate: str):
+    """A BWB work or an exact dated copy (``BWBR…@YYYY-MM-DD``)."""
+    import re
+    m = re.fullmatch(r"(?i)(BWBR\d{7})(?:@(\d{4}-\d{2}-\d{2}))?", candidate.strip())
+    if not m:
+        return None
+    from .adapters.registry import get_adapter
+    return get_adapter("nl-legislation", ids=m.group(1).upper(),
+                       version_date=m.group(2), use_sru=False)
+
+
 # adapter key (from the snowball classifier) → a builder that returns a one-item
 # adapter run for a given candidate id. Extend as adapters gain id-fetch support.
 _TARGETED_HARVEST = {
@@ -417,6 +428,7 @@ _TARGETED_HARVEST = {
     "eu-cellar": _targeted_eu_cellar,
     "echr": _targeted_echr,
     "nl-rechtspraak": _targeted_nl_rechtspraak,
+    "nl-legislation": _targeted_nl_legislation,
     "us-caselaw": _targeted_us_caselaw,
 }
 

@@ -30,6 +30,7 @@ _CASE_PINPOINT = re.compile(
     rf"(?:at|in)\s+(?:paras?\.?\s*|paragraphs?\s+|§§?\s*)?(?P<a>\[?\d{{1,4}}\]?{_PIN_CONT})"
     rf"|(?:paras?\.?\s*|paragraphs?\s+)(?P<b>\[?\d{{1,4}}\]?{_PIN_CONT})"
     rf"|§§?\s*(?P<d>\d{{1,4}}{_PIN_CONT})"  # ECHR: "Golder v UK, § 35", "§§ 35-36"
+    r"|(?:r\.?\s*o\.?|rov\.)\s*(?P<e>\d{1,3}(?:\.\d{1,3}){0,3})"  # Dutch rechtsoverweging
     r"|\[(?P<c>\d{1,3})\]"
     r")",
     re.IGNORECASE,
@@ -56,10 +57,10 @@ def _attach_case_pinpoints(text: str, cites: list[Citation]) -> list[Citation]:
             out.append(c)
             continue
         m = _CASE_PINPOINT.match(text[c.char_end: c.char_end + 60])
-        run = m and (m.group("a") or m.group("b") or m.group("c") or m.group("d"))
+        run = m and (m.group("a") or m.group("b") or m.group("c") or m.group("d") or m.group("e"))
         first = re.match(r"\[?(\d{1,4})", run or "")
         if run and first and not re.fullmatch(r"(?:19|20)\d{2}", first.group(1)):
-            out.append(replace(c, pinpoint=_pin_text(run)))
+            out.append(replace(c, pinpoint=(f"r.o. {run}" if m.group("e") else _pin_text(run))))
         else:
             out.append(c)
     return out
@@ -639,6 +640,8 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # grammar interface cannot represent.
     from .german import german_citations
     cites += german_citations(text)
+    from .dutch import dutch_citations
+    cites += dutch_citations(text)
     # US reporter citations (self-contained matcher), gated to text that looks American — recognises
     # "135 S. Ct. 2401" so it clusters as a case instead of being misread as statutory
     # material. Added before the dedupe so a genuine overlap resolves by span.
@@ -668,7 +671,7 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     kept: list[Citation] = []
     occupied: list[tuple[int, int]] = []
     for c in ordered:
-        exact_multi = c.method == "de_law_reference" and any(
+        exact_multi = c.method in ("de_law_reference", "nl_juriconnect") and any(
             k.char_start == c.char_start and k.char_end == c.char_end
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)
         if not exact_multi and any(s <= c.char_start and c.char_end <= e for s, e in occupied):
