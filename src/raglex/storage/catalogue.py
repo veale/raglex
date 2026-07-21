@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
 CREATE INDEX IF NOT EXISTS documents_ecli_idx ON documents (ecli);
 CREATE INDEX IF NOT EXISTS documents_payload_hash_idx ON documents (payload_hash);
+CREATE INDEX IF NOT EXISTS documents_landing_url_idx ON documents (landing_url);
 
 CREATE TABLE IF NOT EXISTS relations (
     relation_id        INTEGER PRIMARY KEY AUTOINCREMENT,
