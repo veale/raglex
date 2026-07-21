@@ -97,6 +97,16 @@ register(Grammar(
     _canlii,
 ))
 
+# A legacy SCC report-only authority repeatedly cited by its distinctive short name.
+# Its neutral citation is known and stable, but the document's authorities table gives
+# only the S.C.R. reporter, so no local definition can otherwise connect the later pin.
+register(Grammar(
+    "ca_known_case_shortname", "case",
+    re.compile(r"\bMoreau[‑–—-]Bérubé,?\s+at\s+paras?\.?\s*(?P<para>\d+(?:[‑–—-]\d+)?)",
+               re.IGNORECASE),
+    lambda m: ("scc/2002/11", f"para {m.group('para')}", "case"),
+))
+
 # -- South Africa -----------------------------------------------------------
 # "2004 (1) SA 406 (CC)" — year in the open, part number in round brackets, then the
 # series, the page, and the COURT in trailing round brackets. The bare token "SA" is
@@ -209,8 +219,32 @@ register(Grammar(
 # separates it from "1999 S.C. 583" (Session Cases, a Scottish reporter).
 register(Grammar(
     "ca_statute_annual", "act",
-    re.compile(_CA_PINPOINT + r"(?:S\.?C\.?|L\.?C\.?)\s*\d{4},?\s*(?:c|ch)\.?\s*\d+\b"),
-    lambda m: _ca_section(m, None),
+    re.compile(_CA_PINPOINT + r"(?P<series>S\.?C\.?|L\.?C\.?)\s*(?P<year>\d{4}),?\s*"
+               r"(?:c|ch)\.?\s*(?P<chapter>\d+)\b"),
+    # The official annual citation is itself a canonical alias minted by the
+    # Justice Laws importer. Keeping it as the candidate lets the resolver follow
+    # that alias and lets a following defined shorthand ("FMIOA") inherit a target.
+    lambda m: _ca_section(m, f"{'L.C.' if m.group('series').upper().startswith('L') else 'S.C.'} "
+                             f"{m.group('year')}, c. {int(m.group('chapter'))}"),
+))
+
+# Canadian treaty-series citation: a stable bibliographic identifier even where the
+# treaty text is not held yet. Recognising the full span prevents "T.S. 1966 No. 29"
+# being broken into fake statutory sections and gives the network a treaty node.
+register(Grammar(
+    "ca_treaty_series", "treaty",
+    re.compile(r"\bCan\.?\s*T\.?\s*S\.?\s*(?P<year>\d{4})\s+No\.?\s*(?P<num>\d+)\b",
+               re.IGNORECASE),
+    lambda m: (f"ca/treaty/can-ts/{m.group('year')}/{int(m.group('num'))}", None, "treaty"),
+))
+
+# UK Tax Cases reporter: "(1977), 51 T.C. 708". It has no fetchable neutral id,
+# but is a case report and must be protected from provision/section heuristics.
+register(Grammar(
+    "uk_tax_cases_report", "case",
+    re.compile(r"(?:\((?:18|19|20)\d{2}\),?\s*)?\d{1,3}\s+T\.?\s*C\.?\s+\d{1,5}\b",
+               re.IGNORECASE),
+    _candidateless,
 ))
 
 # Regulations: "SOR/2018-69", "DORS/2018-69" (French), "SI/2005-91", "TR/2005-91". SOR/SI
@@ -250,6 +284,8 @@ _AU_JURIS = "|".join(AU_JURISDICTION_TAGS)
 
 def _au_statute(m: "re.Match[str]") -> Normalised:
     sec = m.groupdict().get("sec")
+    if not sec and m.groupdict().get("division"):
+        return None, f"Part {m.group('part')}, Division {m.group('division')}", "act"
     # Name-only: no id yet (the citation carries no act number), resolved by title against
     # harvested Australian legislation. Not routed through any gazetteer.
     return None, (f"s. {sec}" if sec else None), "act"
@@ -265,5 +301,16 @@ register(Grammar(
         r"\s+Act)\s+(?P<year>(?:18|19|20)\d{2})"
         rf"\s*\((?P<juris>{_AU_JURIS})\)"
     ),
+    _au_statute,
+))
+
+# Internal hierarchical references in Australian legislation often omit a state tag:
+# "Division 3A of Part 3 of the Vehicle and Traffic Act 1999". Consume the hierarchy
+# as one citation and retain the exact structural pinpoint for title-based resolution.
+register(Grammar(
+    "au_statute_hierarchy", "act",
+    re.compile(r"\bDivision\s+(?P<division>\d+[A-Z]?)\s+of\s+Part\s+(?P<part>\d+[A-Z]?)\s+of\s+"
+               r"(?:the\s+)?(?P<title>[A-Z][A-Za-z'’\- ]+?\s+Act)\s+"
+               r"(?P<year>(?:18|19|20)\d{2})\b"),
     _au_statute,
 ))

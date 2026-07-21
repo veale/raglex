@@ -626,3 +626,21 @@ def test_eu_directive_suffix_is_preserved_and_that_directive_range_expands():
     assert numeric.raw == "Directive 2000/31/EC"
     assert {c.pinpoint for c in cs if c.candidate_id == "32000L0031"} >= {
         "Article 12", "Article 13", "Article 14", "Article 15"}
+
+
+def test_named_statute_keeps_spaced_nested_pinpoint():
+    c = next(c for c in extract_citations(
+        "section 28(6) (b) of the Crime (Sentences) Act 1997")
+        if c.method == "uk_statute_named")
+    assert c.pinpoint == "s. 28(6)(b)"
+
+
+def test_case_shortnames_handle_lowercase_accents_and_parenthesised_parties():
+    text = ("Mouvement laïque québécois v. Saguenay (City), 2015 SCC 16; "
+            "Tervita Corp. v. Canada (Commissioner of Competition), 2015 SCC 3. "
+            "Saguenay, at para. 46; Tervita, at para. 35.")
+    sh = [c for c in extract_citations(text) if c.method == "shorthand"]
+    assert {(c.raw.split(",")[0], c.candidate_id, c.pinpoint) for c in sh} >= {
+        ("Saguenay", "scc/2015/16", "para 46"),
+        ("Tervita", "scc/2015/3", "para 35"),
+    }

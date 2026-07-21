@@ -705,7 +705,7 @@ def _resolve_named_statute(m: "re.Match[str]") -> Normalised:
 
     title, year = m.group("title").strip(), m.group("year")
     cid = _UK_ACT_TO_ID.get(f"{title} {year}".lower()) or _gz(title, year)
-    sec = m.group("sec")
+    sec = re.sub(r"\s+", "", m.group("sec") or "") or None
     return cid, (f"s. {sec}" if sec else None), "act"
 
 
@@ -722,7 +722,7 @@ register(Grammar(
     # of names froze a rescan for hours (fca/2016/1034, 2026-07). No real short title has
     # more than ~8 tokens, so the bound only cuts the pathological scans.
     re.compile(
-        r"(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\(\d+[A-Za-z]?\))*)\s+of\s+)?"
+        r"(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)\s+of\s+)?"
         r"(?:the\s+)?"
         r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
         r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\))){0,11}?"

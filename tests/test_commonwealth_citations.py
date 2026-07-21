@@ -292,11 +292,41 @@ def test_canadian_statute_pinpoint_is_captured():
     assert c.candidate_id == "ca/act/p-21" and c.pinpoint == "s. 8"
 
 
-def test_canadian_annual_statute_is_candidateless_pending_its_alias():
+def test_canadian_spaced_paragraph_pinpoint_carries_forward_whole():
+    cs = extract_citations("Citizenship Act, R.S.C. 1985, c. C-29. Section 3(2) (a) applies.")
+    assert any(c.candidate_id == "ca/act/c-29" and c.pinpoint == "s. 3(2)(a)" for c in cs)
+
+
+def test_canadian_annual_statute_uses_its_official_alias_as_candidate():
     """The annual chapter number ("c. 18") is not the consolidated id, so it resolves
-    only via the alias the ca-federal import mints — candidate-less at extraction."""
+    via the alias the ca-federal import mints."""
     got = candidates("enacted by S.C. 2019, c. 18, s. 2")
-    assert "S.C. 2019, c. 18" in got and got["S.C. 2019, c. 18"] is None
+    assert got["S.C. 2019, c. 18"] == "S.C. 2019, c. 18"
+
+
+def test_canadian_treaty_series_and_tax_cases_are_recognised_whole():
+    cs = extract_citations("Vienna Convention, Can. T.S. 1966 No. 29; Fitzleet (1977), 51 T.C. 708")
+    assert any(c.candidate_id == "ca/treaty/can-ts/1966/29" and c.entity_kind == "treaty" for c in cs)
+    assert any(c.method == "uk_tax_cases_report" and c.entity_kind == "case" for c in cs)
+
+
+def test_legacy_scc_distinctive_shortname_resolves_with_pinpoint():
+    c = next(c for c in extract_citations("Moreau-Bérubé, at paras. 74‑75")
+             if c.method == "ca_known_case_shortname")
+    assert c.candidate_id == "scc/2002/11" and c.pinpoint == "para 74‑75"
+
+
+def test_canadian_annual_act_defines_pinpointed_abbreviation():
+    cs = extract_citations("Foreign Missions Act, S.C. 1991, c. 41 (\"FMIOA\"). Sched. II to the FMIOA applies.")
+    sh = next(c for c in cs if c.method == "shorthand")
+    assert sh.candidate_id == "S.C. 1991, c. 41" and sh.pinpoint == "Sch. II"
+
+
+def test_australian_hierarchical_act_reference_keeps_full_pinpoint():
+    c = next(c for c in extract_citations(
+        "Division 3A of Part 3 of the Vehicle and Traffic Act 1999.")
+        if c.method == "au_statute_hierarchy")
+    assert c.pinpoint == "Part 3, Division 3A" and c.entity_kind == "act"
 
 
 def test_canadian_regulations_resolve_including_the_french_series_names():

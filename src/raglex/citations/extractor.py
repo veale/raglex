@@ -110,8 +110,12 @@ _CJEU_LABEL = re.compile(r"judgment\s+in\s+(?P<name>[A-Z][A-Za-z0-9'’&.\- ]{2,
 # of "2008 SCC 9". Party names are short runs of Capitalised words; "v"/"v." is the
 # join. Anchored to the end so it's the name that actually introduces the citation.
 _CASE_NAME_BEFORE = re.compile(
-    r"(?P<p1>[A-Z][\w.'’()-]*(?:\s+[A-Z][\w.'’()-]*){0,4})\s+v\.?\s+"
-    r"(?P<p2>[A-Z][\w.'’()-]*(?:\s+[A-Z][\w.'’()-]*){0,5})\s*,?\s*$")
+    # Party names routinely contain lower-case connective words, accents and a
+    # parenthesised public-body qualifier: "Mouvement laïque québécois v. Saguenay
+    # (City)". Bound each side at citation-list punctuation rather than pretending
+    # every token is capitalised.
+    r"(?P<p1>[A-ZÀ-ÖØ-Þ][^,;\n]{1,100}?)\s+v\.?\s+"
+    r"(?P<p2>[A-ZÀ-ÖØ-Þ][^,;\n]{1,100}?)\s*,?\s*$")
 # Parties too generic to be a distinctive short form: a bare "Canada, at para 5"
 # or "R, at para 2" must never mint a link. Government/Crown/office parties only —
 # a real surname (Dunsmuir, Khosa, Vavilov) always survives.
@@ -138,6 +142,7 @@ def _party_short_form(party: str | None) -> str | None:
     referred to as "Dunsmuir" — or None for a generic government/Crown party (whose
     surname would mislink a bare later mention)."""
     p = " ".join((party or "").split()).strip(" ,.")
+    p = re.sub(r"\s*\([^)]*\)\s*$", "", p).strip()
     if not p or p.lower() in _GENERIC_PARTY:
         return None
     words = [w for w in re.split(r"\s+", p) if w]
@@ -216,7 +221,7 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
                 _register(lm.group("name"), c, abbrev=False)
         # Party-name short forms — the common-law idiom with NO explicit marker
         # ("Dunsmuir v. New Brunswick, 2008 SCC 9" … "Dunsmuir, at para. 61").
-        nm2 = _CASE_NAME_BEFORE.search(text[max(0, c.char_start - 100): c.char_start])
+        nm2 = _CASE_NAME_BEFORE.search(text[max(0, c.char_start - 220): c.char_start])
         if nm2:
             for party in (nm2.group("p1"), nm2.group("p2")):
                 short = _party_short_form(party)
@@ -243,7 +248,9 @@ def _link_shorthand_uses(
     if abbrev:
         # a bare mention, optionally preceded by "the" — but not when it's being
         # (re)defined in brackets, which the def pass already owns
-        pat += rf"|(?<![\[(\"“'])\b{esc}\b(?![\"”'\])])"
+        pat += (rf"|(?<![\[(\"“'])(?:(?P<prov>(?:ss?\.?\s*\d+[A-Za-z]?(?:\([^)]*\))*"
+                rf"|Sched(?:ule)?\.?\s*[IVXLC\d]+))\s+(?:of|to)\s+(?:the\s+)?)?"
+                rf"\b{esc}\b(?![\"”'\])])")
     use_re = re.compile(pat, re.IGNORECASE if not abbrev else 0)
     for m in use_re.finditer(text):
         s, e = m.start(), m.end()
@@ -252,9 +259,15 @@ def _link_shorthand_uses(
         if any(os < e and s < oe for os, oe in occupied):
             continue
         run = m.groupdict().get("run") or m.groupdict().get("run2")
+        prov = m.groupdict().get("prov")
+        provision_pin = None
+        if prov:
+            provision_pin = (re.sub(r"(?i)^Sched(?:ule)?\.?\s*", "Sch. ", prov)
+                             if re.match(r"(?i)^Sched", prov)
+                             else re.sub(r"(?i)^ss?\.?\s*", "s. ", prov))
         out.append(Citation(
             raw=m.group(0), entity_kind=entity_kind, candidate_id=candidate_id,
-            pinpoint=_pin_text(run) if run else None,
+            pinpoint=_pin_text(run) if run else provision_pin,
             char_start=s, char_end=e, method=method, confidence=confidence,
         ))
         occupied.append((s, e))
@@ -501,7 +514,7 @@ _BARE_PROVISION = re.compile(
     r"\b(?P<cue>section|sections|sub-?section|s|ss|article|articles|art|arts|"
     r"recital|recitals|"
     r"regulation|regulations|reg|regs|paragraph|paragraphs|para|paras|schedule|sch)\.?\s*"
-    r"(?P<num>\d+[A-Z]?(?:\(\d+[A-Z]?\))*)\b",
+    r"(?P<num>\d+[A-Z]?(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?=\W|$)",
     re.IGNORECASE,
 )
 # carry-forward only attaches a bare provision to a *legislation* antecedent — a
@@ -532,6 +545,7 @@ def _cue_allows(cue: str, kind: str) -> bool:
 
 
 def _bare_pinpoint(cue: str, num: str) -> str:
+    num = re.sub(r"\s+", "", num)
     c = cue.lower().rstrip(".")
     if c.startswith("recital"):
         return f"Recital {num}"
