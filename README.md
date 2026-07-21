@@ -3,9 +3,7 @@
 RagLex builds and searches a corpus of law. It collects case law, legislation, and
 regulatory guidance from official and free sources across many jurisdictions, keeps the
 original documents next to the text extracted from them, works out how the documents cite
-one another, and lets you search and navigate the result. It grew out of data protection
-and freedom of information research, but nothing in the engine is tied to that subject. The
-topic focus is a matter of configuration, and the same machinery serves any area of law.
+one another, and lets you search and navigate the result.
 
 ## How it works
 
@@ -24,10 +22,10 @@ rather than overwritten, and the change is visible in the interface.
 ## Sources and jurisdictions
 
 RagLex harvests from the United Kingdom (the National Archives Find Case Law service,
-legislation.gov.uk, BAILII, the House of Lords archive, and cases and legislation imported
-from Westlaw and Lexis exports), the European Union (Court of Justice case law and
+legislation.gov.uk, BAILII (only indirectly from pre-downloaded databases, not scraping), the House of Lords archive, and can accept cases and legislation imported
+from Westlaw and Lexis exports if the licensing terms allow), the European Union (Court of Justice case law and
 legislation through the CELLAR and EUR-Lex services), the European Court of Human Rights
-through HUDOC, Ireland, the United States through CourtListener (both its live API and its
+through HUDOC, Ireland (legislation via API, cases via manual import), the United States through CourtListener (both its live API and its
 bulk exports), Canada, Australia, New Zealand, Singapore, Hong Kong, India, and the
 Netherlands. It also collects regulatory guidance and decisions from bodies such as the
 European Data Protection Board, the Article 29 Working Party, Ofcom, and the Information
@@ -37,7 +35,7 @@ of the system does not change.
 A document that the corpus cites but does not hold can often be fetched on demand from the
 source that publishes it. Where that is not possible, the system can point you at the free
 legal information institute that carries it (BAILII, AustLII, CanLII, NZLII, and the others)
-so you can read it there.
+so you can read it there. This is important as broadly the LIIs do not allow scraping and so the system respects that and directs humans to read there.
 
 ## Citations and resolution
 
