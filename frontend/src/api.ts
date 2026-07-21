@@ -117,6 +117,12 @@ export const api = {
   // Outbound links to the LII that publishes a case we can't show in full.
   liiLinks: (id: string) =>
     req<{ stable_id: string; links: LIILink[] }>(`/document-lii-links?id=${encodeURIComponent(id)}`),
+  // The same, for a reference that isn't held yet (the peek's "read it here" on an
+  // unfetched/unfetchable case) — links are constructed from the citation, so a
+  // "can_upload" one doubles as the file to save-and-upload.
+  referenceLiiLinks: (ref: string, raw?: string) =>
+    req<{ ref: string; links: (LIILink & { kind?: string; can_upload?: boolean })[] }>(
+      `/reference-lii-links?ref=${encodeURIComponent(ref)}${raw ? `&raw=${encodeURIComponent(raw)}` : ""}`),
   liiLinkTargets: (scope: LIIScope, limit = 500, sites?: string) =>
     req<{ scope: string; count: number; links: LIITarget[] }>(
       `/lii-links?scope=${scope}&limit=${limit}${sites ? `&sites=${encodeURIComponent(sites)}` : ""}`),
@@ -158,6 +164,7 @@ export const api = {
   unresolved: (limit = 100) => req<any[]>(`/unresolved?limit=${limit}`),
   coverage: () => req<any>("/coverage"),
   corpusMap: () => req<any>("/corpus-map"),
+  refreshCorpusMap: () => req<any>("/corpus-map/refresh", { method: "POST" }),
   corpusMapCites: (category: string) => req<any>(`/corpus-map/cites?category=${encodeURIComponent(category)}`),
   updateDocument: (stable_id: string, fields: Record<string, string>) =>
     req<any>(`/documents/${encodeURIComponent(stable_id)}/update`, { method: "POST", body: JSON.stringify(fields) }),

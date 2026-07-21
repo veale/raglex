@@ -346,38 +346,59 @@ def display_citation(raw: str | None) -> str:
     return out
 
 
-# ── which subscription holds a series ───────────────────────────────────────
-# Westlaw UK / Lexis+ UK hold the UK series; the Irish and Commonwealth series
-# largely need the respective national services. Grouped coarsely — the point is
-# to keep un-retrievable citations out of a UK Find & Print batch, not to build a
-# gazetteer of publishers. Series not listed default to "uk" (the England & Wales,
-# Scottish, NI, nominate and practitioner series are the bulk of REPORT_SERIES).
-_JURISDICTION_SERIES: dict[str, frozenset[str]] = {
-    "ie": frozenset({"IR", "ILRM", "ILTR", "Ir Jur Rep", "Ir Jur", "LR Ir", "Frewen"}),
-    "eu": frozenset({"CMLR", "CEC", "ECR", "EHRR"}),
-    "commonwealth": frozenset({
-        # Canada
-        "DLR", "DLR (2d)", "DLR (3d)", "DLR (4th)", "SCR", "CCC", "CCC (2d)",
-        "CCC (3d)", "WWR", "OR (2d)", "OR (3d)", "CRR", "CPR (3d)",
-        # Australia
-        "CLR", "ALR", "ALJR", "NSWLR", "VR", "WAR", "SASR", "Qd R", "A Crim R",
-        "ACSR", "FamLR",
-        # New Zealand / Hong Kong / Singapore
-        "NZLR", "NZAR", "NZFLR", "HKLRD", "HKC", "SGCA", "SLR",
-    }),
+# ── which jurisdiction a report series belongs to (Westlaw/Lexis export filter) ──
+# The fine-grained country map ``REPORTER_JURISDICTION`` is the source of truth — it
+# already carries Canada / Australia / NZ / Singapore / Hong Kong / South Africa / India /
+# Malaysia. The export filter buckets PER JURISDICTION off it: the old coarse
+# "commonwealth" slot both burned batch slots AND mislabelled Australian FCR / SR (NSW) /
+# ALD, Canadian OR / RJQ etc. as UK, because those series were absent from the small
+# hand-maintained set and fell through to the "uk" default. Series not listed still default
+# to "uk" (England & Wales, Scotland, NI, the nominate and practitioner series — the bulk
+# a UK subscription genuinely holds).
+_EXPORT_SERIES_EXTRA: dict[str, str] = {
+    # Wide-travelling / neutral-court forms REPORTER_JURISDICTION deliberately omits from
+    # auto-resolution, but which are unambiguous enough for a manual export picker.
+    "MLJ": "MY", "MLJU": "MY", "SGCA": "SG", "SGHC": "SG",
+    # Canadian series REPORTER_JURISDICTION doesn't carry (editioned forms fold to the base
+    # via _SERIES_EDITION_RE below; these two have no base entry).
+    "CRR": "CA", "CPR": "CA", "FamLR": "AU",
+    # Irish and EU series, kept distinct from the UK default.
+    "IR": "IE", "ILRM": "IE", "ILTR": "IE", "Ir Jur Rep": "IE", "Ir Jur": "IE",
+    "LR Ir": "IE", "Frewen": "IE",
+    "CMLR": "EU", "CEC": "EU", "ECR": "EU", "EHRR": "EU",
 }
-_SERIES_TO_JURISDICTION: dict[str, str] = {
-    s: j for j, series in _JURISDICTION_SERIES.items() for s in series
-}
+_EXPORT_SERIES_JURISDICTION: dict[str, str] = {**REPORTER_JURISDICTION, **_EXPORT_SERIES_EXTRA}
+
+# An ordinal edition suffix ("(2d)", "(3d)", "(4th)") never changes the jurisdiction, so
+# strip it before the lookup — but a country/court parenthetical ("SR (NSW)") must survive.
+_SERIES_EDITION_RE = re.compile(r"\s*\((?:\d+(?:st|nd|rd|th|d))\)\s*$", re.I)
+# A round-bracketed year is the Australian-FCR signal; a square-bracketed one is English.
+_ROUND_YEAR_RE = re.compile(r"\((?:1[6-9]|20)\d{2}\)")
+# Report series whose jurisdiction is carried by bracket style, not the token itself.
+_BRACKET_AMBIGUOUS: frozenset[str] = frozenset({"FCR"})
 
 
-def series_jurisdiction(series: str | None) -> str:
-    """The coarse jurisdiction bucket a report series belongs to — ``uk`` (default:
-    England & Wales, Scotland, NI, the nominate reports), ``ie``, ``eu``, or
-    ``commonwealth``. Drives the Westlaw/Lexis export filter: a UK subscription
-    can't retrieve an Irish or Commonwealth report, so exporting one just burns a
-    slot in the 100-citation batch."""
-    return _SERIES_TO_JURISDICTION.get(series or "", "uk")
+def series_jurisdiction(series: str | None, raw: str | None = None) -> str:
+    """The jurisdiction a report series belongs to, as a country-code bucket the
+    Westlaw/Lexis export filter groups by — ``uk`` (default: England & Wales, Scotland, NI,
+    the nominate reports), ``ie``, ``eu``, or a specific Commonwealth jurisdiction (``ca``,
+    ``au``, ``nz``, ``sg``, ``hk``, ``za``, ``in``, ``my``, and the African/other long
+    tail). A UK subscription can't retrieve a foreign report, so labelling one correctly
+    keeps it out of a UK batch where it would just burn a slot.
+
+    ``raw`` (the full citation) disambiguates the handful of series whose jurisdiction is
+    carried by bracket style, not the token: **FCR** is the *English* Family Court Reports
+    when year-bracketed (``[1993] 1 FCR 553``) but the *Australian* Federal Court Reports
+    when volume-numbered (``(1993) 43 FCR 280``)."""
+    token = " ".join((series or "").split())
+    if not token:
+        return "uk"
+    base = _SERIES_EDITION_RE.sub("", token).strip()
+    if base in _BRACKET_AMBIGUOUS:
+        # FCR: round-bracketed year → Australia; square-bracketed (or unknown) → England.
+        return "au" if raw and _ROUND_YEAR_RE.search(raw) else "uk"
+    j = _EXPORT_SERIES_JURISDICTION.get(token) or _EXPORT_SERIES_JURISDICTION.get(base)
+    return j.lower() if j else "uk"
 
 
 def report_citations(raw: str | None) -> list[str]:

@@ -163,6 +163,42 @@ def test_coverage_reports_what_is_cooling_off(monkeypatch):
     assert cov["cooling_off_absent"] == 1
 
 
+def test_retry_cooled_reattempts_parked_references(monkeypatch):
+    """The Corpus Map's 'harvest ALL (incl. cooling)' button: a normal drain skips a
+    reference on its cool-down, but retry_cooled re-attempts it — for when the source was
+    merely unavailable and the item was wrongly parked."""
+    f = _facade()
+    _hanging_ref(f)
+    _drain_with(f, monkeypatch, "absent")      # park it on the 90-day miss list
+
+    attempts: list[str] = []
+
+    def fake_fetch(self, cat, rs, ts, *, ref, candidate):
+        attempts.append(candidate)
+        return {"candidate": candidate, "outcome": "absent", "stored": 0, "error": "absent"}
+    monkeypatch.setattr(Facade, "_fetch_reference", fake_fetch)
+
+    res = f.harvest_all_references(limit=10)                    # normal: skips the cooled ref
+    assert res["attempted"] == 0 and res["skipped_recent_fail"] == 1 and attempts == []
+
+    res2 = f.harvest_all_references(limit=10, retry_cooled=True)  # ignores the cool-down
+    assert res2["attempted"] == 1 and res2["skipped_recent_fail"] == 0 and len(attempts) == 1
+
+
+def test_corpus_map_splits_pending_from_cooling(monkeypatch):
+    """A pending routable reference reads as 'pending' (untried, one click away) until the
+    drain tries and parks it, after which it reads as 'cooling' — so the Corpus Map
+    distinguishes 'never tried' from 'tried, waiting out a cool-down'."""
+    f = _facade()
+    _hanging_ref(f)
+    before = f._corpus_map_uncached()["totals"]
+    assert before["pending"] == 1 and before["cooling"] == 0
+
+    _drain_with(f, monkeypatch, "absent")      # park it
+    after = f._corpus_map_uncached()["totals"]
+    assert after["pending"] == 0 and after["cooling"] == 1
+
+
 def test_retry_failed_clears_the_cooldown(monkeypatch):
     f = _facade()
     _hanging_ref(f)

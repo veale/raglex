@@ -37,6 +37,9 @@ log = logging.getLogger("raglex.jobs")
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "backfill-eu-stubs",
+    # one whole-queue drain at a time — the nightly idle harvest and a manual "harvest all
+    # routable" would otherwise race over the same hanging-reference queue.
+    "harvest-all",
     "rebuild-citation-counts", "rebuild-authority", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",

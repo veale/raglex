@@ -555,6 +555,25 @@ def test_commonwealth_neutral_citations_classified_by_jurisdiction():
     assert "nzlii" in external_link("nzsc/2020/12", None)["url"]
 
 
+def test_external_link_prefers_direct_lii_pages_over_search():
+    from raglex.adapters.bailii import external_link
+
+    # A neutral-citation slug → a DIRECT judgment page on the right institute, not a search,
+    # and now for Hong Kong / South Africa too (not just CA/AU/NZ).
+    hk = external_link("hkcfa/2003/46", "[2003] HKCFA 46")
+    assert hk["kind"] == "lii" and "hklii" in hk["url"] and "/HKCFA/2003/46" in hk["url"]
+    za = external_link("zasca/2011/73", "[2011] ZASCA 73")
+    assert za["kind"] == "lii" and "saflii" in za["url"]
+    ca = external_link("scc/2011/10", "2011 SCC 10")
+    assert ca["kind"] == "lii" and "canlii" in ca["url"] and "2011scc10" in ca["url"]
+    # A UK neutral slug keeps its one-click BAILII RTF (upload imports under the slug).
+    uk = external_link("ewca/civ/2005/324", "[2005] EWCA Civ 324")
+    assert uk["kind"] == "rtf" and uk["url"].endswith(".rtf")
+    # A classic report with no constructible page → a BAILII search fallback.
+    ac = external_link(None, "[1982] AC 510")
+    assert ac["kind"] == "search" and "bailii" in ac["url"]
+
+
 def test_commonwealth_and_scots_reporters_stay_candidate_less():
     # ordinal Canadian series, Australian reports, and Scots bare-year reports are
     # recognised as report citations (lookup-only) — never fake court slugs

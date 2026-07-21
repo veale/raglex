@@ -154,3 +154,70 @@ def us_case_citations(text: str) -> list[Citation]:
             confidence=0.85,
         ))
     return out
+
+
+# CourtListener court-id slugs → natural-language names. Not citation court codes (US
+# cases cite by reporter, not neutral citation), so these live here rather than in the
+# neutral-citation registry, and court_label consults this map for us-… sources. Covers
+# the default seed set (SCOTUS + the federal circuits, FEDERAL_APPELLATE); an unlisted
+# slug (a district court, a state court) falls through to us_court_name's derivation.
+US_COURT_NAMES: dict[str, str] = {
+    "scotus": "Supreme Court of the United States",
+    "ca1": "U.S. Court of Appeals, First Circuit",
+    "ca2": "U.S. Court of Appeals, Second Circuit",
+    "ca3": "U.S. Court of Appeals, Third Circuit",
+    "ca4": "U.S. Court of Appeals, Fourth Circuit",
+    "ca5": "U.S. Court of Appeals, Fifth Circuit",
+    "ca6": "U.S. Court of Appeals, Sixth Circuit",
+    "ca7": "U.S. Court of Appeals, Seventh Circuit",
+    "ca8": "U.S. Court of Appeals, Eighth Circuit",
+    "ca9": "U.S. Court of Appeals, Ninth Circuit",
+    "ca10": "U.S. Court of Appeals, Tenth Circuit",
+    "ca11": "U.S. Court of Appeals, Eleventh Circuit",
+    "cadc": "U.S. Court of Appeals, D.C. Circuit",
+    "cafc": "U.S. Court of Appeals, Federal Circuit",
+    "cc": "U.S. Court of Claims",
+    "uscfc": "U.S. Court of Federal Claims",
+    "cavc": "U.S. Court of Appeals for Veterans Claims",
+    "tax": "U.S. Tax Court",
+    "bap1": "Bankruptcy Appellate Panel, First Circuit",
+    "bap9": "Bankruptcy Appellate Panel, Ninth Circuit",
+}
+
+
+def us_court_name(slug: str | None) -> str | None:
+    """Natural-language name for a CourtListener court-id ``slug`` ('scotus' → 'Supreme
+    Court of the United States', 'ca9' → '…Ninth Circuit'). Derives the common families
+    the explicit map doesn't enumerate — the federal district courts ('cand' → 'U.S.
+    District Court, N.D. Cal.') — and returns ``None`` when it can't, so the caller keeps
+    its own prettified fallback rather than inventing a court name."""
+    if not slug:
+        return None
+    low = slug.strip().lower()
+    if low in US_COURT_NAMES:
+        return US_COURT_NAMES[low]
+    # Federal district courts: <region><state>d, e.g. "cand" (N.D. Cal.), "nysd" (S.D.N.Y.).
+    _REGION = {"c": "Central", "e": "Eastern", "m": "Middle", "n": "Northern",
+               "s": "Southern", "w": "Western"}
+    _STATE = {
+        "al": "Ala.", "ak": "Alaska", "az": "Ariz.", "ar": "Ark.", "ca": "Cal.",
+        "co": "Colo.", "ct": "Conn.", "de": "Del.", "fl": "Fla.", "ga": "Ga.",
+        "hi": "Haw.", "id": "Idaho", "il": "Ill.", "in": "Ind.", "ia": "Iowa",
+        "ks": "Kan.", "ky": "Ky.", "la": "La.", "me": "Me.", "md": "Md.",
+        "ma": "Mass.", "mi": "Mich.", "mn": "Minn.", "ms": "Miss.", "mo": "Mo.",
+        "mt": "Mont.", "ne": "Neb.", "nv": "Nev.", "nh": "N.H.", "nj": "N.J.",
+        "nm": "N.M.", "ny": "N.Y.", "nc": "N.C.", "nd": "N.D.", "oh": "Ohio",
+        "ok": "Okla.", "or": "Or.", "pa": "Pa.", "ri": "R.I.", "sc": "S.C.",
+        "sd": "S.D.", "tn": "Tenn.", "tx": "Tex.", "ut": "Utah", "vt": "Vt.",
+        "va": "Va.", "wa": "Wash.", "wv": "W. Va.", "wi": "Wis.", "wy": "Wyo.",
+    }
+    # CourtListener district slug = <state><region?>d, state first: "cand" = ca+n+d =
+    # N.D. Cal.; "mdd" = md+''+d = D. Md.; "nysd" = ny+s+d = S.D.N.Y.
+    if low.endswith("d") and len(low) >= 3:
+        body = low[:-1]
+        st = _STATE.get(body[:2])
+        if st:
+            region = _REGION.get(body[2:])
+            prefix = f"{region[0]}.D." if region else "D."
+            return f"U.S. District Court, {prefix} {st}"
+    return None

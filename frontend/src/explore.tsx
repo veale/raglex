@@ -26,7 +26,7 @@ type ShapeRow = {
   jurisdiction: string; total: number; cases: number; legislation: number;
   guidance: number; other: number; with_text: number; embedded: number;
   density: number; years: Record<string, number>;
-  courts: { court: string; n: number }[];
+  courts: { court: string; label?: string; n: number }[];
   sources: { source: string; label: string; n: number }[];
 };
 

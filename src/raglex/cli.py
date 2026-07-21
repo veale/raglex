@@ -266,7 +266,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if sub == "serve":
         import os
 
-        from .jobs import JobManager
+        from .jobs import MAX_CONCURRENT_JOBS, JobManager
 
         print(f"[watch] scheduler up; ticking every {args.interval}s")
         # The scheduler's own work is recorded as jobs, in the same table the API reads —
@@ -284,6 +284,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_au_repair = 0.0
         last_resolve = 0.0
         eurlex_broken_until = 0.0
+        last_night_harvest_day = -1  # tm_yday of the last overnight idle-harvest kick-off
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
             try:
@@ -297,6 +298,34 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print(f"[watch] watch {wid} still running; skipping")
                 if due:
                     print(f"[watch] started {len(due)} due watch job(s)")
+                # Overnight idle harvest: once per night, around 01:00 local, drain the WHOLE
+                # routable hanging-reference queue — but ONLY when the box is otherwise idle,
+                # i.e. no user-initiated job is running (the scheduler's own recurring jobs
+                # don't count). So it never competes with an import or a manual harvest the
+                # operator kicked off. Singleton + resumable, so a multi-hour drain simply
+                # continues the next night if it doesn't finish. Disable with
+                # RAGLEX_NIGHTLY_HARVEST=0.
+                now_local = time.localtime()
+                if (now_local.tm_hour == 1
+                        and last_night_harvest_day != now_local.tm_yday
+                        and int(os.environ.get("RAGLEX_NIGHTLY_HARVEST", "1") or 0)):
+                    busy = [j for j in jobs.list(limit=MAX_CONCURRENT_JOBS * 2)
+                            if j["status"] == "running" and j["origin"] != "scheduler"]
+                    if busy:
+                        print(f"[watch] 01:00 idle-harvest: {len(busy)} user job(s) "
+                              f"running ({', '.join(sorted({j['kind'] for j in busy}))}); deferring")
+                    else:
+                        last_night_harvest_day = now_local.tm_yday
+                        started = jobs.start(
+                            "harvest-all", "overnight harvest — all routable references",
+                            {"limit": int(os.environ.get("RAGLEX_NIGHTLY_HARVEST_LIMIT") or 100000),
+                             "min_citing": 1})
+                        if started.get("already_running"):
+                            print("[watch] 01:00 idle-harvest: a harvest-all is still running; skipping")
+                        elif started.get("error"):
+                            print(f"[watch] 01:00 idle-harvest: {started['error']}")
+                        else:
+                            print("[watch] 01:00 idle-harvest: draining all routable references")
                 # Slow worklist drain: fetch a bounded batch of routable references
                 # each tick (survives restarts; the scheduler service is persistent).
                 Config.from_env()  # refresh settings → env (RAGLEX_AUTOHARVEST)

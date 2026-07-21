@@ -1121,6 +1121,33 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
   );
 }
 
+// The "read it here" block for an unfetched/unfetchable case: the free LII page(s) the
+// citation resolves to (AustLII / NZLII / CanLII / SAFLII / HKLII / BAILII), constructed
+// from the citation. A "derived" link is a real judgment URL; a search link is the fallback
+// when no page can be built. Doubles as the source to save-and-upload for an in-place fix.
+function ReferenceLiiLinks({ refId, raw }: { refId: string; raw?: string }) {
+  const [data] = useAsync(() => api.referenceLiiLinks(refId, raw), [refId, raw]);
+  const links = data?.links || [];
+  if (!links.length) return null;
+  return (
+    <div className="lii-links" style={{ margin: "6px 0 10px" }}>
+      <h4 style={{ margin: "0 0 4px", fontSize: 12 }}>Read it on a legal-information institute</h4>
+      <ul style={{ margin: 0 }}>
+        {links.map((l, i) => (
+          <li key={i} style={{ fontSize: 13 }}>
+            <a href={l.url} target="_blank" rel="noopener noreferrer">
+              {l.site_name || l.site || "link"} ↗</a>
+            {l.certainty && l.certainty !== "recorded" && (
+              <span className={`lii-tag lii-${l.certainty}`}
+                title={(LII_CERTAINTY as any)[l.certainty]}>{l.certainty}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // Shown in the peek when a cited authority isn't in the corpus — try a targeted
 // fetch (routable ids), and offer a URL paste as a fallback (e.g. a report citation
 // with no neutral citation — paste the BAILII / Find Case Law link).
@@ -1167,6 +1194,7 @@ function FetchPrompt({ refId, raw, onDone }: { refId: string; raw?: string; onDo
     <div>
       <p><b>Not in the corpus yet</b></p>
       <p className="muted" style={{ fontSize: 13, wordBreak: "break-word" }}>{raw || refId}</p>
+      <ReferenceLiiLinks refId={refId} raw={raw} />
       <button className="primary" disabled={busy} onClick={fetchIt}>⤓ Try to fetch this</button>
       <div className="row" style={{ marginTop: 8 }}>
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="…or paste a URL (BAILII / Find Case Law) to add it" />
@@ -1526,8 +1554,12 @@ export function DocAutocomplete({ initial, onPick, placeholder }:
           <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
             onMouseEnter={() => setHi(i)}
             onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
+            {/* jurisdiction token — the search spans every jurisdiction, so a UK case
+                citing an Irish Act shows an "Ireland" tag right in the dropdown */}
+            {o.jurisdiction && o.jurisdiction !== "Other" &&
+              <span className="tag ac-jur" title={o.court_label || o.court || o.jurisdiction}>{o.jurisdiction}</span>}
             <b>{o.title || o.stable_id}</b>
-            <span className="muted"> {o.source}/{o.doc_type} · {o.stable_id}</span>
+            <span className="muted"> {o.court_label || `${o.source}/${o.doc_type}`} · {o.stable_id}</span>
           </div>
         ))}
       </div>}
@@ -3604,10 +3636,11 @@ function RetrievalExportPanel() {
   const [batchSize, setBatchSize] = useState(100);
   const [sep, setSep] = useState("newline");
   const [names, setNames] = useState(false);
-  // Westlaw UK / Lexis+ UK are UK subscriptions: an Irish or Commonwealth report in the
-  // batch can't retrieve and just burns one of the 100 slots — so default to UK only.
-  // The bucket vocabulary comes from the server (it's what the filter resolves into),
-  // so a new bucket shows up here without a frontend change.
+  // Westlaw UK / Lexis+ UK are UK subscriptions: a foreign report in the batch can't
+  // retrieve and just burns one of the 100 slots — so default to UK only. The bucket
+  // vocabulary comes from the server (it's what the filter resolves into) and is now
+  // per-jurisdiction (Canada, Australia, NZ, Singapore, Hong Kong… separately, not one
+  // "Commonwealth" lump), so a new bucket shows up here without a frontend change.
   const [facets] = useAsync(() => api.facetValues(), []);
   const JURS: { key: string; label: string }[] =
     facets?.retrieval_jurisdictions || [{ key: "uk", label: "United Kingdom" }];
@@ -3655,7 +3688,7 @@ function RetrievalExportPanel() {
         <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
           <span className="muted">jurisdictions:</span>
           <MultiSelect options={JURS} value={jurs} onChange={setJurs} placeholder="all"
-            title="Which report-series jurisdictions to include. A UK subscription can't retrieve Irish or Commonwealth reports — they'd burn slots in the 100-citation batch." />
+            title="Which jurisdictions to include, split per country (Canada, Australia, NZ, Singapore, Hong Kong… separately). A UK subscription can't retrieve a foreign report — it'd just burn a slot in the 100-citation batch." />
         </span>
         <button className="primary" disabled={busy} onClick={run}>{busy ? "building…" : "Build citation batches"}</button>
         {data && <a className="mini" href={`/api/export/retrieval-citations.txt?${qs}`} target="_blank" rel="noopener noreferrer">⬇ download all as .txt</a>}
@@ -3892,6 +3925,19 @@ function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
   const [decided, setDecided] = useState<null | "accepted" | "rejected">(null);
   const [msg, setMsg] = useState("");
   const [showCtx, setShowCtx] = useState(false);
+  // "…it's actually this OTHER thing" — link the reference to a document the suggester
+  // never proposed. The search spans every jurisdiction (a UK case citing an Irish Act),
+  // with a jurisdiction token in the dropdown so the right one is pickable with confidence.
+  const [linkOther, setLinkOther] = useState(false);
+  const linkTo = async (id: string, title: string) => {
+    setBusy(true); setMsg("linking…");
+    try {
+      const r = await api.resolveReference({ ref: s.ref, existing_id: id });
+      setDecided("accepted");
+      setMsg(`✓ linked to ${title}${r.resolved_edges ? ` · resolved ${r.resolved_edges} edge(s)` : ""}`);
+    } catch (e: any) { setMsg("error: " + e); }
+    setBusy(false);
+  };
   const decide = async (accept: boolean) => {
     setBusy(true); setMsg(accept ? "linking…" : "");
     try {
@@ -3920,9 +3966,17 @@ function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
         <button className="mini sug-yes" disabled={busy} title="yes — link every citation of this reference to it"
           onClick={() => decide(true)}>✓</button>{" "}
         <button className="mini sug-no" disabled={busy} title="no — never suggest this again"
-          onClick={() => decide(false)}>✗</button>
+          onClick={() => decide(false)}>✗</button>{" "}
+        <a className="mini-link" title="none of the above — link this reference to a different document you pick (searches every jurisdiction)"
+          onClick={() => setLinkOther((v) => !v)}>{linkOther ? "cancel" : "↳ something else…"}</a>
       </>}
       {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {msg}</span>}
+      {linkOther && !decided && (
+        <div style={{ marginTop: 4 }}>
+          <DocAutocomplete placeholder="find the right case or act by name — any jurisdiction…"
+            onPick={(id, title) => linkTo(id, title)} />
+        </div>
+      )}
       {showCtx && <RefContext refKey={s.ref} />}
     </div>
   );
@@ -4200,12 +4254,24 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
   const toggle = (k: string) => setOpen((o) => { const n = new Set(o); n.has(k) ? n.delete(k) : n.add(k); return n; });
   const see = (f: Record<string, string>) => navigate && navigate(f);
 
+  const refreshTable = async () => {
+    setMsg("↻ refreshing the table…");
+    try { await api.refreshCorpusMap(); reload(); setMsg(""); }
+    catch (e: any) { setMsg("✗ " + e); }
+  };
+
   return (
     <div className="panel corpus-map">
-      <h3 style={{ marginTop: 0 }}>Corpus map <span className="muted">— what we hold, what we’re missing, and what each part cites</span></h3>
+      <div className="row" style={{ alignItems: "baseline" }}>
+        <h3 style={{ marginTop: 0, flex: 1 }}>Corpus map <span className="muted">— what we hold, what we’re missing, and what each part cites</span></h3>
+        <button className="mini" style={{ flex: "0 0 auto" }} disabled={warming}
+          title="Recompute the table in the background (it's cached and warmed on startup, so this is only needed to reflect a very recent harvest)."
+          onClick={refreshTable}>↻ refresh table</button>
+      </div>
       <div className="row stat-strip" style={{ flexWrap: "wrap", gap: 20 }}>
         <div><b>{(totals.held ?? s.total ?? 0).toLocaleString()}</b><div className="muted">held <Info t="Documents currently in the corpus." /></div></div>
-        <div><b>{(totals.pending ?? cov?.routable_references ?? 0).toLocaleString()}</b><div className="muted">pending <Info t="Distinct items we cite but don’t yet hold AND can fetch automatically (a known adapter, high confidence). These are the one-click ‘Harvest’ targets." /></div></div>
+        <div><b>{(totals.pending ?? cov?.routable_references ?? 0).toLocaleString()}</b><div className="muted">pending <Info t="Routable items we cite but don’t yet hold and have NOT tried — the one-click ‘untried’ harvest targets (a known adapter, high confidence)." /></div></div>
+        <div><b>{(totals.cooling ?? 0).toLocaleString()}</b><div className="muted">cooling <Info t="Routable references the harvester recently tried and parked — waiting out a retry (hours) or miss (up to 90 days) cool-down. ‘Harvest all’ re-attempts them." /></div></div>
         <div><b>{(totals.name_only ?? cov?.needs_identifier ?? 0).toLocaleString()}</b><div className="muted">name-only <Info t="References recognised but not routable — recognised by name with no identifier, or a form we can’t fetch yet. Need a human (upload / identifier / link)." /></div></div>
         {pct != null && <div><b>{pct}%</b><div className="muted">citations resolved <Info t="Share of all citation edges whose target is held in the corpus." /></div></div>}
         <div><b>{(cov?.hanging_references ?? 0).toLocaleString()}</b><div className="muted">hanging total <Info t="Every distinct cited-but-not-held reference, routable or not." /></div></div>
@@ -4218,14 +4284,14 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
           <thead><tr>
             <th>category / sub-type</th>
             <th className="num">held <Info t="Documents of this kind in the corpus." /></th>
-            <th className="num">pending <Info t="Routable cited-but-not-held items — one click to harvest." /></th>
+            <th className="num">pending <Info t="Routable, cited-but-not-held, and untried — one click to harvest." /></th>
+            <th className="num">cooling <Info t="Tried recently and parked on a retry/miss cool-down. ‘Harvest all’ re-attempts these." /></th>
             <th className="num">name-only <Info t="Recognised but not auto-fetchable; need a human." /></th>
             <th className="actions-h">actions</th>
           </tr></thead>
           <tbody>
             {(map.categories || []).map((c: any) => {
               const isOpen = open.has(c.key);
-              const isEU = c.key === "eu-cellar";
               return (
                 <Fragment key={c.key}>
                   <tr className="cat-row">
@@ -4235,20 +4301,12 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
                     </td>
                     <td className="num">{c.held.toLocaleString()}</td>
                     <td className="num">{c.pending ? c.pending.toLocaleString() : <span className="muted">0</span>}</td>
+                    <td className="num">{c.cooling ? c.cooling.toLocaleString() : <span className="muted">0</span>}</td>
                     <td className="num">{c.name_only ? c.name_only.toLocaleString() : <span className="muted">0</span>}</td>
                     <td className="actions">
                       {navigate && c.held > 0 && <button className="mini" title="Browse these held documents in the Corpus pane" onClick={() => see({ source: c.key })}>👁 list</button>}
-                      {c.pending > 0 && c.key !== "other" && <button className="mini" title={`Harvest ALL ${c.pending} pending routable references in this category (runs in the background, cancellable, skips items that fail)`} onClick={() => fireJob("harvest-all", { adapter: c.key, limit: 1000000 }, setMsg)}>⤓ harvest ({c.pending.toLocaleString()})</button>}
-                      {c.key !== "other" && <details className="refresh-menu">
-                        <summary className="mini" title="Refresh actions">↻ refresh</summary>
-                        <div className="refresh-pop">
-                          <button onClick={() => fireJob("rescan-citations", {}, setMsg)} title="Re-extract citations from every document with the latest grammars (global)">re-scan citations</button>
-                          {isEU && <button onClick={() => fireJob("expand-citing", { source: "eu-cellar" }, setMsg)} title="Find cases that cite our held EU cases (CELLAR citation graph)">find citing cases</button>}
-                          {isEU && <button onClick={() => fireJob("pull-ag-opinions", {}, setMsg)} title="Pull the AG Opinion for every held CJEU judgment that lacks one">pull AG opinions</button>}
-                          <button onClick={() => fireJob("backfill-metadata", {}, setMsg)} title="Repair court/title/ruling-only metadata from stored raw (global)">backfill metadata</button>
-                        </div>
-                      </details>}
-                      {c.key !== "other" && <button className="mini" title="Total refresh: harvest this category’s pending references, then (EU) pull citing cases" onClick={() => fireJob("refresh-category", { category: c.key }, setMsg)}>⟳ total</button>}
+                      {c.pending > 0 && c.key !== "other" && <button className="mini" title={`Harvest the ${c.pending} UNTRIED routable references in this category (runs in the background, cancellable, skips items that fail)`} onClick={() => fireJob("harvest-all", { adapter: c.key, limit: 1000000 }, setMsg)}>⤓ untried ({c.pending.toLocaleString()})</button>}
+                      {(c.cooling > 0 || (c.pending > 0 && c.key !== "other")) && c.key !== "other" && <button className="mini" title={`Harvest ALL ${(c.pending + c.cooling).toLocaleString()} routable references in this category, including the ${c.cooling.toLocaleString()} on a retry/miss cool-down (re-attempts items previously parked as unavailable)`} onClick={() => fireJob("harvest-all", { adapter: c.key, limit: 1000000, retry_cooled: true }, setMsg)}>⤓ all ({(c.pending + c.cooling).toLocaleString()})</button>}
                     </td>
                   </tr>
                   {isOpen && (c.subtypes || []).map((st: any) => (
@@ -4256,17 +4314,20 @@ function CorpusMap({ cov, navigate }: { cov: any; navigate?: (f: Record<string, 
                       <td className="sub-label">{st.label}</td>
                       <td className="num">{st.held.toLocaleString()}</td>
                       <td className="num">{st.pending ? st.pending.toLocaleString() : <span className="muted">0</span>}</td>
+                      <td className="num">{st.cooling ? st.cooling.toLocaleString() : <span className="muted">0</span>}</td>
                       <td className="num">{st.name_only ? st.name_only.toLocaleString() : <span className="muted">0</span>}</td>
                       <td className="actions">
                         {navigate && st.held > 0 && Object.keys(st.filter || {}).length > 0 &&
                           <button className="mini" title="Browse these held documents" onClick={() => see(st.filter)}>👁 list</button>}
                         {st.pending > 0 && c.key === "uk-legislation" &&
-                          <button className="mini" title={`Harvest ALL ${st.pending} pending references of this type`} onClick={() => fireJob("harvest-all", { adapter: "uk-legislation", leg_kind: st.key.split(":")[0], limit: 1000000 }, setMsg)}>⤓ harvest ({st.pending.toLocaleString()})</button>}
+                          <button className="mini" title={`Harvest the ${st.pending} untried references of this type`} onClick={() => fireJob("harvest-all", { adapter: "uk-legislation", leg_kind: st.key.split(":")[0], limit: 1000000 }, setMsg)}>⤓ untried ({st.pending.toLocaleString()})</button>}
+                        {st.cooling > 0 && c.key === "uk-legislation" &&
+                          <button className="mini" title={`Harvest all ${(st.pending + st.cooling).toLocaleString()} references of this type, including the ${st.cooling.toLocaleString()} cooling off`} onClick={() => fireJob("harvest-all", { adapter: "uk-legislation", leg_kind: st.key.split(":")[0], limit: 1000000, retry_cooled: true }, setMsg)}>⤓ all ({(st.pending + st.cooling).toLocaleString()})</button>}
                       </td>
                     </tr>
                   ))}
                   {isOpen && (
-                    <tr className="cites-row"><td colSpan={5}><CitesPanel category={c.key} /></td></tr>
+                    <tr className="cites-row"><td colSpan={6}><CitesPanel category={c.key} /></td></tr>
                   )}
                 </Fragment>
               );

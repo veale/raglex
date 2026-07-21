@@ -511,6 +511,7 @@ tbody tr:hover { background: var(--surface-2); }
 .ac-opt { padding: var(--sp-3) var(--sp-4); cursor: pointer; border-bottom: 1px solid var(--line-faint); }
 .ac-opt:last-child { border-bottom: 0; }
 .ac-opt.hi { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.ac-jur { margin-right: var(--sp-2); font-size: 10px; vertical-align: middle; }
 
 /* --- "Possibly: …?" match suggestions -------------------------------------- */
 .suggestion { font-size: .8125rem; padding: var(--sp-2) var(--sp-3); margin: 2px 0;

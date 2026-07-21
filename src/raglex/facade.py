@@ -208,36 +208,81 @@ def _is_junk_ref(ref: str) -> bool:
     return low.startswith(("http://", "https://"))
 
 
-# Corpus-Map category → coarse jurisdiction bucket, for the Westlaw/Lexis export filter.
-# (Report series map via reporters.series_jurisdiction; neutral citations & bare names
-# map here, off the candidate's court token.)
+# Corpus-Map category → retrieval jurisdiction bucket, for the Westlaw/Lexis export filter.
+# (Report series map via reporters.series_jurisdiction; neutral citations & bare names map
+# here, off the candidate's court token.) The big single jurisdictions get their own bucket;
+# the long tail is grouped by region the same way the Corpus Map's taxonomy does, so the
+# picker stays short without collapsing Canada/Australia/NZ/etc. into one "Commonwealth" row.
 _CATEGORY_JURISDICTION: dict[str, str] = {
     "uk-caselaw": "uk", "uk-legislation": "uk",
     "ie-caselaw": "ie", "ie-legislation": "ie",
     "eu-cellar": "eu", "eu-legislation": "eu", "echr": "eu",
-    "ca-caselaw": "commonwealth", "au-caselaw": "commonwealth",
-    "nz-caselaw": "commonwealth", "in-caselaw": "commonwealth",
     "us-caselaw": "us",
+    "ca-caselaw": "ca", "ca-legislation": "ca",
+    "au-caselaw": "au", "au-legislation": "au",
+    "nz-caselaw": "nz", "nz-legislation": "nz",
+    "in-caselaw": "in",
+    "sg-caselaw": "sg", "sg-legislation": "sg",
+    "hk-caselaw": "hk", "hk-legislation": "hk",
+    "za-caselaw": "za", "my-caselaw": "my",
+    "africa-caselaw": "africa", "caribbean-caselaw": "caribbean",
+    "pacific-caselaw": "pacific", "ci-caselaw": "ci", "offshore-caselaw": "offshore",
 }
 
-# The canonical retrieval-jurisdiction buckets, in the order a UK-subscription user
-# reads them (their own first). This is a COARSE bucket vocabulary, not a country list:
-# the report-series and candidate-court lookups both resolve into exactly these, so the
-# Westlaw/Lexis filter can only ever offer these. Served to the UI rather than
-# duplicated there, so a new bucket appears in the picker automatically.
+# The canonical retrieval-jurisdiction buckets, in the order a UK-subscription user reads
+# them (their own first). Both the report-series and candidate-court lookups resolve into
+# exactly these keys (via _retrieval_bucket), so the Westlaw/Lexis filter can only ever
+# offer these. Served to the UI rather than duplicated there, so a new bucket appears in the
+# picker automatically.
 RETRIEVAL_JURISDICTIONS: tuple[tuple[str, str], ...] = (
     ("uk", "United Kingdom"),
     ("ie", "Ireland"),
     ("eu", "EU (CMLR, ECR…)"),
-    ("commonwealth", "Commonwealth"),
     ("us", "United States"),
+    ("ca", "Canada"),
+    ("au", "Australia"),
+    ("nz", "New Zealand"),
+    ("in", "India"),
+    ("sg", "Singapore"),
+    ("hk", "Hong Kong"),
+    ("za", "South Africa"),
+    ("my", "Malaysia"),
+    ("africa", "Africa (other)"),
+    ("caribbean", "Caribbean"),
+    ("pacific", "Pacific"),
+    ("ci", "Channel Islands"),
+    ("offshore", "Offshore & int'l commercial"),
 )
+
+# Fine country code (from a report series or a candidate court token) → retrieval picker
+# bucket. The majors pass through unchanged; the long tail of individual African / Pacific /
+# Caribbean / offshore jurisdictions folds into a regional bucket so the picker stays short.
+_RETRIEVAL_BUCKET: dict[str, str] = {
+    "gb": "uk", "uk": "uk", "ie": "ie", "eu": "eu", "us": "us",
+    "ca": "ca", "au": "au", "nz": "nz", "in": "in", "sg": "sg", "hk": "hk",
+    "za": "za", "my": "my",
+    **{c: "africa" for c in ("ke", "gh", "ng", "zw", "zm", "na", "ug", "tz", "mw",
+                             "sz", "bw", "mu", "sc")},
+    **{c: "pacific" for c in ("fj", "pg", "sb", "vu", "ws", "to", "nr", "ck", "ki", "tv")},
+    **{c: "caribbean" for c in ("tt", "jm", "bb", "bs", "gy", "bz")},
+    **{c: "ci" for c in ("je", "gg", "im")},
+    **{c: "offshore" for c in ("ky", "ae", "qa", "sh", "io", "bm", "gi")},
+}
+
+
+def _retrieval_bucket(code: str | None) -> str:
+    """Collapse a fine jurisdiction code into one of the RETRIEVAL_JURISDICTIONS picker
+    buckets (majors pass through; the African/Pacific/Caribbean/offshore long tail folds to
+    its region), so the export filter and the picker always speak the same vocabulary."""
+    c = (code or "").lower()
+    return _RETRIEVAL_BUCKET.get(c, c or "uk")
 
 
 def _candidate_jurisdiction(candidate: str | None) -> str:
-    """The jurisdiction bucket (uk / ie / eu / commonwealth) of a non-report reference,
-    from its candidate's court token — so an Irish neutral citation ("[2019] IESC 4" →
-    ``iesc/2019/4``) reads as Irish, not the "uk" default. Bare names → "uk"."""
+    """The retrieval bucket of a non-report reference, from its candidate's court token — so
+    an Irish neutral citation ("[2019] IESC 4" → ``iesc/2019/4``) reads as Irish and an
+    Australian one ("[2003] HKCFA 46" → hk) reads as Hong Kong, not the "uk" default. Bare
+    names → "uk"."""
     if not candidate:
         return "uk"
     from .citations.taxonomy import classify_candidate
@@ -985,7 +1030,15 @@ class Facade:
 
     def list_documents(self, **filters) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
-            return [dict(r) for r in cat.list_documents(**filters)]
+            rows = [dict(r) for r in cat.list_documents(**filters)]
+        # Enrich with the jurisdiction bucket + natural-language court name, so the
+        # manual-match autocomplete can show a jurisdiction token per option (a UK case
+        # citing an Irish Act needs the "Ireland" tag to be pickable with confidence).
+        for r in rows:
+            r["jurisdiction"] = self._doc_bucket(r.get("source", ""), r.get("court"))
+            if r.get("court"):
+                r["court_label"] = self.court_label(r["court"], r.get("source"))
+        return rows
 
     # metadata filters the search accepts (everything else — sort/limit/offset/facets — is
     # handled separately, so an unknown key can't leak into the SQL builder)
@@ -1222,6 +1275,7 @@ class Facade:
         (("sg-",), "Singapore"),
         (("hk-",), "Hong Kong"),
         (("in-",), "India"),
+        (("us-",), "United States"),
     )
 
     # source key → the natural-language name a person recognises (and, where the
@@ -1378,6 +1432,15 @@ class Facade:
             # that print the jurisdiction alongside drop the duplicate themselves.
             return f"Data Protection Authority · {country}" if country \
                 else "Data Protection Authority"
+        # US CourtListener court-id slugs (scotus, ca9, cand…) aren't neutral-citation
+        # court codes, so resolve them from the US map before the citation registry —
+        # otherwise "scotus" prettifies to "Scotus".
+        if (source or "").lower().startswith("us-"):
+            from .citations.us_cases import us_court_name
+
+            name = us_court_name(low)
+            if name:
+                return name
         # bracketless-citation jurisdictions (Canada, US) vs bracketed (AU, NZ, UK)
         src = (source or "").lower()
         hint = False if src.startswith(("ca-", "ca/")) else True if src.startswith(
@@ -2326,7 +2389,12 @@ class Facade:
                 # does ("[2019] IESC 4" → ie). Neither fires for a bare case name — those
                 # fall back to where the reference is CITED FROM, below.
                 series = report_series((raw or ref or "").strip())
-                jur = series_jurisdiction(series) if series else _candidate_jurisdiction(cand)
+                # A recognised report series names its jurisdiction (bracket style
+                # disambiguates the ambiguous ones — English vs Australian FCR — hence raw);
+                # otherwise the candidate's court token does. Both resolve into the picker's
+                # bucket vocabulary via _retrieval_bucket.
+                jur = (_retrieval_bucket(series_jurisdiction(series, raw or ref))
+                       if series else _candidate_jurisdiction(cand))
                 rows.append({
                     "ref": ref, "raw": raw, "candidate": cand, "form": form,
                     "is_report": is_report, "citing_count": g["citing_count"], "link": link,
@@ -2373,9 +2441,10 @@ class Facade:
         citations (both tools cap a run at 100); ``separator`` is ``newline`` or
         ``semicolon`` (both platforms accept either). ``include_series`` restricts to
         named report series (e.g. only WLR + Cr App R that Westlaw actually holds).
-        ``jurisdictions`` restricts by the series' jurisdiction bucket (``uk`` / ``ie``
-        / ``eu`` / ``commonwealth``) — a UK subscription can't retrieve an Irish or
-        Commonwealth report, so those citations just burn slots in a 100-cap batch."""
+        ``jurisdictions`` restricts by the reference's jurisdiction bucket (``uk`` / ``ie``
+        / ``eu`` / ``us`` / a specific Commonwealth country like ``ca`` / ``au`` / ``nz`` /
+        ``sg`` / ``hk`` — see :data:`RETRIEVAL_JURISDICTIONS`) — a UK subscription can't
+        retrieve a foreign report, so those citations just burn slots in a 100-cap batch."""
         import re as _re
 
         from .citations.reporters import is_report_citation, report_series, series_jurisdiction
@@ -2448,6 +2517,16 @@ class Facade:
         return self._cached("corpus_map", 90, self._corpus_map_uncached,
                             placeholder={"categories": [], "totals": {}})
 
+    def refresh_corpus_map(self) -> dict:
+        """Force a background recompute of the corpus map — the "↻ refresh table" action.
+        Drops the cached snapshot (and the lazy per-category cites) and kicks a fresh
+        compute, returning the warming placeholder for the UI to poll."""
+        for key in [k for k in self._cache
+                    if k == "corpus_map" or k.startswith("corpus_cites:")]:
+            self._cache.pop(key, None)
+            self._refreshing.discard(key)
+        return self.corpus_map()
+
     def _corpus_map_uncached(self) -> dict:
         from .citations.taxonomy import (CATEGORY_LABELS, CATEGORY_ORDER,
                                          classify_candidate, classify_document)
@@ -2457,20 +2536,28 @@ class Facade:
             c = cats.get(key)
             if c is None:
                 c = cats[key] = {"key": key, "label": CATEGORY_LABELS.get(key, key),
-                                 "held": 0, "pending": 0, "name_only": 0, "subtypes": {}}
+                                 "held": 0, "pending": 0, "cooling": 0, "name_only": 0,
+                                 "subtypes": {}}
             return c
 
         def _sub(c: dict, tax) -> dict:
             s = c["subtypes"].get(tax.subtype)
             if s is None:
                 s = c["subtypes"][tax.subtype] = {"key": tax.subtype, "label": tax.subtype_label,
-                                                  "held": 0, "pending": 0, "name_only": 0,
-                                                  "filter": tax.filter}
+                                                  "held": 0, "pending": 0, "cooling": 0,
+                                                  "name_only": 0, "filter": tax.filter}
             return s
 
-        # held — one GROUP BY query, classified in Python
+        # held — one GROUP BY query, classified in Python; plus the harvest cool-down set,
+        # so a pending reference the drain recently tried and parked reads as "cooling"
+        # (tried, waiting out its retry/miss TTL) rather than "untried, one click away".
+        import os as _os
+        miss_ttl = float(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
+        retry_ttl_days = float(_os.environ.get("RAGLEX_RETRY_TTL_HOURS") or 6) / 24.0
         with self._open() as (cat, _rs, _ts):
             held_rows = cat.document_subtype_counts()
+            cooled = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
+            cooled |= cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl_days)
         for r in held_rows:
             tax = classify_document(source=r["source"], doc_type=r["doc_type"],
                                     court=r["court"], stable_id=r["prefix"] or "")
@@ -2483,6 +2570,8 @@ class Facade:
             c = _cat(tax.category); s = _sub(c, tax)
             if h["needs_identifier"] or h["confidence"] == "low" or not h["suggested_adapter"]:
                 c["name_only"] += 1; s["name_only"] += 1
+            elif h["candidate"] in cooled:
+                c["cooling"] += 1; s["cooling"] += 1
             else:
                 c["pending"] += 1; s["pending"] += 1
 
@@ -2500,12 +2589,13 @@ class Facade:
                     s = new_subs.get(key)
                     if s is None:
                         s = new_subs[key] = {"key": key, "label": label, "held": 0,
-                                             "pending": 0, "name_only": 0, "filter": {"source": "echr"}}
+                                             "pending": 0, "cooling": 0, "name_only": 0,
+                                             "filter": {"source": "echr"}}
                     s["held"] += r["n"]
             if "convention" in old:
                 new_subs["convention"] = old["convention"]
             case = old.get("case")
-            if case and (case["pending"] or case["name_only"]):  # pending/name-only have no formation
+            if case and (case["pending"] or case["cooling"] or case["name_only"]):  # no formation
                 new_subs["case"] = {**case, "held": 0, "label": "ECHR case (pending / by name)"}
             c["subtypes"] = new_subs
 
@@ -2514,7 +2604,7 @@ class Facade:
         for c in out:
             c["subtypes"] = sorted(c["subtypes"].values(),
                                    key=lambda s: (-s["held"], -s["pending"], s["label"]))
-        totals = {k: sum(c[k] for c in out) for k in ("held", "pending", "name_only")}
+        totals = {k: sum(c[k] for c in out) for k in ("held", "pending", "cooling", "name_only")}
         return {"categories": out, "totals": totals}
 
     def corpus_map_cites(self, *, category: str) -> dict:
@@ -3181,13 +3271,18 @@ class Facade:
 
     def harvest_all_references(self, *, limit: int = 25, min_citing: int = 1,
                                adapter: str | None = None, leg_kind: str | None = None,
+                               retry_cooled: bool = False,
                                on_progress=None, cancel_check=None) -> dict:
         """Drain the routable part of the hanging-reference queue in one go: for every
         reference that is high-enough confidence *and* has a targeted adapter, fetch
         its exact item, then extract + resolve **once** at the end. Bounded by
         ``limit`` (most-cited first) so a UI click returns; ``min_citing`` skips
         one-off references. Un-routable / low-confidence references are left for
-        manual handling."""
+        manual handling.
+
+        ``retry_cooled`` ignores the cool-down lists, re-attempting references the drain
+        recently tried and parked — the "harvest ALL (incl. cooling)" action, for when a
+        source was merely unavailable and its items were wrongly written off."""
         # Consider EVERY hanging reference, not just the top-N by frequency — otherwise a
         # category whose items are each cited only a few times (e.g. UK case-law) is starved
         # out of the global ranking by high-frequency legislation, and a per-category harvest
@@ -3212,9 +3307,12 @@ class Facade:
         import os as _os
         miss_ttl = float(_os.environ.get("RAGLEX_MISS_TTL_DAYS") or 90)
         retry_ttl_days = float(_os.environ.get("RAGLEX_RETRY_TTL_HOURS") or 6) / 24.0
-        with self._open() as (cat, _rs, _ts):
-            cooled = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
-            cooled |= cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl_days)
+        if retry_cooled:
+            cooled: set[str] = set()  # re-attempt everything, cool-down or not
+        else:
+            with self._open() as (cat, _rs, _ts):
+                cooled = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
+                cooled |= cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl_days)
         skipped = sum(1 for r in candidates if r["candidate"] in cooled)
         # honour the requested limit — one click can drain everything now that the run
         # fails-fast on dead items, skips them, stays responsive, and is cancellable.
@@ -4623,6 +4721,33 @@ class Facade:
                 out.append({"site": link.site, "site_name": link.site_name,
                             "url": link.url, "certainty": link.certainty})
         return out
+
+    def reference_links(self, *, ref: str, raw: str | None = None) -> dict:
+        """External LII links for a reference that ISN'T held — the sidebar's "read it here"
+        for an unfetched or unfetchable case. Constructs the direct LII page(s) from a
+        neutral-citation slug where one can be (AustLII / NZLII / CanLII / SAFLII / HKLII /
+        PacLII / CommonLII / BAILII), and always adds the single best fallback the harvest
+        list uses (a jurisdiction-appropriate search, or a BAILII search for a classic
+        report). Pure string work — no network — so it's cheap to call on every peek."""
+        from .adapters.bailii import external_link
+        from .citations.lii import lii_links
+
+        slug = (ref or "").strip()
+        raw_s = (raw or "").strip() or None
+        # a slug-shaped ref ("nzsc/2012/12") is a neutral citation we can build direct
+        # pages from; a bare name or a raw report citation is not.
+        cand = slug if ("/" in slug and not slug.lower().startswith("http")) else None
+        out: list[dict] = []
+        for link in lii_links(cand or ""):
+            out.append({"site": link.site, "site_name": link.site_name, "url": link.url,
+                        "certainty": link.certainty, "kind": "lii"})
+        best = external_link(cand, raw_s or slug)
+        if best and not any(o["url"] == best["url"] for o in out):
+            out.append({"site": best.get("site"),
+                        "site_name": (best.get("label") or "").replace(" ↗", "").replace(" ↓", ""),
+                        "url": best["url"], "certainty": best.get("certainty"),
+                        "kind": best.get("kind"), "can_upload": best.get("can_upload")})
+        return {"ref": ref, "links": out}
 
     def lii_link_targets(self, *, scope: str = "unheld", limit: int = 5000,
                          sites: list[str] | None = None) -> list[dict]:

@@ -140,11 +140,31 @@ def test_series_jurisdiction_buckets():
     assert series_jurisdiction("NI") == "uk"
     assert series_jurisdiction("ILRM") == "ie"
     assert series_jurisdiction("IR") == "ie"
-    assert series_jurisdiction("DLR (4th)") == "commonwealth"
-    assert series_jurisdiction("CLR") == "commonwealth"
-    assert series_jurisdiction("NZLR") == "commonwealth"
     assert series_jurisdiction("CMLR") == "eu"
     assert series_jurisdiction(None) == "uk"           # non-report shapes default UK
+    # Per-jurisdiction now, not one "commonwealth" lump — so a UK batch drops them.
+    assert series_jurisdiction("DLR (4th)") == "ca"    # edition suffix folds to the base
+    assert series_jurisdiction("RJQ") == "ca"
+    assert series_jurisdiction("CLR") == "au"
+    assert series_jurisdiction("SR (NSW)") == "au"     # the parenthetical is NOT an edition
+    assert series_jurisdiction("ALD") == "au"
+    assert series_jurisdiction("NZLR") == "nz"
+    assert series_jurisdiction("HKC") == "hk"
+    assert series_jurisdiction("MLJ") == "my"
+    assert series_jurisdiction("SACR") == "za"
+
+
+def test_fcr_disambiguated_by_bracket_style():
+    # FCR collides: English Family Court Reports [YYYY] vs Australian Federal Court
+    # Reports (YYYY). The full citation's bracket style is the only tell.
+    from raglex.citations.reporters import report_series, series_jurisdiction
+
+    au = "(1993) 43 FCR 280"
+    en = "[1993] 1 FCR 553"
+    assert series_jurisdiction(report_series(au), au) == "au"
+    assert series_jurisdiction(report_series(en), en) == "uk"
+    # No raw to judge by → default to the English series (the safe UK-batch assumption).
+    assert series_jurisdiction("FCR") == "uk"
 
 
 # ── display casing of stored (folded) aliases ───────────────────────────────

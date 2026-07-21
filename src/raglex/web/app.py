@@ -688,6 +688,11 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Held-vs-pending by legal category & sub-type — the dashboard coverage table."""
         return facade.corpus_map()
 
+    @app.post("/corpus-map/refresh")
+    def corpus_map_refresh_ep() -> dict:
+        """Force a background recompute of the corpus map (the '↻ refresh table' button)."""
+        return facade.refresh_corpus_map()
+
     @app.get("/corpus-map/cites")
     def corpus_map_cites_ep(category: str) -> dict:
         """Lazy: what this category's held docs cite, by target category (unique + total)."""
@@ -1013,6 +1018,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         ``/documents/{id:path}/lii-links`` route is swallowed whole by the generic
         document route (the same reason ``/document-body?id=`` is shaped this way)."""
         return {"stable_id": id, "links": facade.lii_links_for(id)}
+
+    @app.get("/reference-lii-links")
+    def reference_lii_links_ep(ref: str, raw: str | None = None) -> dict:
+        """Outbound LII links for a reference that is NOT held — what the peek sidebar shows
+        when an unfetched/unfetchable case is clicked, so the user can read it on the
+        institute that publishes it (or find it there and upload it). ``ref`` is the
+        reference id / neutral-citation slug; ``raw`` the citation as written."""
+        return facade.reference_links(ref=ref, raw=raw)
 
     @app.get("/lii-links")
     def lii_links_ep(scope: str = "unheld", limit: int = 2000,

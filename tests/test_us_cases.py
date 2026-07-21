@@ -3,7 +3,22 @@ American-looking text."""
 
 from __future__ import annotations
 
-from raglex.citations.us_cases import looks_american, us_case_citations
+from raglex.citations.us_cases import looks_american, us_case_citations, us_court_name
+
+
+def test_us_court_names_from_courtlistener_slugs():
+    # the seed set gets explicit names…
+    assert us_court_name("scotus") == "Supreme Court of the United States"
+    assert us_court_name("ca9") == "U.S. Court of Appeals, Ninth Circuit"
+    assert us_court_name("cadc") == "U.S. Court of Appeals, D.C. Circuit"
+    assert us_court_name("cafc") == "U.S. Court of Appeals, Federal Circuit"
+    # …and the district courts are derived (state first: ca+n+d = N.D. Cal.)
+    assert us_court_name("cand") == "U.S. District Court, N.D. Cal."
+    assert us_court_name("nysd") == "U.S. District Court, S.D. N.Y."
+    assert us_court_name("mdd") == "U.S. District Court, D. Md."
+    # an unmappable slug stays None, so the caller keeps its own fallback (never invents one)
+    assert us_court_name("nonesuch") is None
+    assert us_court_name(None) is None
 
 
 def test_gate_matches_us_reporters_only():

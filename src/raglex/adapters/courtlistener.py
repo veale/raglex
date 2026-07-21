@@ -445,12 +445,15 @@ class CourtListenerAdapter(BaseAdapter):
         a majority, a concurrence and two dissents costs four of the day's 125. Field
         selection keeps each response to the one text representation we store.
         """
-        # plain_text is always requested (the extractor and embedder consume it); the
-        # HTML rendering rides along only when asked for, since it roughly doubles the
-        # payload and we would otherwise be paying for a reading pane nobody opened.
-        wanted = ["id", "type", "author_str", "ordering_key", "plain_text"]
-        if self.prefer_html:
-            wanted.append("html_with_citations")
+        # Request EVERY text representation _opinion_text can fall back to — not just
+        # plain_text. CourtListener populates these by ingestion source: an opinion from
+        # Harvard CAP / Columbia / Lawbox routinely has an empty plain_text with the text
+        # only in xml_harvard / html_columbia / html. Requesting plain_text alone meant the
+        # fallback chain had nothing to fall back TO, so those clusters came back with no
+        # text and were silently dropped (discovered=1 stored=0). The daily quota meters
+        # request COUNT, not payload size, so carrying the extra fields costs nothing
+        # against the 125/day cap.
+        wanted = ["id", "type", "author_str", "ordering_key", *_OPINION_TEXT_FIELDS]
         params = {"fields": ",".join(wanted)}
         out: list[dict] = []
         for url in cluster.get("sub_opinions") or []:
@@ -615,6 +618,16 @@ def _assemble_text(opinions: list[dict]) -> tuple[str, list[Segment]]:
     return "".join(parts), segments
 
 
+# The opinion text representations, in order of how much structure survives — the field
+# _opinion_text prefers first, then the fallbacks. This is the ONE list: _opinions requests
+# exactly these fields, so the fallback chain always has data to fall back to (requesting a
+# subset here is what silently dropped every plain_text-empty CAP/Columbia opinion).
+_OPINION_TEXT_FIELDS: tuple[str, ...] = (
+    "plain_text", "html_with_citations", "html", "html_columbia",
+    "html_lawbox", "html_anon_2020", "xml_harvard",
+)
+
+
 def _opinion_text(opinion: dict) -> str:
     """One opinion's text, preferring the cleanest representation available.
 
@@ -624,8 +637,7 @@ def _opinion_text(opinion: dict) -> str:
     plain_text is what the extractor wants — both are stripped to text here, but the
     HTML form keeps paragraph breaks a PDF-derived plain_text sometimes loses.
     """
-    for key in ("plain_text", "html_with_citations", "html", "html_columbia",
-                "html_lawbox", "html_anon_2020", "xml_harvard"):
+    for key in _OPINION_TEXT_FIELDS:
         value = opinion.get(key)
         if value and str(value).strip():
             return _strip_markup(str(value)) if key != "plain_text" else str(value)

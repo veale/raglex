@@ -44,6 +44,34 @@ def test_every_registered_jurisdiction_has_a_corpus_map_bucket():
         assert category in CATEGORY_LABELS
 
 
+def test_retrieval_buckets_split_commonwealth_by_country():
+    """The Westlaw/Lexis export filter buckets per country now, so an Australian FCR /
+    SR (NSW) or a Canadian OR doesn't leak into a UK-only batch under one "commonwealth"
+    lump (the reported jurisdiction-leak bug)."""
+    from raglex.facade import (
+        RETRIEVAL_JURISDICTIONS,
+        _CATEGORY_JURISDICTION,
+        _candidate_jurisdiction,
+        _retrieval_bucket,
+    )
+    from raglex.citations.reporters import report_series, series_jurisdiction
+
+    keys = {k for k, _ in RETRIEVAL_JURISDICTIONS}
+    assert "commonwealth" not in keys
+    assert {"ca", "au", "nz", "sg", "hk", "za", "us"} <= keys
+    # a report series resolves to its own country, folded into the picker vocabulary
+    for raw, want in [("(1993) 43 FCR 280", "au"), ("(1946) 46 SR (NSW) 318", "au"),
+                      ("[1932] O.R. 675", "ca"), ("[2008] 2 NZLR 321", "nz")]:
+        jur = _retrieval_bucket(series_jurisdiction(report_series(raw), raw))
+        assert jur == want, (raw, jur)
+    # a neutral citation with no series resolves off the candidate's court token
+    assert _candidate_jurisdiction("hkcfa/2003/46") == "hk"
+    assert _candidate_jurisdiction("nswca/2014/17") == "au"
+    # every category bucket is a valid picker key (the long tail folds to a region)
+    for bucket in _CATEGORY_JURISDICTION.values():
+        assert _retrieval_bucket(bucket) in keys
+
+
 def test_colliding_codes_are_disambiguated_by_bracket_style():
     """FCA is the Federal Court of Australia AND the Federal Court of Appeal of Canada.
     Only the brackets say which: [2020] FCA 1 vs 2020 FCA 1."""

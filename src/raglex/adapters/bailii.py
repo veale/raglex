@@ -109,14 +109,21 @@ def bailii_search_url(citation: str) -> str:
     return f"https://www.bailii.org/cgi-bin/find_by_citation.cgi?citation={quote_plus(citation.strip())}"
 
 
-# Where a non-BAILII jurisdiction's cases are actually findable — the free LIIs.
-# BAILII covers GB + IE; a Canadian/Australian/NZ citation gets its own institute's
-# search, not a BAILII search that can never hit.
+# Where a non-BAILII jurisdiction's cases are actually findable — the free LIIs. BAILII
+# covers GB + IE; every other jurisdiction gets its OWN institute's search (a BAILII search
+# that can never hit is worse than useless). Used only when no direct LII page can be
+# constructed from the slug; the direct page (via citations.lii) is always preferred.
 _LII_SEARCH: dict[str, tuple[str, str]] = {
     "CA": ("CanLII", "https://www.canlii.org/en/#search/text={q}"),
     "AU": ("AustLII", "https://www.austlii.edu.au/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
     "NZ": ("NZLII", "http://www.nzlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
     "IN": ("LII of India", "http://www.liiofindia.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
+    "ZA": ("SAFLII", "http://www.saflii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
+    # Singapore / Hong Kong / Malaysia: the CommonLII aggregator runs the Sino engine over
+    # all three and is the reliable free search surface for them.
+    "SG": ("CommonLII", "http://www.commonlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
+    "HK": ("CommonLII", "http://www.commonlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
+    "MY": ("CommonLII", "http://www.commonlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
 }
 
 
@@ -127,20 +134,30 @@ def external_link(candidate: str | None, raw: str | None) -> dict | None:
     - a UK neutral-citation slug → the direct BAILII **RTF** (one-click download); an
       uploaded RTF is imported under that stable_id, resolving every pending citation to
       it (``import_bailii``);
-    - a Canadian / Australian / NZ / Indian citation → that jurisdiction's own legal
-      information institute search (BAILII doesn't hold them);
+    - any other neutral-citation slug → the **direct LII page** constructed from the slug
+      (AustLII / NZLII / CanLII / SAFLII / HKLII / PacLII / CommonLII) — a real judgment
+      URL, not a search;
+    - a citation whose court names a jurisdiction but yields no constructible page → that
+      jurisdiction's own LII **search** (BAILII doesn't hold non-UK/IE cases);
     - anything else (a classic law report, a case by name) → a BAILII **search** link; the
       user resolves it by uploading the file against the reference (``resolve-file``).
     """
     from urllib.parse import quote_plus
 
     from ..citations.courts import lookup
+    from ..citations.lii import lii_links
 
     if candidate:
         rtf = bailii_url(candidate)
         if rtf:
             return {"kind": "rtf", "url": rtf, "label": "BAILII RTF ↓",
                     "can_upload": True, "stable_id": candidate}
+        # Any other neutral-citation slug → the direct LII page, constructed locally from
+        # the slug (no network hit) — far more useful than a search that the user then has
+        # to disambiguate.
+        for link in lii_links(candidate):
+            return {"kind": "lii", "url": link.url, "label": f"{link.site_name} ↗",
+                    "can_upload": True, "site": link.site, "certainty": link.certainty}
     cite = (raw or candidate or "").strip()
     if not cite:
         return None

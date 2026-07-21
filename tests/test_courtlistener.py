@@ -368,6 +368,45 @@ def test_dissents_and_concurrences_are_kept_as_labelled_segments():
         assert record.text[seg.char_start:seg.char_end].startswith(seg.label)
 
 
+def test_opinion_stored_when_plain_text_empty_but_html_present():
+    """The bug that made federal harvest look dead: CAP / Columbia / Lawbox-sourced
+    opinions routinely carry an EMPTY plain_text, with the text only in xml_harvard /
+    html_with_citations. The adapter must both REQUEST those fields and fall back to
+    them — otherwise the case is discovered, its opinions fetched 200 OK, and the cluster
+    silently stored as nothing (the observed 'discovered=1 stored=0 errors=0')."""
+    cluster = {**_CLUSTER,
+               "sub_opinions": ["https://www.courtlistener.com/api/rest/v4/opinions/9/"]}
+    opinions = {"opinions/9/": {"id": 9, "type": "020lead", "author_str": "Roberts",
+                                "plain_text": "",
+                                "html_with_citations": "<p>Text lives only in the HTML.</p>"}}
+    routes = {"citation-lookup": [{"citation": "576 U.S. 644", "status": 200,
+                                   "clusters": [cluster]}], **opinions}
+    adapter = _adapter(routes, ids="us/us/576/644")
+    (stub,) = list(adapter.discover(None))
+    record = adapter.fetch(stub)
+    assert record is not None, "empty plain_text with populated HTML must still store"
+    assert "Text lives only in the HTML." in record.text
+
+
+def test_requested_opinion_fields_cover_every_text_fallback():
+    """Guard against the field-list / fallback-chain drift that caused the silent drop:
+    _opinions must request every representation _opinion_text is prepared to read, or a
+    field that would have carried the text is never fetched."""
+    from raglex.adapters.courtlistener import _OPINION_TEXT_FIELDS
+
+    adapter = _adapter({"citation-lookup": [{"citation": "576 U.S. 644", "status": 200,
+                                             "clusters": [_CLUSTER]}], **_OPINIONS},
+                       ids="us/us/576/644")
+    (stub,) = list(adapter.discover(None))
+    adapter.fetch(stub)
+    opinion_gets = [c for c in adapter._client.calls
+                    if c[0] == "GET" and "opinions/" in c[1]]
+    assert opinion_gets, "expected per-opinion GETs"
+    for _method, _url, params in opinion_gets:
+        requested = set((params or {}).get("fields", "").split(","))
+        assert set(_OPINION_TEXT_FIELDS) <= requested, requested
+
+
 def test_unresolved_and_ambiguous_lookups_import_nothing():
     """404 (valid but not held) and 400 (unknown reporter — often a hallucination)
     carry no clusters; 300 is ambiguous and must NOT be auto-imported, because
