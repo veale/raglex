@@ -1,4 +1,4 @@
-import { createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Component, createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
@@ -60,9 +60,25 @@ export function TrayStack({ open }: { open: (id: string, a?: string) => void }) 
         <span className="tray-title">{t.label}</span>
         <button className="tray-x" onClick={() => closeAt(i)} title="close">✕</button>
       </div>
-      <div className="tray-body"><TrayContent t={t} open={open} /></div>
+      <div className="tray-body"><TrayErrorBoundary><TrayContent t={t} open={open} /></TrayErrorBoundary></div>
     </aside>
   ))}</>;
+}
+
+// A single unexpected legacy metadata value must not unmount the whole React root.
+// Besides making the overlay recoverable, this leaves a useful error in the tray
+// instead of Firefox's otherwise featureless white screen.
+class TrayErrorBoundary extends Component<{ children: any }, { error: string }> {
+  state = { error: "" };
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  componentDidCatch(error: unknown) { console.error("RagLex tray render failed", error); }
+  render() {
+    return this.state.error
+      ? <div className="error-box">Could not display this panel: {this.state.error}</div>
+      : this.props.children;
+  }
 }
 
 // Escape closes the topmost overlay: the peek first (it renders on top), then the top tray.
@@ -98,14 +114,15 @@ function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => v
 // having to hunt for them in the surrounding prose. `mark` is a [start, end] offset
 // pair into `text`; without it the snippet renders plain.
 function SnipText({ s }: { s: any }) {
+  const text = typeof s?.text === "string" ? s.text : String(s?.text ?? "");
   const m: [number, number] | null = s.mark || null;
-  if (!m || m[1] <= m[0] || m[1] > (s.text?.length ?? 0)) return <>{s.text}</>;
+  if (!m || m[1] <= m[0] || m[1] > text.length) return <>{text}</>;
   return (
     <>
-      {s.text.slice(0, m[0])}
+      {text.slice(0, m[0])}
       <mark className="msnip-cite" title={s.raw ? `matched: ${s.raw}` : undefined}>
-        {s.text.slice(m[0], m[1])}</mark>
-      {s.text.slice(m[1])}
+        {text.slice(m[0], m[1])}</mark>
+      {text.slice(m[1])}
     </>
   );
 }
@@ -124,8 +141,10 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   const [data, error, retry] = useAsync(() => api.mentions(target, anchor, sort), [target, anchor, sort]);
   if (error) return <div className="error-box">Could not load mentions. <button className="mini" onClick={retry}>retry</button></div>;
   if (!data) return <p className="muted loading-pulse">Loading mentions…</p>;
-  const groups: any[] = data.groups || [];
-  const sorts: Record<string, string> = data.sorts || {};
+  const groups: any[] = (Array.isArray(data.groups) ? data.groups : [])
+    .filter((g: any) => g && typeof g === "object")
+    .map((g: any) => ({ ...g, snippets: Array.isArray(g.snippets) ? g.snippets : [] }));
+  const sorts: Record<string, string> = data.sorts && typeof data.sorts === "object" ? data.sorts : {};
   const sorter = Object.keys(sorts).length > 0 && (
     <div className="tray-sort">
       <select value={sort} onChange={(e) => setSort(e.target.value)} title="order these citing documents by…">
@@ -1739,8 +1758,9 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
 // (case names), the rest plain. Falls back to a plain string when no citation is supplied.
 type OscolaCite = { parts: { t: string; i: boolean }[]; text: string };
 export function Oscola({ c, fallback }: { c?: OscolaCite | null; fallback?: string }) {
-  if (!c || !c.parts || c.parts.length === 0) return <>{fallback ?? ""}</>;
-  return <>{c.parts.map((p, i) => p.i ? <i key={i}>{p.t}</i> : <Fragment key={i}>{p.t}</Fragment>)}</>;
+  const parts = Array.isArray(c?.parts) ? c.parts : [];
+  if (parts.length === 0) return <>{fallback ?? ""}</>;
+  return <>{parts.map((p, i) => p?.i ? <i key={i}>{String(p?.t ?? "")}</i> : <Fragment key={i}>{String(p?.t ?? "")}</Fragment>)}</>;
 }
 
 // "Court · jurisdiction · date" for a document head. Some court labels already name
