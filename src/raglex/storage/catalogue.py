@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS documents (
     topic_score      REAL,
     upstream_status  TEXT NOT NULL DEFAULT 'live',
     upstream_status_at TEXT,
+    last_extracted_at TEXT,
+    last_extraction_run_id TEXT,
     fetched_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
@@ -322,7 +324,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     cancel        INTEGER NOT NULL DEFAULT 0,
     started_at    TEXT NOT NULL,
     heartbeat_at  TEXT,
-    finished_at   TEXT
+    finished_at   TEXT,
+    root_job_id   TEXT,
+    resumed_from  TEXT,
+    resume_policy TEXT NOT NULL DEFAULT 'restart',
+    attempt       INTEGER NOT NULL DEFAULT 1,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    restart_requested INTEGER NOT NULL DEFAULT 0,
+    lease_heartbeat_at TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, started_at);
 
@@ -502,6 +511,16 @@ class Catalogue:
             # when this document's citations were last (re-)extracted — the durable
             # "last rescanned at" stamp a staleness-scoped rescan skips against (§5).
             ("documents", "last_extracted_at", "TEXT"),
+            # A durable per-pass marker: a resumed citation scan excludes documents
+            # already stamped with its root run id, regardless of ordering/new inserts.
+            ("documents", "last_extraction_run_id", "TEXT"),
+            ("jobs", "root_job_id", "TEXT"),
+            ("jobs", "resumed_from", "TEXT"),
+            ("jobs", "resume_policy", "TEXT NOT NULL DEFAULT 'restart'"),
+            ("jobs", "attempt", "INTEGER NOT NULL DEFAULT 1"),
+            ("jobs", "checkpoint_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("jobs", "restart_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ("jobs", "lease_heartbeat_at", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -816,15 +835,22 @@ class Catalogue:
         self.conn.execute("DELETE FROM citations WHERE src_id = ?", (src_id,))
         self.conn.commit()
 
-    def mark_extracted(self, src_id: str, *, commit: bool = True) -> None:
+    def mark_extracted(self, src_id: str, *, run_id: str | None = None,
+                       commit: bool = True) -> None:
         """Stamp ``last_extracted_at`` = now for a document — the durable "last rescanned"
         signal a staleness-scoped rescan skips against (§5). Set on every extraction,
         including ones that produced no citations, so citation-less documents converge and
         aren't re-scanned every run."""
-        self.conn.execute(
-            "UPDATE documents SET last_extracted_at = ? WHERE stable_id = ?",
-            (_now(), src_id),
-        )
+        if run_id:
+            self.conn.execute(
+                "UPDATE documents SET last_extracted_at = ?, last_extraction_run_id = ? "
+                "WHERE stable_id = ?", (_now(), run_id, src_id))
+        else:
+            # An unrelated incremental extraction must not erase a long scan's durable
+            # completion marker while that scan is resumable.
+            self.conn.execute(
+                "UPDATE documents SET last_extracted_at = ? WHERE stable_id = ?",
+                (_now(), src_id))
         if commit:
             self.conn.commit()
 
@@ -1993,7 +2019,8 @@ class Catalogue:
                           doc_types: list[str] | None = None,
                           source: str | None = None,
                           only_unextracted: bool = False,
-                          stale_days: int | None = None) -> list[str]:
+                          stale_days: int | None = None,
+                          exclude_extraction_run_id: str | None = None) -> list[str]:
         """Document ids that have extractable text, in id order — the target set for a
         re-extraction. ``doc_types`` scopes it (e.g. ``['judgment']`` to skip the 122k
         legislation docs, which mostly cite only other legislation); ``source`` scopes it
@@ -2026,6 +2053,9 @@ class Catalogue:
         if source:
             sql += " AND d.source = ?"
             params.append(source)
+        if exclude_extraction_run_id:
+            sql += " AND (d.last_extraction_run_id IS NULL OR d.last_extraction_run_id <> ?)"
+            params.append(exclude_extraction_run_id)
         if only_unextracted:
             sql += " AND NOT EXISTS (SELECT 1 FROM citations c WHERE c.src_id = d.stable_id)"
         if stale_days is not None:
@@ -3245,19 +3275,36 @@ class Catalogue:
     # different container, so nothing in the UI ever showed that it had been storing
     # zero documents for seventeen days.
     def create_job(self, job_id: str, kind: str, label: str, params: dict,
-                   *, origin: str = "api") -> None:
+                   *, origin: str = "api", root_job_id: str | None = None,
+                   resumed_from: str | None = None, resume_policy: str = "restart",
+                   attempt: int = 1, checkpoint: dict | None = None) -> None:
         now = _now()
         self.conn.execute(
             "INSERT INTO jobs (job_id, kind, label, params_json, status, origin, "
-            "started_at, heartbeat_at) VALUES (?,?,?,?,'running',?,?,?)",
-            (job_id, kind, label, json.dumps(params or {}), origin, now, now),
+            "started_at, heartbeat_at, lease_heartbeat_at, root_job_id, resumed_from, resume_policy, attempt, checkpoint_json) "
+            "VALUES (?,?,?,?,'running',?,?,?,?,?,?,?,?,?)",
+            (job_id, kind, label, json.dumps(params or {}), origin, now, now, now,
+             root_job_id or job_id, resumed_from, resume_policy, attempt,
+             json.dumps(checkpoint or {})),
         )
         self.conn.commit()
 
-    def heartbeat_job(self, job_id: str, progress: dict, log_tail: list[str]) -> None:
+    def pulse_job(self, job_id: str) -> None:
+        """Prove the owning process is alive without pretending work progressed."""
         self.conn.execute(
-            "UPDATE jobs SET progress_json = ?, log_json = ?, heartbeat_at = ? WHERE job_id = ?",
-            (json.dumps(progress or {}), json.dumps(log_tail[-300:]), _now(), job_id),
+            "UPDATE jobs SET lease_heartbeat_at = ? WHERE job_id = ? AND status = 'running'",
+            (_now(), job_id),
+        )
+        self.conn.commit()
+
+    def heartbeat_job(self, job_id: str, progress: dict, log_tail: list[str],
+                      checkpoint: dict | None = None) -> None:
+        self.conn.execute(
+            "UPDATE jobs SET progress_json = ?, log_json = ?, heartbeat_at = ?"
+            + (", checkpoint_json = ?" if checkpoint is not None else "")
+            + " WHERE job_id = ?",
+            ((json.dumps(progress or {}), json.dumps(log_tail[-300:]), _now())
+             + ((json.dumps(checkpoint),) if checkpoint is not None else ()) + (job_id,)),
         )
         self.conn.commit()
 
@@ -3296,6 +3343,15 @@ class Catalogue:
         UI can cancel a job running inside the scheduler container."""
         cur = self.conn.execute(
             "UPDATE jobs SET cancel = 1 WHERE job_id = ? AND status = 'running'", (job_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def request_job_restart(self, job_id: str) -> bool:
+        """Cancel cooperatively and queue exactly one replacement after it stops."""
+        cur = self.conn.execute(
+            "UPDATE jobs SET cancel = 1, restart_requested = 1 "
+            "WHERE job_id = ? AND status = 'running'", (job_id,)
         )
         self.conn.commit()
         return cur.rowcount > 0

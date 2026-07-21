@@ -75,14 +75,80 @@ def test_restart_rebuilds_from_stored_params(monkeypatch):
     started: dict = {}
     mgr = JobManager(f, origin="api")
 
-    def fake_start(kind, label, params):
-        started.update(kind=kind, params=params)
+    def fake_start(kind, label, params, **resume):
+        started.update(kind=kind, params=params, resume=resume)
         return {"job_id": "new"}
     monkeypatch.setattr(mgr, "start", fake_start)
 
     res = mgr.restart("old")
     assert res["restarted_from"] == "old"
-    assert started == {"kind": "harvest-all", "params": {"limit": 7}}  # from the row, not a closure
+    assert started["kind"] == "harvest-all" and started["params"] == {"limit": 7}
+    assert started["resume"]["resumed_from"] == "old"
+    assert started["resume"]["root_job_id"] == "old"
+
+
+def test_checkpoint_is_distinct_from_display_progress():
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("scan", "rescan-citations", "scan", {}, root_job_id="scan",
+                       resume_policy="checkpoint")
+        cat.heartbeat_job("scan", {"stage": "scan", "done": 2}, [],
+                          checkpoint={"completed": 1, "last_id": "doc/1"})
+        row = JobManager(f).get("scan")
+    assert row["progress"]["done"] == 2
+    assert row["resume"]["checkpoint"] == {"completed": 1, "last_id": "doc/1"}
+
+
+def test_scan_run_marker_excludes_only_committed_documents(catalogue):
+    from raglex.core.models import DocType, Record
+
+    for sid in ("doc/a", "doc/b", "doc/c"):
+        rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                     raw_bytes=sid.encode(), text="text")
+        rec.ensure_payload_hash()
+        catalogue.upsert_document(rec, text_path="dummy")
+    catalogue.mark_extracted("doc/a", run_id="root-1")
+    catalogue.mark_extracted("doc/b", run_id="another-run")
+    assert set(catalogue.text_document_ids(exclude_extraction_run_id="root-1")) == {"doc/b", "doc/c"}
+
+
+def test_running_restart_cancels_before_replacement(monkeypatch):
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("live", "rescan-citations", "scan", {}, origin="api")
+    mgr = JobManager(f, origin="api")
+    monkeypatch.setattr(mgr, "start", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("replacement must not overlap live worker")))
+    result = mgr.restart("live")
+    assert result["cancelling"] and result["restart_when_stopped"]
+    with f._open() as (cat, _rs, _ts):
+        assert cat.job_cancelled("live")
+
+
+def test_startup_auto_resumes_only_declared_safe_kinds(monkeypatch):
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("scan", "rescan-citations", "scan", {}, origin="api")
+        cat.create_job("rank", "rebuild-authority", "rank", {}, origin="api")
+    resumed = []
+    mgr = JobManager(f, origin="api")
+    monkeypatch.setattr(mgr, "_resume_row", lambda row: resumed.append(row["job_id"]))
+    assert mgr.reap_orphans(auto_resume=True) == 2
+    assert resumed == ["scan"]
+
+
+def test_job_status_exposes_resume_lineage_and_liveness():
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("try2", "rescan-citations", "scan", {"_resume_run_id": "root"},
+                       root_job_id="root", resumed_from="try1",
+                       resume_policy="checkpoint", attempt=2)
+    row = JobManager(f).get("try2")
+    assert row["resume"] == {
+        "policy": "checkpoint", "root_job_id": "root", "resumed_from": "try1",
+        "attempt": 2, "checkpoint": {},
+    }
+    assert row["process_alive"] is True
 
 
 # -- the alert that would have caught the seventeen-day silence --------------

@@ -319,6 +319,7 @@ def _stored_shorthands_for(catalogue: Catalogue, cites: list) -> list[tuple]:
 def extract_document(
     catalogue: Catalogue, textstore: TextStore, stable_id: str,
     *, llm: CitationExtractor | None = None, aliases: dict[str, str] | None = None,
+    run_id: str | None = None,
 ) -> int:
     """Extract citations from one document's text. Records every occurrence in the
     ``citations`` table (the audit/observation layer, with char spans for treatment
@@ -341,7 +342,7 @@ def extract_document(
             # staleness-scoped reruns converge instead of re-hitting the doc
             log.warning("[cite-extract] %s: grammar pass exceeded %.0fs budget — skipped",
                         stable_id, _GUARD.timeout_s())
-            catalogue.mark_extracted(stable_id)
+            catalogue.mark_extracted(stable_id, run_id=run_id)
             return 0
     else:  # the llm extractor is not picklable (and may call the network) — unguarded
         raw_defs = []
@@ -463,7 +464,7 @@ def extract_document(
     catalogue.add_relations(stable_id, list(edges.values()))
     # durable "last rescanned at" stamp — set even when the document cited nothing, so a
     # staleness-scoped rescan can skip it next time (§5).
-    catalogue.mark_extracted(stable_id)
+    catalogue.mark_extracted(stable_id, run_id=run_id)
     return len(cites)
 
 

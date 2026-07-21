@@ -59,7 +59,9 @@ def create_app(config: Config | None = None) -> FastAPI:
     facade = Facade(config or Config.from_env())
     facade.warm_caches()  # pre-compute heavy dashboard aggregates so first load is instant
     jobs = JobManager(facade, origin="api")
-    jobs.reap_orphans()  # rows the previous process left 'running' have no thread behind them
+    # A deploy kills in-process workers. Durable/checkpointed API jobs resume under a
+    # new attempt automatically; conservative job kinds remain visibly interrupted.
+    jobs.reap_orphans(auto_resume=True)
     app = FastAPI(title="RagLex", version="0.1.0", summary="Legal corpus ops + research API")
     # The React dev server lives on another origin; allow it (tighten in prod).
     app.add_middleware(
@@ -497,10 +499,10 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/jobs/{job_id}/restart")
     def job_restart_ep(job_id: str) -> dict:
-        """Re-launch a job from where its persisted data left off — for a frozen job (host
-        slept and its network socket died) or any finished/cancelled one. The work is
-        idempotent: dedup skips held docs, recorded misses are skipped, so a restart only
-        does what's left. The old (maybe still-parked) thread is signalled to cancel."""
+        """Resume a finished/interrupted job under a linked attempt. Citation scans use
+        committed per-document run markers; imports restart discovery and deduplicate
+        durable outputs. A live worker is cancelled cooperatively before its replacement
+        starts, so two attempts never write the same scope concurrently."""
         return jobs.restart(job_id)
 
     # -- watches (saved harvest plans + scheduler, §5a) --------------------

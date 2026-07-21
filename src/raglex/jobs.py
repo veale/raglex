@@ -12,11 +12,11 @@ things worth having:
   appeared in the jobs panel at all. That is precisely why an auto-drain silently storing
   zero documents for seventeen days went unnoticed.
 
-So a job is a **row**. Its work is named by ``kind`` and parameterised by ``params``, both
-persisted, so any process can re-launch it from scratch — the work is idempotent (dedup
-skips held documents, cool-down lists skip known-absent ones), so a restart only does
-what's left. Cancellation is a flag on the row, which is why the UI can cancel a job
-running inside the scheduler.
+So a job is a **row**. Its work is named by ``kind`` and parameterised by ``params``.
+Restart semantics are explicit per kind: citation scans use committed document markers;
+imports rediscover but deduplicate durable records; short graph rebuilds restart as a
+whole. Attempts retain a root lineage and checkpoint. Cancellation is a flag on the row,
+which is why the UI can cancel a job running inside the scheduler.
 """
 
 from __future__ import annotations
@@ -51,6 +51,41 @@ MAX_CONCURRENT_JOBS = 6
 # SAME category still dedup, and the nightly whole-queue drain (no adapter → distinct params)
 # dedups against a second whole-queue drain but no longer blocks the per-category buttons.
 DEDUP_KINDS = frozenset({"run-watch", "gap-scan", "harvest-source", "harvest-all"})
+
+# Resume is an explicit contract, not a blanket promise that "idempotent" means no
+# repeated work. ``checkpoint`` jobs stamp each completed document with a stable root
+# run id. ``deduplicate`` jobs restart discovery but cheaply skip durable outputs.
+# ``restart`` jobs are safe to run again but have no useful mid-phase cursor.
+RESUME_POLICIES = {
+    "rescan-citations": "checkpoint", "rescan": "checkpoint",
+    "harvest-source": "deduplicate", "harvest-all": "deduplicate",
+    "auto-drain": "deduplicate", "embed": "deduplicate",
+    "import-bailii-corpus": "deduplicate", "import-bailii-zip": "deduplicate",
+    "import-bailii-dir": "deduplicate", "import-bailii-parquet": "deduplicate",
+    "import-indian-sci": "deduplicate", "import-sg-seed": "deduplicate",
+    "import-westlaw-zip": "deduplicate", "import-westlaw-dir": "deduplicate",
+    "import-caselaw-zip": "deduplicate", "import-caselaw-dir": "deduplicate",
+    "gap-scan": "deduplicate", "repair-au-cth": "deduplicate",
+}
+AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
+_SCAN_KINDS = frozenset({"rescan-citations", "rescan"})
+
+
+def _scan_scope(kind: str, params: dict) -> str | None:
+    return (params.get("source") or "*") if kind in _SCAN_KINDS else None
+
+
+def _scan_conflict(kind: str, params: dict, running_row) -> bool:
+    """Two extraction passes may coexist only when their source sets are disjoint."""
+    if kind not in _SCAN_KINDS or running_row["kind"] not in _SCAN_KINDS:
+        return False
+    import json as _json
+    try:
+        other = _json.loads(running_row["params_json"] or "{}")
+    except (ValueError, TypeError):
+        other = {}
+    a, b = _scan_scope(kind, params), _scan_scope(running_row["kind"], other)
+    return a == "*" or b == "*" or a == b
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
 # its worker thread is parked on a network socket that died when the host slept/woke. We
 # can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
@@ -98,7 +133,9 @@ def fmt_progress(p: dict) -> str:
 # kind → the facade call it names. Persisting (kind, params) instead of a closure is what
 # makes a job survive the process that started it.
 RUNNERS: dict[str, Callable] = {
-    "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(source=p.get("source"), on_progress=cb, cancel_check=cancel),
+    "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
+        source=p.get("source"), run_id=p.get("_resume_run_id"),
+        on_progress=cb, cancel_check=cancel),
     "backfill-metadata": lambda f, p, cb, cancel: f.backfill_document_metadata(on_progress=cb),
     "backfill-edge-keys": lambda f, p, cb, cancel: f.backfill_edge_keys(on_progress=cb, cancel_check=cancel),
     # re-fetch EU instruments stored as bare metadata stubs (a transient harvest
@@ -132,7 +169,9 @@ RUNNERS: dict[str, Callable] = {
     "mine-parallel": lambda f, p, cb, cancel: f.mine_parallel_citations(**p, on_progress=cb, cancel_check=cancel),
     "match-legislation": lambda f, p, cb, cancel: f.match_named_legislation(**p, on_progress=cb, cancel_check=cancel),
     "match-echr": lambda f, p, cb, cancel: f.match_echr_reports(**p, on_progress=cb, cancel_check=cancel),
-    "rescan": lambda f, p, cb, cancel: f.rescan(**p, on_progress=cb, cancel_check=cancel),
+    "rescan": lambda f, p, cb, cancel: f.rescan(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        run_id=p.get("_resume_run_id"), on_progress=cb, cancel_check=cancel),
     "suggest-matches": lambda f, p, cb, cancel: f.suggest_matches(**p, on_progress=cb, cancel_check=cancel),
     "harvest-echr": lambda f, p, cb, cancel: f.harvest_missing_echr(**p, on_progress=cb, cancel_check=cancel),
     "run-watch": lambda f, p, cb, cancel: f.run_watch(watch_id=p["watch_id"], on_progress=cb, cancel_check=cancel),
@@ -162,24 +201,35 @@ class JobManager:
         self.yield_s = float(os.environ.get("RAGLEX_JOB_YIELD_S") or 0.003)
 
     # -- lifecycle ---------------------------------------------------------
-    def reap_orphans(self) -> int:
+    def reap_orphans(self, *, auto_resume: bool = False) -> int:
         """Mark this process's leftover 'running' rows as interrupted (called at startup).
         Their worker threads died with the previous process; without this they show as
         live forever."""
         with self.facade._open() as (cat, _rs, _ts):
+            rows = [dict(r) for r in cat.running_jobs() if r["origin"] == self.origin]
             n = cat.orphan_running_jobs(self.origin)
             cat.prune_jobs()
         if n:
             log.info("marked %d orphaned %s job(s) as interrupted", n, self.origin)
+        if auto_resume:
+            for row in rows:
+                if row["kind"] in AUTO_RESUME_KINDS and not row["cancel"]:
+                    self._resume_row(row)
         return n
 
-    def start(self, kind: str, label: str, params: dict | None = None) -> dict:
+    def start(self, kind: str, label: str, params: dict | None = None, *,
+              resumed_from: str | None = None, root_job_id: str | None = None,
+              attempt: int = 1, checkpoint: dict | None = None) -> dict:
         if kind not in RUNNERS:
             return {"error": f"unknown job kind {kind!r}"}
-        params = params or {}
+        params = dict(params or {})
         with self.facade._open() as (cat, _rs, _ts):
             running = cat.running_jobs()
-            if kind in SINGLETON_KINDS:
+            for j in running:
+                if _scan_conflict(kind, params, j):
+                    return {"job_id": j["job_id"], "already_running": True,
+                            "conflict": "citation extraction scope overlaps"}
+            if kind in SINGLETON_KINDS and kind not in _SCAN_KINDS:
                 for j in running:
                     if j["kind"] == kind:
                         return {"job_id": j["job_id"], "already_running": True}
@@ -196,12 +246,20 @@ class JobManager:
             if len(running) >= MAX_CONCURRENT_JOBS:
                 return {"error": f"too many jobs running ({len(running)}); let some finish first"}
             job_id = uuid.uuid4().hex[:8]
-            cat.create_job(job_id, kind, label, params, origin=self.origin)
+            policy = RESUME_POLICIES.get(kind, "restart")
+            root = root_job_id or job_id
+            if policy == "checkpoint":
+                params["_resume_run_id"] = root
+            cat.create_job(job_id, kind, label, params, origin=self.origin,
+                           root_job_id=root, resumed_from=resumed_from,
+                           resume_policy=policy, attempt=attempt, checkpoint=checkpoint)
         threading.Thread(target=self._worker, args=(job_id, kind, params), daemon=True).start()
         return {"job_id": job_id}
 
     def _worker(self, job_id: str, kind: str, params: dict) -> None:
-        state = {"progress": {}, "log": [], "cancel": False, "last_poll": 0.0, "last_write": 0.0}
+        state = {"progress": {}, "checkpoint": None, "log": [], "cancel": False,
+                 "last_poll": 0.0, "last_write": 0.0}
+        stopped = threading.Event()
 
         def cancel_check() -> bool:
             # Poll the row, not a local flag — the cancel may come from another process.
@@ -217,6 +275,9 @@ class JobManager:
             return bool(state["cancel"])
 
         def on_progress(**p) -> None:
+            checkpoint = p.pop("_checkpoint", None)
+            if checkpoint is not None:
+                state["checkpoint"] = checkpoint
             state["progress"] = p
             line = fmt_progress(p)
             if line and (not state["log"] or state["log"][-1] != line):
@@ -229,12 +290,22 @@ class JobManager:
                 state["last_write"] = time.monotonic()
                 try:
                     with self.facade._open() as (cat, _rs, _ts):
-                        cat.heartbeat_job(job_id, p, state["log"])
+                        cat.heartbeat_job(job_id, p, state["log"], checkpoint=state["checkpoint"])
                 except Exception:  # noqa: BLE001
                     pass
             if self.yield_s:
                 time.sleep(self.yield_s)  # yield the GIL so the API never starves
 
+        def pulse() -> None:
+            """Keep a truthful liveness heartbeat during one long document/SQL phase."""
+            while not stopped.wait(30):
+                try:
+                    with self.facade._open() as (cat, _rs, _ts):
+                        cat.pulse_job(job_id)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        threading.Thread(target=pulse, daemon=True).start()
         try:
             result = RUNNERS[kind](self.facade, params, on_progress, cancel_check)
             status = "cancelled" if state["cancel"] else "done"
@@ -243,11 +314,17 @@ class JobManager:
             result, status = {"error": str(exc)}, "error"
             state["log"].append(f"✗ error: {exc}")
             log.exception("job %s (%s) failed", job_id, kind)
+        finally:
+            stopped.set()
         try:
             with self.facade._open() as (cat, _rs, _ts):
                 cat.finish_job(job_id, status, result, state["log"])
+                finished = dict(cat.get_job(job_id))
         except Exception:  # noqa: BLE001
             log.exception("could not record completion of job %s", job_id)
+            finished = None
+        if finished and finished.get("restart_requested"):
+            self._resume_row(finished)
 
     # -- reads -------------------------------------------------------------
     @staticmethod
@@ -262,14 +339,31 @@ class JobManager:
 
         running = j["status"] == "running"
         idle = _age_seconds(j["heartbeat_at"]) if running else 0.0
+        lease_idle = _age_seconds(j["lease_heartbeat_at"] or j["heartbeat_at"]) if running else 0.0
         logs = _load(j["log_json"], [])
+        progress = _load(j["progress_json"], {})
+        elapsed = _age_seconds(j["started_at"])
+        done, total = progress.get("done"), progress.get("total")
+        rate = (float(done) / elapsed) if elapsed > 0 and isinstance(done, (int, float)) and done > 0 else None
+        eta = ((float(total) - float(done)) / rate
+               if rate and isinstance(total, (int, float)) and total >= done else None)
         out = {
             "id": j["job_id"], "kind": j["kind"], "label": j["label"], "status": j["status"],
-            "origin": j["origin"], "progress": _load(j["progress_json"], {}),
+            "origin": j["origin"], "progress": progress,
             "started_at": j["started_at"], "finished_at": j["finished_at"],
             "idle_s": round(idle, 1), "stalled": running and idle >= STALL_SECONDS,
+            "process_alive": running and lease_idle < STALL_SECONDS,
+            "lease_idle_s": round(lease_idle, 1),
+            "rate_per_s": round(rate, 3) if rate else None,
+            "eta_s": round(eta) if eta is not None else None,
             "last": (logs or [""])[-1],
             "result": _load(j["result_json"], None),
+            "resume": {
+                "policy": j["resume_policy"] or "restart",
+                "root_job_id": j["root_job_id"] or j["job_id"],
+                "resumed_from": j["resumed_from"], "attempt": j["attempt"] or 1,
+                "checkpoint": _load(j["checkpoint_json"], {}),
+            },
         }
         if tail is not None:
             out["log"] = logs[-tail:]
@@ -293,20 +387,33 @@ class JobManager:
         host slept and its network socket died) or any finished/cancelled one. Rebuilt from
         the stored (kind, params), so it works even across the restart that lost the
         original process."""
-        import json as _json
-
         with self.facade._open() as (cat, _rs, _ts):
             j = cat.get_job(job_id)
             if not j:
                 return {"error": "unknown job"}
-            kind, label = j["kind"], j["label"]
-            try:
-                params = _json.loads(j["params_json"] or "{}")
-            except (ValueError, TypeError):
-                params = {}
             if j["status"] == "running":
-                cat.request_job_cancel(job_id)  # ask the old thread to stop at a checkpoint
-                cat.finish_job(job_id, "cancelled", {"superseded_by_restart": True})
-        res = self.start(kind, label, params)
-        res["restarted_from"] = job_id
+                # Never overlap an old worker with its replacement. Python cannot kill a
+                # thread parked in a socket; marking it finished and launching another
+                # caused two writers to race when the old socket eventually returned.
+                cat.request_job_restart(job_id)
+                return {"job_id": job_id, "cancelling": True,
+                        "restart_when_stopped": True}
+            row = dict(j)
+        return self._resume_row(row)
+
+    def _resume_row(self, row: dict) -> dict:
+        import json as _json
+
+        try:
+            params = _json.loads(row.get("params_json") or "{}")
+            checkpoint = _json.loads(row.get("checkpoint_json") or "{}")
+        except (ValueError, TypeError):
+            params, checkpoint = {}, {}
+        root = row.get("root_job_id") or row["job_id"]
+        res = self.start(row["kind"], row["label"], params,
+                         resumed_from=row["job_id"], root_job_id=root,
+                         attempt=int(row.get("attempt") or 1) + 1,
+                         checkpoint=checkpoint)
+        res["restarted_from"] = row["job_id"]
+        res["resume_policy"] = RESUME_POLICIES.get(row["kind"], "restart")
         return res

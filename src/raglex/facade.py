@@ -6272,7 +6272,8 @@ class Facade:
             cat.delete_alias(phrase)
             return {"phrase": phrase, "deleted": True}
 
-    def apply_rules(self, *, source: str | None = None, on_progress=None, cancel_check=None) -> dict:
+    def apply_rules(self, *, source: str | None = None, run_id: str | None = None,
+                    on_progress=None, cancel_check=None) -> dict:
         """Re-extract document text with the current grammars + user rules — the "re-scan the
         corpus for new potential citations" action. Run this after a new adapter/grammar
         lands (e.g. the law-report grammars, ECHR app numbers) so already-stored docs pick
@@ -6282,20 +6283,21 @@ class Facade:
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()
-            docs_iter = cat.list_documents(source=source, limit=200000) if source \
-                else cat.list_documents(limit=200000)
-            ids = [r["stable_id"] for r in docs_iter if r["has_text"]]
+            ids = cat.text_document_ids(source=source,
+                                        exclude_extraction_run_id=run_id)
             docs = cites = 0
             cancelled = False
             for i, sid in enumerate(ids, 1):
                 if cancel_check and cancel_check():
                     cancelled = True
                     break
-                _progress(on_progress, stage="re-scanning citations", done=i, total=len(ids), item=sid)
-                n = extract_document(cat, ts, sid, aliases=aliases)
+                n = extract_document(cat, ts, sid, aliases=aliases, run_id=run_id)
                 if n:
                     docs += 1
                     cites += n
+                _progress(on_progress, stage="re-scanning citations", done=i, total=len(ids),
+                          item=sid, _checkpoint={"phase": "extract", "completed": i,
+                                                "last_id": sid, "run_id": run_id})
             # don't run the (long, un-interruptible) resolve if the user cancelled —
             # so a cancel actually stops promptly instead of grinding to completion.
             if cancelled:
@@ -6728,7 +6730,7 @@ class Facade:
     def rescan(self, *, limit: int | None = None, coref: bool = True, parallel: bool = True,
                doc_types: list[str] | None = None, source: str | None = None,
                only_unextracted: bool = False, stale_days: int | None = None,
-               on_progress=None, cancel_check=None) -> dict:
+               run_id: str | None = None, on_progress=None, cancel_check=None) -> dict:
         """Full fresh relink of the corpus: re-extract every text document with the current
         grammars, then run the whole resolution chain — so every fix (statute-name grammar,
         carry-forward cue/kind, the enlarged case pool, name/EHRR/EU matchers, parallel
@@ -6768,18 +6770,22 @@ class Facade:
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()          # user shorthand rules — loaded ONCE
             ids = cat.text_document_ids(limit=limit, doc_types=doc_types, source=source,
-                                        only_unextracted=only_unextracted, stale_days=stale_days)
+                                        only_unextracted=only_unextracted, stale_days=stale_days,
+                                        exclude_extraction_run_id=run_id)
             total = len(ids)
             docs = cites = 0
             for i, sid in enumerate(ids):
                 if _cancelled():
                     break
-                n = extract_document(cat, ts, sid, aliases=aliases)
+                n = extract_document(cat, ts, sid, aliases=aliases, run_id=run_id)
                 if n:
                     docs += 1
                     cites += n
-                if on_progress and i % 500 == 0:
-                    _progress(on_progress, stage="re-extracting corpus", done=i, total=total)
+                if on_progress and (i % 100 == 0 or i + 1 == total):
+                    _progress(on_progress, stage="re-extracting corpus", done=i + 1,
+                              total=total, item=sid,
+                              _checkpoint={"phase": "extract", "completed": i + 1,
+                                           "last_id": sid, "run_id": run_id})
             resolved = Resolver(cat).run()
         report["extract"] = {"docs_reextracted": docs, "citations": cites,
                              "resolved_edges": resolved.resolved, "total": total}

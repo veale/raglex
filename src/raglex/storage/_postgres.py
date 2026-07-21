@@ -164,6 +164,8 @@ CREATE TABLE IF NOT EXISTS documents (
     topic_score      REAL,
     upstream_status  TEXT NOT NULL DEFAULT 'live',
     upstream_status_at TEXT,
+    last_extracted_at TEXT,
+    last_extraction_run_id TEXT,
     fetched_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
@@ -232,7 +234,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     cancel        INTEGER NOT NULL DEFAULT 0,
     started_at    TEXT NOT NULL,
     heartbeat_at  TEXT,
-    finished_at   TEXT
+    finished_at   TEXT,
+    root_job_id   TEXT,
+    resumed_from  TEXT,
+    resume_policy TEXT NOT NULL DEFAULT 'restart',
+    attempt       INTEGER NOT NULL DEFAULT 1,
+    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+    restart_requested INTEGER NOT NULL DEFAULT 0,
+    lease_heartbeat_at TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status, started_at);
 
