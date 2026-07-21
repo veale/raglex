@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import zipfile
 
-from raglex.adapters.nl_legislation import _parse_sru_page
+from raglex.adapters.nl_legislation import NLLegislationAdapter, _parse_sru_page
 from raglex.adapters.nl_rechtspraak import NLRechtspraakAdapter, parse_lido_links
 from raglex.citations.dutch import law_name_alias
 from raglex.citations.extractor import extract_citations
@@ -58,6 +58,22 @@ def test_rechtspraak_bulk_zip_is_discoverable(tmp_path):
         zf.writestr("2021/ECLI_NL_HR_2021_1.xml", "<x/>")
     stubs = list(NLRechtspraakAdapter(path=str(archive)).discover(None))
     assert len(stubs) == 1 and stubs[0].hints["member"].endswith(".xml")
+
+
+def test_bwb_bulk_retains_old_versions_and_makes_latest_the_work(tmp_path):
+    archive = tmp_path / "bwb.zip"
+    template = '''<toestand><meta><identifier>BWBR0002221</identifier>
+      <geldigheidsdatum>{date}</geldigheidsdatum></meta><wetgeving>
+      <citeertitel>Voorbeeldwet</citeertitel><wettekst><artikel><kop><nr>1</nr></kop>
+      <lid><al>Tekst.</al></lid></artikel></wettekst></wetgeving></toestand>'''
+    with zipfile.ZipFile(archive, "w") as zf:
+        for date in ("2015-01-01", "2020-01-01"):
+            zf.writestr(f"BWBR0002221_{date}.xml", template.format(date=date))
+    adapter = NLLegislationAdapter(path=str(archive))
+    stubs = list(adapter.discover(None))
+    assert [s.stable_id for s in stubs] == ["BWBR0002221@2015-01-01", "BWBR0002221"]
+    old = adapter.fetch(stubs[0])
+    assert old and old.extra["point_in_time"] == "2015-01-01"
 
 
 def test_lido_outgoing_graph_keeps_historical_statute_version():

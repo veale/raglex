@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from pathlib import Path
 from typing import Iterator
 from xml.etree import ElementTree as ET
+import zipfile
 
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
@@ -43,6 +45,22 @@ DEFAULT_IDS = (
 def _date(value: str | None) -> date | None:
     if not value:
         return None
+
+
+def _bulk_identity(data: bytes, name: str = "") -> tuple[str, str] | None:
+    """Read the BWB work id and validity date from an official bulk XML member."""
+    sample = data[:300_000].decode("utf-8", "ignore")
+    bwb = re.search(r"\b(BWB[RV]\d{7})\b", name + " " + sample, re.I)
+    if not bwb:
+        return None
+    # KOOP dumps vary by generation; accept the standard element/attribute names and
+    # finally a date carried in the member name.
+    dm = re.search(
+        r"(?:geldigheidsdatum|geldig-van|geldig_van|inwerkingtreding)[^>0-9]{0,80}"
+        r"(?:>|[=\"'])\s*(\d{4}-\d{2}-\d{2})", sample, re.I)
+    if not dm:
+        dm = re.search(r"(\d{4}-\d{2}-\d{2})", name)
+    return (bwb.group(1).upper(), dm.group(1) if dm else "0001-01-01")
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
     except ValueError:
@@ -62,6 +80,7 @@ class NLLegislationAdapter(BaseAdapter):
         rechtsgebied: str | None = None,
         all_records: bool = False,
         version_date: str | None = None,
+        path: str | None = None,
         use_sru: bool = True,
         client: RateLimitedClient | None = None,
     ) -> None:
@@ -73,6 +92,7 @@ class NLLegislationAdapter(BaseAdapter):
         # otherwise a configured BWB-id list. SRU also drives delta sync.
         self.rechtsgebied = rechtsgebied
         self.version_date = version_date
+        self.path = Path(path) if path else None
         self.use_sru = use_sru
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
@@ -90,6 +110,9 @@ class NLLegislationAdapter(BaseAdapter):
         return _parse_sru_page(resp.content)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        if self.path is not None:
+            yield from self._discover_bulk()
+            return
         # 1) SRU path (topic discovery + delta sync via dcterms.modified).
         if self.use_sru:
             clauses = []
@@ -130,6 +153,41 @@ class NLLegislationAdapter(BaseAdapter):
             yield Stub(stable_id=sid, landing_url=f"{BASE_URL}/{bwbid}",
                        hints={"bwbid": bwbid, "geldig": self.version_date})
 
+    def _discover_bulk(self) -> Iterator[Stub]:
+        """Enumerate every toestand in a KOOP bulk zip/folder, retaining history."""
+        entries: list[tuple[str, str, dict]] = []
+        archives = [self.path] if self.path.is_file() and self.path.suffix.lower() == ".zip" else (
+            sorted(self.path.rglob("*.zip")) if self.path.is_dir() else [])
+        for archive in archives:
+            try:
+                with zipfile.ZipFile(archive) as zf:
+                    for member in zf.namelist():
+                        if not member.lower().endswith(".xml"):
+                            continue
+                        raw = zf.read(member)
+                        ident = _bulk_identity(raw, member)
+                        if ident:
+                            entries.append((*ident, {"archive": str(archive), "member": member}))
+            except (OSError, zipfile.BadZipFile):
+                continue
+        if self.path.is_dir():
+            for xml in sorted(self.path.rglob("*.xml")):
+                try:
+                    ident = _bulk_identity(xml.read_bytes(), str(xml))
+                except OSError:
+                    continue
+                if ident:
+                    entries.append((*ident, {"file": str(xml)}))
+        latest = {}
+        for bwb, valid, _ in entries:
+            latest[bwb] = max(valid, latest.get(bwb, ""))
+        for bwb, valid, hints in entries:
+            # The latest toestand is the undated Work node; every earlier toestand is
+            # separately addressable for time-correct Juriconnect edges.
+            sid = bwb if valid == latest[bwb] else f"{bwb}@{valid}"
+            yield Stub(stable_id=sid, landing_url=f"{BASE_URL}/{bwb}",
+                       hint_date=_date(valid), hints={**hints, "bwbid": bwb, "geldig": valid})
+
     def _resolve_date(self, bwbid: str) -> str | None:
         """Find the current in-force *toestand* date from the work landing page
         (the BWB XML path requires an exact toestand date, not an arbitrary one)."""
@@ -142,15 +200,29 @@ class NLLegislationAdapter(BaseAdapter):
 
     def fetch(self, stub: Stub) -> Record | None:
         bwbid = stub.hints.get("bwbid") or stub.stable_id.split("@", 1)[0]
-        # prefer the in-force date SRU already gave us; else resolve from the page
+        if stub.hints.get("archive"):
+            try:
+                with zipfile.ZipFile(stub.hints["archive"]) as zf:
+                    raw = zf.read(stub.hints["member"])
+            except (OSError, KeyError, zipfile.BadZipFile):
+                return None
+        elif stub.hints.get("file"):
+            try:
+                raw = Path(stub.hints["file"]).read_bytes()
+            except OSError:
+                return None
+        else:
+            raw = None
+        # prefer the in-force date SRU/bulk metadata already gave us
         date = stub.hints.get("geldig") or self._resolve_date(bwbid)
         if not date:
             return None
-        try:
-            resp = self._client.get(f"{BASE_URL}/{bwbid}/{date}/0/xml")
-        except FetchError:
-            return None
-        raw = resp.content
+        if raw is None:
+            try:
+                resp = self._client.get(f"{BASE_URL}/{bwbid}/{date}/0/xml")
+            except FetchError:
+                return None
+            raw = resp.content
         parsed = parse("bwb", raw)
         if not parsed.text:
             return None

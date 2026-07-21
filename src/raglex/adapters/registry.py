@@ -532,7 +532,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("rechtsgebied", "Legal area", "e.g. staats- en bestuursrecht"),
          SourceOption("all_records", "Entire BWB", "true — paginate every SRU record"),
          SourceOption("ids", "BWB identifiers", "BWBR0040940,BWBR0045754"),
-         SourceOption("version_date", "Exact historical date", "YYYY-MM-DD")),
+         SourceOption("version_date", "Exact historical date", "YYYY-MM-DD"),
+         SourceOption("path", "KOOP bulk path", "bulk zip or extracted XML folder")),
     ),
     "fr-legislation": SourceInfo(
         "fr-legislation", "France — Légifrance (codes, PISTE)", "legislation", "FR", False,
