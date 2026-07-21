@@ -116,6 +116,8 @@ _CASE_NAME_BEFORE = re.compile(
     # every token is capitalised.
     r"(?P<p1>[A-ZÀ-ÖØ-Þ][^,;\n]{1,100}?)\s+v\.?\s+"
     r"(?P<p2>[A-ZÀ-ÖØ-Þ][^,;\n]{1,100}?)\s*,?\s*$")
+_STATUTE_NAME_BEFORE = re.compile(
+    r"(?P<name>[A-Z][A-Za-zÀ-ÿ'’()&.\- ]{2,100}?\s+(?:Act|Regulations?))\s*,?\s*$")
 # Parties too generic to be a distinctive short form: a bare "Canada, at para 5"
 # or "R, at para 2" must never mint a link. Government/Crown/office parties only —
 # a real surname (Dunsmuir, Khosa, Vavilov) always survives.
@@ -207,6 +209,13 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
                     or m.group("hf") or "").strip(" '\"“”’")
             if len(name) >= 3:
                 _register(name, c, abbrev=is_statute or _is_abbrev(name))
+        # Formal chapter citations are commonly introduced by the short title:
+        # "Citizenship Act, R.S.C. 1985, c. C-29". Learn that title for later
+        # "s. 3(2)(a) of the Citizenship Act" uses in the same judgment.
+        if is_statute:
+            nm = _STATUTE_NAME_BEFORE.search(text[max(0, c.char_start - 140):c.char_start])
+            if nm:
+                _register(nm.group("name"), c, abbrev=True)
         if not is_case:
             continue
         # CJEU "judgment in <Name>" label, immediately either side of the citation
@@ -248,7 +257,7 @@ def _link_shorthand_uses(
     if abbrev:
         # a bare mention, optionally preceded by "the" — but not when it's being
         # (re)defined in brackets, which the def pass already owns
-        pat += (rf"|(?<![\[(\"“'])(?:(?P<prov>(?:ss?\.?\s*\d+[A-Za-z]?(?:\([^)]*\))*"
+        pat += (rf"|(?<![\[(\"“'])(?:(?P<prov>(?:ss?\.?\s*\d+[A-Za-z]?(?:\s*\([^)]*\))*"
                 rf"|Sched(?:ule)?\.?\s*[IVXLC\d]+))\s+(?:of|to)\s+(?:the\s+)?)?"
                 rf"\b{esc}\b(?![\"”'\])])")
     use_re = re.compile(pat, re.IGNORECASE if not abbrev else 0)
@@ -265,6 +274,7 @@ def _link_shorthand_uses(
             provision_pin = (re.sub(r"(?i)^Sched(?:ule)?\.?\s*", "Sch. ", prov)
                              if re.match(r"(?i)^Sched", prov)
                              else re.sub(r"(?i)^ss?\.?\s*", "s. ", prov))
+            provision_pin = re.sub(r"\s*(\([^)]*\))\s*", r"\1", provision_pin)
         out.append(Citation(
             raw=m.group(0), entity_kind=entity_kind, candidate_id=candidate_id,
             pinpoint=_pin_text(run) if run else provision_pin,

@@ -297,6 +297,14 @@ def test_canadian_spaced_paragraph_pinpoint_carries_forward_whole():
     assert any(c.candidate_id == "ca/act/c-29" and c.pinpoint == "s. 3(2)(a)" for c in cs)
 
 
+def test_canadian_formal_citation_teaches_act_title_for_later_pinpoints():
+    text = ("Citizenship Act, R.S.C. 1985, c. C-29. Later, Section 3(2) (a) provides "
+            "that s. 3(1) (a) of the Citizenship Act applies.")
+    cs = extract_citations(text)
+    assert any(c.method == "shorthand" and c.candidate_id == "ca/act/c-29"
+               and c.pinpoint == "s. 3(1)(a)" for c in cs)
+
+
 def test_canadian_annual_statute_uses_its_official_alias_as_candidate():
     """The annual chapter number ("c. 18") is not the consolidated id, so it resolves
     via the alias the ca-federal import mints."""
