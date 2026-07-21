@@ -130,6 +130,8 @@ class DeRiiAdapter(BaseAdapter):
             extra={k: v for k, v in {
                 "aktenzeichen": docket,
                 "doktyp": parsed.metadata.get("doktyp"),
+                "court_code": parsed.metadata.get("court_code"),
+                "court_body": parsed.metadata.get("court_body"),
                 "aliases": [case_alias(court, docket)] if court and docket else None,
             }.items() if v},
         )

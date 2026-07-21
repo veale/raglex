@@ -45,7 +45,8 @@ def test_de_gii_slug():
 RII = """<?xml version="1.0" encoding="UTF-8"?>
 <dokumente>
  <dokument doknr="KVRE123">
-  <gericht>Bundesgerichtshof</gericht>
+  <gertyp>BGH</gertyp>
+  <spruchkoerper>VI. Zivilsenat</spruchkoerper>
   <ecli>ECLI:DE:BGH:2021:120521UVIZR100.20.0</ecli>
   <entsch-datum>2021-05-12</entsch-datum>
   <aktenzeichen>VI ZR 100/20</aktenzeichen>
@@ -63,6 +64,8 @@ def test_rii_parser_zones_and_ecli():
     d = parse_rii(RII)
     assert d.metadata["ecli"] == "ECLI:DE:BGH:2021:120521UVIZR100.20.0"
     assert d.metadata["court"] == "Bundesgerichtshof"
+    assert d.metadata["court_code"] == "BGH"
+    assert d.metadata["court_body"] == "VI. Zivilsenat"
     assert d.decision_date == date(2021, 5, 12)
     assert [s.label for s in d.segments] == ["Leitsatz", "Tenor", "Tatbestand", "Entscheidungsgründe"]
 
@@ -76,6 +79,8 @@ def test_de_rii_local_fetch(tmp_path):
     assert rec.doc_type == DocType.JUDGMENT
     assert rec.ecli == "ECLI:DE:BGH:2021:120521UVIZR100.20.0"
     assert rec.court == "Bundesgerichtshof" and rec.text
+    assert rec.extra["court_code"] == "BGH"
+    assert rec.extra["court_body"] == "VI. Zivilsenat"
 
 
 # -- France: DILA (constructed fixtures, DTD shapes) ------------------------

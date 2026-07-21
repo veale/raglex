@@ -30,6 +30,28 @@ _ZONES = (
     ("sonstlt", "Sonstiger Langtext"),
 )
 
+# ``gertyp`` is the court field in the official RII DTD.  Keep one canonical,
+# human-readable value in ``documents.court`` so facets do not split between an
+# abbreviation from the bulk feed and a long name from another German source.
+_COURT_NAMES = {
+    "BVerfG": "Bundesverfassungsgericht",
+    "BGH": "Bundesgerichtshof",
+    "BAG": "Bundesarbeitsgericht",
+    "BFH": "Bundesfinanzhof",
+    "BSG": "Bundessozialgericht",
+    "BVerwG": "Bundesverwaltungsgericht",
+    "BPatG": "Bundespatentgericht",
+    "GmSOGB": "Gemeinsamer Senat der obersten Gerichtshöfe des Bundes",
+}
+
+
+def rii_court_name(value: str | None) -> str | None:
+    """Canonical display name for an RII ``gertyp`` token."""
+    if not value:
+        return None
+    value = " ".join(value.split())
+    return _COURT_NAMES.get(value, value)
+
 
 def _find(root: ET.Element, tag: str) -> ET.Element | None:
     return next((e for e in root.iter() if localname(e.tag).lower() == tag), None)
@@ -65,7 +87,11 @@ def parse_rii(data: bytes) -> ParsedDoc:
         doc = root
 
     ecli = _text(doc, "ecli")
-    court = _text(doc, "gericht")
+    # Real RII documents carry ``gertyp`` and ``spruchkoerper``.  ``gericht`` is
+    # accepted as a compatibility fallback for older fixtures/derived exports.
+    court_code = _text(doc, "gertyp") or _text(doc, "gericht")
+    court = rii_court_name(court_code)
+    court_body = _text(doc, "spruchkoerper")
     aktenzeichen = _text(doc, "aktenzeichen") or _text(doc, "az")
     doc_date = _iso(_text(doc, "entsch-datum") or _text(doc, "entscheidungsdatum"))
     title = _text(doc, "titelzeile") or ", ".join(x for x in (court, aktenzeichen) if x) or ecli
@@ -85,8 +111,10 @@ def parse_rii(data: bytes) -> ParsedDoc:
         segments=segments,
         title=title,
         decision_date=doc_date,
-        metadata={"ecli": ecli, "court": court, "aktenzeichen": aktenzeichen,
-                  "doktyp": _text(doc, "doktyp"), "doknr": doc.get("doknr")},
+        metadata={"ecli": ecli, "court": court, "court_code": court_code,
+                  "court_body": court_body, "aktenzeichen": aktenzeichen,
+                  "doktyp": _text(doc, "doktyp"),
+                  "doknr": _text(doc, "doknr") or doc.get("doknr")},
     )
 
 
