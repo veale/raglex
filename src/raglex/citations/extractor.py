@@ -103,7 +103,7 @@ _SHORTHAND_DEF = re.compile(
 # Rights, paragraph 57." Without this the later short references dangle, losing the
 # pincites the opinion actually turns on. The label can sit either side of the
 # citation, so both windows are searched.
-_CJEU_LABEL = re.compile(r"judgment\s+in\s+(?P<name>[A-Z][A-Za-z'’&.\- ]{2,40}?)\s*(?=[,.]|$)",
+_CJEU_LABEL = re.compile(r"judgment\s+in\s+(?P<name>[A-Z][A-Za-z0-9'’&.\- ]{2,40}?)\s*(?=[,.]|$)",
                          re.IGNORECASE)
 
 # A case NAME immediately before a citation — "Dunsmuir v. New Brunswick, " ahead
@@ -205,8 +205,12 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
         if not is_case:
             continue
         # CJEU "judgment in <Name>" label, immediately either side of the citation
-        for side in (text[max(0, c.char_start - 60): c.char_start],
-                     text[c.char_end: c.char_end + 60]):
+        # Joined-case introductions are longer (``Cases C-203/15 and C-698/15,
+        # the judgment in Tele2 Sverige and Watson, EU:C:…``); 60 characters cut
+        # the label in half immediately before the ECLI, so its later pincites
+        # remained unlinked.  This is still a deliberately tight local window.
+        for side in (text[max(0, c.char_start - 140): c.char_start],
+                     text[c.char_end: c.char_end + 100]):
             lm = _CJEU_LABEL.search(side)
             if lm and not re.match(r"\s*,?\s*(?:paragraph|para)", side[lm.end():]):
                 _register(lm.group("name"), c, abbrev=False)

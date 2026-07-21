@@ -249,3 +249,12 @@ def test_cjeu_judgment_in_shortname_coref():
     # same case (62012CJ0293 resolves to ECLI:EU:C:2014:238 via the CELEX→ECLI alias)
     assert {c.candidate_id for c in sh} in ({"62012CJ0293"}, {"ECLI:EU:C:2014:238"})
     assert {c.pinpoint for c in sh} == {"para 57", "para 65"}
+
+
+def test_cjeu_joined_case_long_intro_still_defines_shortname():
+    text = ("Cases C-203/15 and C-698/15, the judgment in Tele2 Sverige and Watson, "
+            "EU:C:2016:970. Later: Judgment in Tele2 Sverige and Watson, paragraph 105.")
+    sh = [c for c in extract_citations(text) if c.method == "shorthand"]
+    assert len(sh) == 1
+    assert sh[0].candidate_id in {"62015CJ0203", "62015CJ0698", "ECLI:EU:C:2016:970"}
+    assert sh[0].pinpoint == "para 105"
