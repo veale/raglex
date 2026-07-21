@@ -458,3 +458,32 @@ def test_lawmaker_nested_notes_recover_line_breaks():
 def test_reparse_sniffer_recognises_lawmaker_html():
     from raglex.facade import _sniff_format
     assert _sniff_format(LAWMAKER_TAS_HTML) == "lawmaker-html"
+
+
+def test_reparse_uses_stored_format_when_legacy_html_has_no_sniff_marker(tmp_path, monkeypatch):
+    """A source-site template change must not strand a re-derivable projection."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from raglex.facade import Facade
+
+    raw = tmp_path / "legacy.html"
+    raw.write_bytes(LAWMAKER_TAS_HTML.replace(b'id="fragview"', b'id="old-view"'))
+    doc = {
+        "stable_id": "au/tas/sr/2019/61", "source": "au-tas",
+        "raw_path": str(raw), "payload_hash": "abc",
+    }
+    cat = SimpleNamespace(
+        get_document=lambda _sid: doc,
+        document_meta=lambda _sid: {"format": "lawmaker-html"},
+    )
+    ts = SimpleNamespace(put=lambda *_args: None, put_segments=lambda *_args: None)
+
+    @contextmanager
+    def opened():
+        yield cat, None, ts
+
+    facade = object.__new__(Facade)
+    monkeypatch.setattr(facade, "_open", opened)
+    got = facade.reparse_document(stable_id="au/tas/sr/2019/61")
+    assert got["reparsed"] is True
+    assert got["format"] == "lawmaker-html"

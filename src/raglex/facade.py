@@ -3084,7 +3084,16 @@ class Facade:
                 text, segments = extract_formex(raw)
                 fmt = "formex-judgment"
             else:
-                fmt = _sniff_format(raw)
+                # Older harvests can pre-date (or omit) a byte signature that the
+                # current sniffer knows about.  The importer records the parser format
+                # in document metadata, so prefer that durable projection hint and use
+                # byte sniffing only as a fallback.  This is especially important for
+                # LawMaker pages whose surrounding site template changes over time.
+                meta = cat.document_meta(stable_id)
+                hinted = str(meta.get("format") or "").strip().lower()
+                fmt = hinted if hinted in {
+                    "akn", "bwb", "formex-legislation", "lawmaker-html",
+                } else _sniff_format(raw)
                 if fmt is None:
                     return {"stable_id": stable_id, "reparsed": False, "reason": "no structural format"}
                 if fmt == "lawmaker-html":
