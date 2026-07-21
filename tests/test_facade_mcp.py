@@ -78,6 +78,20 @@ def test_facade_document_mentions_grouped_and_ranked(config):
     assert {g["src_id"] for g in only1["groups"]} == {a}
 
 
+def test_mentions_of_parent_article_include_subarticles(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>Article 22 Automated decisions</p>", filename="gdpr.html",
+                            doc_type="legislation", title="GDPR")["stable_id"]
+    srcs = []
+    for i, anchor in enumerate(("Article 22", "Article 22(1)", "Article 22(3)")):
+        src = f.import_bytes(data=f"<p>cite {i}</p>".encode(), filename=f"c{i}.html",
+                             doc_type="judgment", title=f"C{i} v D")["stable_id"]
+        f.link(src_id=src, dst_id=target, relationship="mentions", dst_anchor=anchor)
+        srcs.append(src)
+    got = f.document_mentions(target, anchor="Article 22")
+    assert {g["src_id"] for g in got["groups"]} == set(srcs)
+
+
 def test_facade_list_documents_query_is_case_insensitive(config):
     f = Facade(config)
     f.import_bytes(data=b"<p>right to erasure</p>", filename="e.html",

@@ -32,7 +32,8 @@ export function PeekProvider({ children }: { children: any }) {
 type Tray =
   | { kind: "mentions"; target: string; anchor?: string; label: any }
   | { kind: "cites"; target: string; family: "cases" | "statute"; label: any }
-  | { kind: "doc"; id: string; highlightTarget?: string; highlightAnchor?: string; label: any };
+  | { kind: "doc"; id: string; highlightTarget?: string; highlightAnchor?: string;
+      occurrenceStart?: number; label: any };
 const TrayCtx = createContext<{ stack: Tray[]; push: (t: Tray) => void; closeAt: (i: number) => void } | null>(null);
 export function useTray() {
   return useContext(TrayCtx) ?? { stack: [] as Tray[], push: (_t: Tray) => {}, closeAt: (_i: number) => {} };
@@ -107,7 +108,8 @@ export function EscapeCloser() {
 }
 
 function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => void }) {
-  if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget} highlightAnchor={t.highlightAnchor} open={open} />;
+  if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget}
+    highlightAnchor={t.highlightAnchor} occurrenceStart={t.occurrenceStart} open={open} />;
   if (t.kind === "cites") return <CitesTray target={t.target} family={t.family} open={open} />;
   return <MentionsTray target={t.target} anchor={t.anchor} open={open} />;
 }
@@ -196,8 +198,10 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
         <div className="mgroup" key={i}>
           <div className="mgroup-head">
             <a className="mgroup-title" title="Open this citing document in a new tray, with its citing passages highlighted"
-              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
+              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor,
+                occurrenceStart: g.snippets[0]?.start, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
               <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
+            {g.count > 1 && <span className="tag" title={`${g.count} separate mentions in this document`}>↔ {g.count}</span>}
             <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
           </div>
           <div className="mgroup-meta muted">
@@ -208,7 +212,10 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
           {/* the anchor places the quote WITHIN THE CITING document; with only one
               passage there is nothing to disambiguate, so it just adds noise */}
           {g.snippets.map((s: any, j: number) => (
-            <div className="msnip" key={j}>
+            <div className="msnip" key={j} role="button" title="Open at this exact mention"
+              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target,
+                highlightAnchor: anchor, occurrenceStart: s.start,
+                label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
               {s.anchor && g.snippets.length > 1 && <span className="msnip-anchor">{s.anchor}</span>}
               <span className="msnip-text">…<SnipText s={s} />…</span></div>
           ))}
@@ -246,13 +253,18 @@ function CitesTray({ target, family, open }: { target: string; family: "cases" |
 
 // A read-only reader inside a tray, highlighting the paragraphs where the document cites
 // the origin document (the "bit linked from"), scrolled to the first.
-function MentionReader({ id, highlightTarget, highlightAnchor, open }:
-  { id: string; highlightTarget?: string; highlightAnchor?: string; open: (id: string, a?: string) => void }) {
+function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, open }:
+  { id: string; highlightTarget?: string; highlightAnchor?: string; occurrenceStart?: number;
+    open: (id: string, a?: string) => void }) {
   const [body] = useAsync(() => api.documentBody(id), [id]);
+  const [occIndex, setOccIndex] = useState(0);
   const peek = usePeek();
   const onCite = (c: any) => peek.push(citePeek(c));
-  const segs: any[] = body?.segments || [];
+  const segs: any[] = (body?.segments || []).length ? body.segments
+    : body?.text ? [{ label: "document", char_start: 0, char_end: body.text.length, kind: "document", level: 0 }] : [];
   const cites: any[] = body?.citations || [];
+  const occurrences = highlightTarget ? cites.filter((c: any) => c.resolved_id === highlightTarget)
+    .sort((a: any, b: any) => a.char_start - b.char_start) : [];
   // paragraphs where THIS document cites the target. When the reader arrived from a
   // specific pinpoint ("Article 25 GDPR"), the citation of THAT pinpoint is the one
   // to jump to — not merely the first mention of the instrument (which is often an
@@ -273,16 +285,28 @@ function MentionReader({ id, highlightTarget, highlightAnchor, open }:
     });
   }
   useEffect(() => {
+    if (!occurrences.length) return;
+    const exact = occurrenceStart == null ? -1
+      : occurrences.findIndex((c: any) => c.char_start === occurrenceStart);
+    const pinned = wantKey ? occurrences.findIndex((c: any) => c.pinpoint && anchorKey(c.pinpoint) === wantKey) : -1;
+    setOccIndex(exact >= 0 ? exact : pinned >= 0 ? pinned : 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, occurrenceStart, highlightTarget, highlightAnchor]);
+  useEffect(() => {
     if (!body) return;
-    // the pinpoint's own paragraph wins; else the first target mention
+    const occurrence = occurrences[occIndex];
+    // An exact citation span wins even in one enormous/unsegmented paragraph.
+    // Segment fallback remains for old structured edges without stored offsets.
     const target = pinpointSeg != null ? pinpointSeg : [...hi][0];
-    if (target != null) {
-      const el = document.getElementById(`tray-${id}-seg-${target}`);
+    if (occurrence || target != null) {
+      const el = occurrence
+        ? document.getElementById(`tray-${id}-cite-${occurrence.char_start}`)
+        : document.getElementById(`tray-${id}-seg-${target}`);
       if (el) setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "center" });
         el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 1600); }, 80);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [body]);
+  }, [body, occIndex]);
   if (!body) return <p className="muted loading-pulse">Loading…</p>;
   return (
     <SelectionShorthand docId={id}>
@@ -293,7 +317,7 @@ function MentionReader({ id, highlightTarget, highlightAnchor, open }:
       {!body.text && <p className="muted">No text (metadata only).</p>}
       <div className="reader">
         {segs.map((s: any, i: number) => {
-          const sb = segBody(body.text, s, cites, onCite);
+          const sb = segBody(body.text, s, cites, onCite, undefined, undefined, `tray-${id}`);
           return (
             <div className={`seg lvl${Math.min(s.level, 2)} kind-${s.kind}${hi.has(i) ? " seg-hi" : ""}${i === pinpointSeg ? " seg-pinpoint" : ""}`} key={i} id={`tray-${id}-seg-${i}`}>
               {sb.showLabel && <span className="seg-label">{s.label}</span>}
@@ -302,6 +326,12 @@ function MentionReader({ id, highlightTarget, highlightAnchor, open }:
           );
         })}
       </div>
+      {occurrences.length > 1 && <div className="tray-occ-nav">
+        <button className="mini" disabled={occIndex <= 0} onClick={() => setOccIndex((n) => Math.max(0, n - 1))}>← previous</button>
+        <span className="muted">mention {occIndex + 1} of {occurrences.length}</span>
+        <button className="mini" disabled={occIndex >= occurrences.length - 1}
+          onClick={() => setOccIndex((n) => Math.min(occurrences.length - 1, n + 1))}>next →</button>
+      </div>}
     </SelectionShorthand>
   );
 }
@@ -911,7 +941,8 @@ function renderRun(text: string, key: string, paraSet?: Set<string>, onPara?: (n
 // cited authority (JADE-style inline links) — resolved → peek the authority (+ pinpoint),
 // pending → marked as a citation we've parsed but don't yet hold. Paragraph refs jump.
 function renderCited(text: string, segStart: number, segEnd: number, cites: any[],
-                     onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void) {
+                     onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void,
+                     idPrefix?: string) {
   const within = cites
     .filter((c) => c.char_start >= segStart && c.char_end <= segEnd)
     .sort((a, b) => a.char_start - b.char_start);
@@ -930,7 +961,8 @@ function renderCited(text: string, segStart: number, segEnd: number, cites: any[
       : state === "pending" ? `${c.entity_kind}: ${c.candidate_id} — not in the corpus yet (click to fetch)`
       : `${c.entity_kind} reference — not resolvable automatically (click to search)`;
     // resolved links get a rich hover card (CiteHoverLayer) instead of the native tooltip
-    nodes.push(<a key={k} className={`cite cite-${state}${guess ? " cite-inferred" : ""}`}
+    nodes.push(<a key={k} id={idPrefix ? `${idPrefix}-cite-${c.char_start}` : undefined}
+      className={`cite cite-${state}${guess ? " cite-inferred" : ""}`}
       title={state === "resolved" && !guess ? undefined : title}
       data-doc={state === "resolved" ? c.resolved_id : undefined} data-pin={c.pinpoint || undefined}
       onClick={() => onCite(c)}>{label}</a>);
@@ -1001,13 +1033,13 @@ function railCaption(s: { label: string; kind: string }): { prefix: string; num:
 // Each line becomes its own block so the indent applies to the WHOLE provision, wrapped
 // lines included — not just the first line, which a text-indent would give.
 function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
-                  paraSet?: Set<string>, onPara?: (n: string) => void) {
+                  paraSet?: Set<string>, onPara?: (n: string) => void, idPrefix?: string) {
   return (
     <>
       {s.lines.map((ln: any, i: number) => (
         <div className="stat-line" key={i}
           style={ln.depth ? { paddingLeft: `calc(var(--indent-step) * ${ln.depth})` } : undefined}>
-          {renderCited(text, ln.start, ln.end, cites, onCite, paraSet, onPara)}
+          {renderCited(text, ln.start, ln.end, cites, onCite, paraSet, onPara, idPrefix)}
         </div>
       ))}
     </>
@@ -1015,21 +1047,22 @@ function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
 }
 
 function segBody(text: string, s: { label: string; char_start: number; char_end: number; lines?: any[] },
-                 cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void) {
+                 cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void,
+                 idPrefix?: string) {
   // drafted hierarchy (legislation): render provision-by-provision, indented
   if (s.lines && s.lines.length > 1) {
-    return { showLabel: true, body: segLines(text, s, cites, onCite, paraSet, onPara) };
+    return { showLabel: true, body: segLines(text, s, cites, onCite, paraSet, onPara, idPrefix) };
   }
   const num = labelNum(s.label);
   const raw = text.slice(s.char_start, s.char_end);
   const m = num ? new RegExp(`^(\\s*)(${num})([.)\\]]?)(\\s+)`).exec(raw) : null;
-  if (!m) return { showLabel: true, body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara) };
+  if (!m) return { showLabel: true, body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix) };
   const numEnd = s.char_start + m[0].length;
   return {
     showLabel: false,
     body: <>
       <b className="seg-num">{m[2]}{m[3]}</b>{" "}
-      {renderCited(text, numEnd, s.char_end, cites, onCite, paraSet, onPara)}
+      {renderCited(text, numEnd, s.char_end, cites, onCite, paraSet, onPara, idPrefix)}
     </>,
   };
 }
@@ -1454,7 +1487,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
             ))}
             {mb && mb.list.length > 0
-              && <MentionedBy list={mb.list} target={id} anchor={mb.anchor} />}
+              && <MentionedBy list={mb.list} target={id} anchor={s.label} />}
           </div>
           );
         })}

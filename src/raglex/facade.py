@@ -882,7 +882,13 @@ class Facade:
         with self._open() as (cat, _rs, ts):
             rels = [r for r in cat.relations_to(stable_id) if r["extracted_via"] != "inferred"]
             if anchor:
-                rels = [r for r in rels if (r["dst_anchor"] or "") == anchor]
+                # A provision heading represents its whole family. "Mentions of
+                # Article 22" includes citations pinned to Article 22(1), 22(2), …;
+                # exact string equality made the UI inherit whichever subparagraph
+                # happened to appear first and hid the rest.
+                parent = re.sub(r"(?:\([^()]+\))+\s*$", "", anchor).strip()
+                family = re.compile(rf"^{re.escape(parent)}(?:\([^()]+\))*$", re.IGNORECASE)
+                rels = [r for r in rels if family.match((r["dst_anchor"] or "").strip())]
             by_src: dict[str, list] = {}
             for r in rels:
                 by_src.setdefault(r["src_id"], []).append(r)

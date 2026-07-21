@@ -986,3 +986,19 @@ table { width: 100%; }
   display: flex; gap: 6px; justify-content: flex-end;
   border-top: 1px solid var(--line-faint); margin-top: 4px; padding-top: 6px;
 }
+.tray-occ-nav {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  margin-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.msnip[role="button"] { cursor: pointer; }
+.msnip[role="button"]:hover { background: var(--inset); }
