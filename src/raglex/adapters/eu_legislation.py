@@ -163,7 +163,10 @@ class EULegislationAdapter(BaseAdapter):
             # Public CELLAR equivalent of EUR-Lex expert-search
             # ``PS_ID=treaty OR FM_CODED=TREATY``. Whole instruments have a sector-1
             # CELEX ending at the descriptor; article fragments continue with digits.
-            branches.append('{ ?work a cdm:treaty ; cdm:resource_legal_id_celex ?celex . '
+            branches.append('{ { ?work a cdm:treaty } UNION '
+                            '{ ?work cdm:work_has_resource-type '
+                            '<http://publications.europa.eu/resource/authority/resource-type/TREATY> } '
+                            '?work cdm:resource_legal_id_celex ?celex . '
                             'FILTER(REGEX(STR(?celex), "^1[0-9]{4}[A-Z]{1,2}$")) }')
         filters = []
         if since:

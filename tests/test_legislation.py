@@ -536,5 +536,6 @@ def test_eu_primary_law_celexes_use_formal_names_eli_and_aliases():
 def test_eu_legislation_default_enumeration_includes_whole_treaties():
     q = EULegislationAdapter()._enumerate_query(None, 0)
     assert "a cdm:treaty" in q
+    assert "work_has_resource-type" in q
     assert '^1[0-9]{4}[A-Z]{1,2}$' in q
     assert "TREATY" in EULegislationAdapter().types

@@ -41,7 +41,10 @@ export function TrayProvider({ children }: { children: any }) {
   const [stack, setStack] = useState<Tray[]>([]);
   useEffect(() => { document.body.classList.toggle("has-tray", stack.length > 0); }, [stack.length]);
   const push = (t: Tray) => setStack((s) => [...s, t]);
-  const closeAt = (i: number) => setStack((s) => s.filter((_, j) => j < i)); // close this + those above it
+  // A tray's own × dismisses that tray only. Lower trays are not parents whose
+  // removal should cascade through everything opened later; the remaining stack
+  // simply closes up the visual gap. Escape still targets only the current top tray.
+  const closeAt = (i: number) => setStack((s) => s.filter((_, j) => j !== i));
   return <TrayCtx.Provider value={{ stack, push, closeAt }}>{children}</TrayCtx.Provider>;
 }
 
