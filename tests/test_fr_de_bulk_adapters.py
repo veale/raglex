@@ -51,6 +51,10 @@ RII = """<?xml version="1.0" encoding="UTF-8"?>
   <entsch-datum>2021-05-12</entsch-datum>
   <aktenzeichen>VI ZR 100/20</aktenzeichen>
   <doktyp>Urteil</doktyp>
+  <norm>§ 823 Abs. 1 BGB</norm>
+  <vorinstanz>vorgehend OLG München, Az. 1 U 2/20</vorinstanz>
+  <identifier>https://www.rechtsprechung-im-internet.de/example</identifier>
+  <publisher>BMJV</publisher>
   <titelzeile>Schadensersatz nach Datenschutzverstoß</titelzeile>
   <leitsatz><Content><P>Der Leitsatz.</P></Content></leitsatz>
   <tenor><Content><P>Die Revision wird zurueckgewiesen.</P></Content></tenor>
@@ -67,7 +71,8 @@ def test_rii_parser_zones_and_ecli():
     assert d.metadata["court_code"] == "BGH"
     assert d.metadata["court_body"] == "VI. Zivilsenat"
     assert d.decision_date == date(2021, 5, 12)
-    assert [s.label for s in d.segments] == ["Leitsatz", "Tenor", "Tatbestand", "Entscheidungsgründe"]
+    assert [s.label for s in d.segments] == ["Normen", "Vorinstanz", "Leitsatz", "Tenor", "Tatbestand", "Entscheidungsgründe"]
+    assert d.metadata["identifier"].endswith("/example")
 
 
 def test_de_rii_local_fetch(tmp_path):
@@ -81,6 +86,8 @@ def test_de_rii_local_fetch(tmp_path):
     assert rec.court == "Bundesgerichtshof" and rec.text
     assert rec.extra["court_code"] == "BGH"
     assert rec.extra["court_body"] == "VI. Zivilsenat"
+    assert rec.extra["norms"] == "§ 823 Abs. 1 BGB"
+    assert rec.landing_url.endswith("/example")
 
 
 # -- France: DILA (constructed fixtures, DTD shapes) ------------------------

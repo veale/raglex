@@ -121,7 +121,8 @@ class DeRiiAdapter(BaseAdapter):
             decision_date=parsed.decision_date,
             language="de",
             source_language="de",
-            landing_url=stub.hints.get("url") or f"https://www.rechtsprechung-im-internet.de/{stub.stable_id}",
+            landing_url=(parsed.metadata.get("identifier") or stub.hints.get("url")
+                         or f"https://www.rechtsprechung-im-internet.de/jportal/docs/bsjrs/{stub.stable_id}.zip"),
             raw_bytes=data,
             raw_ext="xml",
             text=parsed.text,
@@ -132,6 +133,12 @@ class DeRiiAdapter(BaseAdapter):
                 "doktyp": parsed.metadata.get("doktyp"),
                 "court_code": parsed.metadata.get("court_code"),
                 "court_body": parsed.metadata.get("court_body"),
+                "court_location": parsed.metadata.get("court_location"),
+                "norms": parsed.metadata.get("norms"),
+                "prior_instance": parsed.metadata.get("prior_instance"),
+                "region": parsed.metadata.get("region"),
+                "publisher": parsed.metadata.get("publisher"),
+                "access_rights": parsed.metadata.get("access_rights"),
                 "aliases": [case_alias(court, docket)] if court and docket else None,
             }.items() if v},
         )

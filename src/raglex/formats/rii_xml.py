@@ -20,8 +20,13 @@ from .base import ParsedDoc, register
 
 # rii text fields → German zone labels, in a judgment's layout order.
 _ZONES = (
+    # These two header fields contain high-value, explicit citation edges.  They
+    # must be part of the derived text or the citation scanner never sees them.
+    ("norm", "Normen"),
+    ("vorinstanz", "Vorinstanz"),
     ("leitsatz", "Leitsatz"),
     ("orientierungssatz", "Orientierungssatz"),
+    ("sonstosatz", "Sonstiger Orientierungssatz"),
     ("tenor", "Tenor"),
     ("tatbestand", "Tatbestand"),
     ("entscheidungsgruende", "Entscheidungsgründe"),
@@ -92,6 +97,7 @@ def parse_rii(data: bytes) -> ParsedDoc:
     court_code = _text(doc, "gertyp") or _text(doc, "gericht")
     court = rii_court_name(court_code)
     court_body = _text(doc, "spruchkoerper")
+    court_location = _text(doc, "gerort")
     aktenzeichen = _text(doc, "aktenzeichen") or _text(doc, "az")
     doc_date = _iso(_text(doc, "entsch-datum") or _text(doc, "entscheidungsdatum"))
     title = _text(doc, "titelzeile") or ", ".join(x for x in (court, aktenzeichen) if x) or ecli
@@ -106,6 +112,7 @@ def parse_rii(data: bytes) -> ParsedDoc:
             blocks.append((label, "zone", body))
     text, segments = assemble(blocks)
 
+    identifier = _text(doc, "identifier")
     return ParsedDoc(
         text=text or None,
         segments=segments,
@@ -114,7 +121,16 @@ def parse_rii(data: bytes) -> ParsedDoc:
         metadata={"ecli": ecli, "court": court, "court_code": court_code,
                   "court_body": court_body, "aktenzeichen": aktenzeichen,
                   "doktyp": _text(doc, "doktyp"),
-                  "doknr": _text(doc, "doknr") or doc.get("doknr")},
+                  "doknr": _text(doc, "doknr") or doc.get("doknr"),
+                  "court_location": court_location,
+                  "norms": _text(doc, "norm"),
+                  "prior_instance": _text(doc, "vorinstanz"),
+                  "region": _text(doc, "region"),
+                  "identifier": identifier,
+                  "coverage": _text(doc, "coverage"),
+                  "source_language": _text(doc, "language"),
+                  "publisher": _text(doc, "publisher"),
+                  "access_rights": _text(doc, "accessRights")},
     )
 
 
