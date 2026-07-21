@@ -28,6 +28,7 @@ from ..core.adapter import BaseAdapter
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..formats.gii_xml import parse_gii
+from ..citations.german import law_id
 
 TOC_URL = "https://www.gesetze-im-internet.de/gii-toc.xml"
 _BASE = "https://www.gesetze-im-internet.de"
@@ -168,6 +169,7 @@ class DeGiiAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in {
                 "jurabk": jurabk, "doknr": parsed.metadata.get("doknr"),
+                "aliases": [law_id(jurabk)] if jurabk else None,
             }.items() if v},
         )
 

@@ -110,6 +110,10 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         return "French judicial decision", "FR", "fr-judilibre"
     if low.startswith("fr:decision:") or candidate.upper().startswith(("CETATEXT", "CONSTEXT", "CNILTEXT")):
         return "French national decision", "FR", None
+    if low.startswith("de/gesetz/") or low.startswith("eli/bund/"):
+        return "German federal legislation", "DE", "de-gii"
+    if low.startswith("de:case:"):
+        return "German federal decision", "DE", "de-neuris"
     # An ECtHR case cited by name (EHRR grammar) — the candidate is "echr:<case name>",
     # resolved via a HUDOC docname search by the echr adapter (inferred, fuzzy).
     if kind == "echr_case" or candidate.lower().startswith("echr:"):

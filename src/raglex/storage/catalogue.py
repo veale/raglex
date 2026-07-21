@@ -1584,7 +1584,8 @@ class Catalogue:
             appno_expr = "meta_json::jsonb ->> 'appno'"
         else:
             appno_expr = "json_extract(meta_json, '$.appno')"
-        minted = {"echr_appno": 0, "fr_number": 0, "fr_code_article": 0}
+        minted = {"echr_appno": 0, "fr_number": 0, "fr_code_article": 0,
+                  "de_case": 0, "de_law": 0}
         rows = self.conn.execute(
             f"SELECT ecli, {appno_expr} AS appno FROM documents "
             "WHERE source = 'echr' AND ecli IS NOT NULL AND meta_json IS NOT NULL"
@@ -1638,6 +1639,33 @@ class Catalogue:
                         "ON CONFLICT(alias) DO NOTHING", (alias.casefold(), r["stable_id"], source)
                     )
                     minted["fr_code_article" if source == "fr-code-article" else "fr_number"] += 1
+            from ..citations.german import case_alias, law_id
+
+            de_rows = self.conn.execute(
+                "SELECT stable_id, source, doc_type, court, meta_json FROM documents "
+                "WHERE source LIKE 'de-%' AND meta_json IS NOT NULL"
+            )
+            for r in de_rows:
+                try:
+                    meta = json.loads(r["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                aliases: list[tuple[str, str]] = []
+                jurabk = meta.get("jurabk")
+                if jurabk and r["doc_type"] == "legislation":
+                    aliases.append((law_id(str(jurabk)), "de-law"))
+                dockets = meta.get("file_numbers") or meta.get("aktenzeichen") or []
+                if isinstance(dockets, str):
+                    dockets = [dockets]
+                for docket in dockets:
+                    if docket and r["court"]:
+                        aliases.append((case_alias(r["court"], str(docket)), "de-case"))
+                for alias, source in aliases:
+                    self.conn.execute(
+                        "INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?) "
+                        "ON CONFLICT(alias) DO NOTHING", (alias.casefold(), r["stable_id"], source)
+                    )
+                    minted["de_law" if source == "de-law" else "de_case"] += 1
         return minted
 
     def held_key_set(self) -> set[str]:

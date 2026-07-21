@@ -43,6 +43,8 @@ CATEGORY_LABELS: dict[str, str] = {
     "us-caselaw": "US case-law",
     "fr-caselaw": "French case-law",
     "fr-legislation": "French legislation",
+    "de-caselaw": "German case-law",
+    "de-legislation": "German legislation",
     "sg-caselaw": "Singapore case-law",
     "hk-caselaw": "Hong Kong case-law",
     "za-caselaw": "South African case-law",
@@ -60,7 +62,8 @@ CATEGORY_LABELS: dict[str, str] = {
     "other": "Other / unrouted",
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
-                  "eu-cellar", "eu-legislation", "echr", "fr-caselaw", "fr-legislation", "guidance",
+                  "eu-cellar", "eu-legislation", "echr", "fr-caselaw", "fr-legislation",
+                  "de-caselaw", "de-legislation", "guidance",
                   "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw", "us-caselaw",
                   "sg-caselaw", "hk-caselaw", "za-caselaw", "my-caselaw",
                   "africa-caselaw", "caribbean-caselaw", "pacific-caselaw",
@@ -77,6 +80,7 @@ JURISDICTION_CATEGORY: dict[str, str] = {
     "IE": "ie-caselaw", "CA": "ca-caselaw", "AU": "au-caselaw",
     "NZ": "nz-caselaw", "IN": "in-caselaw", "US": "us-caselaw",
     "FR": "fr-caselaw",
+    "DE": "de-caselaw",
     # The wider Commonwealth. The big single jurisdictions get their own row; the long
     # tail is grouped by region, because ~30 one-case rows would bury the map while
     # "African case-law: 214 pending" is a signal worth acting on.
@@ -237,6 +241,13 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         return Tax(category, CATEGORY_LABELS[category], subtype,
                    "Codes and legislation" if legislation else (court or source),
                    {"source": source, **({"doc_type": doc_type} if doc_type else {})})
+    if source.startswith("de-"):
+        legislation = doc_type == "legislation"
+        category = "de-legislation" if legislation else "de-caselaw"
+        subtype = "federal" if legislation else (court or source).casefold()
+        return Tax(category, CATEGORY_LABELS[category], subtype,
+                   "Federal legislation" if legislation else (court or source),
+                   {"source": source, **({"doc_type": doc_type} if doc_type else {})})
     if source == "uk-legislation":
         sub, label = _leg_subtype(prefix)
         return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"], sub, label,
@@ -360,6 +371,12 @@ def classify_candidate(candidate: str, kind: str = "") -> Tax:
     if cand.lower().startswith(("fr:pourvoi:", "fr:decision:")) or cand.upper().startswith(("JURITEXT", "CETATEXT", "CONSTEXT", "CNILTEXT")):
         return Tax("fr-caselaw", CATEGORY_LABELS["fr-caselaw"], "case", "French decision",
                    {"source": "fr-dila"})
+    if cand.lower().startswith("de/gesetz/") or cand.lower().startswith("eli/bund/"):
+        return Tax("de-legislation", CATEGORY_LABELS["de-legislation"], "federal",
+                   "Federal legislation", {"source": "de-gii"})
+    if cand.lower().startswith("de:case:"):
+        return Tax("de-caselaw", CATEGORY_LABELS["de-caselaw"], "federal",
+                   "Federal courts", {"source": "de-rii"})
     if adapter == "uk-legislation":
         prefix = cand.split("/", 1)[0].lower() if "/" in cand else cand.lower()
         sub, label = _leg_subtype(prefix)

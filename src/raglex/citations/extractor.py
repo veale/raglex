@@ -634,6 +634,11 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # list so the stable longest-match dedupe keeps them on a span tie.
     cites = alias_citations(text, aliases) if aliases else []
     cites += grammar_citations(text)
+    # German references are normalised before linking and may expand to several exact
+    # targets (ranges, i.V.m., repeated Nr./Abs. clauses), which the one-match/one-edge
+    # grammar interface cannot represent.
+    from .german import german_citations
+    cites += german_citations(text)
     # US reporter citations (self-contained matcher), gated to text that looks American — recognises
     # "135 S. Ct. 2401" so it clusters as a case instead of being misread as statutory
     # material. Added before the dedupe so a genuine overlap resolves by span.
@@ -663,7 +668,10 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     kept: list[Citation] = []
     occupied: list[tuple[int, int]] = []
     for c in ordered:
-        if any(s <= c.char_start and c.char_end <= e for s, e in occupied):
+        exact_multi = c.method == "de_law_reference" and any(
+            k.char_start == c.char_start and k.char_end == c.char_end
+            and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)
+        if not exact_multi and any(s <= c.char_start and c.char_end <= e for s, e in occupied):
             continue
         kept.append(c)
         occupied.append((c.char_start, c.char_end))

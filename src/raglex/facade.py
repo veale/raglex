@@ -219,6 +219,7 @@ _CATEGORY_JURISDICTION: dict[str, str] = {
     "eu-cellar": "eu", "eu-legislation": "eu", "echr": "eu",
     "us-caselaw": "us",
     "fr-caselaw": "fr", "fr-legislation": "fr",
+    "de-caselaw": "de", "de-legislation": "de",
     "ca-caselaw": "ca", "ca-legislation": "ca",
     "au-caselaw": "au", "au-legislation": "au",
     "nz-caselaw": "nz", "nz-legislation": "nz",
@@ -240,6 +241,7 @@ RETRIEVAL_JURISDICTIONS: tuple[tuple[str, str], ...] = (
     ("ie", "Ireland"),
     ("eu", "EU (CMLR, ECR…)"),
     ("fr", "France"),
+    ("de", "Germany"),
     ("us", "United States"),
     ("ca", "Canada"),
     ("au", "Australia"),
@@ -260,7 +262,7 @@ RETRIEVAL_JURISDICTIONS: tuple[tuple[str, str], ...] = (
 # bucket. The majors pass through unchanged; the long tail of individual African / Pacific /
 # Caribbean / offshore jurisdictions folds into a regional bucket so the picker stays short.
 _RETRIEVAL_BUCKET: dict[str, str] = {
-    "gb": "uk", "uk": "uk", "ie": "ie", "eu": "eu", "fr": "fr", "us": "us",
+    "gb": "uk", "uk": "uk", "ie": "ie", "eu": "eu", "fr": "fr", "de": "de", "us": "us",
     "ca": "ca", "au": "au", "nz": "nz", "in": "in", "sg": "sg", "hk": "hk",
     "za": "za", "my": "my",
     **{c: "africa" for c in ("ke", "gh", "ng", "zw", "zm", "na", "ug", "tz", "mw",
@@ -1460,6 +1462,7 @@ class Facade:
         (("eu-", "edpb", "a29wp", "dma", "cellar", "eur-lex"), "European Union"),
         (("echr",), "Council of Europe"),
         (("fr-",), "France"),
+        (("de-",), "Germany"),
         (("nl-",), "Netherlands"),
         (("ie-", "eisb"), "Ireland"),
         (("au-",), "Australia"),
@@ -1498,6 +1501,8 @@ class Facade:
         "fr-dila": "DILA open data", "fr-judilibre": "Judilibre",
         "fr-legislation": "Légifrance", "fr-conseil-etat": "Conseil d'État",
         "fr-cnil": "CNIL", "fr-constit": "Conseil constitutionnel",
+        "de-gii": "Gesetze im Internet", "de-rii": "Rechtsprechung im Internet",
+        "de-neuris": "NeuRIS", "de-neuris-legislation": "NeuRIS",
         "ci-caselaw": "Channel Islands", "offshore-caselaw": "Offshore courts",
         "uk-grc": "FTT (General Regulatory Chamber)",
     }
@@ -1574,6 +1579,9 @@ class Facade:
         "indian-supreme-court-judgments.s3.amazonaws.com": "Supreme Court of India",
         "legifrance.gouv.fr": "Légifrance", "courdecassation.fr": "Cour de cassation",
         "conseil-etat.fr": "Conseil d'État",
+        "gesetze-im-internet.de": "Gesetze im Internet",
+        "rechtsprechung-im-internet.de": "Rechtsprechung im Internet",
+        "rechtsinformationen.bund.de": "NeuRIS",
     }
 
     def link_label(self, url: str | None, source: str | None = None) -> str | None:

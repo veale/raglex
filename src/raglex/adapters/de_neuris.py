@@ -33,6 +33,7 @@ from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..core.segmentation import assemble
 from ..formats.ldml_de import parse_ldml_de
+from ..citations.german import case_alias, law_id
 
 BASE = "https://testphase.rechtsinformationen.bund.de/v1"
 
@@ -98,6 +99,7 @@ def parse_caselaw(obj: dict) -> Record | None:
         return None
     court = _field(obj, "courtName", "courtType", "judicialBody") or "Bundesgericht"
     file_numbers = _field(obj, "fileNumbers", "fileNumber")
+    docket_list = [file_numbers] if isinstance(file_numbers, str) else list(file_numbers or [])
 
     blocks: list[tuple[str, str, str]] = []
     for key, label in _CASELAW_ZONES:
@@ -132,6 +134,7 @@ def parse_caselaw(obj: dict) -> Record | None:
             "file_numbers": file_numbers,
             "document_type": _field(obj, "documentType"),
             "court_type": _field(obj, "courtType"),
+            "aliases": [case_alias(str(court), str(d)) for d in docket_list if d],
         }.items() if v},
     )
 
@@ -261,5 +264,8 @@ class DeNeurisAdapter(BaseAdapter):
             segments=parsed.segments,
             relations=parsed.relations,
             extracted_via=ExtractedVia.STRUCTURED,
-            extra={k: v for k, v in {"eli": eli_id, "jurabk": jurabk}.items() if v},
+            extra={k: v for k, v in {
+                "eli": eli_id, "jurabk": jurabk,
+                "aliases": [law_id(jurabk)] if jurabk else None,
+            }.items() if v},
         )

@@ -62,6 +62,15 @@ wheels = [
 ]
 
 [[package]]
+name = "bundesrecht"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/74/cc/0ce6a43b36baa8d3d665d903cd21b5aec33d7e752ec2c718e943d501a892/bundesrecht-0.1.3.tar.gz", hash = "sha256:12ecf9b1304c01b885d124ccdb3067548e21a50f70537a5ade18318a1c9c3fa6", size = 35197, upload-time = "2026-06-19T22:55:22.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/1d/4e2f09cec46a02bc247e7ea846753804dde28f390f1926322866fd9b18ad/bundesrecht-0.1.3-py3-none-any.whl", hash = "sha256:942791f5124dde381ad4f3f3ee893b03d6b4b0e88904c538a090ad49a31f79be", size = 32653, upload-time = "2026-06-19T22:55:21.307Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 source = { registry = "https://pypi.org/simple" }
@@ -900,6 +909,7 @@ name = "raglex"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "bundesrecht" },
     { name = "httpx" },
     { name = "socksio" },
 ]
@@ -948,6 +958,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", marker = "extra == 'scrape'", specifier = ">=4.15.0" },
+    { name = "bundesrecht", specifier = ">=0.1.3,<0.2" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", marker = "extra == 'web'", specifier = ">=1.2" },

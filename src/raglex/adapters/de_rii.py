@@ -22,6 +22,7 @@ from ..core.adapter import BaseAdapter
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..formats.rii_xml import parse_rii
+from ..citations.german import case_alias
 
 TOC_URL = "https://www.rechtsprechung-im-internet.de/rii-toc.xml"
 
@@ -109,6 +110,7 @@ class DeRiiAdapter(BaseAdapter):
         parsed = parse_rii(data)
         ecli = parsed.metadata.get("ecli") or (stub.stable_id if stub.stable_id.startswith("ECLI:") else None)
         stable_id = ecli or stub.stable_id
+        court, docket = parsed.metadata.get("court"), parsed.metadata.get("aktenzeichen")
         return Record(
             source=self.source,
             stable_id=stable_id,
@@ -126,7 +128,8 @@ class DeRiiAdapter(BaseAdapter):
             segments=parsed.segments,
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in {
-                "aktenzeichen": parsed.metadata.get("aktenzeichen"),
+                "aktenzeichen": docket,
                 "doktyp": parsed.metadata.get("doktyp"),
+                "aliases": [case_alias(court, docket)] if court and docket else None,
             }.items() if v},
         )
