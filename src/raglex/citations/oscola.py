@@ -47,7 +47,7 @@ def _plain(parts: list[Part]) -> str:
 def _clean_parenthetical_spacing(text: str) -> str:
     """Typography cleanup for imported metadata: ``( the EPPO )`` → ``(the EPPO)``.
     Only boundary whitespace changes; meaningful text inside remains untouched."""
-    return re.sub(r"\(\s+([^()]*?\S)\s+\)", r"(\1)", text or "")
+    return re.sub(r"\(([^()]*)\)", lambda m: f"({m.group(1).strip()})", text or "")
 
 
 def _pack(parts: list[Part]) -> dict:
@@ -137,7 +137,7 @@ def _clean_eu_title(title: str) -> tuple[str, str | None]:
     # party names sometimes end in a redundant docket echo supplied by EUR-Lex.
     title = re.sub(r"\s*\((?:(?:Joined\s+)?Cases?\s+)?[CTF][-‑–]?\d+/\d+"
                    r"(?:\s*(?:P|RX))?(?:\s*(?:,|and|to|&)\s*[CTF][-‑–]?\d+/\d+"
-                   r"(?:\s*(?:P|RX))?)*\)\s*$", "", title, flags=re.I)
+                   r"(?:\s*(?:P|RX))?)*\)", "", title, flags=re.I)
     case_no = None
     m = _EUECJ_TAIL_RE.search(title)
     if m:

@@ -250,6 +250,7 @@ def test_case_display_title_drops_c_t_and_appeal_docket_suffixes():
     assert clean_case_display_title("EDPS v SRB (C-413/23 P)") == "EDPS v SRB"
     assert clean_case_display_title("Example (T-123/24)") == "Example"
     assert clean_case_display_title("Example (F-12/08)") == "Example"
+    assert clean_case_display_title("Alpha (T-1/20), Beta (T-2/20)") == "Alpha, Beta"
 
 
 # -- joined cases: the judgment lives only under the LEAD case number (§5b) --

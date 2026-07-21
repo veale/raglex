@@ -239,3 +239,6 @@ def test_oscola_cleans_parenthetical_spacing_in_legislation_titles():
     got = cite({"stable_id": "32017R1939", "source": "eu-legislation",
                 "doc_type": "legislation", "title": "Council Regulation ( the EPPO )"})
     assert got["text"] == "Council Regulation (the EPPO)"
+    got = cite({"stable_id": "32017R1939", "source": "eu-legislation",
+                "doc_type": "legislation", "title": "Council Regulation ( the EPPO)"})
+    assert got["text"] == "Council Regulation (the EPPO)"

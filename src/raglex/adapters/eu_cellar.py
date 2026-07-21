@@ -150,9 +150,9 @@ _TITLE_HEADER_RE = re.compile(
     r"^(Judgment|Order|Opinion|View|Arr[êe]t|Ordonnance|Avis|Conclusions|Urteil|Sentenza|Auto)\b",
     re.IGNORECASE,
 )
-_TRAILING_DOCKET_RE = re.compile(
+_DOCKET_PAREN_RE = re.compile(
     r"\s*\((?:(?:Joined\s+)?Cases?\s+)?[CTF][-‑–]?\d+/\d+(?:\s*(?:P|RX))?"
-    r"(?:\s*(?:,|and|to|et|&)\s*[CTF][-‑–]?\d+/\d+(?:\s*(?:P|RX))?)*\)\s*$",
+    r"(?:\s*(?:,|and|to|et|&)\s*[CTF][-‑–]?\d+/\d+(?:\s*(?:P|RX))?)*\)",
     re.IGNORECASE,
 )
 
@@ -163,7 +163,7 @@ def clean_case_display_title(title: str | None) -> str | None:
     ``OC``. Covers Court, General Court, Civil Service and appeal/RX suffixes."""
     if not title:
         return title
-    return _TRAILING_DOCKET_RE.sub("", title).strip()
+    return re.sub(r"\s{2,}", " ", _DOCKET_PAREN_RE.sub("", title)).strip()
 
 
 def concise_case_title(raw: str) -> str:
