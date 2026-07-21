@@ -117,7 +117,12 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   // PageRank by default — raw citation counts flatter the merely-popular over the
   // judgment that actually settled the point
   const [sort, setSort] = useState("pagerank");
-  const [data] = useAsync(() => api.mentions(target, anchor, sort), [target, anchor, sort]);
+  // Hooks must be created on the loading render too.  Keeping this below the
+  // early return made the loaded render add a hook, which React treats as a fatal
+  // render-order error (the entire app appeared as a blank page on click).
+  const [slice, setSlice] = useState<string | null>(null);
+  const [data, error, retry] = useAsync(() => api.mentions(target, anchor, sort), [target, anchor, sort]);
+  if (error) return <div className="error-box">Could not load mentions. <button className="mini" onClick={retry}>retry</button></div>;
   if (!data) return <p className="muted loading-pulse">Loading mentions…</p>;
   const groups: any[] = data.groups || [];
   const sorts: Record<string, string> = data.sorts || {};
@@ -135,7 +140,6 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
     cases: "cases", legislation: "legislation", guidance: "guidance",
     administrative: "admin decisions", other: "other",
   };
-  const [slice, setSlice] = useState<string | null>(null);
   const facets = new Map<string, { jur: string; kind: string; n: number }>();
   for (const g of groups) {
     if (!g.src_jurisdiction || !g.src_kind) continue;
