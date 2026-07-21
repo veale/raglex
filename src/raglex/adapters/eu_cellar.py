@@ -473,13 +473,26 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
         return None
-    parties = no_case = None
+    parties = no_case = header_title = None
     for e in root.iter():
         ln = _localname(e.tag)
         if ln == "PARTIES" and parties is None:
             parties = " ".join(t.strip() for t in e.itertext() if t.strip())
         elif ln == "NO.CASE" and no_case is None:
             no_case = " ".join(e.itertext())
+        elif ln == "TITLE" and header_title is None:
+            header_title = " ".join(t.strip() for t in e.itertext() if t.strip())
+    # Modern AG Formex has no <PARTIES>.  Its first TITLE nevertheless contains
+    # ``Case C-340/21 VB v Natsionalna… (Request for …)``.  Recover that caption;
+    # previously these opinions fell back to a blank title or, worse, their ECLI.
+    if not parties and header_title:
+        header_title = re.sub(r"\s+", " ", header_title)
+        m = re.search(r"\bCase\s+[CTF]?[-‑–]?\d+/\d+\s*(.+?)(?:\(Request\b|$)",
+                      header_title, re.IGNORECASE)
+        if m:
+            parties = m.group(1).strip(" .,—-")
+            # Formex inline nodes concatenate around the party separator.
+            parties = re.sub(r"(?<=[A-Za-zÀ-ÿ])v(?=[A-ZÀ-Þ])", " v ", parties)
     if not parties:
         return None
     parties = _clean_parties(re.sub(r"\s+", " ", parties))
@@ -487,6 +500,8 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
         return None
     if no_case:
         no_case = re.sub(r"\s+", "", no_case).replace("‑", "-").replace("–", "-")
+        if re.fullmatch(r"\d+/\d+", no_case):
+            no_case = "C-" + no_case
         if no_case:
             return f"{parties} ({no_case})"
     return parties
@@ -627,7 +642,10 @@ LIMIT {self.per_page}
                 landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
                 raw_url=f"{CELEX_BASE}/{celex}",
                 hint_date=_parse_iso(row.get("date")),
-                title=row.get("title") or row.get("ecli") or celex,  # the case name
+                # ECLI/CELEX identify the document; they are not case names.  Keeping
+                # either in ``title`` prevents fetch() from deriving the parties from
+                # Formex and later makes OSCOLA italicise the identifier as a name.
+                title=row.get("title"),
                 court=court,
                 hints={"celex": celex, "link": row.get("link", ""), "rtype": row.get("rtype", "")},
             )
@@ -650,7 +668,13 @@ LIMIT {self.per_page}
                 text, segments, raw_ext = None, [], "txt"
         # the CELLAR webservice often gives no title — derive a concise case name from
         # the judgment's own parties + case number ("ZZ v … (C-300/11)").
-        title = stub.title or (formex_case_title(raw) if raw is not None and raw_ext == "xml" else None)
+        formex_title = formex_case_title(raw) if raw is not None and raw_ext == "xml" else None
+        generic = bool(stub.title and (
+            re.fullmatch(r"(?i)ECLI:[A-Z]{2}:.+", stub.title.strip())
+            or stub.title.strip() == celex
+            or re.fullmatch(r"(?i)(?:Joined\s+)?Cases?\s+[CTF][-‑–]?\d+/\d+", stub.title.strip())
+        ))
+        title = formex_title or (None if generic else stub.title)
 
         relations: list[TypedRelation] = []
         # 1) the typed edge to the legislation that surfaced this case (§1A).

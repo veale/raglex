@@ -236,6 +236,14 @@ def test_formex_case_title_from_parties_and_number():
     assert formex_case_title(_OLD_FORMEX) == "ZZ v Secretary of State for the Home Department (C-300/11)"
 
 
+def test_formex_ag_title_without_parties_element():
+    from raglex.adapters.eu_cellar import formex_case_title
+    xml = b"""<DOC><NO.CASE>C-340/21</NO.CASE><TITLE>Opinion of Advocate General
+      Pitruzzella delivered on 27 April 2023 Case C-340/21 VBvNatsionalna agentsia
+      za prihodite (Request for a preliminary ruling)</TITLE></DOC>"""
+    assert formex_case_title(xml) == "VB v Natsionalna agentsia za prihodite (C-340/21)"
+
+
 # -- joined cases: the judgment lives only under the LEAD case number (§5b) --
 
 def test_resolve_case_celex_joined_case_falls_back_to_lead(monkeypatch):
