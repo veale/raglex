@@ -295,11 +295,12 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "Walks sector-3 legal acts (Regulations, Directives, Decisions) via a CELLAR "
         "SPARQL enumeration by default, newest-first: an incremental run picks up newly "
         "published acts, a backfill pages through the whole series. Name CELEXes to "
-        "fetch specific instruments (Formex; articles + recitals).",
-        (SourceOption("celex", "CELEX ids", "32016R0679,32002L0058"),
+        "fetch specific instruments (Formex; articles + recitals). EU primary-law "
+        "documents (Charter, TEU, TFEU) are importable by CELEX and retain their ELI + names.",
+        (SourceOption("celex", "CELEX ids", "32016R0679,12012P,12016M,12016E"),
          SourceOption("types", "Descriptors to enumerate", "R,L,D (default)"),
          SourceOption("years", "Year range", "1990-2026")),
-        ("CELEX (32016R0679)", "Directive/Regulation number"),
+        ("CELEX (32016R0679)", "Treaty/Charter CELEX (12012P)", "Directive/Regulation number"),
     ),
     "ie-legislation": SourceInfo(
         "ie-legislation", "Irish legislation — as enacted (eISB)", "legislation", "IE", False,

@@ -40,6 +40,28 @@ CDM = "http://publications.europa.eu/ontology/cdm#"
 # separate instruments.
 DEFAULT_TYPES = ("R", "L", "D")
 
+# Consolidated EU primary-law documents. Citations use the CELEX stem (12016E),
+# EUR-Lex displays /TXT, and ELI supplies the durable web identity. All forms and
+# ordinary legal names must converge on the same held node.
+PRIMARY_LAW: dict[str, dict[str, object]] = {
+    "12012P": {
+        "title": "Charter of Fundamental Rights of the European Union",
+        "eli": "https://eur-lex.europa.eu/eli/treaty/char_2012/oj/eng",
+        "aliases": ("12012P/TXT", "Charter of Fundamental Rights of the European Union",
+                    "Charter of Fundamental Rights", "EU Charter", "the Charter"),
+    },
+    "12016M": {
+        "title": "Consolidated version of the Treaty on European Union",
+        "eli": "https://eur-lex.europa.eu/eli/treaty/teu_2016/oj/eng",
+        "aliases": ("12016M/TXT", "Treaty on European Union", "TEU"),
+    },
+    "12016E": {
+        "title": "Consolidated version of the Treaty on the Functioning of the European Union",
+        "eli": "https://eur-lex.europa.eu/eli/treaty/tfeu_2016/oj/eng",
+        "aliases": ("12016E/TXT", "Treaty on the Functioning of the European Union", "TFEU"),
+    },
+}
+
 # Sector-1 (primary law) descriptors → the instrument the article belongs to.
 _TREATY = {"E": "TFEU", "M": "TEU", "F": "TEU (pre-Lisbon)", "C": "EC Treaty",
            "A": "Euratom Treaty", "P": "Charter of Fundamental Rights", "D": "EEA Agreement"}
@@ -53,7 +75,10 @@ _GENERIC_TITLE = re.compile(r"^\s*(?:EUR-Lex\b.*|ANNEX|[A-Z]_\d.*\.xml|)\s*$", r
 def celex_title(celex: str) -> str | None:
     """A human title derived from a CELEX when the source gives none: treaty/Charter
     articles → "Article 267 TFEU"; secondary law → "Regulation 2016/679"."""
-    m = re.match(r"^(?P<sector>[1-9])(?P<year>\d{4})(?P<desc>[A-Z]{1,2})(?P<num>\d+)", celex.upper())
+    celex = celex.upper().removesuffix("/TXT")
+    if celex in PRIMARY_LAW:
+        return str(PRIMARY_LAW[celex]["title"])
+    m = re.match(r"^(?P<sector>[1-9])(?P<year>\d{4})(?P<desc>[A-Z]{1,2})(?P<num>\d+)", celex)
     if not m:
         return None
     sector, year, desc, num = m.group("sector"), m.group("year"), m.group("desc"), m.group("num")
@@ -109,9 +134,12 @@ class EULegislationAdapter(BaseAdapter):
             yield from self._discover_enumerate(since, max_pages=max_pages)
             return
         for celex in self.celex_list:
+            celex = celex.upper().removesuffix("/TXT")
+            primary = PRIMARY_LAW.get(celex)
             yield Stub(
                 stable_id=celex,
-                landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
+                landing_url=str(primary["eli"]) if primary else
+                            f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
                 raw_url=f"{CELEX_BASE}/{celex}",
                 court=None,
             )
@@ -186,6 +214,8 @@ LIMIT {self.page_size} OFFSET {offset}
             return []
 
     def fetch(self, stub: Stub) -> Record | None:
+        primary = PRIMARY_LAW.get(stub.stable_id.upper())
+        aliases = list(primary["aliases"]) if primary else []
         trans = self._transposition_edges(stub.stable_id)
         # Try Formex; a 404/FetchError (no Formex rendition) is NOT fatal — fall
         # through to the EUR-Lex HTML below rather than giving up.
@@ -205,13 +235,14 @@ LIMIT {self.page_size} OFFSET {offset}
                 source=self.source,
                 stable_id=stub.stable_id,  # CELEX — the resolution target (§5b)
                 doc_type=DocType.LEGISLATION,
-                title=parsed.title or stub.stable_id,
+                title=str(primary["title"]) if primary else (parsed.title or stub.stable_id),
                 language="en", source_language="en",
                 landing_url=stub.landing_url,
                 raw_bytes=raw, raw_ext="zip",
                 text=parsed.text, segments=parsed.segments, relations=parsed.relations + trans,
                 extracted_via=ExtractedVia.STRUCTURED,
-                extra={"format": "formex-legislation", "celex": stub.stable_id},
+                extra={"format": "formex-legislation", "celex": stub.stable_id,
+                       "eli": primary.get("eli") if primary else None, "aliases": aliases},
             )
         # No Formex rendition (common for old instruments like Directive 95/46) — fall
         # back to the EUR-Lex HTML, which exists even when Formex doesn't.
@@ -220,25 +251,29 @@ LIMIT {self.page_size} OFFSET {offset}
         if hp and hp.text:
             # the EUR-Lex HTML <title> is often generic ("EUR-Lex - 12008E267 - EN")
             # or a stray heading ("ANNEX") — derive a real title from the CELEX then.
-            title = celex_title(stub.stable_id) if _is_generic_title(hp.title) else hp.title
+            title = (str(primary["title"]) if primary else
+                     celex_title(stub.stable_id) if _is_generic_title(hp.title) else hp.title)
             return Record(
                 source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
                 title=title or stub.stable_id, language="en", source_language="en",
                 landing_url=stub.landing_url, raw_bytes=html, raw_ext="html",
                 text=hp.text, segments=hp.segments, relations=hp.relations + trans,
                 extracted_via=ExtractedVia.STRUCTURED,
-                extra={"format": "eurlex-html", "celex": stub.stable_id},
+                extra={"format": "eurlex-html", "celex": stub.stable_id,
+                       "eli": primary.get("eli") if primary else None, "aliases": aliases},
             )
         # Neither Formex nor HTML parsed — register a metadata stub so the (often
         # heavily-cited) instrument is still a real, clickable node and its citations
         # resolve (§5b); text can be backfilled later.
         return Record(
             source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
-            title=stub.stable_id, language="en", source_language="en",
+            title=str(primary["title"]) if primary else stub.stable_id,
+            language="en", source_language="en",
             landing_url=stub.landing_url, raw_bytes=stub.stable_id.encode(), raw_ext="txt",
             relations=trans,
             extracted_via=ExtractedVia.STRUCTURED,
-            extra={"celex": stub.stable_id, "metadata_only": True},
+            extra={"celex": stub.stable_id, "metadata_only": True,
+                   "eli": primary.get("eli") if primary else None, "aliases": aliases},
         )
 
     def _fetch_html(self, celex: str) -> bytes | None:

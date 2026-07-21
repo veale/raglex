@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from raglex.adapters.eu_legislation import EULegislationAdapter
+from raglex.adapters.eu_legislation import EULegislationAdapter, celex_title
 from raglex.adapters.uk_legislation import UKLegislationAdapter
 from raglex.core.errors import FetchError
 from raglex.core.models import DocType
@@ -523,3 +523,11 @@ def test_backfill_eu_stubs_is_a_noop_without_stubs(tmp_path):
                  settings_path=tmp_path / "s.json", embed_provider="local-hashing",
                  embed_model=None)
     assert Facade(cfg).backfill_eu_stubs() == {"checked": 0, "upgraded": 0}
+def test_eu_primary_law_celexes_use_formal_names_eli_and_aliases():
+    ad = EULegislationAdapter(celex="12012P/TXT")
+    stub = next(ad.discover(None))
+    assert stub.stable_id == "12012P"
+    assert stub.landing_url == "https://eur-lex.europa.eu/eli/treaty/char_2012/oj/eng"
+    assert celex_title("12012P") == "Charter of Fundamental Rights of the European Union"
+    assert celex_title("12016M").endswith("Treaty on European Union")
+    assert celex_title("12016E").endswith("Treaty on the Functioning of the European Union")
