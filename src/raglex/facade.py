@@ -1173,6 +1173,196 @@ class Facade:
                     for v in cat.list_versions(stable_id)]
             return out
 
+    # -- the agent's front door: resolve a citation, fetch it if we can, return it -----
+    def lookup(self, *, citation: str, pincite: str | None = None, context: int = 1,
+               cited_by: bool = True, similar: bool = True, autofetch: bool = True,
+               full: bool = False) -> dict:
+        """Resolve a citation (or a stable_id) and return one self-contained answer.
+
+        This is the retrieval front door — it folds fetching in as a silent fallback rather
+        than making the agent orchestrate resolve/harvest itself:
+
+        * held already → the document's metadata + a short text PREVIEW and its structural
+          outline (token-cheap by default); with ``pincite`` just that passage plus
+          ``context`` neighbouring segments (0 = the pinpoint alone / 1 = some / 2 = lots),
+          or with ``full`` the whole text (capped, use a pincite for anything targeted);
+        * routable but not held, and ``autofetch`` → fetched SILENTLY from its source
+          (CourtListener, Find Case Law, legislation.gov.uk, CELLAR, HUDOC…) then returned,
+          so a case that is merely new to the corpus still comes back with its text;
+        * not fetchable at all → the external LII / BAILII URL(s), so the agent can read or
+          scrape it itself.
+
+        Alongside the text it returns the ways this authority is cited (parallel citations
+        and shorthands), who cites it (``cited_by``), and cocitation neighbours
+        (``similar`` — "cases like this"), each of which the agent can then query in depth."""
+        from .citations import extract_citations
+        from .citations.snowball import _classify
+        from .resolve.matchers import first_candidate
+
+        raw = (citation or "").strip()
+        if not raw:
+            return {"error": "empty citation"}
+        # 1. resolve to a candidate id — the citation as written, an ECLI/CELEX, or a slug
+        cand: str | None = None
+        hits = extract_citations(raw)
+        if hits and hits[0].candidate_id:
+            cand = hits[0].candidate_id
+        if not cand:
+            fc = first_candidate(raw)
+            cand = fc.value if fc else None
+        with self._open() as (cat, _rs, _ts):
+            held_id = cat.find_document_id(cand) if cand else None
+            if held_id is None and cand is None and ("/" in raw or ":" in raw):
+                # maybe the agent passed a stable_id straight through
+                if cat.get_document(raw) is not None:
+                    held_id, cand = raw, raw
+        form = adapter = None
+        if cand:
+            form, _juris, adapter = _classify(cand, "case")
+        # 2. silent autofetch when routable but not held
+        fetched = False
+        if held_id is None and autofetch and cand and adapter is not None:
+            try:
+                hr = self.harvest_reference(ref=raw, candidate=cand)
+            except Exception:  # noqa: BLE001 — a fetch failure just falls through to the URL
+                hr = {}
+            if hr.get("resolved") and hr.get("document"):
+                held_id, fetched = hr["document"], True
+        # 3a. held → the rich answer
+        if held_id:
+            return self._lookup_held(held_id, raw=raw, pincite=pincite, context=context,
+                                     cited_by=cited_by, similar=similar, fetched=fetched,
+                                     full=full)
+        # 3b. not held → external links (the agent reads / scrapes it itself)
+        links = self.reference_links(ref=cand or raw, raw=raw)
+        bucket = _candidate_jurisdiction(cand) if cand else None
+        return {
+            "citation": raw, "candidate": cand, "held": False,
+            "form": form, "routable": adapter is not None,
+            "jurisdiction": dict(RETRIEVAL_JURISDICTIONS).get(bucket, bucket) if bucket else None,
+            "autofetch_attempted": bool(autofetch and cand and adapter is not None),
+            "external_links": links["links"],
+            "note": ("Not held, and could not be fetched automatically — read it at one of "
+                     "the external links (a free legal-information institute) and, if useful, "
+                     "add it with the maintenance import tools."
+                     if links["links"] else
+                     "Not recognised as a routable citation — try search() by party name."),
+        }
+
+    # Token discipline (MCP best practice): never dump a whole judgment into context by
+    # default. A preview orients the agent; a pincite quotes exactly; ``full`` is the
+    # explicit, still-capped escape hatch. ~2.5k chars ≈ 600 tokens preview; ~48k ≈ 12k
+    # tokens for a capped full read (well under the 25k-token tool-response ceiling).
+    _LOOKUP_PREVIEW_CHARS = 2500
+    _LOOKUP_FULL_CHARS = 48_000
+
+    def _lookup_held(self, held_id: str, *, raw: str, pincite: str | None, context: int,
+                     cited_by: bool, similar: bool, fetched: bool, full: bool = False) -> dict:
+        """Assemble the held-document answer for :meth:`lookup`."""
+        doc = self.get_document(held_id)
+        d = doc.get("document", {}) or {}
+        out: dict = {
+            "held": True, "fetched_now": fetched, "stable_id": held_id,
+            "queried_as": raw,
+            "title": d.get("title"), "oscola": doc.get("oscola"),
+            "jurisdiction": doc.get("jurisdiction"), "court": doc.get("court_label"),
+            "date": str(d.get("decision_date"))[:10] if d.get("decision_date") else None,
+            "doc_type": d.get("doc_type"), "source": doc.get("source_label"),
+            # every way this authority is cited — parallel citations & shorthands
+            "also_cited_as": doc.get("also_cited_as"),
+            "cited_by_count": doc.get("cited_by_count"),
+        }
+        # text: the pincited passage (+ context scale), a capped full read, or — by
+        # default — a short preview plus the structural outline, so the agent decides what
+        # to pull rather than paying for the whole document up front.
+        if pincite:
+            out["pincite"] = pincite
+            out["passage"] = self.get_provision(held_id, label=pincite, context=context)
+        else:
+            body = self.document_body(held_id)
+            text = body.get("text") or ""
+            segs = body.get("segments") or []
+            out["segment_count"] = len(segs)
+            if full:
+                out["text"] = text[:self._LOOKUP_FULL_CHARS]
+                if len(text) > self._LOOKUP_FULL_CHARS:
+                    out["text_truncated"] = True
+                    out["text_note"] = ("truncated — pincite a provision/paragraph for an "
+                                        "exact, complete quote")
+            else:
+                out["text_preview"] = text[:self._LOOKUP_PREVIEW_CHARS]
+                out["preview_truncated"] = len(text) > self._LOOKUP_PREVIEW_CHARS
+                # the structural spine (headings / section & article labels), so the agent
+                # can pincite the right provision without reading the body
+                out["outline"] = [s.get("label") for s in segs
+                                  if s.get("label") and s.get("kind") not in ("paragraph",)][:60]
+                out["how_to_read"] = ("preview only — pass pincite='<label>' for one "
+                                      "provision (with context 0/1/2), or full=true for the "
+                                      "whole text")
+        if cited_by:
+            cit = self.citator(held_id)
+            out["cited_by"] = {"stats": cit.get("cited_by"),
+                               "significant": cit.get("most_significant_citors", [])[:8]}
+        if similar:
+            out["similar"] = self.related_documents(held_id, limit=8).get("co_cited", [])
+        return out
+
+    def holdings_overview(self) -> dict:
+        """A dense, parsimonious snapshot of the corpus for an agent to orient itself in
+        ONE call: per meaningfully-populated jurisdiction, how much case-law / legislation
+        / guidance is HELD, and whether more can be FETCHED on demand (a live adapter). The
+        balance of holdings to read before deciding what the corpus can be relied on for."""
+        from .adapters.registry import SOURCE_INFO
+
+        _REG_NAME = {"GB": "United Kingdom", "EU": "European Union", "US": "United States",
+                     "IE": "Ireland", "AU": "Australia", "CA": "Canada", "NZ": "New Zealand",
+                     "SG": "Singapore", "HK": "Hong Kong", "NL": "Netherlands",
+                     "CoE": "Council of Europe"}
+        fetch: dict[str, list[str]] = {}
+        for si in SOURCE_INFO.values():
+            fetch.setdefault(_REG_NAME.get(si.jurisdiction, si.jurisdiction), []).append(si.key)
+        shape = self._shape_ready()
+        rows = []
+        for j in shape.get("jurisdictions", []):
+            total = j.get("total", 0)
+            if total < 1:
+                continue
+            rows.append({
+                "jurisdiction": j["jurisdiction"],
+                "held": {"cases": j.get("cases", 0), "legislation": j.get("legislation", 0),
+                         "guidance": (j.get("guidance", 0) or 0) + (j.get("administrative", 0) or 0)},
+                "total": total,
+                "fetch_on_demand": sorted(fetch.get(j["jurisdiction"], [])),
+            })
+        rows.sort(key=lambda r: -r["total"])
+        return {"jurisdictions": rows, "total_documents": shape.get("total", 0),
+                "warming": bool(shape.get("_warming")),
+                "note": "fetch_on_demand lists adapters that can pull MORE for that "
+                        "jurisdiction on demand; an empty list means upload-only. Give a "
+                        "citation to lookup() and it will fetch silently where it can."}
+
+    def _shape_ready(self) -> dict:
+        """The corpus shape, computed synchronously if the warmed cache is still cold — so
+        the (infrequent) overview/jurisdictions tools never hand an agent an empty
+        placeholder just because the background warm hasn't finished."""
+        shape = self.corpus_shape()
+        if not shape.get("jurisdictions") and shape.get("_warming"):
+            shape = self._corpus_shape_uncached()
+        return shape
+
+    def jurisdictions(self) -> list[dict]:
+        """The selectable jurisdictions for search/retrieval, each with its held-document
+        count — the vocabulary the ``jurisdiction`` search filter accepts."""
+        shape = self._shape_ready()
+        return [{"jurisdiction": j["jurisdiction"], "documents": j.get("total", 0)}
+                for j in shape.get("jurisdictions", []) if j.get("total", 0) > 0]
+
+    def sources_for_jurisdiction(self, name: str) -> list[str]:
+        """The corpus sources belonging to a jurisdiction bucket (its natural-language name
+        as returned by :meth:`jurisdictions`), so a search can be scoped by jurisdiction."""
+        want = (name or "").strip().lower()
+        return [s for s in self._all_sources() if self._jurisdiction_of(s).lower() == want]
+
     def get_provision(self, stable_id: str, *, label: str | None = None,
                       char_start: int | None = None, char_end: int | None = None,
                       context: int = 1) -> dict:

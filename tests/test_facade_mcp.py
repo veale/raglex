@@ -99,36 +99,49 @@ def test_facade_embed_and_search(config):
     assert hits and "erasure" in hits[0]["chunk_text"].lower()
 
 
-# -- MCP server: same operations as tools ----------------------------------
-def test_mcp_exposes_full_toolset(config):
-    server = build_server(config)
+# -- MCP server: lean retrieval surface, mutations gated -------------------
+def test_mcp_core_tools_first_class_mutations_gated(config):
+    """The research surface is first-class and small; the ~60 mutation/admin ops are NOT
+    each a top-level tool — they live behind the one ``maintenance`` dispatcher, whose
+    ``help`` still lists them all (so nothing is lost, only removed from the hot context)."""
     import asyncio
-    tools = asyncio.run(server.list_tools())
-    names = {t.name for t in tools}
-    # read + write + ops parity with the API
-    for expected in {
-        "search", "list_documents", "get_document", "graph_neighbours", "corpus_stats",
-        "dashboard", "harvest_worklist", "import_pdf_url", "import_pdf_base64", "add_note",
-        "attach_file_base64", "link_documents", "tag_document", "import_zotero",
-        "embed_pending", "resolve_citations",
-    }:
-        assert expected in names, f"missing MCP tool {expected}"
+
+    server = build_server(config)
+    names = {t.name for t in asyncio.run(server.list_tools())}
+    for core in {"search", "lookup", "overview", "jurisdictions", "list_documents",
+                 "get_document", "graph_neighbours", "citator", "related_documents"}:
+        assert core in names, f"missing core tool {core}"
+    assert "maintenance" in names
+    assert len(names) < 20, f"core surface unexpectedly large: {sorted(names)}"
+    # the mutation ops are gated, not top-level…
+    for gated in {"import_pdf_url", "import_pdf_base64", "add_note", "harvest_worklist",
+                  "import_zotero", "embed_pending", "resolve_citations", "corpus_stats"}:
+        assert gated not in names, f"{gated} leaked as a top-level tool"
+    # …but every one is still reachable and documented via maintenance('help')
+    import json
+    help_res = asyncio.run(server.call_tool("maintenance", {"op": "help"}))
+    if isinstance(help_res, tuple):
+        help_res = help_res[1] if isinstance(help_res[1], dict) else help_res[0]
+    if isinstance(help_res, list):
+        help_res = json.loads(help_res[0].text)
+    ops = help_res["ops"]
+    for gated in {"import_pdf_base64", "add_note", "corpus_stats", "resolve_citations"}:
+        assert gated in ops
 
 
-def test_mcp_tool_call_roundtrips(config):
-    """A tool call writes through the same Facade the API uses."""
+def test_mcp_tool_call_roundtrips_through_maintenance(config):
+    """A gated op dispatched through ``maintenance`` writes through the same Facade."""
     import asyncio
 
     server = build_server(config)
     b64 = base64.b64encode(b"<p>An imported note about Article 22.</p>").decode()
-    result = asyncio.run(server.call_tool(
-        "import_pdf_base64", {"content_base64": b64, "filename": "n.html", "doc_type": "commentary"}
-    ))
-    # FastMCP returns (content, structured) — the structured payload carries our dict
+    result = asyncio.run(server.call_tool("maintenance", {
+        "op": "import_pdf_base64",
+        "args": {"content_base64": b64, "filename": "n.html", "doc_type": "commentary"}}))
     structured = result[1] if isinstance(result, tuple) else result
     assert "stable_id" in str(structured)
 
-    stats = asyncio.run(server.call_tool("corpus_stats", {}))
+    stats = asyncio.run(server.call_tool("maintenance", {"op": "corpus_stats"}))
     assert "total" in str(stats)
 
 
