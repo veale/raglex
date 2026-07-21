@@ -233,7 +233,7 @@ def test_formex_falls_back_to_grseq_grounds_not_ruling_only():
 
 def test_formex_case_title_from_parties_and_number():
     from raglex.adapters.eu_cellar import formex_case_title
-    assert formex_case_title(_OLD_FORMEX) == "ZZ v Secretary of State for the Home Department (C-300/11)"
+    assert formex_case_title(_OLD_FORMEX) == "ZZ v Secretary of State for the Home Department"
 
 
 def test_formex_ag_title_without_parties_element():
@@ -241,7 +241,15 @@ def test_formex_ag_title_without_parties_element():
     xml = b"""<DOC><NO.CASE>C-340/21</NO.CASE><TITLE>Opinion of Advocate General
       Pitruzzella delivered on 27 April 2023 Case C-340/21 VBvNatsionalna agentsia
       za prihodite (Request for a preliminary ruling)</TITLE></DOC>"""
-    assert formex_case_title(xml) == "VB v Natsionalna agentsia za prihodite (C-340/21)"
+    assert formex_case_title(xml) == "VB v Natsionalna agentsia za prihodite"
+
+
+def test_case_display_title_drops_c_t_and_appeal_docket_suffixes():
+    from raglex.adapters.eu_cellar import clean_case_display_title
+    assert clean_case_display_title("OC (C-479/22P)") == "OC"
+    assert clean_case_display_title("EDPS v SRB (C-413/23 P)") == "EDPS v SRB"
+    assert clean_case_display_title("Example (T-123/24)") == "Example"
+    assert clean_case_display_title("Example (F-12/08)") == "Example"
 
 
 # -- joined cases: the judgment lives only under the LEAD case number (§5b) --

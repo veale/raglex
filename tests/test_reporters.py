@@ -234,3 +234,8 @@ def test_display_citation_english_and_old_law_reports():
     assert display_citation("150 e.r. 1030") == "150 ER 1030"
     assert display_citation("(1868) lr 7 qb 339") == "(1868) LR 7 QB 339"
     assert display_citation("1999 sc 583") == "1999 SC 583"
+def test_oscola_cleans_parenthetical_spacing_in_legislation_titles():
+    from raglex.citations.oscola import cite
+    got = cite({"stable_id": "32017R1939", "source": "eu-legislation",
+                "doc_type": "legislation", "title": "Council Regulation ( the EPPO )"})
+    assert got["text"] == "Council Regulation (the EPPO)"

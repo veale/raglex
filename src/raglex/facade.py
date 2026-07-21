@@ -6569,7 +6569,8 @@ class Facade:
         metadata comes back in batches of 50 per credentialed call; CELEXes the
         webservice has nothing for are flagged so they're not retried daily. Needs
         EURLEX_USERNAME/PASSWORD (Settings); without them it's a no-op."""
-        from .adapters.eu_cellar import EUCellarAdapter, concise_case_title, eurlex_metadata
+        from .adapters.eu_cellar import (EUCellarAdapter, clean_case_display_title,
+                                         concise_case_title, eurlex_metadata)
         from .adapters.eu_legislation import _is_generic_title, celex_title
 
         with self._open() as (cat, _rs, _ts):
@@ -6582,6 +6583,11 @@ class Facade:
             shortened = 0
             for r in rows:
                 t = r["title"]
+                clean = clean_case_display_title(t)
+                if clean and clean != t:
+                    cat.update_document_fields(r["stable_id"], {"title": clean}, curate=False)
+                    r["title"] = t = clean
+                    shortened += 1
                 if t and ("—" in t or "#" in t) and len(t) > 90:
                     short = concise_case_title(t)
                     if short and short != t:
@@ -6619,8 +6625,9 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             for celex, sid in want.items():
                 m = meta.get(celex) or {}
-                if m.get("title") and m["title"] != sid:
-                    cat.update_document_fields(sid, {"title": m["title"]}, curate=False)
+                clean_title = clean_case_display_title(m.get("title"))
+                if clean_title and clean_title != sid:
+                    cat.update_document_fields(sid, {"title": clean_title}, curate=False)
                     titled += 1
                 for subj in (m.get("subjects") or []):
                     if cat.upsert_document_tag(sid, subj, method="eurlex"):

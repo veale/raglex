@@ -150,6 +150,20 @@ _TITLE_HEADER_RE = re.compile(
     r"^(Judgment|Order|Opinion|View|Arr[êe]t|Ordonnance|Avis|Conclusions|Urteil|Sentenza|Auto)\b",
     re.IGNORECASE,
 )
+_TRAILING_DOCKET_RE = re.compile(
+    r"\s*\((?:(?:Joined\s+)?Cases?\s+)?[CTF][-‑–]?\d+/\d+(?:\s*(?:P|RX))?"
+    r"(?:\s*(?:,|and|to|et|&)\s*[CTF][-‑–]?\d+/\d+(?:\s*(?:P|RX))?)*\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def clean_case_display_title(title: str | None) -> str | None:
+    """Drop a terminal parenthesised C/T/F docket echo from a party-name title.
+    The ECLI/CELEX already carries identity; ``OC (C-479/22P)`` should display as
+    ``OC``. Covers Court, General Court, Civil Service and appeal/RX suffixes."""
+    if not title:
+        return title
+    return _TRAILING_DOCKET_RE.sub("", title).strip()
 
 
 def concise_case_title(raw: str) -> str:
@@ -169,7 +183,7 @@ def concise_case_title(raw: str) -> str:
     parties = _CASE_NO_RE.sub("", parties)
     parties = re.sub(r"\s*\([CTF][-‑]\d+/\d+\)", "", parties).strip(" .—-")  # drop inline (C-…/…)
     if parties and case_no:
-        return f"{parties} ({case_no})"
+        return clean_case_display_title(f"{parties} ({case_no})") or parties
     return parties or (f"Case {case_no}" if case_no else raw)
 
 
@@ -503,8 +517,8 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
         if re.fullmatch(r"\d+/\d+", no_case):
             no_case = "C-" + no_case
         if no_case:
-            return f"{parties} ({no_case})"
-    return parties
+            return clean_case_display_title(f"{parties} ({no_case})") or parties
+    return clean_case_display_title(parties)
 
 
 class EUCellarAdapter(BaseAdapter):

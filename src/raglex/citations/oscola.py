@@ -44,6 +44,12 @@ def _plain(parts: list[Part]) -> str:
     return "".join(p["t"] for p in parts).strip()
 
 
+def _clean_parenthetical_spacing(text: str) -> str:
+    """Typography cleanup for imported metadata: ``( the EPPO )`` → ``(the EPPO)``.
+    Only boundary whitespace changes; meaningful text inside remains untouched."""
+    return re.sub(r"\(\s+([^()]*?\S)\s+\)", r"(\1)", text or "")
+
+
 def _pack(parts: list[Part]) -> dict:
     parts = [p for p in parts if p["t"]]
     return {"parts": parts, "text": _plain(parts)}
@@ -127,6 +133,11 @@ def _clean_eu_title(title: str) -> tuple[str, str | None]:
 
     Returns the cleaned name and any case number recovered from the stripped tail.
     """
+    title = _clean_parenthetical_spacing(title)
+    # party names sometimes end in a redundant docket echo supplied by EUR-Lex.
+    title = re.sub(r"\s*\((?:(?:Joined\s+)?Cases?\s+)?[CTF][-‑–]?\d+/\d+"
+                   r"(?:\s*(?:P|RX))?(?:\s*(?:,|and|to|&)\s*[CTF][-‑–]?\d+/\d+"
+                   r"(?:\s*(?:P|RX))?)*\)\s*$", "", title, flags=re.I)
     case_no = None
     m = _EUECJ_TAIL_RE.search(title)
     if m:
@@ -156,7 +167,7 @@ def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
         if sid.upper().startswith("ECLI:"):
             ecli = sid
     ecli_short = ecli[5:] if ecli.upper().startswith("ECLI:") else ecli
-    title = (_get(doc, "title") or "").strip()
+    title = _clean_parenthetical_spacing((_get(doc, "title") or "").strip())
     title, tail_case_no = _clean_eu_title(title)
     case_no = case_no or tail_case_no
     if not case_no and not ecli_short:
@@ -188,7 +199,7 @@ def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
 def _uk_case(doc: Mapping) -> dict | None:
     slug = _get(doc, "stable_id")
     neutral = slug_to_citation(slug)
-    title = (_get(doc, "title") or "").strip()
+    title = _clean_parenthetical_spacing((_get(doc, "title") or "").strip())
     parts: list[Part] = []
     if title:
         parts.append(_run(title, italic=True))
@@ -310,7 +321,7 @@ def cite(doc: Mapping, meta: Mapping | None = None) -> dict:
         return out
     # Legislation and everything else: the stored title is already the OSCOLA short form
     # (e.g. "Data Protection Act 2018", or the full EU instrument name); italicise nothing.
-    title = (_get(doc, "title") or "").strip()
+    title = _clean_parenthetical_spacing((_get(doc, "title") or "").strip())
     if title:
         return _pack([_run(title)])
     return _pack([_run(str(_get(doc, "ecli") or _get(doc, "stable_id") or ""))])
