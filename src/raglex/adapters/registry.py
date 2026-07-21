@@ -26,6 +26,13 @@ from .sg_legislation import SGLegislationAdapter
 from .echr import ECHRAdapter
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
+from .fr_conseil_etat import FrConseilEtatAdapter
+from .fr_dila import FrDilaAdapter
+from .fr_judilibre import FrJudilibreAdapter
+from .fr_legislation import FrLegislationAdapter
+from .de_gii import DeGiiAdapter
+from .de_neuris import DeNeurisAdapter
+from .de_rii import DeRiiAdapter
 from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
@@ -123,6 +130,32 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # (HTTP 405 human-verification), so there is deliberately no HTML fallback.
     "nz-legislation": NZLegislationAdapter,
     "nl-legislation": NLLegislationAdapter,
+    # France — one PISTE-authed family plus the administrative order. Légifrance
+    # (fr-legislation) is the ELI resolution target the case-law edges point at; the
+    # CNIL and CONSTIT funds ride the same client. Judilibre (fr-judilibre) is the
+    # ECLI-native Cour de cassation base with court-authored edges. fr-conseil-etat is
+    # the administrative order (opendata.justice-administrative.fr).
+    "fr-legislation": FrLegislationAdapter,
+    "fr-cnil": lambda **kw: FrLegislationAdapter(fond="CNIL", **kw),
+    "fr-constit": lambda **kw: FrLegislationAdapter(fond="CONSTIT", **kw),
+    "fr-judilibre": FrJudilibreAdapter,
+    "fr-conseil-etat": FrConseilEtatAdapter,
+    # Germany — NeuRIS / rechtsinformationen.bund.de (beta), ELI + ECLI native. One
+    # adapter, two modes: federal case law (default) and federal legislation (LDML.de).
+    "de-neuris": DeNeurisAdapter,
+    "de-neuris-legislation": lambda **kw: DeNeurisAdapter(mode="legislation", **kw),
+    # Germany bulk seeds (no key): the legacy juris-DTD portals. de-gii = federal
+    # statutes (gesetze-im-internet, local clone or gii-toc.xml); de-rii = federal
+    # case law (rechtsprechung-im-internet, rii-toc.xml). NeuRIS is the live increment.
+    "de-gii": DeGiiAdapter,
+    "de-rii": DeRiiAdapter,
+    # France bulk seed (no auth): the DILA OPENDATA archives read from local disk. One
+    # adapter across funds; the PISTE/Conseil-d'État live adapters handle increments.
+    "fr-dila": FrDilaAdapter,  # CASS (Cour de cassation) by default
+    "fr-dila-legi": lambda **kw: FrDilaAdapter(fond="LEGI", **kw),
+    "fr-dila-jade": lambda **kw: FrDilaAdapter(fond="JADE", **kw),
+    "fr-dila-constit": lambda **kw: FrDilaAdapter(fond="CONSTIT", **kw),
+    "fr-dila-cnil": lambda **kw: FrDilaAdapter(fond="CNIL", **kw),
     # Scrape recipes (§5a) — regulator portals with no API.
     **{key: _scrape_factory(recipe) for key, recipe in RECIPES.items()},
 }
@@ -497,6 +530,100 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "discovery by rechtsgebied. Keywords post-filter the results.",
         (SourceOption("rechtsgebied", "Legal area", "e.g. staats- en bestuursrecht"),),
     ),
+    "fr-legislation": SourceInfo(
+        "fr-legislation", "France — Légifrance (codes, PISTE)", "legislation", "FR", False,
+        "Consolidated French statute law via DILA's Légifrance API on the PISTE gateway "
+        "(needs free PISTE credentials — one app also serves fr-judilibre). Fund LEGI "
+        "enumerates every consolidated code via /list/code; each article carries an ELI "
+        "and a full version history (mapped onto document versions for point-in-time). "
+        "Name LEGITEXT/LEGIARTI ids or an ELI to fetch specific instruments.",
+        (SourceOption("ids", "Instrument ids", "LEGITEXT000006070721, LEGIARTI000006419292"),
+         SourceOption("fond", "Fund", "LEGI (default) | CNIL | CONSTIT | JORF")),
+        ("ELI id", "LEGITEXT/LEGIARTI id", "legifrance.gouv.fr URL"),
+    ),
+    "fr-cnil": SourceInfo(
+        "fr-cnil", "France — CNIL deliberations (Légifrance)", "guidance", "FR", False,
+        "The French DPA's deliberations, harvested through the same Légifrance/PISTE "
+        "client (fund CNIL) — a high-relevance addition to the EDPB/ICO guidance layer.",
+        (), ("CNILTEXT id",),
+    ),
+    "fr-constit": SourceInfo(
+        "fr-constit", "France — Conseil constitutionnel (Légifrance)", "caselaw", "FR", False,
+        "Conseil constitutionnel decisions via Légifrance/PISTE (fund CONSTIT).",
+        (), ("CONSTEXT id", "ECLI:FR:CC:…"),
+    ),
+    "fr-judilibre": SourceInfo(
+        "fr-judilibre", "France — Cour de cassation (Judilibre)", "caselaw", "FR", False,
+        "The Cour de cassation open-data judgment base via Judilibre on PISTE (shares "
+        "credentials with fr-legislation). ECLI-native and incremental: discovery walks "
+        "/export by update date, each decision's functional zones (motivations, "
+        "dispositif…) become citable segments, and the court-authored textes appliqués "
+        "and rapprochements become typed edges to legislation and case law.",
+        (SourceOption("ids", "Decision ids/ECLIs", "ECLI:FR:CCASS:2021:C100400"),),
+        ("ECLI:FR:CCASS:…", "Judilibre decision id"),
+    ),
+    "fr-conseil-etat": SourceInfo(
+        "fr-conseil-etat", "France — administrative order (Conseil d'État)", "caselaw",
+        "FR", False,
+        "The administrative court order (Conseil d'État, cours administratives d'appel, "
+        "tribunaux administratifs) from opendata.justice-administrative.fr — the "
+        "complete set, ECLI-native (ECLI:FR:CE:…). Where most data-protection and "
+        "public-law litigation sits. The search endpoint is undocumented, so it is read "
+        "defensively; verify live before a backfill.",
+        (), ("ECLI:FR:CE:…", "numéro de dossier"),
+    ),
+    "de-neuris": SourceInfo(
+        "de-neuris", "Germany — federal case law (NeuRIS, beta)", "caselaw", "DE", False,
+        "Federal court decisions (BVerfG, BGH, BAG, BFH, BSG, BVerwG, BPatG) from the "
+        "official rechtsinformationen.bund.de open API — ECLI-native, anonymised, 2010 "
+        "onward. BETA: endpoints may change, data still filling. Daily watermark.",
+        (SourceOption("ids", "Document numbers/ECLIs", "ECLI:DE:BGH:2021:..."),),
+        ("ECLI:DE:…", "NeuRIS document number"),
+    ),
+    "de-neuris-legislation": SourceInfo(
+        "de-neuris-legislation", "Germany — federal legislation (NeuRIS, beta)",
+        "legislation", "DE", False,
+        "Consolidated federal laws and ordinances (BGB, SGB, GG, BDSG…) from "
+        "rechtsinformationen.bund.de — ELI-native, served as LegalDocML.de (the German "
+        "AKN profile), so §/Abs./Satz become chunk units. BETA; only current versions "
+        "are reachable by ELI today (point-in-time is a known gap).",
+        (SourceOption("ids", "ELIs", "eli/bund/bgbl-1/..."),),
+        ("ELI id", "Jurabk (BGB, BDSG)"),
+    ),
+    "de-gii": SourceInfo(
+        "de-gii", "Germany — federal statutes bulk (gesetze-im-internet)",
+        "legislation", "DE", False,
+        "The no-key bulk seed: every federal statute as juris gii-norm XML. Point `path` "
+        "at a local clone of the gesetze-im-internet corpus (one folder per law) for "
+        "offline enumeration + change detection off each file's builddate; leave it blank "
+        "to fetch gii-toc.xml and pull per-law zips. Keyed by the abbreviation "
+        "(de/gesetz/bgb). Current versions only — NeuRIS is the live increment.",
+        (SourceOption("path", "Local gii clone", "/data/corpora/gesetze-im-internet"),
+         SourceOption("ids", "Limit to abbreviations", "BGB,BDSG,SGB V")),
+        ("Jurabk (BGB)", "de/gesetz/bgb"),
+    ),
+    "de-rii": SourceInfo(
+        "de-rii", "Germany — federal case law bulk (rechtsprechung-im-internet)",
+        "caselaw", "DE", False,
+        "The no-key case-law bulk seed: BVerfG, the five supreme federal courts and the "
+        "BPatG (2010→), anonymised, ECLI-native, as juris rii XML. Fetches rii-toc.xml "
+        "and pulls each decision, or reads a local `path` of rii XML files. Every seeded "
+        "decision resolves the ECLI:DE: citations the corpus already holds.",
+        (SourceOption("path", "Local rii folder", "/data/corpora/rechtsprechung-im-internet"),),
+        ("ECLI:DE:…",),
+    ),
+    "fr-dila": SourceInfo(
+        "fr-dila", "France — DILA OPENDATA bulk seed", "caselaw", "FR", False,
+        "The no-auth offline seed from the echanges.dila.gouv.fr/OPENDATA archives (read "
+        "from local disk — a directory of extracted XML or a .tar.gz). One adapter across "
+        "the funds via `fond`: CASS (default, Cour de cassation), CAPP, JADE "
+        "(administrative), CONSTIT, CNIL, and LEGI (legislation). Same ECLI / Légifrance "
+        "identifiers as the live PISTE adapters, so seeding resolves pending citations. "
+        "Apply the daily deltas after the Freemium global snapshot to stay current.",
+        (SourceOption("path", "Path to DILA archives/dir", "/data/corpora/dila/CASS"),
+         SourceOption("fond", "Fund", "CASS (default) | CAPP | JADE | CONSTIT | CNIL | LEGI")),
+        ("ECLI:FR:…", "Légifrance JURI id", "LEGIARTI id"),
+    ),
 }
 
 
@@ -544,7 +671,13 @@ def source_catalog() -> list[dict]:
                                              # drop's filename timestamp, and the NZ
                                              # API's most_recently_updated sort
                                              "ca-federal", "hk-legislation",
-                                             "nz-legislation"))
+                                             "nz-legislation",
+                                             # Légifrance code /list/code lastUpdate cursor,
+                                             # CNIL fund search date, NeuRIS published-from
+                                             "fr-legislation", "fr-cnil",
+                                             "de-neuris-legislation",
+                                             # gii builddate change-detection cursor
+                                             "de-gii"))
         out.append(row)
     return out
 

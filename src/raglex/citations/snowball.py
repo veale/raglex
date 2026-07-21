@@ -39,7 +39,8 @@ _ECLI_RE = re.compile(r"^ECLI:(?P<country>[A-Z]{2}):(?P<court>[A-Z0-9]+):", re.I
 _NEUTRAL_RE = re.compile(r"^(?P<court>[a-z]+)(?:/[a-z]+)?/(?:19|20)\d{2}/\d+$")
 # ECLI country → the adapter that can fetch it today (extend as adapters land). "CE"
 # (Council of Europe) is the ECtHR — ECLI:CE:ECHR:… → the HUDOC adapter.
-_ECLI_ADAPTER = {"EU": "eu-cellar", "NL": "nl-rechtspraak", "GB": "uk-caselaw", "CE": "echr"}
+_ECLI_ADAPTER = {"EU": "eu-cellar", "NL": "nl-rechtspraak", "GB": "uk-caselaw", "CE": "echr",
+                 "FR": "fr-judilibre", "DE": "de-neuris"}
 # A bare ECHR application number (4451/70, 36022/97) — the resolvable key for an ECtHR
 # case (the HUDOC adapter looks it up). Distinct from a CJEU number, which has a C-/T- prefix.
 ECHR_APPNO_RE = re.compile(r"^\d{1,5}/\d{2}$")  # app-number year is always 2 digits
@@ -117,6 +118,17 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
     m = _ECLI_RE.match(candidate)
     if m:
         country = m.group("country").upper()
+        court = m.group("court").upper()
+        # France has two court orders under one country code: the administrative
+        # order (Conseil d'État / cours administratives d'appel / tribunaux
+        # administratifs) is served by fr-conseil-etat, the judicial order (Cour de
+        # cassation and below) by fr-judilibre. The Conseil constitutionnel lives in
+        # Légifrance's CONSTIT fund.
+        if country == "FR":
+            adapter = {"CE": "fr-conseil-etat", "CAA": "fr-conseil-etat",
+                       "TA": "fr-conseil-etat", "CC": "fr-legislation"}.get(
+                           court, "fr-judilibre")
+            return f"ECLI judgment (FR:{court})", country, adapter
         return f"ECLI judgment ({country})", country, _ECLI_ADAPTER.get(country)
     if _ECHR_APPNO_RE.match(candidate):
         return "ECHR application no.", "CoE", "echr"

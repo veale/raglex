@@ -25,8 +25,12 @@ from typing import Iterator
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
-from ..core.models import DocType, ExtractedVia, Record, Stub
+from ..core.models import DocType, ExtractedVia, Record, Stub, TypedRelation
 from ..formats import parse
+
+# A Directive CELEX (sector 3, descriptor L) — the only instruments that have national
+# transposition measures, so the only ones we run the (extra) transposition query for.
+_DIRECTIVE_RE = re.compile(r"^3\d{4}L\d", re.IGNORECASE)
 
 CELEX_BASE = "https://publications.europa.eu/resource/celex"
 SPARQL_ENDPOINT = "https://publications.europa.eu/webapi/rdf/sparql"
@@ -170,7 +174,19 @@ LIMIT {self.page_size} OFFSET {offset}
             if len(rows) < self.page_size or (max_pages is not None and pages >= max_pages):
                 return
 
+    def _transposition_edges(self, celex: str) -> list[TypedRelation]:
+        """`transposes` edges to national implementing measures — Directives only, and
+        best-effort (a SPARQL hiccup must never fail the fetch of the directive itself)."""
+        if not _DIRECTIVE_RE.match(celex or ""):
+            return []
+        from .eu_cellar import national_transposition_edges
+        try:
+            return national_transposition_edges(celex, self._sparql)
+        except Exception:  # noqa: BLE001 — best-effort enrichment
+            return []
+
     def fetch(self, stub: Stub) -> Record | None:
+        trans = self._transposition_edges(stub.stable_id)
         # Try Formex; a 404/FetchError (no Formex rendition) is NOT fatal — fall
         # through to the EUR-Lex HTML below rather than giving up.
         raw = None
@@ -193,7 +209,7 @@ LIMIT {self.page_size} OFFSET {offset}
                 language="en", source_language="en",
                 landing_url=stub.landing_url,
                 raw_bytes=raw, raw_ext="zip",
-                text=parsed.text, segments=parsed.segments, relations=parsed.relations,
+                text=parsed.text, segments=parsed.segments, relations=parsed.relations + trans,
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"format": "formex-legislation", "celex": stub.stable_id},
             )
@@ -209,7 +225,7 @@ LIMIT {self.page_size} OFFSET {offset}
                 source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
                 title=title or stub.stable_id, language="en", source_language="en",
                 landing_url=stub.landing_url, raw_bytes=html, raw_ext="html",
-                text=hp.text, segments=hp.segments, relations=hp.relations,
+                text=hp.text, segments=hp.segments, relations=hp.relations + trans,
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"format": "eurlex-html", "celex": stub.stable_id},
             )
@@ -220,6 +236,7 @@ LIMIT {self.page_size} OFFSET {offset}
             source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
             title=stub.stable_id, language="en", source_language="en",
             landing_url=stub.landing_url, raw_bytes=stub.stable_id.encode(), raw_ext="txt",
+            relations=trans,
             extracted_via=ExtractedVia.STRUCTURED,
             extra={"celex": stub.stable_id, "metadata_only": True},
         )

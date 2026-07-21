@@ -42,6 +42,12 @@ class RelationshipType(StrEnum):
     CITES_FOR_FACT = "cites_for_fact"
     MENTIONS = "mentions"
     IMPLEMENTS = "implements"  # statute -> directive
+    # a national transposition measure (NIM/MNE) implementing an EU directive: the
+    # EU directive -> the national measure that transposes it, minted from CELLAR's
+    # transposition relations. Usually dangling until the national statute is
+    # harvested by fr-legislation / de-neuris, so it feeds the §5b worklist and turns
+    # "GDPR ⇐ transposed by ⇒ BDSG / loi Informatique et Libertés" into a live edge.
+    TRANSPOSES = "transposes"
     INTERPRETS = "interprets"  # case -> statute
     # a CJEU judgment answering a preliminary reference made by a national court
     # (CJEU case -> the national referring case). Usually dangling until the

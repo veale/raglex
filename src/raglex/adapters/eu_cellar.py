@@ -280,6 +280,60 @@ def _parse_iso(value: str | None) -> date | None:
         return None
 
 
+# National transposition measures (NIM/MNE) live in CELLAR's CDM graph and are reachable
+# by SPARQL — this is a CELLAR feature, NOT a SOAP-only one. For a directive we pull the
+# national measures that implement it and mint `transposes` edges (directive → national
+# measure) whose destinations resolve against fr-legislation / de-neuris once they exist,
+# turning "GDPR ⇐ transposed by ⇒ BDSG / loi Informatique et Libertés" into a live edge.
+_NIM_ELI_RE = re.compile(r"(eli/[^\s?#\"']+)", re.IGNORECASE)
+
+
+def _transposition_query(celex: str) -> str:
+    return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?nim ?nimCelex ?country ?eli ?title WHERE {{
+  ?dir cdm:resource_legal_id_celex ?dc . FILTER(STR(?dc) = "{celex}")
+  ?nim cdm:resource_legal_implements_resource_legal ?dir .
+  OPTIONAL {{ ?nim cdm:resource_legal_id_celex ?nimCelex }}
+  OPTIONAL {{ ?nim cdm:resource_legal_in_force_country ?c .
+             BIND(REPLACE(STR(?c), "^.*/", "") AS ?country) }}
+  OPTIONAL {{ ?nim cdm:resource_legal_id_local ?eli }}
+  OPTIONAL {{ ?nim cdm:work_has_expression ?e . ?e cdm:expression_title ?title }}
+}}
+LIMIT 500
+"""
+
+
+def national_transposition_edges(celex: str, sparql) -> list[TypedRelation]:
+    """`transposes` edges from a directive CELEX to its national implementing measures,
+    using a caller-supplied ``sparql(query) -> list[dict]``. Most destinations aren't in
+    the corpus yet, so the edge is dangling (dst None) with the national title/country/ELI
+    kept in ``raw_citation_string`` — it surfaces in the §5b worklist and resolves when
+    fr-legislation / de-neuris harvests the measure. A national ELI, when present, is used
+    directly as the destination id."""
+    edges: list[TypedRelation] = []
+    seen: set[str] = set()
+    for row in sparql(_transposition_query(celex)):
+        eli = row.get("eli") or ""
+        m = _NIM_ELI_RE.search(eli)
+        dst = m.group(1).rstrip("/") if m else None
+        title = row.get("title") or row.get("nimCelex") or eli or row.get("nim")
+        country = row.get("country")
+        key = dst or f"{title}|{country}"
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        raw = title if not country else f"{title} | country: {country}"
+        edges.append(TypedRelation(
+            relationship_type=RelationshipType.TRANSPOSES,
+            raw_citation_string=raw,
+            dst_id=dst,
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.PENDING,
+        ))
+    return edges
+
+
 # -- pure Formex helpers ----------------------------------------------------
 def unzip_formex(raw: bytes) -> bytes | None:
     """CELLAR returns Formex as a zip; unpack the first XML member (pure). Returns

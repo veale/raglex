@@ -88,7 +88,21 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
                 "US-citation queue may spend, leaving the rest for on-demand lookups"),
     SettingSpec("EURLEX_USERNAME", "EUR-Lex webservice user", False, "Sources"),
     SettingSpec("EURLEX_PASSWORD", "EUR-Lex webservice password", True, "Sources"),
-    SettingSpec("PISTE_KEY_ID", "PISTE KeyId (Judilibre)", True, "Sources"),
+    # PISTE (piste.gouv.fr) OAuth2 client-credentials — one app can subscribe to
+    # BOTH Judilibre (fr-judilibre) and Légifrance (fr-legislation), so the two
+    # French adapters share these. Register a free app at piste.gouv.fr, subscribe
+    # it to the Judilibre + Légifrance APIs, and paste the app's client id/secret.
+    SettingSpec("PISTE_CLIENT_ID", "PISTE client id (Légifrance OAuth2)", True, "Sources",
+                "OAuth2 client-credentials; free after registration at piste.gouv.fr"),
+    SettingSpec("PISTE_CLIENT_SECRET", "PISTE client secret", True, "Sources"),
+    # Judilibre authenticates with a static API key sent in the `KeyId` header (NOT
+    # OAuth) — the app's API key from the PISTE Authentification tab. Falls back to
+    # PISTE_CLIENT_ID when blank (on PISTE the client id doubles as the KeyId).
+    SettingSpec("PISTE_KEY_ID", "PISTE KeyId (Judilibre)", True, "Sources",
+                "Judilibre API key sent as the KeyId header; blank = reuse PISTE_CLIENT_ID"),
+    # Point the French adapters at the PISTE sandbox instead of production (the FR
+    # services are evolving; sandbox lets you verify shapes without touching prod quota).
+    SettingSpec("PISTE_SANDBOX", "PISTE sandbox mode", False, "Sources", "1 = sandbox-*.piste.gouv.fr"),
     SettingSpec("RAGLEX_PROXY", "Outbound proxy (all traffic)", True, "Network",
                 "socks5://user:pass@host:1080 | http://host:8080"),
     SettingSpec("RAGLEX_SCRAPER", "Scraper engine", False, "Network",
