@@ -26,6 +26,17 @@ from ..formats.rii_xml import parse_rii
 TOC_URL = "https://www.rechtsprechung-im-internet.de/rii-toc.xml"
 
 
+def _read_zip_xml(path: str) -> bytes | None:
+    """The decision XML inside a per-decision rii zip (the single .xml member)."""
+    import zipfile
+    try:
+        zf = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return None
+    name = next((n for n in zf.namelist() if n.endswith(".xml")), None)
+    return zf.read(name) if name else None
+
+
 class DeRiiAdapter(BaseAdapter):
     source = "de-rii"
     min_interval = 0.3
@@ -43,8 +54,15 @@ class DeRiiAdapter(BaseAdapter):
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         if self.path is not None:
-            for xml in sorted(self.path.rglob("*.xml")):
-                yield Stub(stable_id=xml.stem, hints={"file": str(xml)})
+            # the rii download ships one jb-JURE*.zip per decision (each holding the
+            # decision XML); a plain folder of loose XML is also supported.
+            zips = sorted(self.path.glob("*.zip"))
+            if zips:
+                for z in zips:
+                    yield Stub(stable_id=z.stem, hints={"zip_file": str(z)})
+            else:
+                for xml in sorted(self.path.rglob("*.xml")):
+                    yield Stub(stable_id=xml.stem, hints={"file": str(xml)})
             return
         resp = self._client.get(TOC_URL, raise_for_4xx=False)
         if resp.status_code >= 400:
@@ -78,6 +96,8 @@ class DeRiiAdapter(BaseAdapter):
     def fetch(self, stub: Stub) -> Record | None:
         if stub.hints.get("file"):
             data = Path(stub.hints["file"]).read_bytes()
+        elif stub.hints.get("zip_file"):
+            data = _read_zip_xml(stub.hints["zip_file"])
         elif stub.hints.get("url"):
             resp = self._client.get(stub.hints["url"], raise_for_4xx=False)
             data = resp.content if resp.status_code < 400 else None

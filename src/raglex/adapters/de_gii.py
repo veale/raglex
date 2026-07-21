@@ -69,20 +69,38 @@ class DeGiiAdapter(BaseAdapter):
 
     # -- discover ----------------------------------------------------------
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        if self.path is not None:
-            yield from self._discover_local(since)
-        else:
+        if self.path is None:
             yield from self._discover_toc(since)
+            return
+        # The gii-toc download ships one <law>.zip per law (each holding a single
+        # BJNR*.xml); a git clone ships <law>/<law>.xml folders. Detect which we have.
+        zips = sorted(self.path.glob("*.zip"))
+        if zips:
+            yield from self._discover_zipdir(zips)
+        else:
+            yield from self._discover_local(since)
+
+    def _discover_zipdir(self, zips: list[Path]) -> Iterator[Stub]:
+        """A directory of per-law zips (the gii-toc download). The real identity
+        (jurabk) is inside the zipped XML, so it is derived at fetch; the stub keys on
+        the zip stem, which is also what the `ids` filter matches here."""
+        for z in zips:
+            stem = z.stem
+            if self.ids and stem.lower() not in self.ids:
+                continue
+            yield Stub(stable_id=stem, hints={"zip_file": str(z)})
 
     def _discover_local(self, since: str | None) -> Iterator[Stub]:
         root = self.path / "gesetze" if (self.path / "gesetze").is_dir() else self.path
         since_c = (since or "").replace("-", "")[:8]
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
-            # the canonical file is <folder>.xml (a BJNR*.xml sibling duplicates it)
+            # canonical is <folder>.xml; fall back to any XML incl. the BJNR* file, which
+            # in the download format is the ONLY member (same gii-norm content).
             xml = folder / f"{folder.name}.xml"
             if not xml.exists():
-                xml = next((c for c in folder.glob("*.xml")
-                            if not c.name.startswith("BJNR")), None)
+                xml = (next((c for c in folder.glob("*.xml")
+                             if not c.name.startswith("BJNR")), None)
+                       or next(iter(folder.glob("*.xml")), None))
             if xml is None:
                 continue
             jurabk, builddate = _head_meta(xml)
@@ -122,6 +140,8 @@ class DeGiiAdapter(BaseAdapter):
         file = stub.hints.get("file")
         if file:
             data = Path(file).read_bytes()
+        elif stub.hints.get("zip_file"):
+            data = self._read_local_zip(stub.hints["zip_file"])
         elif stub.hints.get("zip_url"):
             data = self._fetch_zip_xml(stub.hints["zip_url"])
         else:
@@ -150,6 +170,15 @@ class DeGiiAdapter(BaseAdapter):
                 "jurabk": jurabk, "doknr": parsed.metadata.get("doknr"),
             }.items() if v},
         )
+
+    def _read_local_zip(self, path: str) -> bytes | None:
+        """The gii-norm XML inside a local per-law zip (the single .xml member)."""
+        try:
+            zf = zipfile.ZipFile(path)
+        except (zipfile.BadZipFile, OSError):
+            return None
+        name = next((n for n in zf.namelist() if n.endswith(".xml")), None)
+        return zf.read(name) if name else None
 
     def _fetch_zip_xml(self, url: str) -> bytes | None:
         resp = self._client.get(url, raise_for_4xx=False)

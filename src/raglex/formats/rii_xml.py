@@ -45,8 +45,12 @@ def _text(root: ET.Element, tag: str) -> str | None:
 def _iso(value: str | None) -> date | None:
     if not value:
         return None
+    v = value.strip()
     try:
-        return date.fromisoformat(value[:10])
+        # rii dates are compact YYYYMMDD ("20100108"); accept ISO too.
+        if len(v) >= 8 and v[:8].isdigit():
+            return date(int(v[:4]), int(v[4:6]), int(v[6:8]))
+        return date.fromisoformat(v[:10])
     except ValueError:
         return None
 
