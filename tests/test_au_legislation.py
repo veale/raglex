@@ -455,6 +455,14 @@ def test_lawmaker_nested_notes_recover_line_breaks():
     assert "Note 1 First note\nNote 2 Second note" in (doc.text or "")
 
 
+def test_lawmaker_self_closing_paragraphs_separate_inline_notes():
+    raw = b'''<div id="fragview"><p class="HeadingParagraph"><b class="HeadingStyle">17.</b>
+      <b>Who is a rider</b></p><blockquote class="Paragraph">Rule text.
+      <P/><I>Note 1 </I>First note.<P/><I>Note 2 </I>Second note.</blockquote></div>'''
+    doc = parse_lawmaker_html(raw, jurisdiction="tas")
+    assert "Rule text.\nNote 1 First note.\nNote 2 Second note." in (doc.text or "")
+
+
 def test_reparse_sniffer_recognises_lawmaker_html():
     from raglex.facade import _sniff_format
     assert _sniff_format(LAWMAKER_TAS_HTML) == "lawmaker-html"

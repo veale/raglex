@@ -49,11 +49,15 @@ _HEADINGSTYLE_RE = re.compile(r'class=[\'"]HeadingStyle[\'"][^>]*>(.*?)</[Bb]>',
 
 
 def _text(html: str) -> str:
+    # LawMaker uses both HTML line breaks and the old Word-export ``<P/>`` idiom
+    # inside a single blockquote.  They are visible paragraph/note boundaries, not
+    # disposable markup.
+    html = re.sub(r"<(?:br\s*/?|p\s*/)>" , "\n", html, flags=re.I)
     return unescape(_TAG_RE.sub("", html)).replace("\xa0", " ")
 
 
 def _norm(s: str) -> str:
-    return " ".join(s.split())
+    return "\n".join(" ".join(line.split()) for line in s.splitlines() if line.strip())
 
 
 def au_id(jurisdiction: str, typ: str, year: str | int, number: str) -> str:
