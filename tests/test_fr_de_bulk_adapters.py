@@ -140,9 +140,11 @@ def test_dila_article_parse():
 
 
 def test_fr_dila_fetch_juri_and_article(tmp_path):
-    (tmp_path / "juri.xml").write_bytes(DILA_JURI)
+    (tmp_path / "JURITEXT000000000001.xml").write_bytes(DILA_JURI)
+    (tmp_path / "index.xml").write_bytes(b"<INDEX/>")
     cass = FrDilaAdapter(path=str(tmp_path), fond="CASS")
     stubs = list(cass.discover(None))
+    assert [s.stable_id for s in stubs] == ["JURITEXT000000000001"]
     rec = cass.fetch(stubs[0])
     assert rec.doc_type == DocType.JUDGMENT
     assert rec.stable_id == "ECLI:FR:CCASS:2021:C100400"
@@ -150,9 +152,14 @@ def test_fr_dila_fetch_juri_and_article(tmp_path):
 
     legi_dir = tmp_path / "legi"
     legi_dir.mkdir()
-    (legi_dir / "art.xml").write_bytes(DILA_ARTICLE)
+    (legi_dir / "LEGIARTI000032041571.xml").write_bytes(DILA_ARTICLE)
+    # Real snapshots also contain many ELI/text metadata XML files.  LEGI discovery
+    # must not spend the bulk run feeding those irrelevant files to the parser.
+    (legi_dir / "versions.xml").write_bytes(b"<VERSIONS/>")
     legi = FrDilaAdapter(path=str(legi_dir), fond="LEGI")
-    rec2 = legi.fetch(list(legi.discover(None))[0])
+    legi_stubs = list(legi.discover(None))
+    assert [s.stable_id for s in legi_stubs] == ["LEGIARTI000032041571"]
+    rec2 = legi.fetch(legi_stubs[0])
     assert rec2.doc_type == DocType.LEGISLATION
     assert rec2.stable_id == "LEGIARTI000032041571"
     assert "Code civil" in rec2.title

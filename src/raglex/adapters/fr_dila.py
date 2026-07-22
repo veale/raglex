@@ -39,6 +39,19 @@ _FUND_JURI = {
     "CNIL": (DocType.DECISION, "CNIL"),
 }
 
+# Canonical document files in each DILA bulk fund.  The archives also contain XML
+# indexes, packaging metadata and (for LEGI) ELI/version trees; those are not legal
+# documents and should never become discovery stubs.
+_FUND_XML_PREFIX = {
+    "LEGI": "LEGIARTI",
+    "CASS": "JURITEXT",
+    "CAPP": "JURITEXT",
+    "INCA": "JURITEXT",
+    "JADE": "CETATEXT",
+    "CONSTIT": "CONSTEXT",
+    "CNIL": "CNILTEXT",
+}
+
 
 class FrDilaAdapter(BaseAdapter):
     source = "fr-dila"
@@ -54,15 +67,37 @@ class FrDilaAdapter(BaseAdapter):
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         if self.path is None or not self.path.exists():
             return
+        # A LEGI snapshot contains far more than article documents: ELI ``versions.xml``
+        # files, text/section metadata and several parallel current/historic trees.  The
+        # old recursive ``*.xml`` + global ``sorted()`` materialised that entire file list
+        # before yielding one stub.  On the mounted DILA corpus this took minutes, looked
+        # hung, consumed a large amount of memory and supplied mostly files that fetch()
+        # would subsequently reject.  Article filenames carry their canonical identity,
+        # so stream precisely those.  Durable LEGIARTI ids are the restart cursor: a
+        # restarted bulk job rediscovers cheaply and Pipeline skips held records.
+        prefix = _FUND_XML_PREFIX.get(self.fond)
+        pattern = f"{prefix}*.xml" if prefix else "*.xml"
+        yielded = 0
+
+        def wanted(name: str) -> bool:
+            return Path(name).name.startswith(prefix) if prefix else True
+
         if self.path.is_dir():
-            for xml in sorted(self.path.rglob("*.xml")):
+            for xml in self.path.rglob(pattern):
                 yield Stub(stable_id=xml.stem, hints={"file": str(xml)})
+                yielded += 1
+                if max_pages is not None and yielded >= max_pages:
+                    return
         elif tarfile.is_tarfile(self.path):
             with tarfile.open(self.path, "r:*") as tar:
                 for member in tar:
-                    if member.isfile() and member.name.endswith(".xml"):
+                    if (member.isfile() and member.name.endswith(".xml")
+                            and wanted(member.name)):
                         yield Stub(stable_id=Path(member.name).stem,
                                    hints={"tar": str(self.path), "member": member.name})
+                        yielded += 1
+                        if max_pages is not None and yielded >= max_pages:
+                            return
 
     # -- fetch -------------------------------------------------------------
     def _read(self, stub: Stub) -> bytes | None:
