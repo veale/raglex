@@ -7801,7 +7801,7 @@ class Facade:
                 rules = RuleEngine(cat)
                 for sid in new_ids:
                     doc = cat.get_document(sid)
-                    resolved_n += resolver.resolve_pending_from(sid)
+                    resolved_n += cat.resolve_pending_from(sid)
                     resolved_n += resolver.run_for(sid, doc["ecli"] if doc else None)
                     rules.run_on_document(sid)
             result = asdict(stats)
