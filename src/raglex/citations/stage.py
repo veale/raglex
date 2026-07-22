@@ -28,6 +28,26 @@ from .extractor import CitationExtractor, extract_citations
 
 log = logging.getLogger(__name__)
 
+# US reporters are plausible only in US material and common-law judgments. Without
+# this jurisdiction gate, compact strings such as ``159 P. 1`` in EU/French material
+# manufacture Pacific Reporter cases from Official Journal/page notation. Keep the
+# list explicit: mixed/civil-law corpora do not opt in merely because they use English.
+_COMMON_LAW_CASE_SOURCES = (
+    "uk-", "ie-", "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw",
+    "sg-caselaw", "hk-caselaw", "za-caselaw", "africa-caselaw",
+    "caribbean-caselaw", "pacific-caselaw", "offshore-caselaw",
+    "bailii", "westlaw",
+)
+_CASE_DOC_TYPES = {str(DocType.JUDGMENT), str(DocType.DECISION), str(DocType.OPINION)}
+
+
+def _allows_us_reporters(doc) -> bool:
+    source = str(doc["source"] or "").lower()
+    if source.startswith("us-"):
+        return True
+    return (str(doc["doc_type"]) in _CASE_DOC_TYPES
+            and source.startswith(_COMMON_LAW_CASE_SOURCES))
+
 
 # --- runaway-extraction guard -------------------------------------------------
 # Python's `re` holds the GIL for the whole of a single match attempt, so one
@@ -354,6 +374,9 @@ def extract_document(
     else:  # the llm extractor is not picklable (and may call the network) — unguarded
         raw_defs = []
         cites = extract_citations(text, llm=llm, aliases=aliases, defs_out=raw_defs)
+
+    if not _allows_us_reporters(doc):
+        cites = [c for c in cites if c.method != "us_reporter"]
 
     # Inside LEGISLATION, a bare "Article 3" / "paragraph 2" is almost always the
     # instrument referring to ITSELF, not to the directive it last named — the

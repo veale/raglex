@@ -4,6 +4,7 @@ American-looking text."""
 from __future__ import annotations
 
 from raglex.citations.us_cases import looks_american, us_case_citations, us_court_name
+from raglex.citations.stage import _allows_us_reporters
 
 
 def test_year_as_volume_is_not_a_us_citation():
@@ -52,6 +53,16 @@ def test_gate_matches_us_reporters_only():
     assert not looks_american("Article 17 of Regulation (EU) 2016/679")
     assert not looks_american("100 D.L.R. (4th) 658")      # Canadian report series
     assert not looks_american("section 12 of the Data Protection Act 2018")
+
+
+def test_document_scope_limits_us_reporters_to_us_and_common_law_cases():
+    assert _allows_us_reporters({"source": "us-caselaw", "doc_type": "judgment"})
+    assert _allows_us_reporters({"source": "uk-caselaw", "doc_type": "judgment"})
+    assert _allows_us_reporters({"source": "ca-caselaw", "doc_type": "decision"})
+    assert not _allows_us_reporters({"source": "eu-cellar", "doc_type": "judgment"})
+    assert not _allows_us_reporters({"source": "fr-dila", "doc_type": "judgment"})
+    assert not _allows_us_reporters({"source": "eu-preparatory", "doc_type": "preparatory"})
+    assert not _allows_us_reporters({"source": "uk-legislation", "doc_type": "legislation"})
 
 
 def test_us_case_citations_extract_candidates():
