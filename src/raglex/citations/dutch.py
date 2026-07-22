@@ -90,19 +90,37 @@ def juriconnect_citations(text: str) -> list[Citation]:
 LAW_REFERENCE_RE = re.compile(
     rf"\b(?:art(?:ikel)?\.?\s+)(?P<article>\d{{1,3}}(?::\d{{1,4}})?[a-z]?)"
     rf"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?"
-    rf"(?:\s*,?\s*(?:van\s+)?(?:de|het)?\s*)?(?P<law>{_LAW_ALT})\b", re.I)
+    rf"(?:\s*,?\s*(?:van\s+)?(?:de|het)?\s*)?(?P<law>(?:Wet\s+)?(?:{_LAW_ALT}))\b", re.I)
 
 
 def law_citations(text: str) -> list[Citation]:
     out: list[Citation] = []
     for m in LAW_REFERENCE_RE.finditer(text):
-        title = _LAW_NAMES.get(next((k for k in _LAW_NAMES if k.casefold() == m.group("law").casefold()), ""), m.group("law"))
+        raw_law = m.group("law")
+        short = re.sub(r"(?i)^Wet\s+(?=[A-Z]{2,6}$)", "", raw_law)
+        title = _LAW_NAMES.get(next((k for k in _LAW_NAMES
+                                     if k.casefold() == short.casefold()), ""), raw_law)
         out.append(Citation(
             raw=m.group(0), entity_kind="act", candidate_id=law_name_alias(title),
             pinpoint=_pin(m.group("article"), m.group("lid")), char_start=m.start(),
             char_end=m.end(), method="nl_law_reference", confidence=.97,
         ))
     return out
+
+
+_NL_ECHR_RE = re.compile(
+    r"\bartikel(?:en)?\s+(?P<article>\d{1,2})"
+    r"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?\s*,?\s*"
+    r"(?:van\s+)?(?:het\s+)?Verdrag\s+tot\s+bescherming\s+van\s+de\s+rechten\s+"
+    r"van\s+de\s+mens\s+en\s+de\s+fundamentele\s+vrijheden\b", re.I)
+
+
+def echr_citations(text: str) -> list[Citation]:
+    return [Citation(
+        raw=m.group(0), entity_kind="treaty", candidate_id="echr/convention",
+        pinpoint=_pin(m.group("article"), m.group("lid")), char_start=m.start(),
+        char_end=m.end(), method="nl_echr_article", confidence=1.0,
+    ) for m in _NL_ECHR_RE.finditer(text)]
 
 
 LJN_RE = re.compile(r"\b(?:LJN|LJ[N]?[- ]?nummer|ELRO)\s*[:.= -]*\s*(?P<id>[A-Z]{2}\s*\d{4})\b", re.I)
@@ -115,4 +133,5 @@ def ljn_citations(text: str) -> list[Citation]:
 
 
 def dutch_citations(text: str) -> list[Citation]:
-    return juriconnect_citations(text) + law_citations(text) + ljn_citations(text)
+    return (juriconnect_citations(text) + law_citations(text) + echr_citations(text)
+            + ljn_citations(text))

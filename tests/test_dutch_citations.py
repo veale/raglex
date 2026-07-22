@@ -21,11 +21,18 @@ def test_dutch_article_and_lid_are_precise():
 
 
 def test_dutch_social_security_abbreviations_keep_article_pincites():
-    cites = _nl("artikel 5, eerste lid, van de WIA en art. 18 WAO")
+    cites = _nl("artikel 5, eerste lid, van de Wet WIA en art. 18 WAO")
     assert [(c.candidate_id, c.pinpoint) for c in cites] == [
         ("nl:law:wet werk en inkomen naar arbeidsvermogen", "Artikel 5, lid eerste"),
         ("nl:law:wet op de arbeidsongeschiktheidsverzekering", "Artikel 18"),
     ]
+
+
+def test_dutch_echr_title_resolves_with_lid_pinpoint():
+    cite = _nl("artikel 6, tweede lid, van het Verdrag tot bescherming van de rechten "
+               "van de mens en de fundamentele vrijheden")[0]
+    assert cite.candidate_id == "echr/convention"
+    assert cite.pinpoint == "Artikel 6, lid tweede"
 
 
 def test_dated_juriconnect_does_not_collapse_to_current_work():
