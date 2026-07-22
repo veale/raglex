@@ -36,6 +36,7 @@ from .de_rii import DeRiiAdapter
 from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
+from .eu_preparatory import EUPreparatoryAdapter
 from .hol import HouseOfLordsAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
@@ -85,6 +86,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # harvesting these closes the §5b loop for every statutory citation in the corpus.
     "uk-legislation": UKLegislationAdapter,
     "eu-legislation": EULegislationAdapter,
+    "eu-preparatory": EUPreparatoryAdapter,
     # Ireland — the eISB (Acts + SIs as enacted/made, the OFFICIAL text) and the LRC
     # Revised Acts (administrative consolidations, point-in-time). Both speak ELI, so
     # Ireland is another ELI source beside legislation.gov.uk and EUR-Lex.
@@ -301,6 +303,16 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("types", "Descriptors to enumerate", "R,L,D,TREATY (default)"),
          SourceOption("years", "Year range", "1990-2026")),
         ("CELEX (32016R0679)", "Treaty/Charter CELEX (12012P)", "Directive/Regulation number"),
+    ),
+    "eu-preparatory": SourceInfo(
+        "eu-preparatory", "EU preparatory and Commission policy documents", "preparatory", "EU", False,
+        "Walks EUR-Lex sector 5 through CELLAR: Commission proposals and communications, "
+        "JOIN papers, staff working documents, SEC papers and impact assessments. Imports "
+        "the official procedure graph linking preparatory papers to proposals and final acts.",
+        (SourceOption("celex", "CELEX ids", "52021PC0554,52021SC0551"),
+         SourceOption("types", "Document families", "PC,DC,JC,SC,XC (default)"),
+         SourceOption("years", "Year range", "2020-2026")),
+        ("CELEX (52021PC0554)", "COM/SWD/SEC/JOIN document number"),
     ),
     "ie-legislation": SourceInfo(
         "ie-legislation", "Irish legislation — as enacted (eISB)", "legislation", "IE", False,
@@ -666,7 +678,7 @@ def source_catalog() -> list[dict]:
         # EDPB sitemap/register cursors. The other legislation/by-id sources are
         # fetched by naming the item — no moving feed.
         row["can_incremental"] = (row.get("kind") == "caselaw"
-                                  or key in ("uk-legislation", "edpb", "edpb-oss", "dma-cases",
+                                  or key in ("uk-legislation", "eu-preparatory", "edpb", "edpb-oss", "dma-cases",
                                              "ofcom-osa", "ofcom-enforcement",
                                              # year cursor / "Updated to" cursor
                                              "ie-legislation", "ie-revised",

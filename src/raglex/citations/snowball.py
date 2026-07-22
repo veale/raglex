@@ -132,6 +132,8 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
             return "CJEU judgment", "EU", "eu-cellar"
         if sector == "1":  # treaties / Charter / primary law (TFEU, TEU, CFR)
             return "EU treaty / primary law", "EU", "eu-legislation"
+        if sector == "5":
+            return "EU preparatory / Commission document", "EU", "eu-preparatory"
         return _CELEX_DESC.get(m.group("desc").upper()[0], "EU instrument"), "EU", "eu-legislation"
     m = _ECLI_RE.match(candidate)
     if m:

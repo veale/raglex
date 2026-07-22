@@ -78,6 +78,24 @@ def test_facade_document_mentions_grouped_and_ranked(config):
     assert {g["src_id"] for g in only1["groups"]} == {a}
 
 
+def test_preparatory_mentions_are_a_separate_conditional_section_and_flag(config):
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>Act</p>", filename="act.html",
+                            doc_type="legislation", title="Final Act")["stable_id"]
+    prep = f.import_bytes(data=b"<p>Impact assessment</p>", filename="ia.html",
+                          doc_type="preparatory", title="Impact assessment")["stable_id"]
+    f.link(src_id=prep, dst_id=target, relationship="adopted_as")
+    mentions = f.document_mentions(target)
+    assert mentions["groups"] == []
+    assert mentions["preparatory_count"] == 1
+    assert mentions["preparatory_groups"][0]["src_id"] == prep
+    assert mentions["preparatory_note"].startswith("Preparatory documents exist")
+    flag = f.get_document(target)["preparatory_documents"]
+    assert flag == {"available": True, "count": 1,
+                    "message": "Preparatory documents exist for this item — 1 available.",
+                    "retrieve_with": "document_mentions"}
+
+
 def test_mentions_of_parent_article_include_subarticles(config):
     f = Facade(config)
     target = f.import_bytes(data=b"<p>Article 22 Automated decisions</p>", filename="gdpr.html",

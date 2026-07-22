@@ -26,6 +26,10 @@ def test_pending_candidates_classify_consistently():
     assert classify_candidate("62018CJ0311").subtype == "cj"
     assert classify_candidate("32016R0679").category == "eu-legislation"
     assert classify_candidate("32016R0679").subtype == "reg"
+    assert classify_candidate("52021PC0554").category == "eu-preparatory"
+    assert classify_candidate("52021PC0554").subtype == "proposals"
+    assert classify_document(source="eu-preparatory", doc_type="preparatory",
+                             stable_id="52021SC0551").subtype == "staff-working"
     assert classify_candidate("uksi/2016/413").subtype == "secondary:UK-wide"
     assert classify_candidate("ukpga/1998/42").subtype == "primary:UK-wide"
     assert classify_candidate("ewhc/2020/1").category == "uk-caselaw"

@@ -218,7 +218,7 @@ def _is_junk_ref(ref: str) -> bool:
 _CATEGORY_JURISDICTION: dict[str, str] = {
     "uk-caselaw": "uk", "uk-legislation": "uk",
     "ie-caselaw": "ie", "ie-legislation": "ie",
-    "eu-cellar": "eu", "eu-legislation": "eu", "echr": "eu",
+    "eu-cellar": "eu", "eu-legislation": "eu", "eu-preparatory": "eu", "echr": "eu",
     "us-caselaw": "us",
     "fr-caselaw": "fr", "fr-legislation": "fr",
     "de-caselaw": "de", "de-legislation": "de",
@@ -327,6 +327,12 @@ def _targeted_eu_legislation(candidate: str):
     return get_adapter("eu-legislation", celex=candidate)
 
 
+def _targeted_eu_preparatory(candidate: str):
+    from .adapters.registry import get_adapter
+
+    return get_adapter("eu-preparatory", celex=candidate)
+
+
 def _targeted_uk_caselaw(candidate: str):
     from .adapters.registry import get_adapter
     from .core.models import Stub
@@ -425,6 +431,7 @@ def _targeted_nl_legislation(candidate: str):
 _TARGETED_HARVEST = {
     "uk-legislation": _targeted_uk_legislation,
     "eu-legislation": _targeted_eu_legislation,
+    "eu-preparatory": _targeted_eu_preparatory,
     "uk-caselaw": _targeted_uk_caselaw,
     "uk-hol": _targeted_uk_hol,
     "eu-cellar": _targeted_eu_cellar,
@@ -670,6 +677,7 @@ class Facade:
                                  "other_passages": others.get(sid) or []})
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
             inferred_total = cat.inferred_citer_count(ids_self)
+            preparatory_count = cat.citer_count_by_doc_type(ids_self, "preparatory")
             meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
             # Summary line: distinct authorities this document cites, split into cases vs
             # statutory material by the citation's entity_kind (OSCOLA's two source families).
@@ -721,6 +729,14 @@ class Facade:
                 "suppressed_count": len(suppressed),
                 "incoming": incoming,
                 "cited_by_count": cited_by_total,
+                "preparatory_documents": {
+                    "available": bool(preparatory_count),
+                    "count": preparatory_count,
+                    "message": (f"Preparatory documents exist for this item — "
+                                f"{preparatory_count} available."
+                                if preparatory_count else None),
+                    "retrieve_with": "document_mentions",
+                },
                 "inferred_by_count": max(0, inferred_total),
                 "assets": [dict(a) for a in cat.assets_for(stable_id)],
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
@@ -951,10 +967,17 @@ class Facade:
                 "passages": lambda g: (-g["count"], *_tie(g)),
             }
             groups.sort(key=keys[sort])
+            # Legislative history is useful but qualitatively different from case-law
+            # treatment. Keep it in a conditional, separately named section at the foot
+            # of the mentions tray (and expose it to MCP clients), rather than intermixing
+            # impact assessments and explanatory material with judgments.
+            preparatory_groups = [g for g in groups if g["src_kind"] == "preparatory"]
+            groups = [g for g in groups if g["src_kind"] != "preparatory"]
 
             # snippets (the passages where the top citers cite this) — from the citation's
             # stored context span, so we read each citer's text at most once.
-            for g in groups[:snippet_docs]:
+            snippet_groups = [*groups[:snippet_docs], *preparatory_groups[:snippet_docs]]
+            for g in snippet_groups:
                 sdoc = srcs[g["src_id"]]
                 text = None
                 if sdoc and sdoc["payload_hash"]:
@@ -989,7 +1012,7 @@ class Facade:
                                          "mark": [ms, me] if me > ms else None,
                                          "raw": r["raw_citation_string"]})
                 g["snippets"] = snippets[:8]
-            for g in groups:
+            for g in [*groups, *preparatory_groups]:
                 g.pop("_rels", None)
                 g.setdefault("snippets", [])
 
@@ -1011,6 +1034,11 @@ class Facade:
                          for lab, v in by_anchor.items()}
             return {"target": stable_id, "anchor": anchor,
                     "total": len(groups), "groups": groups[:max_groups],
+                    "preparatory_count": len(preparatory_groups),
+                    "preparatory_groups": preparatory_groups[:max_groups],
+                    "preparatory_note": (f"Preparatory documents exist for this item — "
+                                         f"{len(preparatory_groups)} available."
+                                         if preparatory_groups else None),
                     "sort": sort, "sorts": dict(self.MENTION_SORTS),
                     "by_anchor": by_anchor}
 
@@ -1505,6 +1533,7 @@ class Facade:
         "westlaw-rtf": "Westlaw import", "ofcom": "Ofcom", "ofcom-osa": "Ofcom (OSA)",
         "ofcom-enforcement": "Ofcom enforcement", "ico": "ICO",
         "eu-cellar": "EUR-Lex (CJEU)", "eu-legislation": "EUR-Lex",
+        "eu-preparatory": "EUR-Lex (EU preparatory & Commission policy documents)",
         "edpb": "EDPB", "edpb-oss": "EDPB one-stop-shop", "a29wp": "Article 29 WP",
         "dma-cases": "DMA case register", "echr": "HUDOC (ECtHR)",
         "nl-rechtspraak": "Rechtspraak.nl", "nl-legislation": "wetten.overheid.nl",
@@ -1720,6 +1749,8 @@ class Facade:
         # EDPB) — otherwise guidance never appears as its own filter category.
         if doc_type == "guidance":
             return "guidance"
+        if doc_type == "preparatory":
+            return "preparatory"
         # then an administrative body's DECISIONS (a DPA decision, an enforcement
         # notice) — before the case-type check, since those carry doc_type "decision"
         if (court or "").lower().startswith("dpa-") or source in self._ADMIN_SOURCES:
@@ -7739,6 +7770,7 @@ class Facade:
         self, source: str, *, backfill: bool = False, since: str | None = None,
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
+        refetch_held: bool = False,
         on_progress=None, cancel_check=None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
@@ -7758,6 +7790,7 @@ class Facade:
         with self._open() as (cat, rs, ts):
             pipe = Pipeline(cat, rs, textstore=ts)
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
+                             refetch_held=refetch_held,
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,
                              on_progress=on_progress, cancel_check=cancel_check)
             # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.

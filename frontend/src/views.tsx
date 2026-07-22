@@ -162,6 +162,7 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   // straight to the categories.
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance",
+    preparatory: "preparatory documents",
     administrative: "admin decisions", other: "other",
   };
   const facets = new Map<string, { jur: string; kind: string; n: number }>();
@@ -174,8 +175,35 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   const tokens = [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
   const shown = slice
     ? groups.filter((g) => `${g.src_jurisdiction}|${g.src_kind}` === slice) : groups;
+  const preparatory: any[] = Array.isArray(data.preparatory_groups) ? data.preparatory_groups : [];
 
-  if (!groups.length) return <><p className="muted">Nothing mentions this yet.</p></>;
+  const mentionGroup = (g: any, i: number, prefix: string) => (
+    <div className="mgroup" key={`${prefix}-${i}`}>
+      <div className="mgroup-head">
+        <a className="mgroup-title" title="Open this document in a new tray, with its linked passages highlighted"
+          onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor,
+            occurrenceStart: g.snippets[0]?.start, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
+          <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
+        {g.count > 1 && <span className="tag" title={`${g.count} separate mentions in this document`}>↔ {g.count}</span>}
+        <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
+      </div>
+      <div className="mgroup-meta muted">
+        {[g.src_court_label || g.src_court, g.src_jurisdiction].filter(Boolean).join(" · ")}
+        {g.src_date ? ` · ${String(g.src_date).slice(0, 4)}` : ""}
+        {g.count > 1 ? ` · ${g.count} passages` : ""}
+      </div>
+      {g.snippets.map((s: any, j: number) => (
+        <div className="msnip" key={j} role="button" title="Open at this exact mention"
+          onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target,
+            highlightAnchor: anchor, occurrenceStart: s.start,
+            label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
+          {s.anchor && g.snippets.length > 1 && <span className="msnip-anchor">{s.anchor}</span>}
+          <span className="msnip-text">…<SnipText s={s} />…</span></div>
+      ))}
+    </div>
+  );
+
+  if (!groups.length && !preparatory.length) return <><p className="muted">Nothing mentions this yet.</p></>;
   return (
     <div>
       {sorter}
@@ -194,33 +222,14 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
         </div>
       )}
       {data.total > groups.length && <p className="muted" style={{ fontSize: 12 }}>{data.total} citing documents · showing {groups.length}</p>}
-      {shown.map((g, i) => (
-        <div className="mgroup" key={i}>
-          <div className="mgroup-head">
-            <a className="mgroup-title" title="Open this citing document in a new tray, with its citing passages highlighted"
-              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor,
-                occurrenceStart: g.snippets[0]?.start, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
-              <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
-            {g.count > 1 && <span className="tag" title={`${g.count} separate mentions in this document`}>↔ {g.count}</span>}
-            <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
-          </div>
-          <div className="mgroup-meta muted">
-            {[g.src_court_label || g.src_court, g.src_jurisdiction].filter(Boolean).join(" · ")}
-            {g.src_date ? ` · ${String(g.src_date).slice(0, 4)}` : ""}
-            {g.count > 1 ? ` · ${g.count} passages` : ""}
-          </div>
-          {/* the anchor places the quote WITHIN THE CITING document; with only one
-              passage there is nothing to disambiguate, so it just adds noise */}
-          {g.snippets.map((s: any, j: number) => (
-            <div className="msnip" key={j} role="button" title="Open at this exact mention"
-              onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target,
-                highlightAnchor: anchor, occurrenceStart: s.start,
-                label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
-              {s.anchor && g.snippets.length > 1 && <span className="msnip-anchor">{s.anchor}</span>}
-              <span className="msnip-text">…<SnipText s={s} />…</span></div>
-          ))}
-        </div>
-      ))}
+      {shown.map((g, i) => mentionGroup(g, i, "mention"))}
+      {preparatory.length > 0 && (
+        <section className="preparatory-documents" style={{ marginTop: 18 }}>
+          <h4>Preparatory documents <span className="tag">{data.preparatory_count}</span></h4>
+          <p className="muted">Impact assessments, proposals, communications and other legislative history linked to this item.</p>
+          {preparatory.map((g, i) => mentionGroup(g, i, "preparatory"))}
+        </section>
+      )}
     </div>
   );
 }
@@ -361,9 +370,18 @@ const REL_TYPES = [
   "analyses", "criticises", "summarises", "annotates", "follows", "distinguishes",
   "overrules", "applies", "considers", "interprets", "mentions",
 ];
-const DOC_TYPES = ["judgment", "decision", "opinion", "legislation", "guidance", "commentary", "article", "note", "annotation"];
+const DOC_TYPES = ["judgment", "decision", "opinion", "legislation", "preparatory", "guidance", "commentary", "article", "note", "annotation"];
 // treatments a citation edge can carry — for the inline reclassify control
 const TREATMENTS = ["mentions", "follows", "distinguishes", "overrules", "applies", "considers", "interprets", "implements"];
+const DOC_TYPE_LABEL: Record<string, string> = {
+  preparatory: "EU preparatory / policy document",
+};
+const RELATION_LABEL: Record<string, string> = {
+  adopted_as: "adopted as",
+  related_to: "accompanies / relates to",
+};
+const docTypeLabel = (t?: string | null) => t ? (DOC_TYPE_LABEL[t] || t.replace(/_/g, " ")) : "";
+const relationLabel = (t: string) => RELATION_LABEL[t] || t.replace(/_/g, " ");
 
 // Start a background job and poll it to completion, reporting progress as it goes.
 async function runJob(kind: "radiate" | "harvest-all", body: Record<string, unknown>,
@@ -558,7 +576,7 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
               <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
                 onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
                 <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
-                <span className="muted"> · {o.source}/{o.doc_type}{o.court ? " · " + o.court : ""}</span>
+                <span className="muted"> · {o.source}/{docTypeLabel(o.doc_type)}{o.court ? " · " + o.court : ""}</span>
               </div>
             ))}
           </div>
@@ -804,7 +822,7 @@ function ResultsList({ items, group, open }: { items: any[]; group: string; open
     <div className="result-row" key={d.stable_id}>
       <a className="result-cite" onClick={() => open(d.stable_id)}><Oscola c={d.oscola} fallback={d.title || d.stable_id} /></a>
       <div className="result-meta muted">
-        <span className="tag">{d.doc_type}</span>
+        <span className="tag">{docTypeLabel(d.doc_type)}</span>
         {d.court && <span> · {d.court}</span>}
         {d.decision_date && <span> · {String(d.decision_date).slice(0, 10)}</span>}
         {d.cited_by > 0 && <span> · cited by {d.cited_by.toLocaleString()}</span>}
@@ -891,7 +909,7 @@ function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => vo
         <a className="mini-link" onClick={() => open(h.doc_id, h.structural_unit || undefined)}>open at this passage ↗</a>
         {h.neighbours.length > 0 && (
           <span className="nbr">graph: {h.neighbours.slice(0, 3).map((n, j) =>
-            <span key={j}>{n.direction === "out" ? "→" : "←"} {n.relationship_type}{" "}
+            <span key={j}>{n.direction === "out" ? "→" : "←"} {relationLabel(n.relationship_type)}{" "}
               <a onClick={() => open(n.id)} title={n.title || n.id}>{n.title ? (n.title.length > 40 ? n.title.slice(0, 40) + "…" : n.title) : n.id}</a>; </span>)}</span>
         )}
       </div>
@@ -1873,7 +1891,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
               <button onClick={() => setEditing((e) => !e)} style={{ flex: "0 0 auto" }}>✎ {editing ? "cancel" : "fix metadata"}</button>
               <button onClick={() => openGraph(d.stable_id)} style={{ flex: "0 0 auto" }}>◴ View citation graph</button>
             </div>
-            <p className="muted" style={{ marginTop: 8 }}>{d.ecli || d.stable_id} · {d.source}/{d.court} · {d.doc_type}
+            <p className="muted" style={{ marginTop: 8 }}>{d.ecli || d.stable_id} · {d.source}/{d.court} · {docTypeLabel(d.doc_type)}
               {" "}· added_by <b>{d.added_by}</b> · v{d.version} · {d.upstream_status}
               {d.landing_url && <> · <a href={d.landing_url} target="_blank" rel="noreferrer">open original ↗</a></>}</p>
             {editing && <MetadataEditor d={d} onDone={() => { setEditing(false); reload(); }} />}
@@ -1942,6 +1960,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   // WHOLE incoming set, so counts stay honest while a filter is applied.
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance",
+    preparatory: "preparatory documents",
     administrative: "admin decisions", other: "other",
   };
   const [slice, setSlice] = useState<string | null>(null);
@@ -1974,7 +1993,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
   const order = ["overrules", "distinguishes", "applies", "follows", "considers", "mentions"];
   const colour: Record<string, string> = { overrules: "var(--bad)", distinguishes: "var(--warn)", applies: "var(--ok)", follows: "var(--ok)" };
   // "mentions" is confusing from the cited-authority's side — read it as "mentioned by".
-  const treat = (t: string) => (t === "mentions" ? "mentioned by" : t);
+  const treat = (t: string) => (t === "mentions" ? "mentioned by" : relationLabel(t));
   // plain-language explanation of each treatment, for a rollover on the chips
   const TREAT_HELP: Record<string, string> = {
     overrules: "A later court held this decision was wrong and replaced it.",
@@ -2189,7 +2208,7 @@ function MetadataEditor({ d, onDone }: { d: any; onDone: () => void }) {
   return (
     <div className="row" style={{ flexWrap: "wrap", marginTop: 6 }}>
       <select value={doc_type} onChange={(e) => setDocType(e.target.value)} style={{ flex: "0 0 auto" }}>
-        {DOC_TYPES.map((t) => <option key={t}>{t}</option>)}
+        {DOC_TYPES.map((t) => <option key={t} value={t}>{docTypeLabel(t)}</option>)}
       </select>
       <input value={court} onChange={(e) => setCourt(e.target.value)} placeholder="court" style={{ maxWidth: 140 }} />
       <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="title" />
@@ -2377,7 +2396,7 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
         <div className="panel">
           <h3>Corpus · {stats.total} documents · resolution {Math.round((stats.resolution?.coverage || 0) * 100)}%</h3>
           <div>{Object.entries(stats.by_doc_type || {}).map(([k, v]: any) =>
-            <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ doc_type: k })} title="browse in Search">{k}: {v}</a> : <>{k}: {v}</>}</span>)}</div>
+            <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ doc_type: k })} title="browse in Search">{docTypeLabel(k)}: {v}</a> : <>{docTypeLabel(k)}: {v}</>}</span>)}</div>
           <div>{Object.entries(stats.by_source || {}).map(([k, v]: any) =>
             <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ source: k })} title="browse in Search">{k}: {v}</a> : <>{k}: {v}</>}</span>)}</div>
           <div>{Object.entries(stats.by_tag || {}).map(([k, v]: any) =>

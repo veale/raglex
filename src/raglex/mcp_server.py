@@ -133,8 +133,23 @@ def build_server(config: Config | None = None) -> FastMCP:
 
     @mcp.tool()
     def get_document(stable_id: str) -> dict:
-        """Full document: metadata, tags, relations (citations), and attachments."""
+        """Full document: metadata, tags, relations, attachments, and a
+        ``preparatory_documents`` availability/count flag when legislative history exists."""
         return facade.get_document(stable_id)
+
+    @mcp.tool()
+    def preparatory_documents(stable_id: str, limit: int = 50) -> dict:
+        """Preparatory/legislative-history documents linked to an item: impact
+        assessments, Commission proposals and communications, explanatory material,
+        and (as those sources are added) Hansard. Returns exact citing passages and
+        structured procedure links; empty when none exist."""
+        result = facade.document_mentions(stable_id, snippet_docs=limit, max_groups=limit)
+        return {
+            "target": stable_id,
+            "count": result.get("preparatory_count", 0),
+            "message": result.get("preparatory_note"),
+            "documents": result.get("preparatory_groups", []),
+        }
 
     @mcp.tool()
     def get_document_body(stable_id: str) -> dict:

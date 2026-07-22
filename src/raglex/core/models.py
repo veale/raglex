@@ -23,6 +23,7 @@ class DocType(StrEnum):
     GUIDANCE = "guidance"
     OPINION = "opinion"
     LEGISLATION = "legislation"
+    PREPARATORY = "preparatory"
     # secondary (§1.9)
     COMMENTARY = "commentary"
     ANNOTATION = "annotation"
@@ -67,6 +68,8 @@ class RelationshipType(StrEnum):
     CITED_BY_COMMENTARY = "cited_by_commentary"
     ANNOTATES = "annotates"
     SUPERSEDES = "supersedes"
+    ADOPTED_AS = "adopted_as"  # proposal/preparatory document -> enacted EU instrument
+    RELATED_TO = "related_to"  # accompanying SWD/impact assessment -> proposal
     # the UK assimilated (formerly "retained EU law") version of an EU instrument →
     # the EU original it derives from (legislation.gov.uk /european/… → its CELEX)
     ASSIMILATED_VERSION_OF = "assimilated_version_of"

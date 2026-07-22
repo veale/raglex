@@ -34,6 +34,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "ie-legislation": "Irish legislation",
     "eu-cellar": "EU case-law",
     "eu-legislation": "EU legislation",
+    "eu-preparatory": "EU preparatory & Commission policy documents",
     "echr": "ECHR",
     "guidance": "Regulatory guidance",
     "ca-caselaw": "Canadian case-law",
@@ -64,7 +65,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "other": "Other / unrouted",
 }
 CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
-                  "eu-cellar", "eu-legislation", "echr", "fr-caselaw", "fr-legislation",
+                  "eu-cellar", "eu-legislation", "eu-preparatory", "echr", "fr-caselaw", "fr-legislation",
                   "de-caselaw", "de-legislation", "guidance",
                   "nl-caselaw", "nl-legislation",
                   "ca-caselaw", "au-caselaw", "nz-caselaw", "in-caselaw", "us-caselaw",
@@ -322,6 +323,11 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         sub, label = _eu_leg_subtype(stable_id)
         return Tax("eu-legislation", CATEGORY_LABELS["eu-legislation"], sub, label,
                    {"source": "eu-legislation"})
+    if source == "eu-preparatory":
+        from ..adapters.eu_preparatory import preparatory_subtype
+        sub, label = preparatory_subtype(stable_id)
+        return Tax("eu-preparatory", CATEGORY_LABELS["eu-preparatory"], sub, label,
+                   {"source": "eu-preparatory"})
     # Regulatory guidance (§1.9/§4a): the EDPB corpus splits by what the document IS
     # (doc_type), the OSS register by lead DPA (court = dpa-xx — the per-authority
     # split), A29WP by papers vs press/plenary context. Zotero-imported guidance
@@ -411,6 +417,11 @@ def classify_candidate(candidate: str, kind: str = "") -> Tax:
         sub, label = _eu_leg_subtype(cand)
         return Tax("eu-legislation", CATEGORY_LABELS["eu-legislation"], sub, label,
                    {"source": "eu-legislation"})
+    if adapter == "eu-preparatory":
+        from ..adapters.eu_preparatory import preparatory_subtype
+        sub, label = preparatory_subtype(cand)
+        return Tax("eu-preparatory", CATEGORY_LABELS["eu-preparatory"], sub, label,
+                   {"source": "eu-preparatory"})
     if adapter == "echr":
         if cand.lower() == "echr/convention":
             return Tax("echr", CATEGORY_LABELS["echr"], "convention", "Convention (treaty)", {})

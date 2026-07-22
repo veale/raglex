@@ -614,6 +614,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             params["since"] = payload["since"]
         if payload.get("options"):
             params["options"] = payload["options"]
+        if payload.get("refetch_held"):
+            params["refetch_held"] = True
         scope = "everything" if params["max_pages"] is None else f"{params['max_pages']} page(s)"
         verb = "backfill" if params["backfill"] else "harvest"
         return _start_job("harvest-source", f"{verb} {source} — {scope}", params)

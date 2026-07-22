@@ -1409,6 +1409,20 @@ class Catalogue:
             f"WHERE dst_id IN ({qs}) AND extracted_via = 'inferred' AND src_id <> dst_id",
             ids).fetchone()["n"]
 
+    def citer_count_by_doc_type(self, ids: list[str], doc_type: str) -> int:
+        """Distinct resolved incoming documents of one family (MCP/UI availability flag)."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return 0
+        qs = ",".join("?" * len(ids))
+        return self.conn.execute(
+            f"""SELECT COUNT(DISTINCT r.src_id) AS n
+                FROM relations r JOIN documents d ON d.stable_id = r.src_id
+                WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+                  AND r.extracted_via <> 'inferred' AND r.relationship_type <> 'cited_by'
+                  AND r.src_id <> r.dst_id AND d.doc_type = ?""",
+            (*ids, doc_type)).fetchone()["n"]
+
     def cited_by_stats(self, ids: list[str], *, recent_years: int = 5) -> dict:
         """Aggregate cited-by numbers for the citator: distinct citing documents,
         total occurrences, and how many of those citers decided in the last N
