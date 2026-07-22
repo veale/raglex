@@ -7705,7 +7705,7 @@ class Facade:
                          else spec.get("max_pages", 1))
             h = self.harvest(source, backfill=bool(spec.get("backfill")),
                              max_pages=max_pages, options=opts, watermark_key=wm_key,
-                             on_progress=on_progress)
+                             use_llm=spec.get("use_llm"), on_progress=on_progress)
             result["harvest"] = h
             seed_ids = self._keyword_seed_docs(source, keywords, limit=spec.get("max_seeds", 60))
             result["seeds_from_source"] = len(seed_ids)
@@ -7770,7 +7770,7 @@ class Facade:
         self, source: str, *, backfill: bool = False, since: str | None = None,
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
-        refetch_held: bool = False,
+        refetch_held: bool = False, use_llm: bool | None = None,
         on_progress=None, cancel_check=None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
@@ -7802,7 +7802,7 @@ class Facade:
             new_ids = list(dict.fromkeys([*stats.stored_ids, *stats.refreshed_ids]))
             from .citations import extract_document
             from .treatment import classify_corpus
-            llm_cite, classifier = self._llm_passes(None)  # auto: LLM iff configured
+            llm_cite, classifier = self._llm_passes(use_llm)
             aliases = cat.named_alias_map()
             total_new = len(new_ids)
             for i, sid in enumerate(new_ids, 1):
