@@ -158,6 +158,16 @@ def test_resolve_pending_for_only_touches_the_new_document(catalogue):
     assert catalogue.count_pending_relations() == 1  # src-2's edge is untouched
 
 
+def test_resolve_pending_from_only_touches_the_new_source(catalogue):
+    _doc(catalogue, "uksc/2024/12")
+    _doc(catalogue, "uksc/2023/1")
+    _doc(catalogue, "src-1", citing="[2024] UKSC 12")
+    _doc(catalogue, "src-2", citing="[2023] UKSC 1")
+    assert catalogue.resolve_pending_from("src-1") == 1
+    assert catalogue.relations_for("src-1")[0]["dst_id"] == "uksc/2024/12"
+    assert catalogue.relations_for("src-2")[0]["resolution_status"] == "pending"
+
+
 def test_cite_count_ranks_worklist(catalogue):
     _doc(catalogue, "src-1", citing="[2024] UKSC 12")
     _doc(catalogue, "src-2", citing="[2024] UKSC 12")

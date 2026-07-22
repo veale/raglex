@@ -7790,9 +7790,20 @@ class Facade:
                     self._classify_guidance_into(cat, ts, sid)
             # ``resolve=False`` lets a batch caller (e.g. seed-from-text over many seeds)
             # resolve ONCE at the end instead of re-resolving the whole graph per call.
-            resolved_n = Resolver(cat).run().resolved if resolve else 0
+            # Ingest changes only two bounded sets: edges emitted BY each new document,
+            # and old pending edges pointing TO it.  A whole-graph Resolver.run() here
+            # made even a one-document LEGI smoke import scan millions of relations and
+            # hit the three-minute statement timeout.  Reserve whole-graph resolution
+            # for its explicit maintenance job; harvest is incremental and durable.
+            resolved_n = 0
             if resolve:
-                RuleEngine(cat).run_all(enabled_only=True)
+                resolver = Resolver(cat)
+                rules = RuleEngine(cat)
+                for sid in new_ids:
+                    doc = cat.get_document(sid)
+                    resolved_n += resolver.resolve_pending_from(sid)
+                    resolved_n += resolver.run_for(sid, doc["ecli"] if doc else None)
+                    rules.run_on_document(sid)
             result = asdict(stats)
             result.pop("stored_ids", None)  # internal and potentially hundreds of thousands
             return {**result, "resolved_edges": resolved_n,

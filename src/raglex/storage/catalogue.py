@@ -1812,6 +1812,48 @@ class Catalogue:
             )
             return max(cur.rowcount, 0)
 
+    def resolve_pending_from(self, stable_id: str) -> int:
+        """Resolve pending outgoing edges from one newly extracted document.
+
+        Extraction already persisted ``candidate_id``/``raw_fold``.  Restricting the
+        usual three resolution joins by ``src_id`` keeps ingest proportional to the new
+        document instead of rescanning the multi-million-edge graph after every fetch.
+        """
+        passes = (
+            """
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM documents d
+            WHERE relations.src_id = ?
+              AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NOT NULL
+              AND (d.stable_id = relations.candidate_id OR d.ecli = relations.candidate_id)
+            """,
+            """
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM citation_aliases a JOIN documents d
+              ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+            WHERE relations.src_id = ?
+              AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NOT NULL
+              AND a.alias = lower(relations.candidate_id)
+            """,
+            """
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM citation_aliases a JOIN documents d
+              ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+            WHERE relations.src_id = ?
+              AND relations.resolution_status = 'pending'
+              AND relations.raw_fold IS NOT NULL
+              AND a.alias = relations.raw_fold
+            """,
+        )
+        total = 0
+        with self._atomic():
+            for sql in passes:
+                cur = self.conn.execute(sql, (stable_id,))
+                total += max(cur.rowcount, 0)
+        return total
+
     def backfill_edge_keys(self, *, batch: int = 20000, on_progress=None) -> int:
         """Populate ``candidate_id``/``raw_fold`` on edges written before those columns
         existed. Runs the matcher ladder once per DISTINCT raw string (a few hundred
