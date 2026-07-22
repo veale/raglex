@@ -36,8 +36,12 @@ _LAW_NAMES = {
     "Gw": "Grondwet", "Rv": "Wetboek van Burgerlijke Rechtsvordering",
     "Vw": "Vreemdelingenwet 2000", "Wob": "Wet openbaarheid van bestuur",
     "Woo": "Wet open overheid", "UAVG": "Uitvoeringswet AVG",
+    "WIA": "Wet werk en inkomen naar arbeidsvermogen",
+    "WAO": "Wet op de arbeidsongeschiktheidsverzekering",
+    "WW": "Werkloosheidswet", "ZW": "Ziektewet",
 }
-_LAW_ALT = "|".join(sorted((re.escape(x) for x in _LAW_NAMES), key=len, reverse=True))
+_LAW_ALT = "|".join(sorted((re.escape(x) for x in (*_LAW_NAMES, *_LAW_NAMES.values())),
+                           key=len, reverse=True))
 
 
 def _pin(article: str | None, paragraph: str | None = None,

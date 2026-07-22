@@ -12,6 +12,7 @@ import re
 import unicodedata
 
 from .grammars import Grammar, Normalised, _eu_celex, register
+from .models import Citation
 
 
 def _fold(value: str) -> str:
@@ -83,7 +84,8 @@ def code_article_alias(title: str, article: str) -> str | None:
 _CODE_ALT = "|".join(
     re.escape(name) for names in _CODE_NAMES.values() for name in sorted(names, key=len, reverse=True)
 )
-_ARTICLE = r"(?P<article>(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:-\d+)?(?:\s*[A-Z])?)"
+_ARTICLE = r"(?P<article>(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:-\d+)?(?:\s*(?-i:[A-Z]))?)"
+_ARTICLE_TOKEN = r"(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:\s*(?-i:[A-Z]))?"
 
 
 def _code_ref(m: re.Match[str]) -> Normalised:
@@ -94,10 +96,44 @@ def _code_ref(m: re.Match[str]) -> Normalised:
 
 register(Grammar(
     "fr_code_article", "act",
-    re.compile(rf"\b(?:articles?|art\.)\s+{_ARTICLE}(?:\s+(?:et|à|a)\s+[^,;.]+?)?\s+(?:du|de la|des|d['’]u?)\s+(?P<code>{_CODE_ALT})\b",
+    re.compile(rf"\b(?:articles?|art\.)\s+{_ARTICLE}"
+               rf"(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})*\s+"
+               rf"(?:du|de la|des|d['’]u?)\s+(?P<code>{_CODE_ALT})\b",
                re.IGNORECASE),
     _code_ref,
 ))
+
+
+_FR_ARTICLE_LIST = rf"(?P<list>{_ARTICLE_TOKEN}(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})*)"
+_FR_ARTICLE_LIST_MULTI = rf"(?P<list>{_ARTICLE_TOKEN}(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})+)"
+_FR_CODE_LIST = re.compile(
+    rf"\b(?:articles?|arts?\.)\s+{_FR_ARTICLE_LIST_MULTI}\s+"
+    rf"(?:du|de la|des|d['’]u?)\s+(?P<host>{_CODE_ALT})\b", re.IGNORECASE)
+_FR_ECHR_LIST = re.compile(
+    rf"\b(?:articles?|arts?\.)\s+{_FR_ARTICLE_LIST}\s+"
+    r"(?:de\s+la|de\s+l['’]|du)\s+Convention\s+européenne"
+    r"(?:\s+de\s+sauvegarde)?\s+des\s+droits\s+de\s+l['’](?:homme|Homme)"
+    r"(?:\s+et\s+des\s+libertés\s+fondamentales)?\b", re.IGNORECASE)
+_FR_ARTICLE_VALUE = re.compile(_ARTICLE_TOKEN, re.IGNORECASE)
+
+
+def french_citations(text: str) -> list[Citation]:
+    """Expand compact French article lists to canonical, pinpointed graph edges."""
+    out: list[Citation] = []
+    for rx, host_kind in ((_FR_CODE_LIST, "code"), (_FR_ECHR_LIST, "echr")):
+        for m in rx.finditer(text):
+            code = code_key(m.group("host")) if host_kind == "code" else None
+            for am in _FR_ARTICLE_VALUE.finditer(m.group("list")):
+                value = normalise_article(am.group(0))
+                candidate = f"fr:code:{code}:{value}" if code else "echr/convention"
+                out.append(Citation(
+                    raw=m.group(0), entity_kind="act" if code else "treaty",
+                    candidate_id=candidate, pinpoint=f"Article {value}",
+                    char_start=m.start(), char_end=m.end(),
+                    method="fr_code_articles" if code else "fr_echr_articles",
+                    confidence=1.0,
+                ))
+    return out
 
 # Légifrance identifiers and URLs are already canonical corpus identifiers.
 register(Grammar(

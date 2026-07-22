@@ -44,6 +44,10 @@ def test_case_docket_and_randnummer_are_preserved():
     assert case_alias("Bundesgerichtshof", "VIII ZR 295/01") == cite.candidate_id
 
 
+def test_french_cedh_marker_is_not_minted_as_german_legislation():
+    assert not _de("§ 95, CEDH 19")
+
+
 def test_german_sources_and_candidates_leave_other_bucket():
     held = classify_document(source="de-rii", doc_type=str(DocType.JUDGMENT),
                              court="Bundesgerichtshof", stable_id="ECLI:DE:BGH:2021:X")
@@ -66,4 +70,3 @@ def test_migration_mints_aliases_for_held_german_nodes(catalogue):
     catalogue.backfill_alias_from_meta()
     assert catalogue.find_document_id("de:case:BGH:VIIIZR295/01") == "ECLI:DE:BGH:2021:TEST"
     assert catalogue.find_document_id("de/gesetz/bgb") == "eli/bund/bgbl-1/1896/s195"
-

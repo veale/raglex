@@ -41,6 +41,26 @@ def test_french_eu_instruments_resolve_to_celex():
     assert cites["directive 95/46/CE"].candidate_id == "31995L0046"
 
 
+def test_french_echr_article_list_is_not_donated_to_later_domestic_code():
+    text = ("articles 3 et 8 de la convention européenne de sauvegarde des droits "
+            "de l'homme et des libertés fondamentales ainsi que les dispositions "
+            "du code de l'entrée et du séjour des étrangers et du droit d'asile")
+    cites = [c for c in extract_citations(text) if c.method == "fr_echr_articles"]
+    assert [(c.candidate_id, c.pinpoint) for c in cites] == [
+        ("echr/convention", "Article 3"), ("echr/convention", "Article 8")]
+    assert not any(c.candidate_id == "fr:code:ceseda:3" for c in extract_citations(text))
+
+
+def test_french_code_article_list_expands_every_pinpoint():
+    cites = [c for c in extract_citations(
+        "articles 452 et 456 du code de procédure civile")
+        if c.method == "fr_code_articles"]
+    assert [(c.candidate_id, c.pinpoint) for c in cites] == [
+        ("fr:code:cprociv:452", "Article 452"),
+        ("fr:code:cprociv:456", "Article 456"),
+    ]
+
+
 def test_legifrance_native_identifiers_are_preserved():
     cite = _one("https://www.legifrance.gouv.fr/juri/id/JURITEXT000051856547",
                 "fr_legifrance_id")

@@ -92,6 +92,31 @@ def test_mentions_of_parent_article_include_subarticles(config):
     assert {g["src_id"] for g in got["groups"]} == set(srcs)
 
 
+def test_corpus_map_cites_translates_country_category_to_storage_source(config, monkeypatch):
+    from contextlib import contextmanager
+
+    f = Facade(config)
+    seen = []
+
+    class Cat:
+        def document_subtype_counts(self):
+            return [{"source": "fr-dila", "doc_type": "judgment",
+                     "court": "Cour de cassation", "prefix": "ECLI:FR:CCASS", "n": 1}]
+
+        def outgoing_citation_targets_for(self, pairs):
+            seen.extend(pairs)
+            return [{"dst_id": "32016R0679", "raw": "règlement (UE) 2016/679"}]
+
+    @contextmanager
+    def opened():
+        yield Cat(), None, None
+
+    monkeypatch.setattr(f, "_open", opened)
+    got = f._corpus_map_cites_uncached("fr-caselaw")
+    assert seen == [("fr-dila", "judgment")]
+    assert got["targets"][0]["category"] == "eu-legislation"
+
+
 def test_facade_list_documents_query_is_case_insensitive(config):
     f = Facade(config)
     f.import_bytes(data=b"<p>right to erasure</p>", filename="e.html",

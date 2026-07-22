@@ -411,6 +411,24 @@ def extract_document(
                  and re.search(r"(?i)\bthe\s+Charter\s*$", c.raw.strip()) else c
                  for c in cites]
 
+    # bundesrecht intentionally accepts abbreviation-shaped tails. At corpus scale
+    # those need a resolver gate: ``§ 1 Pachtgegenstand`` is a contract heading,
+    # whereas ``§ 8 MarkenG`` resolves to an imported GII law alias. Apply the gate
+    # in every host jurisdiction so translations cannot create German phantom laws.
+    de_known: dict[str, bool] = {}
+    filtered = []
+    for c in cites:
+        if c.method != "de_law_reference" or not c.candidate_id:
+            filtered.append(c)
+            continue
+        known = de_known.get(c.candidate_id)
+        if known is None:
+            known = catalogue.find_document_id(c.candidate_id) is not None
+            de_known[c.candidate_id] = known
+        if known:
+            filtered.append(c)
+    cites = filtered
+
     # Corpus-wide shorthands: apply the ones learned elsewhere whose parent this
     # document already cites, then harvest the ones IT defines for the next document.
     # Both are no-ops for a document that cites nothing resolvable.

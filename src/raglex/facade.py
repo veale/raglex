@@ -2856,11 +2856,22 @@ class Facade:
                             lambda: self._corpus_map_cites_uncached(category))
 
     def _corpus_map_cites_uncached(self, category: str) -> dict:
-        from .citations.taxonomy import CATEGORY_LABELS, classify_candidate
+        from .citations.taxonomy import (CATEGORY_LABELS, classify_candidate,
+                                         classify_document)
         from .resolve.matchers import first_candidate
         buckets: dict[str, dict] = {}
         with self._open() as (cat, _rs, _ts):
-            rows = cat.outgoing_citation_targets(category)  # category key == source key
+            # Category keys are presentation taxonomy, not necessarily source names:
+            # fr-caselaw is stored as fr-dila, de-caselaw as de-rii, and nl-caselaw as
+            # nl-rechtspraak. Derive the mapping from the same classifier that builds
+            # the Held column so the two halves of the map cannot drift apart.
+            pairs: set[tuple[str, str | None]] = set()
+            for d in cat.document_subtype_counts():
+                tax = classify_document(source=d["source"], doc_type=d["doc_type"],
+                                        court=d["court"], stable_id=d["prefix"] or "")
+                if tax.category == category:
+                    pairs.add((d["source"], d["doc_type"]))
+            rows = cat.outgoing_citation_targets_for(sorted(pairs))
         for r in rows:
             dst = r["dst_id"]
             if (not dst or dst.startswith("http")):

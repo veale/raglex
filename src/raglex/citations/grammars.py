@@ -520,17 +520,20 @@ register(Grammar(
 # candidate is the consolidated CELEX so every reference clusters to one node and
 # the instrument is harvestable. The "(2)" sub-article rides along as the pinpoint.
 _EU_TREATIES = (
-    (r"(?:the\s+)?Treaty\s+on\s+the\s+Functioning\s+of\s+the\s+European\s+Union|TFEU", "12016E"),
-    (r"(?:the\s+)?Treaty\s+on\s+European\s+Union|TEU", "12016M"),
+    (r"(?:the\s+)?Treaty\s+on\s+the\s+Functioning\s+of\s+the\s+European\s+Union|TFEU|TFUE"
+     r"|(?:le\s+)?Trait[ée]\s+sur\s+le\s+fonctionnement\s+de\s+l['’]Union\s+europ[ée]enne", "12016E"),
+    (r"(?:the\s+)?Treaty\s+on\s+European\s+Union|TEU|TUE"
+     r"|(?:le\s+)?Trait[ée]\s+sur\s+l['’]Union\s+europ[ée]enne", "12016M"),
     (r"(?:the\s+)?Charter\s+of\s+Fundamental\s+Rights(?:\s+of\s+the\s+European\s+Union)?"
-     r"|(?:the\s+)?EU\s+Charter|CFREU|the\s+Charter", "12012P"),
+     r"|(?:the\s+)?EU\s+Charter|CFREU|the\s+Charter"
+     r"|(?:la\s+)?Charte\s+des\s+droits\s+fondamentaux(?:\s+de\s+l['’]Union\s+europ[ée]enne)?", "12012P"),
 )
 for _i, (_names, _celex) in enumerate(_EU_TREATIES):
     register(Grammar(
         f"eu_treaty_{_celex}", "treaty",
         re.compile(
             rf"\bArt(?:icle|\.)?s?\.?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+"
-            rf"(?:of\s+)?(?:{_names})\b",
+            rf"(?:(?:of|du|de\s+la|des)\s+)?(?:{_names})\b",
             re.IGNORECASE,
         ),
         (lambda celex: lambda m: (celex, f"Article {m.group('art')}", "treaty"))(_celex),

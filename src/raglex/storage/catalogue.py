@@ -3240,6 +3240,32 @@ class Catalogue:
             "JOIN documents d ON d.stable_id = r.src_id "
             "WHERE d.source = ? AND r.extracted_via != 'inferred'", (source,)).fetchall()
 
+    def outgoing_citation_targets_for(
+        self, source_types: list[tuple[str, str | None]],
+    ) -> list[sqlite3.Row]:
+        """Edges out of a corpus-map category's actual stored source/type pairs.
+
+        Display categories (``fr-caselaw``) are deliberately not storage sources
+        (``fr-dila``).  Keeping the mapping as source/type pairs also separates a
+        register that supplies both legislation and decisions.
+        """
+        if not source_types:
+            return []
+        clauses, params = [], []
+        for source, doc_type in source_types:
+            if doc_type:
+                clauses.append("(d.source = ? AND d.doc_type = ?)")
+                params.extend((source, doc_type))
+            else:
+                clauses.append("d.source = ?")
+                params.append(source)
+        return self.conn.execute(
+            "SELECT r.dst_id, r.raw_citation_string AS raw FROM relations r "
+            "JOIN documents d ON d.stable_id = r.src_id WHERE ("
+            + " OR ".join(clauses) + ") AND r.extracted_via != 'inferred'",
+            tuple(params),
+        ).fetchall()
+
     def document_subtype_counts(self) -> list[sqlite3.Row]:
         """Held-document counts grouped by (source, doc_type, court, slug-prefix) — the raw
         material for the Corpus Map's per-sub-type "Held" column.

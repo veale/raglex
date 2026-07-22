@@ -88,6 +88,12 @@ def law_citations(text: str) -> list[Citation]:
     found: list[Citation] = []
     for match in LAW_REFERENCE_RE.finditer(text):
         raw = match.group("raw")
+        # CEDH is the French abbreviation for the European Convention/Court, not a
+        # German statute abbreviation. In French judgments ``§ 95, CEDH 19`` is a
+        # Strasbourg paragraph/report marker; treating it as de/gesetz/cedh19 creates
+        # a cross-jurisdiction phantom node. German texts use EMRK for the Convention.
+        if re.match(r"CEDH\b", match.group("law"), re.IGNORECASE):
+            continue
         try:
             canonical_refs = normalise(_expand_compact(raw))
         except (ValueError, TypeError):
