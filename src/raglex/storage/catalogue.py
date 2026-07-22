@@ -3260,9 +3260,10 @@ class Catalogue:
                 clauses.append("d.source = ?")
                 params.append(source)
         return self.conn.execute(
-            "SELECT r.dst_id, r.raw_citation_string AS raw FROM relations r "
+            "SELECT r.dst_id, r.raw_citation_string AS raw, COUNT(*) AS n FROM relations r "
             "JOIN documents d ON d.stable_id = r.src_id WHERE ("
-            + " OR ".join(clauses) + ") AND r.extracted_via != 'inferred'",
+            + " OR ".join(clauses) + ") AND r.extracted_via != 'inferred' "
+            "GROUP BY r.dst_id, r.raw_citation_string",
             tuple(params),
         ).fetchall()
 

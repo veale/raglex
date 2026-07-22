@@ -2885,7 +2885,7 @@ class Facade:
                 b = buckets[tax.category] = {"category": tax.category,
                     "label": CATEGORY_LABELS.get(tax.category, tax.category),
                     "_uniq": set(), "total": 0}
-            b["_uniq"].add(dst); b["total"] += 1
+            b["_uniq"].add(dst); b["total"] += int(r["n"] if "n" in r.keys() else 1)
         targets = [{"category": b["category"], "label": b["label"],
                     "unique": len(b["_uniq"]), "total": b["total"]} for b in buckets.values()]
         targets.sort(key=lambda t: t["total"], reverse=True)
