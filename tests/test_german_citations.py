@@ -48,6 +48,13 @@ def test_french_cedh_marker_is_not_minted_as_german_legislation():
     assert not _de("§ 95, CEDH 19")
 
 
+def test_lowercase_german_word_is_not_safe_as_global_bare_shorthand():
+    from raglex.citations.extractor import attach_stored_shorthands
+    assert not attach_stored_shorthands(
+        "Das Gericht kann dies prüfen.", [],
+        [("kann", "de/gesetz/bgb", "act", True)])
+
+
 def test_german_sources_and_candidates_leave_other_bucket():
     held = classify_document(source="de-rii", doc_type=str(DocType.JUDGMENT),
                              court="Bundesgerichtshof", stable_id="ECLI:DE:BGH:2021:X")

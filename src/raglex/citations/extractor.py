@@ -371,6 +371,11 @@ def attach_stored_shorthands(
         core = name.replace(".", "").replace(" ", "")
         if abbrev and (len(core) <= 2 or core.lower() in _COMMON_INITIALISMS):
             abbrev = False   # demand a pincite rather than trusting a bare mention
+        # A learned single ordinary word (``kann``, ``Geltendmachung``) is not an
+        # abbreviation even if a noisy bracketed definition once labelled it as one.
+        # Keep multi-word formal statute titles and genuine FMIOA/GDPR-style tokens.
+        if abbrev and " " not in name.strip() and not _is_abbrev(name):
+            abbrev = False
         _link_shorthand_uses(
             text, name, entity_kind=entity_kind, candidate_id=candidate_id,
             abbrev=abbrev, out=out, occupied=occupied,

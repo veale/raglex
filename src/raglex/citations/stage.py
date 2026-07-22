@@ -418,7 +418,11 @@ def extract_document(
     de_known: dict[str, bool] = {}
     filtered = []
     for c in cites:
-        if c.method != "de_law_reference" or not c.candidate_id:
+        # In German judgments ``S. 100`` means Seite 100, not section 100.
+        if (doc["source"].startswith("de-") and c.method == "carry_forward"
+                and re.match(r"(?i)^S\.?\s*\d", c.raw or "")):
+            continue
+        if not (c.candidate_id or "").startswith("de/gesetz/"):
             filtered.append(c)
             continue
         known = de_known.get(c.candidate_id)
