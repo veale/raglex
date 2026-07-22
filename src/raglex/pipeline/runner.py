@@ -155,10 +155,15 @@ class Pipeline:
                 # id lookup can never match a doc already keyed by its real neutral citation.
                 refreshed = False
                 held_id = None
+                held_doc = None
                 if refetch_held:
                     pass  # targeted re-pull: fetch even held docs (effects refresh)
-                elif stub.stable_id and self.catalogue.get_document(stub.stable_id) is not None:
-                    held_id = stub.stable_id
+                elif stub.stable_id:
+                    held_doc = self.catalogue.get_document(stub.stable_id)
+                    if held_doc is not None:
+                        held_id = stub.stable_id
+                    elif stub.landing_url:
+                        held_id = self.catalogue.document_id_by_landing_url(stub.landing_url)
                 elif stub.landing_url:
                     held_id = self.catalogue.document_id_by_landing_url(stub.landing_url)
                 if held_id is not None:
@@ -170,6 +175,14 @@ class Pipeline:
                         "contenthash") if feed_hash else None
                     if not (feed_hash and held_hash and feed_hash != held_hash):
                         stats.deduped += 1
+                        # A durable document is not necessarily a completed pipeline
+                        # item. A crash/deploy can occur after bulk storage but before
+                        # harvest's extraction phase. On restart, carry held-but-unscanned
+                        # ids into that phase; otherwise dedup would permanently strand
+                        # them as apparently complete records with no citation graph.
+                        held_doc = held_doc or self.catalogue.get_document(held_id)
+                        if held_doc is not None and not held_doc["last_extracted_at"]:
+                            stats.stored_ids.append(held_id)
                         # A deduped stub was still *seen and held* — advance the cursor
                         # past it. Otherwise a run where everything is already held (e.g.
                         # after a bulk import pre-populated the docs) leaves the watermark
