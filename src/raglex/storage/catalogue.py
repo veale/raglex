@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -612,10 +613,29 @@ class Catalogue:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             except Exception:  # noqa: BLE001 — a migration mustn't block startup
                 pass
+        # Check-before-CREATE, same medicine as the ALTER above: Postgres takes the
+        # table's SHARE lock BEFORE noticing an index already exists, so at startup
+        # these no-ops queued behind any long-running relations UPDATE (a resumed
+        # bulk resolve) and the API sat unbound for minutes. The catalog probe is
+        # lock-free; a genuinely-needed CREATE is bounded by lock_timeout instead of
+        # waiting out a whole resolve batch.
         for stmt in _POST_MIGRATE_INDEXES:
             try:
-                self.conn.execute(stmt)
-            except Exception:  # noqa: BLE001
+                name = re.search(r"IF NOT EXISTS\s+([a-z0-9_]+)", stmt, re.I).group(1)
+                if self.backend == "postgres":
+                    hit = self.conn.execute(
+                        "SELECT 1 FROM pg_class WHERE relname = ? AND relkind = 'i'",
+                        (name,)).fetchone()
+                    if hit:
+                        continue
+                    self.conn.execute("SET lock_timeout = '5s'")
+                    try:
+                        self.conn.execute(stmt)
+                    finally:
+                        self.conn.execute("SET lock_timeout = 0")
+                else:
+                    self.conn.execute(stmt)
+            except Exception:  # noqa: BLE001 — a migration mustn't block startup
                 pass
 
     @staticmethod
@@ -2280,6 +2300,38 @@ class Catalogue:
             """,
             (limit,),
         ).fetchall()
+
+    def held_extraction_state(self, ids: list[str]) -> dict[str, bool]:
+        """``{stable_id: has_extraction_stamp}`` for the HELD subset of ``ids`` — the
+        pipeline's batched dedup prefilter. A bulk backfill's resume pass re-walks a
+        source's whole catalogue mostly re-seeing held documents; one point SELECT
+        per stub made that walk run at ~20 stubs/s against Postgres (a multi-hour
+        no-op over a 300k-item TOC). One IN-query per chunk instead."""
+        out: dict[str, bool] = {}
+        ids = [i for i in dict.fromkeys(ids) if i]
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            qs = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                    f"SELECT stable_id, last_extracted_at FROM documents "
+                    f"WHERE stable_id IN ({qs})", chunk).fetchall():
+                out[r["stable_id"]] = bool(r["last_extracted_at"])
+        return out
+
+    def document_ids_by_landing_urls(self, urls: list[str]) -> dict[str, str]:
+        """``{landing_url: stable_id}`` for the held subset — the batched form of
+        document_id_by_landing_url, for adapters whose stub id is provisional until
+        the document is fetched (NZ)."""
+        out: dict[str, str] = {}
+        urls = [u for u in dict.fromkeys(urls) if u]
+        for i in range(0, len(urls), 400):
+            chunk = urls[i:i + 400]
+            qs = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                    f"SELECT stable_id, landing_url FROM documents "
+                    f"WHERE landing_url IN ({qs})", chunk).fetchall():
+                out[r["landing_url"]] = r["stable_id"]
+        return out
 
     def canadian_unenriched_documents(self, *, limit: int = 500) -> list[sqlite3.Row]:
         """Held Canadian judgments not yet checked against CanLII — the enrichment

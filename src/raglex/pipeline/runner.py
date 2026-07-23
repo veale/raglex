@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from ..core.adapter import Adapter
 from ..core.errors import FetchError, RateLimitException
-from ..core.models import Record, UpstreamStatus
+from ..core.models import Record, Stub, UpstreamStatus
 from ..storage.catalogue import Catalogue
 from ..storage.rawstore import RawStore
 from ..storage.textstore import TextStore
@@ -128,8 +128,17 @@ class Pipeline:
         wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
         last_emit = 0.0
 
+        stubs = adapter.discover(watermark, max_pages=max_pages)
+        # Batched held-lookup: a backfill's resume pass re-walks the source's whole
+        # catalogue mostly re-seeing held documents, and one point SELECT per stub
+        # made that walk crawl at ~20 stubs/s against Postgres (hours of no-op over
+        # a 300k-item TOC). The prefilter answers "held? extracted?" for 200 stubs
+        # in one IN-query; every decision the loop takes per stub is unchanged.
+        annotated = (((s, None, None) for s in stubs) if refetch_held
+                     else self._batched_held(stubs))
+
         try:
-            for stub in adapter.discover(watermark, max_pages=max_pages):
+            for stub, held_id, held_extracted in annotated:
                 if cancel_check and cancel_check():
                     stats.notes.append("cancelled")
                     break
@@ -175,19 +184,9 @@ class Pipeline:
                 # The held check is by id, then by landing URL — the latter for adapters
                 # whose stub id is provisional until the document is fetched (NZ), where an
                 # id lookup can never match a doc already keyed by its real neutral citation.
+                # Both lookups were answered by the batched prefilter above (held_id /
+                # held_extracted ride in with the stub); refetch_held skips it entirely.
                 refreshed = False
-                held_id = None
-                held_doc = None
-                if refetch_held:
-                    pass  # targeted re-pull: fetch even held docs (effects refresh)
-                elif stub.stable_id:
-                    held_doc = self.catalogue.get_document(stub.stable_id)
-                    if held_doc is not None:
-                        held_id = stub.stable_id
-                    elif stub.landing_url:
-                        held_id = self.catalogue.document_id_by_landing_url(stub.landing_url)
-                elif stub.landing_url:
-                    held_id = self.catalogue.document_id_by_landing_url(stub.landing_url)
                 if held_id is not None:
                     # …unless the feed says the content CHANGED: a differing contenthash
                     # (FCL's change signal) means the held copy is a superseded revision —
@@ -202,8 +201,13 @@ class Pipeline:
                         # harvest's extraction phase. On restart, carry held-but-unscanned
                         # ids into that phase; otherwise dedup would permanently strand
                         # them as apparently complete records with no citation graph.
-                        held_doc = held_doc or self.catalogue.get_document(held_id)
-                        if held_doc is not None and not held_doc["last_extracted_at"]:
+                        # The prefilter carried the stamp for id-matched stubs; the rare
+                        # URL-matched ones (held_extracted None) resolve it here.
+                        if held_extracted is None:
+                            held_doc = self.catalogue.get_document(held_id)
+                            held_extracted = bool(
+                                held_doc["last_extracted_at"]) if held_doc else True
+                        if not held_extracted:
                             stats.stored_ids.append(held_id)
                         # A deduped stub was still *seen and held* — advance the cursor
                         # past it. Otherwise a run where everything is already held (e.g.
@@ -302,6 +306,39 @@ class Pipeline:
 
         log.info(stats.summary())
         return stats
+
+    # how many stubs the held-prefilter answers per IN-query. Buffering delays the
+    # first fetch by at most this many discovery steps — irrelevant for the bulk
+    # walks it exists for, and a short feed just flushes at end-of-stream.
+    _HELD_BATCH = 200
+
+    def _batched_held(self, stubs):
+        """Annotate each stub with ``(held_id, has_extraction_stamp)`` via batched
+        catalogue lookups — see run(). ``held_extracted`` is None when unknown (a
+        landing-URL match, whose id differs from the stub's), resolved lazily by the
+        one consumer that needs it."""
+        buf: list[Stub] = []
+        for stub in stubs:
+            buf.append(stub)
+            if len(buf) >= self._HELD_BATCH:
+                yield from self._annotate_held(buf)
+                buf = []
+        if buf:
+            yield from self._annotate_held(buf)
+
+    def _annotate_held(self, buf: "list[Stub]"):
+        state = self.catalogue.held_extraction_state(
+            [s.stable_id for s in buf if s.stable_id])
+        by_url = self.catalogue.document_ids_by_landing_urls(
+            [s.landing_url for s in buf
+             if s.landing_url and s.stable_id not in state])
+        for s in buf:
+            if s.stable_id and s.stable_id in state:
+                yield s, s.stable_id, state[s.stable_id]
+            elif s.landing_url and s.landing_url in by_url:
+                yield s, by_url[s.landing_url], None
+            else:
+                yield s, None, None
 
     def _ingest(self, record: Record, stats: RunStats) -> bool:
         """Dedup → store raw → catalogue. Returns True if stored."""
