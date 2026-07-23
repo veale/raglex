@@ -136,6 +136,8 @@ function SnipText({ s }: { s: any }) {
 // human-readable bucket names ("United Kingdom", "European Union") and bare codes.
 const _FLAG_CODE: Record<string, string> = {
   "european union": "eu", "united kingdom": "gb", "uk": "gb", "gb": "gb", "eu": "eu",
+  // The Council of Europe (ECtHR / ECHR) created and shares the European flag with the EU.
+  "council of europe": "eu", coe: "eu", "european court of human rights": "eu", ecthr: "eu",
   england: "gb", "england & wales": "gb", scotland: "gb", "northern ireland": "gb",
   ireland: "ie", "data protection commission (ireland)": "ie",
   germany: "de", france: "fr", netherlands: "nl", italy: "it", spain: "es",
