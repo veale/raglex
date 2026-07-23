@@ -495,6 +495,29 @@ class Catalogue:
         self.conn.commit()
 
     @contextmanager
+    def _maintenance_timeout(self, ms: int = 1_800_000):
+        """Raise THIS connection's statement_timeout for a known-heavy singleton
+        maintenance statement, restoring the pooled default afterwards.
+
+        The pool's 3-minute default exists to kill runaway *request* queries before
+        they wedge every worker; the counts/authority/source rollups are deliberate
+        whole-graph aggregates that outgrew it at 17M+ relations (both died with
+        'canceling statement due to statement timeout' after the French import).
+        RESET restores the value from the pool's ``-c statement_timeout`` startup
+        option, so the raised limit never leaks back into request-serving use."""
+        if self.backend != "postgres":
+            yield
+            return
+        self.conn.execute(f"SET statement_timeout = {int(ms)}")
+        try:
+            yield
+        finally:
+            try:
+                self.conn.execute("RESET statement_timeout")
+            except Exception:  # noqa: BLE001 — a dropped conn resets itself anyway
+                pass
+
+    @contextmanager
     def _atomic(self):
         """Run a multi-statement write as one all-or-nothing unit on either backend.
         Postgres connects in autocommit mode (so reads never linger 'idle in transaction'
@@ -1034,7 +1057,7 @@ class Catalogue:
 
     def rebuild_citation_counts(self) -> int:
         """Recompute the citation frequency roll-up. One pass; run on a cadence."""
-        with self._atomic():
+        with self._maintenance_timeout(), self._atomic():
             self.conn.execute("DELETE FROM citation_counts")
             self.conn.execute(
                 "INSERT INTO citation_counts "
@@ -1047,10 +1070,30 @@ class Catalogue:
             "SELECT COUNT(*) AS n FROM citation_counts"
         ).fetchone()["n"]
 
+    def storage_size(self) -> dict:
+        """Total database size in bytes plus the largest tables — the Maintain page's
+        disk indicator. Catalog lookups only (instant), never a filesystem walk."""
+        if self.backend == "postgres":
+            total = self.conn.execute(
+                "SELECT pg_database_size(current_database()) AS n").fetchone()["n"]
+            tables = [dict(r) for r in self.conn.execute(
+                """
+                SELECT relname AS name, pg_total_relation_size(c.oid) AS bytes
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relkind = 'r'
+                ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 8
+                """).fetchall()]
+        else:
+            row = self.conn.execute(
+                "SELECT (SELECT page_count FROM pragma_page_count()) * "
+                "(SELECT page_size FROM pragma_page_size()) AS n").fetchone()
+            total, tables = int(row["n"] or 0), []
+        return {"database_bytes": int(total), "tables": tables}
+
     def refresh_source_stats(self) -> int:
         """Recompute the per-source resolved-outgoing roll-up (one heavy aggregate,
         on the citation-counts cadence — never inline in a page load)."""
-        with self._atomic():
+        with self._maintenance_timeout(), self._atomic():
             self.conn.execute("DELETE FROM source_stats")
             self.conn.execute(
                 "INSERT INTO source_stats (source, resolved_outgoing, rebuilt_at) "
@@ -1301,14 +1344,15 @@ class Catalogue:
 
         if on_progress:
             on_progress(stage="loading edges")
-        edges = [(r["src_id"], r["dst_id"]) for r in self.conn.execute(self._GRAPH_EDGE_SQL)]
-        years: dict[str, int] = {}
-        for r in self.conn.execute(
-                "SELECT stable_id, decision_date FROM documents WHERE decision_date IS NOT NULL"):
-            try:
-                years[r["stable_id"]] = int(str(r["decision_date"])[:4])
-            except (ValueError, TypeError):
-                continue
+        with self._maintenance_timeout():
+            edges = [(r["src_id"], r["dst_id"]) for r in self.conn.execute(self._GRAPH_EDGE_SQL)]
+            years: dict[str, int] = {}
+            for r in self.conn.execute(
+                    "SELECT stable_id, decision_date FROM documents WHERE decision_date IS NOT NULL"):
+                try:
+                    years[r["stable_id"]] = int(str(r["decision_date"])[:4])
+                except (ValueError, TypeError):
+                    continue
         if on_progress:
             on_progress(stage="pagerank", total=len(edges))
         rows = compute_authority(edges, years, now_year=date.today().year)

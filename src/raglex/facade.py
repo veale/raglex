@@ -2436,6 +2436,11 @@ class Facade:
         self._invalidate_caches()
         return {"candidates": n, "sources": srcs}
 
+    def system_storage(self) -> dict:
+        """Database disk footprint for the Maintain page (catalog lookups, instant)."""
+        with self._open() as (cat, _rs, _ts):
+            return cat.storage_size()
+
     def backfill_edge_keys(self, *, on_progress=None, cancel_check=None) -> dict:
         """One-off: populate candidate_id/raw_fold on edges written before those columns
         existed, so the set-based resolver and the SQL worklist see the whole graph."""

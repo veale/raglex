@@ -206,3 +206,11 @@ def test_settings_endpoint_masks_and_persists(client, monkeypatch):
     rows = {s["key"]: s for s in client.get("/settings").json()["settings"]}
     assert rows["OPENROUTER_API_KEY"]["display"] == "••••9999"  # masked
     assert rows["ZOTERO_LIBRARY_ID"]["display"] == "7"
+
+
+def test_system_storage_reports_database_size(client):
+    r = client.get("/system/storage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["database_bytes"] > 0
+    assert isinstance(body["tables"], list)

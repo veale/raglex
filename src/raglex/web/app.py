@@ -650,6 +650,11 @@ def create_app(config: Config | None = None) -> FastAPI:
     def embedding_health() -> dict:
         return facade.provider_health()
 
+    @app.get("/system/storage")
+    def system_storage_ep() -> dict:
+        """Database disk footprint (total + largest tables) for the Maintain page."""
+        return facade.system_storage()
+
     # -- research ----------------------------------------------------------
     @app.get("/stats")
     def stats() -> dict:

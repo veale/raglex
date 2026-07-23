@@ -3212,6 +3212,7 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
           <b>Expand coverage</b> pulls in cited-but-missing authorities; <b>Watches</b> pull new material on a schedule;{" "}
           <b>Rules</b> are optional shorthands.
         </p>
+        <DbSizeStat />
       </div>
       <KeepCurrentPanel />
       <BackfillPanel />
@@ -3221,6 +3222,22 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
       <WatchesView />
       <RulesView open={open} />
     </div>
+  );
+}
+
+// Current database disk footprint — total in GB plus the largest tables on hover.
+function DbSizeStat() {
+  const [s] = useAsync(() => api.systemStorage(), []);
+  if (!s) return null;
+  const gb = (b: number) => (b / 1024 ** 3).toFixed(b >= 100 * 1024 ** 3 ? 0 : 1);
+  const top = (s.tables || []).slice(0, 6)
+    .map((t) => `${t.name}: ${gb(t.bytes)} GB`).join("\n");
+  return (
+    <p className="muted" style={{ marginTop: 6, fontSize: 12 }}
+       title={top ? `Largest tables:\n${top}` : undefined}>
+      🖴 Database: <b>{gb(s.database_bytes)} GB</b>
+      {s.tables?.length > 0 && <span> — largest: {s.tables[0].name} ({gb(s.tables[0].bytes)} GB)</span>}
+    </p>
   );
 }
 
