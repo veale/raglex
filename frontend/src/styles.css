@@ -523,6 +523,8 @@ tbody tr:hover { background: var(--surface-2); }
 .suggestion button.sug-no:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
 .also-cited { font-size: .8125rem; margin: 0 0 var(--sp-2); }
 .also-cited b { font-weight: 500; color: var(--text); }
+.original-sources { font-size: .8125rem; margin: 0 0 var(--sp-2); }
+.original-sources a { color: var(--link, var(--accent)); }
 
 /* grouped suggestion review: one block per suggested target, flag chips per row */
 .sug-group { margin: var(--sp-3) 0; border: 1px solid var(--line); border-radius: var(--radius); }

@@ -30,6 +30,42 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _watch_phase_seconds(watch_id: int, cadence_minutes: int) -> int:
+    """A deterministic phase offset (seconds, in ``[0, cadence)``) unique-ish per watch.
+    Knuth's multiplicative hash spreads consecutive watch_ids across the whole window, so
+    watches created together and sharing a cadence land in different slots."""
+    cadence_s = max(1, cadence_minutes) * 60
+    return int((watch_id * 2654435761) % cadence_s)
+
+
+def watch_is_due(watch_id: int, cadence_minutes: int, last_run_at, now) -> bool:
+    """Whether a watch should run now, with per-watch **staggering** so equal-cadence
+    watches don't all fire in the same tick.
+
+    A never-run watch is due immediately (first harvest shouldn't wait). Otherwise the
+    timeline is cut into ``cadence``-long slots anchored to the epoch and shifted by the
+    watch's own phase (:func:`_watch_phase_seconds`); the watch is due once its slot index
+    has advanced past the slot of its last run. Two weekly watches with different phases
+    therefore come due on different ticks and stay offset every week, instead of
+    re-synchronising to a shared last-run time and stampeding together.
+    """
+    import datetime as _dt
+
+    if not last_run_at:
+        return True
+    try:
+        prev = _dt.datetime.fromisoformat(last_run_at)
+    except (ValueError, TypeError):
+        return True
+    if prev.tzinfo is None:
+        prev = prev.replace(tzinfo=_dt.timezone.utc)
+    cadence_s = max(1, cadence_minutes) * 60
+    phase = _watch_phase_seconds(watch_id, cadence_minutes)
+    slot_now = int((now.timestamp() - phase) // cadence_s)
+    slot_prev = int((prev.timestamp() - phase) // cadence_s)
+    return slot_now > slot_prev
+
+
 def _progress(cb, **fields) -> None:
     """Report coarse progress to an optional callback (used by the background-job
     runner so the UI can poll "fetching 5/30"). Never lets a callback error break
@@ -8115,25 +8151,18 @@ class Facade:
 
     def due_watch_ids(self) -> list[int]:
         """The enabled watches whose cadence is due now — the scheduler starts a job per id
-        (so each shows in the Jobs panel), rather than running them inline invisibly."""
+        (so each shows in the Jobs panel), rather than running them inline invisibly.
+
+        Due-ness is **staggered** per watch (see :func:`watch_is_due`) so that watches
+        sharing a cadence — every daily register sync, every weekly source — don't all
+        come due in the same tick and stampede the pipeline. Each fires once per cadence
+        window, at a deterministic phase offset from its neighbours."""
         import datetime as _dt
 
         now = _dt.datetime.now(_dt.timezone.utc)
-        due = []
-        for w in self.list_watches():
-            if not w["enabled"]:
-                continue
-            last = w.get("last_run_at")
-            is_due = True
-            if last:
-                try:
-                    prev = _dt.datetime.fromisoformat(last)
-                    is_due = (now - prev).total_seconds() >= w["cadence_minutes"] * 60
-                except ValueError:
-                    is_due = True
-            if is_due:
-                due.append(w["watch_id"])
-        return due
+        return [w["watch_id"] for w in self.list_watches()
+                if w["enabled"]
+                and watch_is_due(w["watch_id"], w["cadence_minutes"], w.get("last_run_at"), now)]
 
     def tick_watches(self) -> dict:
         """Run every enabled watch whose cadence is due (the scheduler's unit of

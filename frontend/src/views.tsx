@@ -1834,6 +1834,28 @@ export function provenance(parts: (string | null | undefined)[]): string {
 }
 
 // --- Document reader + augment ---------------------------------------------
+// The originating decision links a report carries but whose text we deliberately do not
+// hold (e.g. a GDPRhub case report → the DPA's own decision page/PDF). Shown as
+// "See on <source> (<language>) ↗" so a reader — or an MCP bot — can reach the original.
+function OriginalSources({ meta }: { meta?: any }) {
+  const srcs: any[] = (meta && meta.original_sources) || [];
+  if (!srcs.length) return null;
+  return (
+    <p className="original-sources muted" title="The issuing authority's own copy of this decision (not held in the corpus)">
+      Original {srcs.length > 1 ? "sources" : "source"}:{" "}
+      {srcs.map((s, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="summary-sep"> · </span>}
+          {s.url
+            ? <a href={s.url} target="_blank" rel="noopener noreferrer">
+                See on {s.name || "source"}{s.language ? ` (${s.language})` : ""} ↗</a>
+            : <span>{s.name}{s.language ? ` (${s.language})` : ""}</span>}
+        </Fragment>
+      ))}
+    </p>
+  );
+}
+
 export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
   const [doc, err, reload] = useAsync(() => api.document(id), [id]);
   const [pinAnchor, setPinAnchor] = useState("");
@@ -1882,6 +1904,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
               <Fragment key={i}>{i > 0 && <span className="summary-sep"> · </span>}<b>{a}</b></Fragment>)}
           </p>
         )}
+        <OriginalSources meta={doc.meta} />
         <a className="opts-toggle muted" onClick={() => setShowOpts((v) => !v)}>
           {showOpts ? "▾ Hide options and metadata" : "▸ Expand options and metadata"}</a>
         {showOpts && (

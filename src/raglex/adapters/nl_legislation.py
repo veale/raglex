@@ -14,11 +14,20 @@ Discovery here is a configured BWB-id list (default: the DP instruments). KOOP's
 discover by topic or sync deltas — a drop-in for ``discover`` when wanted.
 Fragment-level citation into NL law uses the **JuriConnect** standard (cf. the
 pinpoint links §1.9 supports).
+
+**Bulk** (``path=``): a whole-corpus KOOP drop can be enumerated offline. It accepts
+an extracted XML folder, a single/loose ``.zip``, or — as KOOP now ships it — the
+**multi-part 7z** (``BWB_<ts>.7z.001/.002/.003`` beside a ``BWBIDLIST.zip`` index),
+which is extracted once to a sibling cache dir (needs the p7zip ``7z`` binary or
+``py7zr``) and then read the same way. Every toestand is retained so historical
+point-in-time edges resolve; the newest becomes the bare Work node.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterator
@@ -65,6 +74,55 @@ def _bulk_identity(data: bytes, name: str = "") -> tuple[str, str] | None:
     if not dm:
         dm = re.search(r"(\d{4}-\d{2}-\d{2})", name)
     return (bwb.group(1).upper(), dm.group(1) if dm else "0001-01-01")
+
+
+def _path_identity(name: str) -> tuple[str, str] | None:
+    """BWB work id + validity date read straight from a bulk member PATH
+    (``BWBR0001821/1998-01-01_0/xml/…``) — so a 194k-file corpus is enumerated without
+    opening every file. Returns None when the path lacks either, so the caller can fall
+    back to reading the member."""
+    bwb = re.search(r"\b(BWB[RV]\d{7})\b", name, re.I)
+    dm = re.search(r"(\d{4}-\d{2}-\d{2})", name)
+    if bwb and dm:
+        return (bwb.group(1).upper(), dm.group(1))
+    return None
+
+
+# KOOP also ships the whole Basiswettenbestand as a **multi-part 7z** (the split
+# ``BWB_<ts>.7z.001/.002/.003`` volumes beside a ``BWBIDLIST.zip`` index). 7z isn't a
+# stdlib format, so it is extracted once to a sibling cache dir and then read with the
+# existing zip/xml enumeration.
+_SEVENZIP_VOL = re.compile(r"\.7z(?:\.(\d{3,}))?$", re.I)
+
+
+def _find_7z() -> str | None:
+    for exe in ("7z", "7za", "7zz", "7zr"):
+        found = shutil.which(exe)
+        if found:
+            return found
+    return None
+
+
+def _extract_7z(volume001: Path, dest: Path) -> None:
+    """Extract a (possibly multi-volume) .7z into ``dest``. Prefers the p7zip binary —
+    which joins ``.001/.002/.003`` volumes natively — and falls back to py7zr +
+    multivolumefile. Raises with an install hint if neither is available."""
+    exe = _find_7z()
+    if exe:
+        subprocess.run([exe, "x", f"-o{dest}", "-y", str(volume001)],
+                       check=True, capture_output=True)
+        return
+    try:
+        import multivolumefile
+        import py7zr
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise RuntimeError(
+            "extracting a multi-part .7z needs the p7zip '7z' binary (apt install p7zip-full) "
+            "or `pip install py7zr multivolumefile`") from exc
+    base = re.sub(r"\.\d{3,}$", "", str(volume001))  # strip the .001 volume suffix
+    with multivolumefile.open(base, mode="rb") as vol:  # pragma: no cover
+        with py7zr.SevenZipFile(vol, mode="r") as z:
+            z.extractall(path=dest)
 
 
 class NLLegislationAdapter(BaseAdapter):
@@ -153,40 +211,91 @@ class NLLegislationAdapter(BaseAdapter):
             yield Stub(stable_id=sid, landing_url=f"{BASE_URL}/{bwbid}",
                        hints={"bwbid": bwbid, "geldig": self.version_date})
 
+    def _bulk_root(self) -> Path:
+        """The directory to enumerate: ``self.path`` as given, or — when it is (or
+        contains) a multi-part ``.7z`` — a sibling cache dir the archive is extracted to
+        once (a marker file skips re-extraction on later runs)."""
+        root = self.path
+        vol001: Path | None = None
+        if root.is_file() and _SEVENZIP_VOL.search(root.name):
+            vol001 = root
+        elif root.is_dir():
+            parts = sorted(root.glob("*.7z.001")) or sorted(root.glob("*.7z"))
+            vol001 = parts[0] if parts else None
+        if vol001 is None:
+            return root  # a plain zip/xml folder (or single zip) — enumerate as-is
+        base = _SEVENZIP_VOL.sub("", vol001.name)
+        dest = vol001.parent / f"{base}_extracted"
+        if not (dest / ".extracted_ok").exists():
+            dest.mkdir(parents=True, exist_ok=True)
+            _extract_7z(vol001, dest)
+            (dest / ".extracted_ok").write_text("ok\n")
+        return dest
+
     def _discover_bulk(self) -> Iterator[Stub]:
-        """Enumerate every toestand in a KOOP bulk zip/folder, retaining history."""
-        entries: list[tuple[str, str, dict]] = []
-        archives = [self.path] if self.path.is_file() and self.path.suffix.lower() == ".zip" else (
-            sorted(self.path.rglob("*.zip")) if self.path.is_dir() else [])
+        """Enumerate every toestand in a KOOP bulk 7z/zip/folder, retaining history.
+
+        The 7z drop lays each toestand out as ``<BWBID>/<date>_0/xml/…`` with the main
+        content XML beside a ``manifest.xml`` and image assets — so identity comes from
+        the *path* (no reading 194k files) and the toestand is deduped to its single main
+        XML (``BWBR….xml`` preferred; ``manifest.xml`` skipped)."""
+        root = self._bulk_root()
+        # keyed by (bwb, date) → (priority, hints); lower priority wins the toestand
+        best: dict[tuple[str, str], tuple[int, dict]] = {}
+
+        def _consider(bwb: str, valid: str, name: str, hints: dict) -> None:
+            base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            if base.lower() == "manifest.xml":
+                return                         # the manifest points at the content, isn't it
+            stem = base[:-4] if base.lower().endswith(".xml") else base
+            prio = (0 if stem.upper() == bwb else 1 if stem.upper().startswith("BWB")
+                    else 2)                    # prefer the file named after the work
+            key = (bwb, valid)
+            if key not in best or prio < best[key][0]:
+                best[key] = (prio, {**hints, "bwbid": bwb, "geldig": valid})
+
+        archives = [root] if root.is_file() and root.suffix.lower() == ".zip" else (
+            sorted(root.rglob("*.zip")) if root.is_dir() else [])
         for archive in archives:
+            # BWBIDLIST.zip is the id index, not toestand XML — skip it whole.
+            if archive.name.upper().startswith("BWBIDLIST"):
+                continue
             try:
                 with zipfile.ZipFile(archive) as zf:
                     for member in zf.namelist():
                         if not member.lower().endswith(".xml"):
                             continue
-                        raw = zf.read(member)
-                        ident = _bulk_identity(raw, member)
+                        ident = _path_identity(member) or _bulk_identity(zf.read(member), member)
                         if ident:
-                            entries.append((*ident, {"archive": str(archive), "member": member}))
+                            _consider(*ident, member, {"archive": str(archive), "member": member})
             except (OSError, zipfile.BadZipFile):
                 continue
-        if self.path.is_dir():
-            for xml in sorted(self.path.rglob("*.xml")):
-                try:
-                    ident = _bulk_identity(xml.read_bytes(), str(xml))
-                except OSError:
-                    continue
+        if root.is_dir():
+            for xml in root.rglob("*.xml"):
+                name = str(xml)
+                # path carries BWB id + date in the 7z tree; only fall back to reading
+                # the file when the layout doesn't (keeps a 194k-file sweep cheap)
+                ident = _path_identity(name)
+                if ident is None:
+                    try:
+                        ident = _bulk_identity(xml.read_bytes(), name)
+                    except OSError:
+                        continue
                 if ident:
-                    entries.append((*ident, {"file": str(xml)}))
-        latest = {}
-        for bwb, valid, _ in entries:
+                    _consider(*ident, name, {"file": name})
+
+        entries = list(best.values())
+        latest: dict[str, str] = {}
+        for _prio, hints in entries:
+            bwb, valid = hints["bwbid"], hints["geldig"]
             latest[bwb] = max(valid, latest.get(bwb, ""))
-        for bwb, valid, hints in entries:
+        for _prio, hints in entries:
+            bwb, valid = hints["bwbid"], hints["geldig"]
             # The latest toestand is the undated Work node; every earlier toestand is
             # separately addressable for time-correct Juriconnect edges.
             sid = bwb if valid == latest[bwb] else f"{bwb}@{valid}"
             yield Stub(stable_id=sid, landing_url=f"{BASE_URL}/{bwb}",
-                       hint_date=_date(valid), hints={**hints, "bwbid": bwb, "geldig": valid})
+                       hint_date=_date(valid), hints=hints)
 
     def _resolve_date(self, bwbid: str) -> str | None:
         """Find the current in-force *toestand* date from the work landing page

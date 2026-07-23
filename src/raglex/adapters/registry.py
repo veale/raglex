@@ -15,6 +15,7 @@ from ..scraping.scrape_adapter import RecipeScrapeAdapter
 from .a29wp import A29WPAdapter
 from .au_legislation import CommonwealthAdapter, LawMakerAdapter
 from .au_caselaw import AustralianCaseLawAdapter
+from .au_nsw_caselaw import NSWCaselawAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_legislation import CanadaFederalAdapter
 from .canlii import CanLIIAdapter
@@ -31,6 +32,8 @@ from .fr_conseil_etat import FrConseilEtatAdapter
 from .fr_dila import FrDilaAdapter
 from .fr_judilibre import FrJudilibreAdapter
 from .fr_legislation import FrLegislationAdapter
+from .gdprhub import GDPRhubAdapter
+from .uk_ipa_codes import UKIPACodesAdapter
 from .de_gii import DeGiiAdapter
 from .de_neuris import DeNeurisAdapter
 from .de_rii import DeRiiAdapter
@@ -74,6 +77,16 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Article 29 Working Party (1997–2018, closed archive) — the justice-site
     # opinion/recommendation index + the newsroom items, WP-number identity.
     "a29wp": A29WPAdapter,
+    # UK Investigatory Powers Act 2016 codes of practice (Home Office guidance) — a
+    # fixed one-time import of the nine gov.uk codes; bare section/schedule references
+    # are linked to the IPA 2016 (ukpga/2016/25).
+    "uk-ipa-codes": UKIPACodesAdapter,
+    # GDPRhub (noyb's DP case-report wiki) — DPA decisions + court judgments as
+    # structured infobox reports, harvested from the NewPages Atom feed (the site is
+    # Anubis-walled, the feed is open). Stored under jurisdiction (court = dpa-xx), the
+    # machine translation as body, GDPRhub's analysis as attached commentary, GDPR
+    # articles + mined DP instruments as interprets edges.
+    "gdprhub": GDPRhubAdapter,
     # Digital Markets Act enforcement cases — the Commission's DMA register via its
     # ODSE search API; every case/decision linked to the DMA (32022R1925).
     "dma-cases": DMACasesAdapter,
@@ -120,6 +133,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Australian case law — the Open Australian Legal Corpus JSONL. Decisions only by
     # default: the statutes are better served by the live registers (au-cth et al).
     "au-caselaw": AustralianCaseLawAdapter,
+    # NSW Caselaw — the LIVE incremental layer over the OALC bulk snapshot. Newest-first
+    # crawl of caselaw.nsw.gov.au's browse JSON, stopping at the watermark; neutral-cite
+    # identity (nswsc/2024/1) unifies with au-caselaw. Run as a weekly (staggered) watch.
+    "au-nsw-caselaw": NSWCaselawAdapter,
     # US case law — CourtListener v4. Keyed by reporter citation (us/us/576/644), the
     # same slug the US matcher mints, so harvesting a case resolves the citations the
     # corpus already holds pending. Free tier is 125 requests/day, enforced by a
@@ -297,6 +314,39 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "Scanned early-years PDFs are OCR'd or flagged. Slow-paced (europa.eu WAF).",
         (SourceOption("surface", "Surface", "both | justice | newsroom"),),
         ("WP number (WP248)",),
+    ),
+    "uk-ipa-codes": SourceInfo(
+        "uk-ipa-codes", "UK IPA 2016 codes of practice (Home Office)", "guidance", "GB", False,
+        "The nine Investigatory Powers Act 2016 codes of practice published by the Home "
+        "Office on gov.uk (interception, equipment interference, communications data, bulk "
+        "acquisition, bulk personal datasets, notices…). A fixed set fetched through the "
+        "stealth tier and stored as guidance under Home Office. Every bare section/schedule "
+        "reference — and any tied to 'the Act' — is linked to the Investigatory Powers Act "
+        "2016 (ukpga/2016/25), pinpointed; references to a different named Act are left to "
+        "the resolver. A maintenance import: safe to re-run or schedule (unchanged pages "
+        "dedup, a revised gov.uk page re-ingests via content hash).",
+        (),
+        ("gov.uk code-of-practice URL",),
+    ),
+    "gdprhub": SourceInfo(
+        "gdprhub", "GDPRhub (DP decisions & analysis)", "caselaw", "EU", False,
+        "noyb's GDPRhub wiki: DPA decisions and court judgments on the GDPR as structured "
+        "infobox case reports, harvested from the NewPages Atom feed (the site itself is "
+        "Anubis-walled; only the feed is pulled, through the stealth tier). Each report is "
+        "stored under its jurisdiction (court = dpa-xx) with the machine translation as the "
+        "body, GDPRhub's summary + analysis as attached commentary (shown when no "
+        "translation exists), and interprets edges to the GDPR articles applied plus any "
+        "LED/EUDPR/ePrivacy/Charter/DSA/DMA/AI-Act references mined from the text. ECLI or "
+        "native case number is the identity and a resolution alias. Incremental on the "
+        "feed's newest-page timestamp. The NewPages feed is a rolling ~90-day window "
+        "(MediaWiki prunes recentchanges at 90 days) — run it as a recurring watch for "
+        "currency. For the full historical corpus set api=true, which switches discovery to "
+        "the MediaWiki API (list=allpages + batched revisions) and backfills every page; "
+        "same identity, so the two modes share nodes. New pages only via the feed; later "
+        "edits do not resurface there (a re-run of the api backfill picks up edits).",
+        (SourceOption("api", "Full-catalogue backfill via API", "true (whole history) | false (feed)"),
+         SourceOption("max_pages", "Page/batch cap per run", "feed: ~50 reports/page; api: 500/batch"),),
+        ("ECLI:…", "native DPA/court case number", "GDPRhub page URL"),
     ),
     "eu-legislation": SourceInfo(
         "eu-legislation", "EU legislation (CELLAR / Formex)", "legislation", "EU", False,
@@ -477,6 +527,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("min_year", "Earliest decision year", "2000")),
         ("neutral citation ([2020] NSWSC 1)", "nswsc/2020/1"),
     ),
+    "au-nsw-caselaw": SourceInfo(
+        "au-nsw-caselaw", "NSW Caselaw (live incremental)", "caselaw", "AU", False,
+        "The currency layer for Australian case law: a newest-first incremental crawl of "
+        "caselaw.nsw.gov.au's browse index (the same source the Open Australian Legal "
+        "Corpus creator scrapes), stopping at the watermark so a weekly run pulls only new "
+        "decisions. Judgment HTML is the body; PDF-only decisions fall back to their asset "
+        "PDF (OCR-flagged if scanned). Keyed by the medium neutral citation (nswsc/2024/1), "
+        "so a live decision is the same node as its OALC-snapshot copy and resolves the "
+        "'[2024] NSWSC 1' citations already held pending. Best run as a staggered weekly watch.",
+        (),
+        ("neutral citation ([2024] NSWSC 1)", "nswsc/2024/1", "caselaw.nsw.gov.au decision id"),
+    ),
     "us-caselaw": SourceInfo(
         "us-caselaw", "US case law (CourtListener API)", "caselaw", "US", False,
         "US federal case law from CourtListener (Free Law Project). Cases are stored "
@@ -568,7 +630,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("all_records", "Entire BWB", "true — paginate every SRU record"),
          SourceOption("ids", "BWB identifiers", "BWBR0040940,BWBR0045754"),
          SourceOption("version_date", "Exact historical date", "YYYY-MM-DD"),
-         SourceOption("path", "KOOP bulk path", "bulk zip or extracted XML folder")),
+         SourceOption("path", "KOOP bulk path", "multi-part .7z / zip / extracted XML folder")),
     ),
     "fr-legislation": SourceInfo(
         "fr-legislation", "France — Légifrance (codes, PISTE)", "legislation", "FR", False,
