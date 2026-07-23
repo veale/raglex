@@ -212,6 +212,18 @@ CREATE TABLE IF NOT EXISTS source_stats (
     rebuilt_at        TEXT NOT NULL
 );
 
+-- Legislation-type rail roll-up for the Explore drill. The per-document Python
+-- classification pass took ~6 minutes per homepage cache warm at 1.9M rows.
+CREATE TABLE IF NOT EXISTS leg_type_stats (
+    source       TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    n            BIGINT NOT NULL DEFAULT 0,
+    years_json   TEXT NOT NULL DEFAULT '{}',
+    filters_json TEXT NOT NULL DEFAULT '[]',
+    rebuilt_at   TEXT NOT NULL,
+    PRIMARY KEY (source, label)
+);
+
 -- Per-document citation-network statistics (PageRank over the resolved mentions
 -- graph, treatments deliberately unweighted — not reliable yet). Rebuilt wholesale.
 -- NB executescript splits this DDL on semicolons WITHOUT stripping comments, so

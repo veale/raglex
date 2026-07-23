@@ -1877,42 +1877,26 @@ class Facade:
             _SERIES = {s.upper() for s in REPORT_SERIES}
 
             # Legislation TYPES per jurisdiction — the same taxonomy the Unresolved
-            # page uses ("Secondary · UK-wide", "Assimilated EU law", AU registers
-            # by jurisdiction), regularised where a register's native split isn't
-            # a level split (Canada's Acts/Regulations → Primary/Secondary ·
-            # Federal). Each type carries its own year histogram + the filter
-            # dicts that reproduce exactly that slice in the drill.
-            from .citations.taxonomy import classify_document
-            _REGULARISE = {
-                ("ca-legislation", "act"): "Primary · Federal",
-                ("ca-legislation", "regulation"): "Secondary · Federal",
-                ("nz-legislation", "public"): "Primary",
-                ("nz-legislation", "secondary-legislation"): "Secondary",
-                ("hk-legislation", "cap"): "Ordinances",
-                ("hk-legislation", "instrument"): "Constitutional instruments",
-                ("sg-legislation", "act"): "Acts",
-                ("sg-legislation", "sl"): "Subsidiary legislation",
-            }
-            _CELEX_LETTER = {"reg": "R", "dir": "L", "dec": "D"}
-            for r in cat.conn.execute(
-                    "SELECT stable_id, source, court, substr(decision_date, 1, 4) AS yr "
-                    "FROM documents WHERE doc_type = 'legislation'").fetchall():
+            # page uses. Read from the leg_type_stats roll-up: the classification is
+            # a per-document Python pass, and running it inline grew from seconds at
+            # 122k legislation rows to ~6 MINUTES at 1.9M (French LEGI) — inside
+            # every homepage cache warm. The roll-up is rebuilt hourly with
+            # citation_counts; a small/fresh corpus (tests, dev) seeds it live.
+            leg_rows = cat.leg_type_stats()
+            if not leg_rows and cat.legislation_count() <= 200_000:
+                self._refresh_leg_type_stats(cat)
+                leg_rows = cat.leg_type_stats()
+            for r in leg_rows:
                 b = _bucket(r["source"])
                 ks = b["kinds"]["legislation"]
-                tax = classify_document(source=r["source"], doc_type="legislation",
-                                        court=r["court"], stable_id=r["stable_id"])
-                label = _REGULARISE.get((tax.category, tax.subtype), tax.subtype_label)
                 t = ks.setdefault("types", {}).setdefault(
-                    label, {"n": 0, "years": {}, "filters": []})
-                t["n"] += 1
-                yr = r["yr"]
-                if yr and yr.isdigit() and 1200 <= int(yr) <= 2100:
-                    t["years"][yr] = t["years"].get(yr, 0) + 1
-                filt = dict(tax.filter)
-                if tax.category == "eu-legislation" and tax.subtype in _CELEX_LETTER:
-                    filt["celex_kind"] = _CELEX_LETTER[tax.subtype]
-                if filt not in t["filters"] and len(t["filters"]) < 16:
-                    t["filters"].append(filt)
+                    r["label"], {"n": 0, "years": {}, "filters": []})
+                t["n"] += r["n"]
+                for yr, n in json.loads(r["years_json"] or "{}").items():
+                    t["years"][yr] = t["years"].get(yr, 0) + n
+                for filt in json.loads(r["filters_json"] or "[]"):
+                    if filt not in t["filters"] and len(t["filters"]) < 16:
+                        t["filters"].append(filt)
 
             def _finish(slice_: dict) -> None:
                 # the slice's dominant source disambiguates the cross-jurisdiction
@@ -2446,8 +2430,62 @@ class Facade:
             # same cadence, same shape of work: the per-source density roll-up the
             # Explore homepage reads instead of a minutes-long live GROUP BY
             srcs = cat.refresh_source_stats()
+            leg = self._refresh_leg_type_stats(cat)
         self._invalidate_caches()
-        return {"candidates": n, "sources": srcs}
+        return {"candidates": n, "sources": srcs, "leg_types": leg}
+
+    def _refresh_leg_type_stats(self, cat) -> int:
+        """Rebuild the legislation-type rail roll-up (the Explore drill's
+        Primary/Secondary/Assimilated/… split with year histograms + drill filters).
+
+        This is the classification pass that used to run inline in every homepage
+        cache warm — ~6 minutes at 1.9M legislation rows. Here it streams the rows
+        once on the hourly counts cadence, memoising the (pure) classification on a
+        16-char id prefix per (source, court): ids sharing that prefix classify
+        identically under every current grammar (slug heads and the CELEX descriptor
+        letter all fall inside it), which collapses 1.9M classify calls to a few
+        thousand."""
+        from .citations.taxonomy import classify_document
+
+        _REGULARISE = {
+            ("ca-legislation", "act"): "Primary · Federal",
+            ("ca-legislation", "regulation"): "Secondary · Federal",
+            ("nz-legislation", "public"): "Primary",
+            ("nz-legislation", "secondary-legislation"): "Secondary",
+            ("hk-legislation", "cap"): "Ordinances",
+            ("hk-legislation", "instrument"): "Constitutional instruments",
+            ("sg-legislation", "act"): "Acts",
+            ("sg-legislation", "sl"): "Subsidiary legislation",
+        }
+        _CELEX_LETTER = {"reg": "R", "dir": "L", "dec": "D"}
+        memo: dict[tuple, tuple] = {}
+        agg: dict[tuple, dict] = {}
+        for r in cat.conn.execute(
+                "SELECT stable_id, source, court, substr(decision_date, 1, 4) AS yr "
+                "FROM documents WHERE doc_type = 'legislation'"):
+            key = (r["source"], r["court"], r["stable_id"][:16])
+            hit = memo.get(key)
+            if hit is None:
+                tax = classify_document(source=r["source"], doc_type="legislation",
+                                        court=r["court"], stable_id=r["stable_id"])
+                label = _REGULARISE.get((tax.category, tax.subtype), tax.subtype_label)
+                filt = dict(tax.filter)
+                if tax.category == "eu-legislation" and tax.subtype in _CELEX_LETTER:
+                    filt["celex_kind"] = _CELEX_LETTER[tax.subtype]
+                hit = memo[key] = (label, filt)
+            label, filt = hit
+            t = agg.setdefault((r["source"], label),
+                               {"n": 0, "years": {}, "filters": []})
+            t["n"] += 1
+            yr = r["yr"]
+            if yr and yr.isdigit() and 1200 <= int(yr) <= 2100:
+                t["years"][yr] = t["years"].get(yr, 0) + 1
+            if filt not in t["filters"] and len(t["filters"]) < 16:
+                t["filters"].append(filt)
+        rows = [(source, label, t["n"], json.dumps(t["years"]),
+                 json.dumps(t["filters"]))
+                for (source, label), t in agg.items()]
+        return cat.replace_leg_type_stats(rows)
 
     def system_storage(self) -> dict:
         """Database disk footprint for the Maintain page (catalog lookups, instant)."""

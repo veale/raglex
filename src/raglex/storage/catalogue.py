@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS source_stats (
     rebuilt_at        TEXT NOT NULL
 );
 
+-- Legislation-type rail roll-up (the Explore drill's Primary/Secondary/... split).
+-- Classification is a per-document Python pass; at 1.9M legislation rows it took
+-- ~6 minutes inside every homepage cache warm. Rebuilt with citation_counts.
+CREATE TABLE IF NOT EXISTS leg_type_stats (
+    source       TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    n            INTEGER NOT NULL DEFAULT 0,
+    years_json   TEXT NOT NULL DEFAULT '{}',
+    filters_json TEXT NOT NULL DEFAULT '[]',
+    rebuilt_at   TEXT NOT NULL,
+    PRIMARY KEY (source, label)
+);
+
 -- Per-document citation-network statistics (PageRank over the resolved mentions
 -- graph — treatment types deliberately NOT weighted, they aren't reliable yet).
 -- Rebuilt wholesale by rebuild_authority() on a cadence, like citation_counts.
@@ -1109,6 +1122,31 @@ class Catalogue:
         """The roll-up, or {} when it has never been rebuilt (caller falls back live)."""
         return {r["source"]: r["resolved_outgoing"] for r in self.conn.execute(
             "SELECT source, resolved_outgoing FROM source_stats")}
+
+    def replace_leg_type_stats(self, rows: list[tuple]) -> int:
+        """Overwrite the legislation-type rail roll-up. ``rows`` are
+        ``(source, label, n, years_json, filters_json)``; the caller (facade) runs
+        the taxonomy classification pass that produces them."""
+        now = _now()
+        with self._atomic():
+            self.conn.execute("DELETE FROM leg_type_stats")
+            for source, label, n, years_json, filters_json in rows:
+                self.conn.execute(
+                    "INSERT INTO leg_type_stats "
+                    "(source, label, n, years_json, filters_json, rebuilt_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (source, label, n, years_json, filters_json, now))
+        return len(rows)
+
+    def leg_type_stats(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT source, label, n, years_json, filters_json FROM leg_type_stats"
+        ).fetchall()
+
+    def legislation_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'legislation'"
+        ).fetchone()["n"]
 
     def clear_relations(self, src_id: str, *, extracted_via: str) -> None:
         """Drop a source's edges from one extraction method, so re-running that
