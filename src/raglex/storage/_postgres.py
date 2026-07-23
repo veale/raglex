@@ -283,6 +283,9 @@ CREATE TABLE IF NOT EXISTS citation_aliases (
     dst_id   TEXT NOT NULL,
     source   TEXT
 );
+-- probed by dst_id per just-harvested document (resolve_pending_for) — without
+-- this index each probe seq-scanned 5M alias rows
+CREATE INDEX IF NOT EXISTS citation_aliases_dst_idx ON citation_aliases (dst_id);
 
 -- Corpus-wide store of shorthands learned in one document and applied (under the
 -- gates in citations/stage.py) in others. See the SQLite DDL for why this is not

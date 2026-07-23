@@ -157,6 +157,14 @@ export const api = {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   },
+  // honest cited-by facet counts (whole incoming set, not the loaded top slice) +
+  // the per-facet server-side fetch for slices outside the loaded page
+  citedByBreakdown: (id: string) =>
+    req<{ buckets: { jurisdiction: string; kind: string; documents: number }[]; total: number }>(
+      `/cited-by-breakdown?id=${encodeURIComponent(id)}`),
+  citedBySlice: (id: string, jurisdiction: string, kind?: string, limit = 60) =>
+    req<{ incoming: any[] }>(
+      `/cited-by-slice?id=${encodeURIComponent(id)}&jurisdiction=${encodeURIComponent(jurisdiction)}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}&limit=${limit}`),
   mentions: (id: string, anchor?: string, sort?: string) =>
     req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`
       + (sort ? `&sort=${encodeURIComponent(sort)}` : "")),

@@ -1911,7 +1911,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
       </div>
       {(doc.incoming || []).length > 0 &&
-        <div id="cited-by-panel"><CitedByPanel incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} /></div>}
+        <div id="cited-by-panel"><CitedByPanel id={d.stable_id} incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} /></div>}
       <RelatedPanel id={d.stable_id} open={open} />
       {d.doc_type === "legislation" && <EffectsBanner id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <ChangesPanel id={d.stable_id} open={open} />}
@@ -1942,7 +1942,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
 
 // "Cited by" — JADE's reverse-citation gloss, but treatment-aware: it shows not
 // just who cites this authority, but HOW (follows / distinguishes / overrules …).
-function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: number; inferred?: number }) {
+function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming: any[]; count?: number; inferred?: number }) {
   const peek = usePeek();
   const tray = useTray();
   const open = (id: string, a?: string) => peek.push({ kind: "doc", id, anchor: a });
@@ -1956,14 +1956,20 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
 
   // Cross-section tokens — "UK cases 7 | EU legislation 35". A citing body reads
   // very differently depending on where it comes from and what kind of instrument
-  // it is, so let the reader slice on both at once. Facets are computed over the
-  // WHOLE incoming set, so counts stay honest while a filter is applied.
+  // it is, so let the reader slice on both at once.
+  //
+  // Counts come from the WHOLE-corpus breakdown, not the loaded rows: the loaded
+  // page is the top slice by PageRank, and on a mega-authority that slice fills
+  // with a few jurisdictions' heavyweights — 2,484 French decisions citing the
+  // GDPR once read as "no French case law" because none cracked the top page.
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance",
     preparatory: "preparatory documents",
     administrative: "admin decisions", other: "other",
   };
   const [slice, setSlice] = useState<string | null>(null);
+  const [breakdown] = useAsync(
+    () => (id ? api.citedByBreakdown(id) : Promise.resolve(null as any)), [id]);
   const facets = new Map<string, { jur: string; kind: string; n: number }>();
   for (const r of incoming) {
     const jur = r.src_jurisdiction, kind = r.src_kind;
@@ -1973,9 +1979,31 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
     f.n++; facets.set(key, f);
   }
   // biggest cross-sections first — the long tail of one-offs stays out of the way
-  const tokens = [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
+  const tokens: [string, { jur: string; kind: string; n: number }][] =
+    breakdown?.buckets?.length
+      ? breakdown.buckets.slice(0, 12).map((b: any) =>
+          [`${b.jurisdiction}|${b.kind}`,
+           { jur: b.jurisdiction, kind: b.kind, n: b.documents }] as
+             [string, { jur: string; kind: string; n: number }])
+      : [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
+  // A clicked facet whose documents mostly fall OUTSIDE the loaded top slice is
+  // fetched from the server (top citers of that jurisdiction × kind, PageRank-
+  // ordered) rather than filtered down to the few that happened to be loaded.
+  const [sliceRows, setSliceRows] = useState<any[] | null>(null);
+  useEffect(() => {
+    setSliceRows(null);
+    if (!slice || !id) return;
+    const loaded = incoming.filter((r) => `${r.src_jurisdiction}|${r.src_kind}` === slice).length;
+    const want = tokens.find(([k]) => k === slice)?.[1].n ?? 0;
+    if (want <= loaded) return;
+    let alive = true;
+    const [jur, kind] = slice.split("|");
+    api.citedBySlice(id, jur, kind).then((r) => { if (alive) setSliceRows(r.incoming || []); })
+      .catch(() => { /* keep the loaded-rows fallback */ });
+    return () => { alive = false; };
+  }, [slice, id]);
   const filtered = slice
-    ? incoming.filter((r) => `${r.src_jurisdiction}|${r.src_kind}` === slice)
+    ? (sliceRows ?? incoming.filter((r) => `${r.src_jurisdiction}|${r.src_kind}` === slice))
     : incoming;
 
   const sorted = [...filtered].sort((a, b) =>
@@ -2014,7 +2042,7 @@ function CitedByPanel({ incoming, count, inferred }: { incoming: any[]; count?: 
       <h3>Cited by <b>{(count ?? incoming.length).toLocaleString()}</b> later {(count ?? incoming.length) === 1 ? "document" : "documents"}
         {" "}<Info t="Documents elsewhere in the corpus that cite THIS one. The coloured chips below break them down by how they treat it (applied, distinguished, overruled…) and by where they come from. Click any document to open it." />
         {slice && (() => {
-          const f = facets.get(slice);
+          const f = tokens.find(([k]) => k === slice)?.[1] || facets.get(slice);
           return <span className="muted" style={{ fontWeight: 400 }}> — showing the <b>{shown.length}</b> that {f ? `are ${f.jur} ${KIND_LABEL[f.kind] || f.kind}` : "match"}</span>;
         })()}
         {inferred ? <span className="muted" style={{ fontWeight: 400 }}> {" · "}

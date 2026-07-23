@@ -136,6 +136,32 @@ def test_mentions_accept_the_full_segment_label_as_anchor(config):
     assert {g["src_id"] for g in got["groups"]} == set(srcs)
 
 
+def test_cited_by_breakdown_counts_the_whole_incoming_set(config):
+    """The facet chips must reflect EVERY citer, not the loaded top slice — a
+    mega-authority's slice fills with a few jurisdictions' heavyweights and the
+    rest (2,484 French GDPR citers, in production) read as absent."""
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>the regulation</p>", filename="reg.html",
+                            doc_type="legislation", title="Regulation")["stable_id"]
+    citers = []
+    for i in range(3):
+        c = f.import_bytes(data=f"<p>cite {i}</p>".encode(), filename=f"m{i}.html",
+                           doc_type="judgment", title=f"M{i} v N")["stable_id"]
+        f.link(src_id=c, dst_id=target, relationship="mentions")
+        citers.append(c)
+    bd = f.cited_by_breakdown(target)
+    assert bd["total"] == 3
+    assert bd["buckets"][0]["kind"] == "cases"
+    assert bd["buckets"][0]["documents"] == 3
+
+    # the per-facet slice returns assembled incoming rows for that bucket
+    jur = bd["buckets"][0]["jurisdiction"]
+    sl = f.cited_by_slice(target, jurisdiction=jur, kind="cases")
+    assert {r["src_id"] for r in sl["incoming"]} == set(citers)
+    # a bucket nobody occupies comes back empty, not as an error
+    assert f.cited_by_slice(target, jurisdiction="Nowhere")["incoming"] == []
+
+
 def test_corpus_map_cites_translates_country_category_to_storage_source(config, monkeypatch):
     from contextlib import contextmanager
 

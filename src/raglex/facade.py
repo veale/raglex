@@ -675,62 +675,14 @@ class Facade:
             # HOW it cites this one (treatment), which JADE doesn't surface. The true
             # distinct count is reported; only the first N are title-enriched (avoid an
             # N+1 over a heavily-cited authority).
-            _RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
-                     "considers": 4, "mentions": 5}
             # Incoming edges via ONE bounded, PageRank-ordered indexed query — the
             # old unbounded scan materialised a mega-authority's 100k citers in
             # Python and pinned a pool connection for seconds per page view
             # (a prime suspect in the pool-exhaustion freezes). `inferred` edges
             # (heuristic carry-forwards) are excluded there and counted apart.
             ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
-            best: dict[str, dict] = {}
-            # A document may cite this authority in several passages. The row shown is
-            # the strongest treatment among them, but the OTHER passages are kept as
-            # anchors (not discarded) so the reader can open each place it was engaged
-            # with — "and 3 other places" is a signal about depth of engagement that a
-            # single collapsed row throws away.
-            others: dict[str, list[dict]] = {}
-            for r in cat.top_citing_edges(ids_self, limit=600):
-                sid = r["src_id"]
-                cur = best.get(sid)
-                if cur is None:
-                    best[sid] = dict(r)
-                    others.setdefault(sid, [])
-                    continue
-                if _RANK.get(r["relationship_type"], 9) < _RANK.get(cur["relationship_type"], 9):
-                    best[sid] = dict(r)
-                    demoted = cur
-                else:
-                    demoted = dict(r)
-                others.setdefault(sid, []).append(
-                    {"dst_anchor": demoted.get("dst_anchor"),
-                     "relationship_type": demoted.get("relationship_type")})
-            incoming = []
-            page_ids = list(best.items())[:200]
-            # one grouped aggregate for the whole page, not one query per row
-            citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
-            for sid, r in page_ids:
-                src = cat.get_document(sid)
-                # OSCOLA citation for the citing document, so "cited by / mentioned by"
-                # reads in proper form. meta_json is on the row → no extra query.
-                src_oscola = _oscola_cite(src, _row_meta(src)) if src else None
-                incoming.append({**r, "src_title": src["title"] if src else None,
-                                 "src_court": src["court"] if src else None,
-                                 "src_date": src["decision_date"] if src else None,
-                                 "src_authority": r.get("src_pagerank") or 0.0,
-                                 # jurisdiction × kind, so the cited-by list can be
-                                 # sliced the way a lawyer actually reads it
-                                 # ("UK cases", "EU legislation")
-                                 "src_jurisdiction": self._doc_bucket(
-                                     src["source"], src["court"]) if src else None,
-                                 "src_kind": self._doc_kind(
-                                     src["source"], src["doc_type"], src["court"]) if src else None,
-                                 # how heavily THIS citer is itself cited — a subtle
-                                 # authority cue next to each name
-                                 "src_cited_by": citer_counts.get(sid),
-                                 "src_oscola": src_oscola,
-                                 # the other passages in this document that cite it
-                                 "other_passages": others.get(sid) or []})
+            incoming = self._assemble_cited_by(
+                cat, cat.top_citing_edges(ids_self, limit=600), cap=200)
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
             inferred_total = cat.inferred_citer_count(ids_self)
             preparatory_count = cat.citer_count_by_doc_type(ids_self, "preparatory")
@@ -797,6 +749,128 @@ class Facade:
                 "assets": [dict(a) for a in cat.assets_for(stable_id)],
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
             }
+
+    _TREATMENT_RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
+                       "considers": 4, "mentions": 5}
+
+    def _assemble_cited_by(self, cat, edge_rows, *, cap: int = 200) -> list[dict]:
+        """Fold raw citing edges into the panel's one-row-per-citing-document shape.
+
+        A document may cite this authority in several passages: the row shown is the
+        strongest treatment among them, but the OTHER passages are kept as anchors
+        (not discarded) so the reader can open each place it was engaged with —
+        "and 3 other places" is a signal about depth of engagement that a single
+        collapsed row throws away. Shared by get_document's global top slice and
+        cited_by_slice's per-jurisdiction fetch."""
+        best: dict[str, dict] = {}
+        others: dict[str, list[dict]] = {}
+        for r in edge_rows:
+            sid = r["src_id"]
+            cur = best.get(sid)
+            if cur is None:
+                best[sid] = dict(r)
+                others.setdefault(sid, [])
+                continue
+            if (self._TREATMENT_RANK.get(r["relationship_type"], 9)
+                    < self._TREATMENT_RANK.get(cur["relationship_type"], 9)):
+                best[sid] = dict(r)
+                demoted = cur
+            else:
+                demoted = dict(r)
+            others.setdefault(sid, []).append(
+                {"dst_anchor": demoted.get("dst_anchor"),
+                 "relationship_type": demoted.get("relationship_type")})
+        incoming: list[dict] = []
+        page_ids = list(best.items())[:cap]
+        # one grouped aggregate for the whole page, not one query per row
+        citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
+        for sid, r in page_ids:
+            src = cat.get_document(sid)
+            # OSCOLA citation for the citing document, so "cited by / mentioned by"
+            # reads in proper form. meta_json is on the row → no extra query.
+            src_oscola = _oscola_cite(src, _row_meta(src)) if src else None
+            incoming.append({**r, "src_title": src["title"] if src else None,
+                             "src_court": src["court"] if src else None,
+                             "src_date": src["decision_date"] if src else None,
+                             "src_authority": r.get("src_pagerank") or 0.0,
+                             # jurisdiction × kind, so the cited-by list can be
+                             # sliced the way a lawyer actually reads it
+                             # ("UK cases", "EU legislation")
+                             "src_jurisdiction": self._doc_bucket(
+                                 src["source"], src["court"]) if src else None,
+                             "src_kind": self._doc_kind(
+                                 src["source"], src["doc_type"], src["court"]) if src else None,
+                             # how heavily THIS citer is itself cited — a subtle
+                             # authority cue next to each name
+                             "src_cited_by": citer_counts.get(sid),
+                             "src_oscola": src_oscola,
+                             # the other passages in this document that cite it
+                             "other_passages": others.get(sid) or []})
+        return incoming
+
+    def cited_by_breakdown(self, stable_id: str) -> dict:
+        """HONEST facet counts for the cited-by panel: distinct citing documents per
+        jurisdiction × kind over the WHOLE resolved incoming set, not the loaded page.
+
+        The panel's rows are the bounded top slice by PageRank (a pool-health
+        necessity on mega-authorities), but computing the facet chips from that slice
+        silently erased whole jurisdictions: 2,484 French decisions citing the GDPR
+        rendered as "no French case law", because the top-600-edge window filled with
+        UK/EU legislation and EDPB material first. One indexed aggregate.
+
+        Cached stale-while-revalidate per document: the aggregate is ~1s warm on a
+        26k-edge authority but the monsters (echr/convention: 358k edges) would pin
+        a pool connection for many seconds — so a cold call computes in the
+        background and returns a warming placeholder, which the panel treats as
+        "fall back to the loaded-rows facets for now"."""
+        def _compute() -> dict:
+            with self._open() as (cat, _rs, _ts):
+                doc = cat.get_document(stable_id)
+                if doc is None:
+                    return {"error": "not found", "stable_id": stable_id}
+                ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
+                buckets: dict[tuple[str, str], int] = {}
+                for r in cat.citing_breakdown(ids_self):
+                    key = (self._doc_bucket(r["source"], r["court"]),
+                           self._doc_kind(r["source"], r["doc_type"], r["court"]))
+                    buckets[key] = buckets.get(key, 0) + r["docs"]
+                out = [{"jurisdiction": j, "kind": k, "documents": n}
+                       for (j, k), n in sorted(buckets.items(), key=lambda kv: -kv[1])]
+                return {"stable_id": stable_id, "buckets": out,
+                        "total": sum(b["documents"] for b in out)}
+        return self._cached(
+            f"cited-by-breakdown:{stable_id}", 21600, _compute,
+            placeholder={"stable_id": stable_id, "buckets": [], "total": None},
+            sync_wait=2.5)
+
+    def cited_by_slice(self, stable_id: str, *, jurisdiction: str,
+                       kind: str | None = None, limit: int = 60) -> dict:
+        """The cited-by panel's per-facet fetch: the top citers of this document FROM
+        ONE jurisdiction (× kind), PageRank-ordered — reachable even when the global
+        top slice never gets there. The SQL filter is by adapter source (what the
+        index can use); the exact jurisdiction × kind bucket is confirmed on the
+        assembled rows, since a few sources fan out per court (dpa-* splits)."""
+        with self._open() as (cat, _rs, _ts):
+            doc = cat.get_document(stable_id)
+            if doc is None:
+                return {"error": "not found", "stable_id": stable_id}
+            ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
+            sources = sorted({
+                r["source"] for r in cat.citing_breakdown(ids_self)
+                if self._doc_bucket(r["source"], r["court"]) == jurisdiction
+                and (not kind or self._doc_kind(r["source"], r["doc_type"],
+                                                r["court"]) == kind)})
+            if not sources:
+                return {"stable_id": stable_id, "jurisdiction": jurisdiction,
+                        "kind": kind, "incoming": []}
+            edges = cat.top_citing_edges(ids_self, limit=max(600, limit * 6),
+                                         sources=sources)
+            rows = self._assemble_cited_by(cat, edges, cap=limit * 3)
+            rows = [r for r in rows
+                    if r["src_jurisdiction"] == jurisdiction
+                    and (not kind or r["src_kind"] == kind)][:limit]
+            return {"stable_id": stable_id, "jurisdiction": jurisdiction,
+                    "kind": kind, "incoming": rows}
 
     def _resolved_target(self, cat, cand: str | None, raw: str | None) -> str | None:
         """The held document a citation points to — by its candidate id, else by the alias
@@ -2210,10 +2284,18 @@ class Facade:
 
         checked = upgraded = 0
         with self._open() as (cat, rs, ts):
+            # Select on has_text = 0, NOT on the meta_json marker: an older
+            # generation of stubs (bare CELEX title, meta_json NULL — 31970L0156
+            # among them) carried no marker at all, so the marker-LIKE selection
+            # could never see the very rows most in need of repair. Textless IS the
+            # condition being repaired; most-cited first so the pass spends itself
+            # on the instruments the corpus actually leans on.
             rows = cat.conn.execute(
-                "SELECT stable_id, landing_url FROM documents "
-                "WHERE source = 'eu-legislation' AND meta_json LIKE '%metadata_only%' "
-                "ORDER BY stable_id LIMIT ?", (limit,)).fetchall()
+                "SELECT d.stable_id, d.landing_url FROM documents d "
+                "LEFT JOIN citation_counts cc ON cc.candidate_id = d.stable_id "
+                "WHERE d.source = 'eu-legislation' AND d.has_text = 0 "
+                "ORDER BY COALESCE(cc.occurrences, 0) DESC, d.stable_id LIMIT ?",
+                (limit,)).fetchall()
             if not rows:
                 return {"checked": 0, "upgraded": 0}
             adapter = EULegislationAdapter()
@@ -8243,7 +8325,11 @@ class Facade:
                     for i, sid in enumerate(new_ids, 1):
                         if cancel_check and cancel_check():
                             break
-                        if i == 1 or i % 1000 == 0 or i == len(new_ids):
+                        # every 25, not every 1000: the job runner already throttles
+                        # heartbeats to 1/s, and a 1000-doc gap meant HOURS with the
+                        # display stuck on "1/4143" whenever per-doc resolution was
+                        # slow — indistinguishable from a hang.
+                        if i == 1 or i % 25 == 0 or i == len(new_ids):
                             _phase_progress(stage="resolving harvested citations", done=i,
                                             total=len(new_ids), item=sid)
                         doc = cat.get_document(sid)

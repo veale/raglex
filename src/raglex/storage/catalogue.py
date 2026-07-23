@@ -182,6 +182,10 @@ CREATE TABLE IF NOT EXISTS citation_aliases (
     dst_id   TEXT NOT NULL,
     source   TEXT
 );
+-- "the aliases OF this document" — resolve_pending_for and the cited-by alias sweep
+-- probe by dst_id, and at 5M alias rows the missing index was a full scan per
+-- just-harvested document (40s per doc inside the bulk resolve phase).
+CREATE INDEX IF NOT EXISTS citation_aliases_dst_idx ON citation_aliases (dst_id);
 
 -- Shorthands LEARNED from one document and applied in others ("[Suncor]" defined in
 -- one judgment, used bare in the next). Deliberately NOT `citation_aliases`: that map
@@ -1537,24 +1541,60 @@ class Catalogue:
         ).fetchall()
         return [{**dict(r), "of": len(keep)} for r in rows]
 
-    def top_citing_edges(self, ids: list[str], *, limit: int = 200) -> list[sqlite3.Row]:
+    def top_citing_edges(self, ids: list[str], *, limit: int = 200,
+                         sources: list[str] | None = None) -> list[sqlite3.Row]:
         """The strongest incoming edges for the cited-by panel: rows ranked by the
         CITING document's PageRank, bounded — one indexed query instead of
         materialising a mega-authority's 100k citers in Python (which pinned a
-        pool connection for seconds per page view). ``src_pagerank`` rides along."""
+        pool connection for seconds per page view). ``src_pagerank`` rides along.
+
+        ``sources`` restricts to citers from those adapter sources — the server-side
+        slice behind the panel's jurisdiction facets. Without it, a mega-authority's
+        bounded window fills with the top jurisdictions' heavyweights and the long
+        tail (2,484 French GDPR citers, none in the global top slice) is unreachable."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return []
+        qs = ",".join("?" * len(ids))
+        src_join, src_where, src_params = "", "", []
+        if sources:
+            qs2 = ",".join("?" * len(sources))
+            src_join = "JOIN documents d ON d.stable_id = r.src_id"
+            src_where = f"AND d.source IN ({qs2})"
+            src_params = list(sources)
+        return self.conn.execute(
+            f"""
+            SELECT r.*, COALESCE(a.pagerank, 0) AS src_pagerank
+            FROM relations r LEFT JOIN doc_authority a ON a.doc_id = r.src_id
+            {src_join}
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+              AND r.relationship_type <> 'cited_by'  -- reverse-oriented scaffold
+              {src_where}
+            ORDER BY src_pagerank DESC LIMIT ?
+            """, (*ids, *src_params, limit)).fetchall()
+
+    def citing_breakdown(self, ids: list[str]) -> list[sqlite3.Row]:
+        """Distinct citing DOCUMENTS grouped by (source, court, doc_type), over the
+        WHOLE resolved incoming set — the raw material for HONEST cited-by facets.
+        The panel's loaded rows are the bounded top slice by PageRank; computing
+        facet counts over that slice silently erased whole jurisdictions (a corpus
+        holding 2,484 French decisions citing the GDPR read as "no French case
+        law"). One indexed aggregate; the facade folds these rows into its
+        jurisdiction × kind buckets."""
         ids = [i for i in dict.fromkeys(ids) if i]
         if not ids:
             return []
         qs = ",".join("?" * len(ids))
         return self.conn.execute(
             f"""
-            SELECT r.*, COALESCE(a.pagerank, 0) AS src_pagerank
-            FROM relations r LEFT JOIN doc_authority a ON a.doc_id = r.src_id
+            SELECT d.source, d.court, d.doc_type, COUNT(DISTINCT r.src_id) AS docs
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
               AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
-              AND r.relationship_type <> 'cited_by'  -- reverse-oriented scaffold
-            ORDER BY src_pagerank DESC LIMIT ?
-            """, (*ids, limit)).fetchall()
+              AND r.relationship_type <> 'cited_by'
+            GROUP BY d.source, d.court, d.doc_type
+            """, ids).fetchall()
 
     def inferred_citer_count(self, ids: list[str]) -> int:
         """Distinct inferred-only citers (reported separately, never in cited-by)."""
@@ -2036,22 +2076,54 @@ class Catalogue:
 
     def resolve_pending_for(self, stable_id: str, ecli: str | None = None) -> int:
         """The incremental case: only edges pointing at THIS document (just harvested)
-        can newly resolve, so a single indexed lookup replaces a whole-graph pass."""
+        can newly resolve, so a few indexed lookups replace a whole-graph pass.
+
+        THREE SEPARATE UPDATES, never one OR — the same rule as resolve_pending_from
+        and the search OR-join fix. OR-ing the direct-candidate hit with two alias
+        subqueries stopped the planner decomposing onto the partial pending indexes:
+        it evaluated hashed subplans across every pending row (3.2M) per document,
+        which turned a bulk harvest's resolve phase into 40 seconds *per document*
+        ("frozen at 1/4143"). Split, each pass is a handful of index probes: the
+        direct pass hits relations_pending_candidate_idx, and the alias passes
+        nested-loop from this document's few aliases (citation_aliases_dst_idx) into
+        the pending lower(candidate_id)/raw_fold indexes."""
         keys = [k for k in (stable_id, ecli) if k]
         qs = ",".join("?" * len(keys))
-        with self._atomic():
-            cur = self.conn.execute(
+        passes = (
+            (
                 f"""
                 UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
-                WHERE resolution_status = 'pending' AND (
-                    candidate_id IN ({qs})
-                    OR lower(candidate_id) IN (SELECT alias FROM citation_aliases WHERE dst_id IN ({qs}))
-                    OR raw_fold IN (SELECT alias FROM citation_aliases WHERE dst_id IN ({qs}))
-                )
+                WHERE resolution_status = 'pending' AND candidate_id IN ({qs})
                 """,
-                (stable_id, *keys, *keys, *keys),
-            )
-            return max(cur.rowcount, 0)
+                (stable_id, *keys),
+            ),
+            (
+                f"""
+                UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
+                FROM citation_aliases a
+                WHERE a.dst_id IN ({qs})
+                  AND relations.resolution_status = 'pending'
+                  AND lower(relations.candidate_id) = a.alias
+                """,
+                (stable_id, *keys),
+            ),
+            (
+                f"""
+                UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
+                FROM citation_aliases a
+                WHERE a.dst_id IN ({qs})
+                  AND relations.resolution_status = 'pending'
+                  AND relations.raw_fold = a.alias
+                """,
+                (stable_id, *keys),
+            ),
+        )
+        total = 0
+        with self._atomic():
+            for sql, params in passes:
+                cur = self.conn.execute(sql, params)
+                total += max(cur.rowcount, 0)
+        return total
 
     def resolve_pending_from(self, stable_id: str) -> int:
         """Resolve pending outgoing edges from one newly extracted document.

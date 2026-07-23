@@ -290,10 +290,28 @@ LIMIT {self.page_size} OFFSET {offset}
         )
 
     def _fetch_html(self, celex: str) -> bytes | None:
-        """The EUR-Lex rendered HTML for a CELEX (the fallback when no Formex)."""
+        """The rendered HTML for a CELEX (the fallback when no Formex): the EUR-Lex
+        display page first, then CELLAR's own ``text/html`` rendition.
+
+        EUR-Lex sits behind a WAF that answers automation with an EMPTY HTTP 202 — a
+        "success" with no bytes, which the old ``< 400`` check accepted, so every
+        pre-Formex instrument quietly became a metadata stub (Directive 70/156,
+        cited constantly, sat as a bare CELEX for years). Anything but a 200 with a
+        real body falls through to CELLAR at ``{CELEX_BASE}/{celex}``, which serves
+        the same rendition unchallenged and is the only machine-reachable copy for
+        the old instruments."""
         url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:{celex}"
         try:
             r = self._client.get(url, headers={"Accept-Language": "eng"})
+            if getattr(r, "status_code", 200) == 200 and len(r.content or b"") > 500:
+                return r.content
+        except FetchError:
+            pass
+        try:
+            r = self._client.get(f"{CELEX_BASE}/{celex}",
+                                 headers={"Accept": "text/html", "Accept-Language": "eng"})
         except FetchError:
             return None
-        return r.content if getattr(r, "status_code", 200) < 400 else None
+        if getattr(r, "status_code", 200) == 200 and (r.content or b"").strip():
+            return r.content
+        return None

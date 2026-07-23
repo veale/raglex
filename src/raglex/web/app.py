@@ -739,6 +739,21 @@ def create_app(config: Config | None = None) -> FastAPI:
         and ranked by the citer's own authority — for the "Mentioned by …" line + tray."""
         return facade.document_mentions(id, anchor=anchor, sort=sort)
 
+    @app.get("/cited-by-breakdown")
+    def cited_by_breakdown_ep(id: str) -> dict:
+        """Facet counts (jurisdiction × kind) over EVERY resolved citer of a document —
+        honest numbers for the cited-by chips, which the loaded top slice can't give."""
+        return facade.cited_by_breakdown(id)
+
+    @app.get("/cited-by-slice")
+    def cited_by_slice_ep(id: str, jurisdiction: str, kind: str | None = None,
+                          limit: int = 60) -> dict:
+        """Top citers of a document from one jurisdiction (× kind), PageRank-ordered —
+        the server-side fetch behind clicking a facet chip whose documents fall outside
+        the globally-loaded slice."""
+        return facade.cited_by_slice(id, jurisdiction=jurisdiction, kind=kind,
+                                     limit=min(int(limit), 200))
+
     @app.get("/citations-out")
     def citations_out(id: str, family: str = "cases") -> dict:
         """Distinct authorities this document cites (``family`` = cases | statute), OSCOLA-
