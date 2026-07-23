@@ -8300,7 +8300,13 @@ class Facade:
             if resolve:
                 resolver = Resolver(cat)
                 rules = RuleEngine(cat)
-                bulk_threshold = int(os.environ.get("RAGLEX_BULK_POSTPROCESS_THRESHOLD") or 10000)
+                # Per-document resolution issues one target-side UPDATE per imported doc,
+                # so it is only ever worth it for a genuine handful — beyond that the
+                # set-based ``run_batched`` (one bounded relation-id sweep for the whole
+                # import) wins by orders of magnitude. A GDPRhub-scale backfill (~3.7k docs)
+                # crawling for an hour under the per-doc loop is the symptom of setting
+                # this too high; keep the per-doc path for small incremental ticks only.
+                bulk_threshold = int(os.environ.get("RAGLEX_BULK_POSTPROCESS_THRESHOLD") or 200)
                 if len(new_ids) >= bulk_threshold:
                     # Never issue one target-side UPDATE per imported document. At DILA
                     # scale that meant 1.7m scans and a months-long "silent" phase.
