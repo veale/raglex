@@ -300,6 +300,17 @@ class JobManager:
             # batch takes.
             stage_changed = p.get("stage") != state["last_stage"]
             state["last_stage"] = p.get("stage")
+            # Stamp when THIS stage began and its first counter value, so the rate/ETA
+            # is computed within the stage. Dividing done by whole-job elapsed showed
+            # "~4d left" on a 400-item resolve phase merely because the job had spent
+            # hours in earlier phases; a resumed counter (a restored relation cursor)
+            # inflated it the other way.
+            if stage_changed:
+                state["stage_meta"] = {
+                    "stage_started_at": _now_iso(),
+                    "stage_done0": p.get("done") if isinstance(p.get("done"), (int, float)) else 0,
+                }
+            p.update(state.get("stage_meta") or {})
             if stage_changed or time.monotonic() - state["last_write"] >= 1.0:
                 state["last_write"] = time.monotonic()
                 try:
@@ -364,9 +375,14 @@ class JobManager:
         lease_idle = _age_seconds(j["lease_heartbeat_at"] or j["heartbeat_at"]) if running else 0.0
         logs = _load(j["log_json"], [])
         progress = _load(j["progress_json"], {})
-        elapsed = _age_seconds(j["started_at"])
+        # Rate/ETA are computed WITHIN the current stage (its own start time and
+        # starting counter, stamped by the worker) — whole-job elapsed made a phase
+        # that just started look days long, and a resumed cursor made it look done.
         done, total = progress.get("done"), progress.get("total")
-        rate = (float(done) / elapsed) if elapsed > 0 and isinstance(done, (int, float)) and done > 0 else None
+        elapsed = _age_seconds(progress.get("stage_started_at") or j["started_at"])
+        done0 = progress.get("stage_done0") if isinstance(progress.get("stage_done0"), (int, float)) else 0
+        rate = ((float(done) - float(done0)) / elapsed
+                if elapsed > 0 and isinstance(done, (int, float)) and done > done0 else None)
         eta = ((float(total) - float(done)) / rate
                if rate and isinstance(total, (int, float)) and total >= done else None)
         out = {

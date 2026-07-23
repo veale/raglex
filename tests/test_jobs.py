@@ -247,8 +247,9 @@ def test_worker_flushes_final_progress_before_finishing():
         del jobs_mod.RUNNERS["_test-final-flush"]
     row = mgr.get("flush2")
     assert row["status"] == "done"
-    assert row["progress"] == {"stage": "extracting citations", "done": 3,
-                               "total": 3, "item": "doc/3"}
+    # subset: the worker also stamps stage_started_at/stage_done0 for stage-relative ETA
+    assert {k: row["progress"].get(k) for k in ("stage", "done", "total", "item")} == {
+        "stage": "extracting citations", "done": 3, "total": 3, "item": "doc/3"}
 
 
 def test_finish_bulk_postprocess_resolves_and_tags_without_extraction():
@@ -318,3 +319,26 @@ def test_drain_alert_waits_for_enough_history():
         _finished_job(f, "auto-drain", {"attempted": 0, "skipped_recent_fail": 100})
     with f._open() as (cat, _rs, _ts):
         assert not any(a.code.startswith("drain_") for a in check_alerts(cat, t))
+
+
+def test_eta_is_stage_relative():
+    """A job that spent hours in earlier phases must not show a days-long ETA for a
+    small phase that just began: rate divides the counter progress made WITHIN the
+    stage by the stage's own elapsed time."""
+    from datetime import datetime, timedelta, timezone
+
+    f = _facade()
+    started = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    stage_started = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("eta1", "rescan-citations", "scan", {})
+        cat.conn.execute("UPDATE jobs SET started_at = ? WHERE job_id = 'eta1'", (started,))
+        cat.conn.commit()
+        cat.heartbeat_job("eta1", {
+            "stage": "resolving harvested citations", "done": 101, "total": 400,
+            # resumed counter: 100 were done before this stage/attempt began
+            "stage_started_at": stage_started, "stage_done0": 100,
+        }, [])
+    row = JobManager(f).get("eta1")
+    # 1 item in ~10s → ~0.1/s → ~2,990s for the remaining 299 — not days
+    assert row["eta_s"] is not None and row["eta_s"] < 3600 * 2
