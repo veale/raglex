@@ -110,6 +110,32 @@ def test_mentions_of_parent_article_include_subarticles(config):
     assert {g["src_id"] for g in got["groups"]} == set(srcs)
 
 
+def test_mentions_accept_the_full_segment_label_as_anchor(config):
+    """The reader's "See all mentions" sends the SEGMENT LABEL — "Article 17 Right to
+    erasure (right to be forgotten)" — while edges pin to the bare unit ("Article 17",
+    "Article 17(2)"). The tray used to answer "Nothing mentions this yet" for a
+    provision cited thousands of times; the canonical-anchor-key fallback fixes it
+    without loosening the match (Article 170 and Recital 17 stay distinct)."""
+    f = Facade(config)
+    target = f.import_bytes(data=b"<p>Article 17 Right to erasure</p>", filename="gdpr17.html",
+                            doc_type="legislation", title="GDPR")["stable_id"]
+    srcs = []
+    for i, anchor in enumerate(("Article 17", "Article 17(2)")):
+        src = f.import_bytes(data=f"<p>cite {i}</p>".encode(), filename=f"e{i}.html",
+                             doc_type="judgment", title=f"E{i} v F")["stable_id"]
+        f.link(src_id=src, dst_id=target, relationship="mentions", dst_anchor=anchor)
+        srcs.append(src)
+    # near-misses that must NOT be swept in by the fallback
+    for anchor, name in (("Article 170", "far"), ("Recital 17", "rec")):
+        src = f.import_bytes(data=f"<p>{name}</p>".encode(), filename=f"{name}.html",
+                             doc_type="judgment", title=f"{name} v X")["stable_id"]
+        f.link(src_id=src, dst_id=target, relationship="mentions", dst_anchor=anchor)
+
+    got = f.document_mentions(
+        target, anchor="Article 17 Right to erasure ( right to be forgotten )")
+    assert {g["src_id"] for g in got["groups"]} == set(srcs)
+
+
 def test_corpus_map_cites_translates_country_category_to_storage_source(config, monkeypatch):
     from contextlib import contextmanager
 

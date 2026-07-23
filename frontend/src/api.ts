@@ -69,6 +69,23 @@ export interface UsCaselawBudget {
   estimated_cases_today: number | null;
   estimated_days_to_clear: number | null;
 }
+// CanLII meters requests too (a persisted ledger below their documented ceiling).
+// The API is metadata-only — the two backlogs it reports are the pending Canadian
+// citations (each resolvable into a metadata stub) and the held decisions awaiting
+// enrichment (permalink, docket, keywords, citator edges).
+export interface CanliiBudget {
+  configured: boolean;            // false = no API key set
+  allowed_now: boolean;
+  blocked_by: string | null;
+  retry_after_seconds: number;
+  remaining: number | null;
+  windows: Record<string, { used: number; limit: number | null }>;
+  daily_cap: boolean;
+  tier: "default" | "custom";
+  pending_ca_references: number;
+  unenriched_documents: number;
+  estimated_days_to_clear: number | null;
+}
 export interface Alert { code: string; severity: string; subject: string; message: string; }
 // A constructed link to the institute that publishes a case. `certainty` is "recorded"
 // when the URL is one the importer actually stored, "derived" when every path segment was
@@ -156,6 +173,9 @@ export const api = {
   stats: () => req<any>("/stats"),
   sources: () => req<SourceHealth[]>("/sources"),
   usCaselawBudget: () => req<UsCaselawBudget>("/sources/us-caselaw/budget"),
+  canliiBudget: () => req<CanliiBudget>("/sources/ca-canlii/budget"),
+  canliiEnrich: (limit = 200) =>
+    req<{ job_id?: string; error?: string }>("/jobs/canlii-enrich", { method: "POST", body: JSON.stringify({ limit }) }),
   queues: () => req<Record<string, number>>("/queues"),
   alerts: () => req<Alert[]>("/alerts"),
   worklist: (limit = 30) => req<any[]>(`/worklist?limit=${limit}`),
@@ -214,7 +234,7 @@ export const api = {
     req<any>("/legislation/version", { method: "POST", body: JSON.stringify({ id, date }) }),
   detectCitations: (text: string) =>
     req<any>("/detect-citations", { method: "POST", body: JSON.stringify({ text }) }),
-  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr" | "suggest-matches" | "finish-bulk-postprocess", body: Record<string, unknown>) =>
+  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr" | "suggest-matches" | "finish-bulk-postprocess" | "canlii-enrich", body: Record<string, unknown>) =>
     req<{ job_id: string; error?: string; already_running?: boolean }>(`/jobs/${kind}`, { method: "POST", body: JSON.stringify(body) }),
   systemStorage: () => req<{ database_bytes: number; tables: { name: string; bytes: number }[] }>("/system/storage"),
   jobStatus: (id: string) => req<any>(`/jobs/${id}`),

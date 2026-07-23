@@ -116,6 +116,20 @@ CREATE TABLE IF NOT EXISTS source_stats (
     rebuilt_at        TEXT NOT NULL
 );
 
+-- The Explore homepage's base aggregate: documents by source/type/court/year with
+-- text+embedding coverage. Two live full-table scans (46s + 32s cold at 4.9M docs)
+-- ran inside every cache warm; the courts facet derives from these same rows.
+CREATE TABLE IF NOT EXISTS corpus_shape_stats (
+    source     TEXT NOT NULL,
+    doc_type   TEXT NOT NULL,
+    court      TEXT,
+    yr         TEXT,
+    n          INTEGER NOT NULL DEFAULT 0,
+    with_text  INTEGER NOT NULL DEFAULT 0,
+    embedded   INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at TEXT NOT NULL
+);
+
 -- Legislation-type rail roll-up (the Explore drill's Primary/Secondary/... split).
 -- Classification is a per-document Python pass; at 1.9M legislation rows it took
 -- ~6 minutes inside every homepage cache warm. Rebuilt with citation_counts.
@@ -1122,6 +1136,27 @@ class Catalogue:
         """The roll-up, or {} when it has never been rebuilt (caller falls back live)."""
         return {r["source"]: r["resolved_outgoing"] for r in self.conn.execute(
             "SELECT source, resolved_outgoing FROM source_stats")}
+
+    def refresh_corpus_shape_stats(self) -> int:
+        """Recompute the homepage base aggregate (one heavy scan, on the counts
+        cadence — never inline in a page load)."""
+        with self._maintenance_timeout(), self._atomic():
+            self.conn.execute("DELETE FROM corpus_shape_stats")
+            self.conn.execute(
+                "INSERT INTO corpus_shape_stats "
+                "(source, doc_type, court, yr, n, with_text, embedded, rebuilt_at) "
+                "SELECT source, doc_type, court, substr(decision_date, 1, 4), "
+                "COUNT(*), SUM(has_text), SUM(has_embedding), ? "
+                "FROM documents GROUP BY source, doc_type, court, substr(decision_date, 1, 4)",
+                (_now(),),
+            )
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM corpus_shape_stats").fetchone()["n"]
+
+    def corpus_shape_stats(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT source, doc_type, court, yr, n, with_text, embedded "
+            "FROM corpus_shape_stats").fetchall()
 
     def replace_leg_type_stats(self, rows: list[tuple]) -> int:
         """Overwrite the legislation-type rail roll-up. ``rows`` are
@@ -2160,6 +2195,29 @@ class Catalogue:
             LIMIT ?
             """,
             (limit,),
+        ).fetchall()
+
+    def canadian_unenriched_documents(self, *, limit: int = 500) -> list[sqlite3.Row]:
+        """Held Canadian judgments not yet checked against CanLII — the enrichment
+        queue for ``canlii_enrich``, most-cited first (via the citation_counts rollup)
+        so the metered API budget goes to the cases the corpus actually leans on.
+
+        The marker is ``canlii_checked_at`` in ``meta_json`` — stamped whether the
+        lookup hit or missed, so a case CanLII doesn't hold isn't re-asked every run.
+        The LIKE pattern is bound as a parameter (a literal ``%`` in the SQL string
+        breaks the postgres driver's paramstyle translation)."""
+        return self.conn.execute(
+            """
+            SELECT d.stable_id, d.title, d.court, d.source
+            FROM documents d
+            LEFT JOIN citation_counts cc ON cc.candidate_id = d.stable_id
+            WHERE d.is_latest = 1 AND d.doc_type = 'judgment'
+              AND d.source IN ('ca-caselaw', 'ca-canlii')
+              AND (d.meta_json IS NULL OR d.meta_json NOT LIKE ?)
+            ORDER BY COALESCE(cc.occurrences, 0) DESC, d.stable_id
+            LIMIT ?
+            """,
+            ("%canlii_checked_at%", limit),
         ).fetchall()
 
     def pending_reference_groups(self, *, min_citing: int = 1, limit: int | None = None,

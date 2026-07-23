@@ -1285,6 +1285,22 @@ def create_app(config: Config | None = None) -> FastAPI:
         """
         return facade.us_caselaw_budget()
 
+    @app.get("/sources/ca-canlii/budget")
+    def canlii_budget_ep() -> dict:
+        """CanLII's remaining metered quota + the Canadian backlogs waiting on it
+        (pending citations to resolve into stubs, held docs to enrich)."""
+        return facade.canlii_budget()
+
+    @app.post("/jobs/canlii-enrich")
+    def canlii_enrich_ep(payload: dict = Body(default={})) -> dict:
+        """Enrich held Canadian decisions from the CanLII API (permalinks, docket,
+        keywords, citator edges) as a background job — budget-metered and resumable."""
+        params = {k: v for k, v in {"limit": payload.get("limit"),
+                                    "include_citing": payload.get("include_citing")}.items()
+                  if v is not None}
+        return jobs.start("canlii-enrich", "CanLII enrich (Canadian metadata + citator)",
+                          params)
+
     # -- settings (UI-editable secrets; env overrides file) ---------------
     @app.get("/settings")
     def get_settings() -> dict:

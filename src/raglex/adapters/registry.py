@@ -17,6 +17,7 @@ from .au_legislation import CommonwealthAdapter, LawMakerAdapter
 from .au_caselaw import AustralianCaseLawAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_legislation import CanadaFederalAdapter
+from .canlii import CanLIIAdapter
 from .courtlistener import CourtListenerAdapter
 from .courtlistener_bulk import CourtListenerBulkAdapter
 from .dma import DMACasesAdapter
@@ -111,6 +112,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Neutral-citation slugs match the extractor's, so importing resolves the Canadian
     # citations the corpus already holds pending; law-report citations become aliases.
     "ca-caselaw": CanadianCaseLawAdapter,
+    # CanLII API — Canadian case METADATA + the citator, never full text (their API is
+    # metadata-only by design). Resolves pending Canadian citations into metadata-stub
+    # documents with a verified "view on CanLII" link, and enriches held decisions
+    # with permalinks, keywords and citator edges. Needs an individually-granted key.
+    "ca-canlii": CanLIIAdapter,
     # Australian case law — the Open Australian Legal Corpus JSONL. Decisions only by
     # default: the statutes are better served by the live registers (au-cth et al).
     "au-caselaw": AustralianCaseLawAdapter,
@@ -439,6 +445,22 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("min_year", "Earliest decision year", "2000"),
          SourceOption("language", "Preferred text language", "en (default) | fr")),
         ("neutral citation (2011 SCC 10)", "scc/2011/10"),
+    ),
+    "ca-canlii": SourceInfo(
+        "ca-canlii", "Canadian case law metadata (CanLII API)", "caselaw", "CA", False,
+        "CanLII's REST API: per-case metadata (title, parallel citations, decision "
+        "date, docket, subject keywords, the canlii.ca permalink) and the CITATOR — "
+        "what a case cites (cases + legislation) and what cites it. NEVER full text: "
+        "a fetched case becomes a metadata stub with a verified 'view on CanLII' "
+        "link, under the same slug the citation extractor mints, so pending Canadian "
+        "citations resolve. Needs an API key (granted individually via CanLII's "
+        "feedback form); politeness enforced by a persisted budget ledger.",
+        (SourceOption("ids", "Cases to fetch", "2011 SCC 10, scc/2011/10"),
+         SourceOption("databases", "Databases to poll", "csc-scc (default), onca, bcca…"),
+         SourceOption("citator", "Fetch citator edges", "true for ids (default) | false"),
+         SourceOption("citing_cap", "Max citing-cases edges per case", "200 (default)"),
+         SourceOption("detail", "Per-case metadata call", "true (default) | false")),
+        ("neutral citation (2011 SCC 10)", "scc/2011/10", "CanLII caseId (2011scc10)"),
     ),
     "au-caselaw": SourceInfo(
         "au-caselaw", "Australian case law (Open Australian Legal Corpus)", "caselaw",

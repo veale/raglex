@@ -42,6 +42,9 @@ SINGLETON_KINDS = frozenset({
     "suggest-matches", "classify-guidance",
     # one relation-range cursor over the whole graph — two would double-resolve ranges
     "finish-bulk-postprocess",
+    # one metered walk of the Canadian enrichment queue — two would double-spend
+    # the CanLII budget on the same head-of-queue documents
+    "canlii-enrich",
     # only ever one indexing pass: two would race over the same pending_embedding queue
     "embed",
 })
@@ -190,6 +193,11 @@ RUNNERS: dict[str, Callable] = {
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
+    # Decorate held Canadian decisions with CanLII metadata + citator edges —
+    # budget-metered, resumable (each checked case is stamped, so a re-run walks on).
+    "canlii-enrich": lambda f, p, cb, cancel: f.canlii_enrich(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
 }
 
 

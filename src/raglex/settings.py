@@ -86,6 +86,19 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("RAGLEX_COURTLISTENER_QUEUE_RESERVE", "CourtListener queue share", False,
                 "Sources", "0.6 — the fraction of the daily quota the unattended "
                 "US-citation queue may spend, leaving the rest for on-demand lookups"),
+    SettingSpec("RAGLEX_CANLII_API_KEY", "CanLII API key", True, "Sources",
+                "granted individually — apply via canlii.org/en/feedback/feedback.html. "
+                "Metadata + citator only (never full text): resolves Canadian citations "
+                "into stubs with verified CanLII links and enriches held decisions"),
+    # Conservative defaults deliberately below CanLII's documented ceiling (~5,000/day);
+    # exposed only so a key granted more isn't held to them.
+    SettingSpec("RAGLEX_CANLII_PER_MINUTE", "CanLII requests/minute", False, "Sources",
+                "blank = 20 (paces requests 3s apart). Also sets the pacing floor"),
+    SettingSpec("RAGLEX_CANLII_PER_HOUR", "CanLII requests/hour", False, "Sources",
+                "blank = 900"),
+    SettingSpec("RAGLEX_CANLII_PER_DAY", "CanLII requests/day", False, "Sources",
+                "blank = 4000 — below the documented ~5,000/day ceiling. A targeted case "
+                "costs 1 request, +2-3 with the citator"),
     SettingSpec("EURLEX_USERNAME", "EUR-Lex webservice user", False, "Sources"),
     SettingSpec("EURLEX_PASSWORD", "EUR-Lex webservice password", True, "Sources"),
     # PISTE (piste.gouv.fr) OAuth2 client-credentials — one app can subscribe to

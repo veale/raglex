@@ -1,5 +1,5 @@
 import { Component, createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
+import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -2295,12 +2295,56 @@ function UsBudgetRow({ budget }: { budget: UsCaselawBudget | null | undefined })
   );
 }
 
+// CanLII quota, shown under the Canadian case-law source row. Same idea as the
+// CourtListener row: the API is metered (a persisted ledger below CanLII's ceiling),
+// so a stalled-looking Canadian queue is usually a spent budget. Metadata-only —
+// the backlogs are citations to resolve into stubs + held docs awaiting enrichment.
+function CanliiBudgetRow({ budget }: { budget: CanliiBudget | null | undefined }) {
+  if (!budget) return null;
+  if (!budget.configured) {
+    return (
+      <tr><td colSpan={4} className="muted" style={{ fontSize: 12, paddingLeft: 12 }}>
+        ↳ no CanLII key — set <span className="kbd">RAGLEX_CANLII_API_KEY</span> in Settings to resolve + enrich Canadian cases
+      </td></tr>
+    );
+  }
+  const wait = budget.retry_after_seconds;
+  const waitLabel = wait >= 3600 ? `${Math.round(wait / 3600)}h` : wait >= 60 ? `${Math.round(wait / 60)}m` : `${wait}s`;
+  const backlog = budget.pending_ca_references + budget.unenriched_documents;
+  return (
+    <tr><td colSpan={4} style={{ fontSize: 12, paddingLeft: 12 }}>
+      <span className="muted">↳ CanLII quota </span>
+      {Object.entries(budget.windows).map(([name, w]) => (
+        <span className="tag" key={name}
+          title={w.limit === null
+            ? `${w.used} requests in the rolling ${name}; no ${name} limit set`
+            : `${w.used} of ${w.limit} requests used in the rolling ${name}`}>
+          {name}: {w.limit === null ? `${w.used} · uncapped` : `${w.used}/${w.limit}`}
+        </span>
+      ))}
+      {budget.tier === "custom" && <span className="tag" title="raised limits set in Settings">custom limits</span>}
+      {budget.allowed_now
+        ? <span className="ok"> ready</span>
+        : <span className="err"> {budget.blocked_by} limit reached — resumes in {waitLabel}</span>}
+      {backlog > 0 && (
+        <span className="muted">
+          {" · "}{budget.pending_ca_references.toLocaleString()} CA citations queued
+          {" · "}{budget.unenriched_documents.toLocaleString()} held docs to enrich
+          {budget.estimated_days_to_clear !== null && budget.estimated_days_to_clear > 0 &&
+            <> · ~{budget.estimated_days_to_clear}d to clear</>}
+        </span>
+      )}
+    </td></tr>
+  );
+}
+
 // --- Dashboard -------------------------------------------------------------
 export function Dashboard({ open: _open, navigate }: { open: (id: string) => void; navigate?: (f: Record<string, string>) => void }) {
   const [sources, , reloadSources] = useAsync(() => api.sources(), []);
   // Its own call, not a field on /sources: counting the pending US backlog is a scan,
   // and /sources is polled on every dashboard refresh.
   const [usBudget, , reloadUsBudget] = useAsync(() => api.usCaselawBudget(), []);
+  const [caBudget, , reloadCaBudget] = useAsync(() => api.canliiBudget(), []);
   const [queues, , reloadQueues] = useAsync(() => api.queues(), []);
   const [alerts, , reloadAlerts] = useAsync(() => api.alerts(), []);
   const [stats, , reloadStats] = useAsync(() => api.stats(), []);
@@ -2313,7 +2357,7 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
   const [backfill, setBackfill] = useState(false);
   const [pages, setPages] = useState(1);
 
-  const refresh = () => { reloadSources(); reloadUsBudget(); reloadQueues(); reloadAlerts(); reloadStats(); reloadWork(); reloadBacklog(); };
+  const refresh = () => { reloadSources(); reloadUsBudget(); reloadCaBudget(); reloadQueues(); reloadAlerts(); reloadStats(); reloadWork(); reloadBacklog(); };
   async function act(p: Promise<any>, label: string) {
     setMsg(label + "…");
     try { const r = await p; setMsg(`${label}: ` + JSON.stringify(r)); refresh(); }
@@ -2377,6 +2421,10 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
                   <td className={s.consecutive_failures ? "err" : ""}>{s.consecutive_failures}</td>
                   <td className="muted">{s.last_yield_at?.slice(0, 10) || "—"}</td></tr>
                 {s.key === "us-caselaw" && <UsBudgetRow budget={usBudget} />}
+                {/* attach the CanLII quota to the first Canadian case-law row present */}
+                {(s.key === "ca-caselaw" ||
+                  (s.key === "ca-canlii" && !(sources ?? []).some((x) => x.key === "ca-caselaw")))
+                  && <CanliiBudgetRow budget={caBudget} />}
               </Fragment>
             ))}
           </tbody></table>
@@ -3123,6 +3171,8 @@ function ExpandCoveragePanel() {
           title="Queue the ECtHR cases the corpus cites by name/EHRR but doesn't hold, and fetch them from HUDOC by case-name search (most-cited first). Then links their EHRR citations.">⇊ Queue missing ECtHR (HUDOC)</button>
         <button onClick={() => fireJob("expand-citing", {}, setMsg)}
           title="Find and pull every case that CITES an EU case already in the corpus (via CELLAR's citation graph). Backward citation expansion.">⇊ Pull cases citing EU cases</button>
+        <button onClick={() => fireJob("canlii-enrich", { limit: 200 }, setMsg)}
+          title="Decorate held Canadian decisions with what the CanLII API knows: the canlii.ca permalink (a verified 'view on CanLII' link), docket number, subject keywords, parallel-citation aliases, and the citator's edges (cited cases + legislation; citing cases capped). Metadata only — CanLII's API never returns text. Budget-metered (most-cited first) and resumable; needs RAGLEX_CANLII_API_KEY in Settings.">🍁 CanLII enrich (Canadian metadata + citator)</button>
       </div>
       {msg && <p className={msg.startsWith("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
     </div>

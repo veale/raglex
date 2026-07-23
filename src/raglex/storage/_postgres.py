@@ -212,6 +212,19 @@ CREATE TABLE IF NOT EXISTS source_stats (
     rebuilt_at        TEXT NOT NULL
 );
 
+-- The Explore homepage's base aggregate (documents by source/type/court/year).
+-- Replaces two live full-table scans per cache warm at 4.9M docs.
+CREATE TABLE IF NOT EXISTS corpus_shape_stats (
+    source     TEXT NOT NULL,
+    doc_type   TEXT NOT NULL,
+    court      TEXT,
+    yr         TEXT,
+    n          BIGINT NOT NULL DEFAULT 0,
+    with_text  BIGINT NOT NULL DEFAULT 0,
+    embedded   BIGINT NOT NULL DEFAULT 0,
+    rebuilt_at TEXT NOT NULL
+);
+
 -- Legislation-type rail roll-up for the Explore drill. The per-document Python
 -- classification pass took ~6 minutes per homepage cache warm at 1.9M rows.
 CREATE TABLE IF NOT EXISTS leg_type_stats (

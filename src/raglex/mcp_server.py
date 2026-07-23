@@ -628,6 +628,20 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.retry_failed_references()
 
     @admin
+    def canlii_budget() -> dict:
+        """CanLII API quota state + the Canadian backlogs queued against it (pending
+        citations to resolve into metadata stubs, held decisions awaiting enrichment)."""
+        return facade.canlii_budget()
+
+    @admin
+    def canlii_enrich(limit: int = 200, include_citing: bool = True) -> dict:
+        """Decorate held Canadian decisions with CanLII metadata (permalink, docket,
+        keywords) + citator edges (cited cases/legislation, capped citing cases), and
+        mint parallel-citation aliases so report/CanLII-number citations resolve.
+        Budget-metered and resumable; needs RAGLEX_CANLII_API_KEY."""
+        return facade.canlii_enrich(limit=limit, include_citing=include_citing)
+
+    @admin
     def rebuild_citation_counts() -> dict:
         """Refresh the citation-frequency roll-up the snowball reads (the live aggregate
         over the citations table is slow at scale, so it's cached; this recomputes it)."""

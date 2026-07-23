@@ -406,6 +406,24 @@ def _targeted_us_caselaw(candidate: str):
     return adapter if getattr(adapter, "configured", False) else None
 
 
+def _targeted_ca_canlii(candidate: str):
+    """A Canadian case by neutral citation (``scc/2011/10``) — resolved through the
+    CanLII API into a METADATA STUB (CanLII's API never returns judgment text): title,
+    date, parallel-citation aliases, citator edges and a verified canlii.ca permalink,
+    held under the same slug the extractor mints so the citing edges resolve.
+
+    Raises when no API key is configured — the caller records that as *transient*
+    (short retry), never as a 90-day absence: the citation is perfectly good, we just
+    can't reach the source without a key."""
+    from .adapters.registry import get_adapter
+
+    adapter = get_adapter("ca-canlii", ids=candidate)
+    if not getattr(adapter, "configured", False):
+        raise RuntimeError("ca-canlii: no API key — set RAGLEX_CANLII_API_KEY "
+                           "(granted via canlii.org/en/feedback/feedback.html)")
+    return adapter
+
+
 def _targeted_nl_rechtspraak(candidate: str):
     """A Dutch judgment by ECLI — Rechtspraak fetches the content directly by ECLI."""
     if not candidate.upper().startswith("ECLI:NL:"):
@@ -444,7 +462,35 @@ _TARGETED_HARVEST = {
     "nl-rechtspraak": _targeted_nl_rechtspraak,
     "nl-legislation": _targeted_nl_legislation,
     "us-caselaw": _targeted_us_caselaw,
+    "ca-canlii": _targeted_ca_canlii,
 }
+
+
+# Canonical anchor key — the server-side mirror of the reader's anchorKey() (views.tsx):
+# "Article 17 Right to erasure (right to be forgotten)" → "art:17", "Recital 47" →
+# "rec:47", "[80]" → "80". Unit type + number alone, so a segment label that carries the
+# provision's TITLE still meets the bare "Article 17" the citation edges pin to.
+_ANCHOR_TYPES = {
+    "article": "art", "art": "art", "recital": "rec", "rec": "rec",
+    "section": "s", "sec": "s", "s": "s", "schedule": "sch", "sch": "sch",
+    "paragraph": "para", "para": "para", "regulation": "reg", "reg": "reg",
+    "rule": "rule", "point": "pt", "pt": "pt", "annex": "annex",
+}
+
+
+def _anchor_key(text: str | None) -> str | None:
+    t = (text or "").strip().lower().lstrip("[(")
+    m = re.match(r"^([a-z]+)?\.?\s*(\d+[a-z]?)", t)
+    if not m or not m.group(2):
+        return None
+    typ = _ANCHOR_TYPES.get(m.group(1) or "", "")
+    return f"{typ}:{m.group(2)}" if typ else m.group(2)
+
+
+def _today_iso() -> str:
+    from datetime import date as _date
+
+    return _date.today().isoformat()
 
 
 def _rel_type(value: str | None, default: RelationshipType | None = None) -> RelationshipType | None:
@@ -916,7 +962,22 @@ class Facade:
                 # happened to appear first and hid the rest.
                 parent = re.sub(r"(?:\([^()]+\))+\s*$", "", anchor).strip()
                 family = re.compile(rf"^{re.escape(parent)}(?:\([^()]+\))*$", re.IGNORECASE)
-                rels = [r for r in rels if family.match((r["dst_anchor"] or "").strip())]
+                matched = [r for r in rels if family.match((r["dst_anchor"] or "").strip())]
+                if not matched:
+                    # The reader's "See all mentions" sends the whole SEGMENT LABEL
+                    # ("Article 17 Right to erasure (right to be forgotten)") while
+                    # edges pin to the bare unit ("Article 17", "Article 17(2)") —
+                    # the title text made the exact family match find nothing, so the
+                    # tray claimed nothing mentions a heavily-cited provision. Fall
+                    # back to the canonical anchor key (the server-side mirror of the
+                    # reader's own anchorKey()): unit type + number alone, which
+                    # still keeps Article 17 distinct from Article 170 and from
+                    # Recital 17.
+                    key = _anchor_key(anchor)
+                    if key:
+                        matched = [r for r in rels
+                                   if _anchor_key(r["dst_anchor"]) == key]
+                rels = matched
             by_src: dict[str, list] = {}
             for r in rels:
                 by_src.setdefault(r["src_id"], []).append(r)
@@ -1785,25 +1846,28 @@ class Facade:
 
     def _corpus_shape_uncached(self) -> dict:
         with self._open() as (cat, _rs, _ts):
-            rows = cat.conn.execute(
-                "SELECT source, doc_type, court, substr(decision_date, 1, 4) AS yr, "
-                "COUNT(*) AS n, SUM(has_text) AS with_text, SUM(has_embedding) AS embedded "
-                "FROM documents GROUP BY source, doc_type, court, substr(decision_date, 1, 4)"
-            ).fetchall()
-            # resolved outgoing edges per source → citation density per document.
-            # Read from the source_stats roll-up (rebuilt with citation_counts on the
-            # hourly cadence): the live relations×documents GROUP BY it replaces took
-            # minutes of IO at 17M+ edges and ran on every cold cache refresh. A DB
-            # whose roll-up has never been built (fresh install, tests) computes live
-            # once and seeds it.
+            # EVERYTHING scan-shaped on this page reads an hourly roll-up. The live
+            # versions — two full documents scans (46s + 32s cold at 4.9M docs) plus
+            # a relations×documents GROUP BY (minutes) plus a per-document taxonomy
+            # pass (~6 min) — ran inside every cache warm and kept the Explore
+            # homepage on its empty placeholder. A DB whose roll-ups have never been
+            # built (fresh install, tests) seeds them live once.
+            rows = cat.corpus_shape_stats()
+            if not rows:
+                cat.refresh_corpus_shape_stats()
+                rows = cat.corpus_shape_stats()
             dens = cat.source_stats()
             if not dens:
                 cat.refresh_source_stats()
                 dens = cat.source_stats()
-            courts = cat.conn.execute(
-                "SELECT source, court, doc_type, COUNT(*) AS n FROM documents "
-                "WHERE court IS NOT NULL AND court <> '' "
-                "GROUP BY source, court, doc_type").fetchall()
+            # the courts facet is a projection of the same roll-up rows
+            court_agg: dict[tuple, int] = {}
+            for r in rows:
+                if r["court"]:
+                    k = (r["source"], r["court"], r["doc_type"])
+                    court_agg[k] = court_agg.get(k, 0) + r["n"]
+            courts = [{"source": s, "court": c, "doc_type": dt, "n": n}
+                      for (s, c, dt), n in court_agg.items()]
 
             juris: dict[str, dict] = {}
 
@@ -2366,6 +2430,159 @@ class Facade:
             "estimated_days_to_clear": days_to_clear,
         }
 
+    def canlii_budget(self) -> dict:
+        """The CanLII key's remaining quota, plus what is queued against it.
+
+        Two queues spend this budget: the routable worklist's pending Canadian
+        citations (each a targeted stub fetch, ~4 requests with the citator) and the
+        held-document enrichment backlog (``canlii_enrich``, ~3-4 requests per case).
+        Both are reported so the operator can see how many days of quota the work
+        ahead represents."""
+        from .adapters.registry import get_adapter
+
+        status = get_adapter("ca-canlii").budget_status()
+        pending = sum(1 for r in self.unresolved_references(limit=None)
+                      if r["suggested_adapter"] == "ca-canlii")
+        with self._open() as (cat, _rs, _ts):
+            # the queue is "how many are left", so probe one page above the UI's
+            # display need rather than counting the whole corpus every poll
+            unenriched = len(cat.canadian_unenriched_documents(limit=100_000))
+        day_limit = (status["windows"].get("day") or {}).get("limit")
+        per_case = 4        # metadata + citedCases + citedLegislations + citingCases
+        days_to_clear = None
+        total = pending + unenriched
+        if total and day_limit:
+            days_to_clear = round(total / max(1, day_limit / per_case), 1)
+        return {
+            **status,
+            "pending_ca_references": pending,
+            "unenriched_documents": unenriched,
+            "estimated_days_to_clear": days_to_clear,
+        }
+
+    def canlii_enrich(self, *, limit: int = 200, include_citing: bool = True,
+                      on_progress=None, cancel_check=None) -> dict:
+        """Decorate held Canadian decisions with what the CanLII API knows (§1.9, §5b).
+
+        For each un-checked Canadian judgment (most-cited first): the canlii.ca
+        permalink + verified long URL, docket number, subject keywords/topics, the
+        citator counts, parallel-citation aliases (so "[2008] 1 SCR 190" resolves
+        here), the CanLII-number alias (so ``canlii/1980/21`` citations land on the
+        held full-text node), and the citator's edges — cited cases and legislation as
+        ``mentions``, citing cases as deferred ``cited_by`` (capped: see the adapter).
+
+        Every case is stamped ``canlii_checked_at`` whether the lookup hit or missed,
+        so re-runs walk forward through the backlog instead of re-asking. Stops
+        cleanly when the budget ledger says stop — the rest of the queue is simply
+        next run's work."""
+        from .adapters.registry import get_adapter
+        from .adapters.canlii import parse_ca_ref, ca_slug
+        from .core.errors import RateLimitException
+
+        adapter = get_adapter("ca-canlii")
+        if not adapter.configured:
+            return {"error": "ca-canlii: no API key — set RAGLEX_CANLII_API_KEY",
+                    "enriched": 0}
+        enriched, missing, edges_added, aliases_added = [], 0, 0, 0
+        rate_limited = False
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.canadian_unenriched_documents(limit=limit)
+            for i, row in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                sid = row["stable_id"]
+                _progress(on_progress, stage="CanLII enrich", done=i, total=len(rows),
+                          item=sid)
+                if parse_ca_ref(sid) is None or sid.startswith("canlii/"):
+                    # surrogate / bare-CanLII ids can't be looked up (no database);
+                    # stamp them so they leave the queue rather than clogging its head
+                    meta = cat.document_meta(sid)
+                    meta["canlii_checked_at"] = _today_iso()
+                    meta["canlii_missing"] = True
+                    cat.set_document_meta(sid, meta, commit=False)
+                    missing += 1
+                    continue
+                try:
+                    found = adapter.case_metadata(sid)
+                    rels, counts = ([], {})
+                    if found:
+                        rels, counts = adapter.citator_relations(
+                            found["_database"], str(found.get("caseId")),
+                            exclude=sid, include_citing=include_citing)
+                except RateLimitException:
+                    # budget spent — stop the batch, leave the queue for the next run
+                    rate_limited = True
+                    _progress(on_progress, stage="rate limited — pausing", done=i,
+                              total=len(rows), msg="CanLII budget spent; resuming next run")
+                    break
+                meta = cat.document_meta(sid)
+                meta["canlii_checked_at"] = _today_iso()
+                if not found:
+                    meta["canlii_missing"] = True
+                    cat.set_document_meta(sid, meta, commit=False)
+                    missing += 1
+                    continue
+                meta.pop("canlii_missing", None)
+                meta.update({k: v for k, v in {
+                    "canlii_url": found.get("url"),
+                    "canlii_long_url": found.get("longUrl"),
+                    "canlii_database": found.get("_database"),
+                    "canlii_case_id": found.get("caseId"),
+                    "docket_number": found.get("docketNumber"),
+                    "keywords": meta.get("keywords") or found.get("keywords"),
+                    "topics": meta.get("topics") or found.get("topics"),
+                    **counts,
+                }.items() if v not in (None, "")})
+                cat.set_document_meta(sid, meta, commit=False,
+                                      title_if_empty=found.get("title"))
+                # parallel report citations + the CanLII number both resolve here
+                from .adapters.ca_caselaw import report_aliases
+                for alias in report_aliases(found.get("citation")):
+                    if cat.get_alias(alias.casefold()) is None:
+                        cat.put_alias(alias.casefold(), sid, source="canlii", commit=False)
+                        aliases_added += 1
+                parsed = parse_ca_ref(str(found.get("caseId") or ""))
+                if parsed and parsed[0] == "canlii":
+                    canlii_id = ca_slug(*parsed)
+                    if canlii_id != sid and cat.get_alias(canlii_id) is None:
+                        cat.put_alias(canlii_id, sid, source="canlii", commit=False)
+                        aliases_added += 1
+                # citator edges, deduped against what this doc already carries (the
+                # A2AJ import ships its own cases_cited edges; never double-mint)
+                if rels:
+                    existing = set()
+                    for r in cat.relations_for(sid):
+                        key = (r["candidate_id"] or r["raw_fold"] or "")
+                        existing.add((r["relationship_type"], key.casefold()))
+                    fresh = []
+                    for rel in rels:
+                        cand, raw_fold = cat._edge_keys(rel)
+                        key = (str(rel.relationship_type), (cand or raw_fold or "").casefold())
+                        if key[1] and key not in existing:
+                            existing.add(key)
+                            fresh.append(rel)
+                    if fresh:
+                        cat.add_relations(sid, fresh)
+                        edges_added += len(fresh)
+                enriched.append(sid)
+                if i % 25 == 0:
+                    cat.commit()
+            cat.commit()
+            if enriched:
+                _progress(on_progress, stage="resolving citations", done=0,
+                          total=len(enriched))
+                resolved = Resolver(cat).run_for_documents(enriched,
+                                                           cancel_check=cancel_check)
+                resolved_edges = resolved.resolved
+            else:
+                resolved_edges = 0
+        self._invalidate_caches()
+        return {"checked": len(enriched) + missing, "enriched": len(enriched),
+                "not_on_canlii": missing, "edges_added": edges_added,
+                "aliases_added": aliases_added, "resolved_edges": resolved_edges,
+                "rate_limited": rate_limited,
+                "remaining": max(0, len(rows) - len(enriched) - missing)}
+
     def alerts(self) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
             return [a.to_dict() for a in check_alerts(cat)]
@@ -2427,12 +2644,13 @@ class Facade:
         """Refresh the snowball's frequency roll-up (scheduler; ~13s over 10M citations)."""
         with self._open() as (cat, _rs, _ts):
             n = cat.rebuild_citation_counts()
-            # same cadence, same shape of work: the per-source density roll-up the
-            # Explore homepage reads instead of a minutes-long live GROUP BY
+            # same cadence, same shape of work: every roll-up the Explore homepage
+            # reads instead of live full-table scans and aggregates
             srcs = cat.refresh_source_stats()
+            shape = cat.refresh_corpus_shape_stats()
             leg = self._refresh_leg_type_stats(cat)
         self._invalidate_caches()
-        return {"candidates": n, "sources": srcs, "leg_types": leg}
+        return {"candidates": n, "sources": srcs, "shape_rows": shape, "leg_types": leg}
 
     def _refresh_leg_type_stats(self, cat) -> int:
         """Rebuild the legislation-type rail roll-up (the Explore drill's
@@ -5092,6 +5310,14 @@ class Facade:
         if recorded and "bailii.org" in recorded:
             out.append({"site": "bailii", "site_name": "BAILII", "url": recorded,
                         "certainty": "recorded"})
+        # CanLII links verified through the API (canlii_enrich / the ca-canlii
+        # adapter) beat a constructed guess: the short canlii.ca permalink survives
+        # site reorganisations, and the recorded long URL is known to exist.
+        for url in (meta.get("canlii_url"), meta.get("canlii_long_url"),
+                    recorded if recorded and "canlii.org" in recorded else None):
+            if url and not any(o["url"] == url for o in out):
+                out.append({"site": "canlii", "site_name": "CanLII", "url": url,
+                            "certainty": "recorded"})
         for link in lii_links(stable_id, court=(doc["court"] if doc is not None else None)):
             if not any(o["url"] == link.url for o in out):
                 out.append({"site": link.site, "site_name": link.site_name,

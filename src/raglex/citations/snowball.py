@@ -183,7 +183,16 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         court = m.group("court").upper()
         known = classify(court)
         if known and not known.generic:
-            return (f"neutral citation ({court})", known.jurisdiction, known.adapter)
+            adapter = known.adapter
+            # Canadian court-issued neutral citations are all addressable at CanLII
+            # (metadata + citator, never full text — a fetched case becomes a stub
+            # with a verified link). The bare "CanLII"-number pseudo-court is NOT
+            # routed: its candidate carries no database, so it can't be looked up.
+            from .courts import COURT_ISSUED
+            if (adapter is None and known.jurisdiction == "CA"
+                    and known.authority == COURT_ISSUED):
+                adapter = "ca-canlii"
+            return (f"neutral citation ({court})", known.jurisdiction, adapter)
         if known:
             # The tribunal isn't registered, but the medium-neutral-citation convention
             # puts the ISO country code first, so the citation still has a country. It
