@@ -47,3 +47,13 @@ def test_render_br_single_vs_double():
 def test_no_br_still_reads():
     el = ET.fromstring("<CONTENU>A single sentence with no breaks.</CONTENU>")
     assert _render_br(el) == "A single sentence with no breaks."
+
+
+def test_sniffer_recognises_dila():
+    from raglex.facade import _sniff_format
+    assert _sniff_format(JURI.encode("utf-8")) == "dila-xml"
+    # a LEGI article (root <ARTICLE> with <META_ARTICLE>) is dila too
+    legi = ("<ARTICLE><META><META_COMMUN><ID>LEGIARTI1</ID></META_COMMUN>"
+            "<META_SPEC><META_ARTICLE/></META_SPEC></META>"
+            "<BLOC_TEXTUEL><CONTENU>Le texte.</CONTENU></BLOC_TEXTUEL></ARTICLE>")
+    assert _sniff_format(legi.encode("utf-8")) == "dila-xml"

@@ -173,6 +173,10 @@ def _sniff_format(raw: bytes) -> str | None:
     # Distinguishes it from de-gii legislation XML, which has no gertyp.
     if b"<dokument" in low and (b"gertyp" in low or b"<doknr" in low):
         return "rii-xml"
+    # DILA JADE/LEGI XML (fr-dila): both the case-law <TEXTE_JURI_ADMIN> and the
+    # legislation <ARTICLE> carry a <META><META_COMMUN> block near the top.
+    if b"<meta_commun" in low or b"texte_juri_admin" in low or b"<meta_article" in low:
+        return "dila-xml"
     if b'id="fragview"' in low or b"topheadingparagraph" in low or b"headingparagraph" in low:
         return "lawmaker-html"
     return None
