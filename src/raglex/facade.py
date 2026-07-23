@@ -3654,11 +3654,15 @@ class Facade:
         hints = {"akn", "bwb", "formex-legislation", "rii-xml", "dila-xml"}
 
         with self._open() as (cat, _rs, ts):
-            rows = [dict(r) for r in cat.conn.execute(
-                "SELECT stable_id, raw_path, payload_hash, meta_json FROM documents "
-                "WHERE source=? AND raw_path IS NOT NULL AND payload_hash IS NOT NULL "
-                "AND stable_id > ? ORDER BY stable_id", (source, after_stable_id or "")).fetchall()]
-            total = len(rows)
+            # KEYSET pagination, not one fetchall: a source with millions of rows would
+            # otherwise spend minutes loading (and GBs holding) the whole set before the
+            # first parse — no progress, heavy memory. Instead pull ``batch`` rows past a
+            # stable_id cursor at a time (PK-indexed, no OFFSET scan); the cursor doubles
+            # as the resume checkpoint.
+            total = cat.conn.execute(
+                "SELECT count(*) FROM documents WHERE source=? AND raw_path IS NOT NULL "
+                "AND payload_hash IS NOT NULL AND stable_id > ?",
+                (source, after_stable_id or "")).fetchone()[0]
             ok = skip = fail = 0
 
             def _work(r: dict) -> str:
@@ -3680,21 +3684,28 @@ class Facade:
                     return "fail"
 
             done = 0
+            cursor = after_stable_id or ""
             batch = 2000
             with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-                for start in range(0, total, batch):
+                while True:
                     if cancel_check and cancel_check():
                         break
-                    chunk = rows[start: start + batch]
+                    chunk = [dict(r) for r in cat.conn.execute(
+                        "SELECT stable_id, raw_path, payload_hash, meta_json FROM documents "
+                        "WHERE source=? AND raw_path IS NOT NULL AND payload_hash IS NOT NULL "
+                        "AND stable_id > ? ORDER BY stable_id LIMIT ?",
+                        (source, cursor, batch)).fetchall()]
+                    if not chunk:
+                        break
                     for res in ex.map(_work, chunk):
                         done += 1
                         ok += res == "ok"
                         skip += res == "skip"
                         fail += res == "fail"
-                    last = chunk[-1]["stable_id"]
+                    cursor = chunk[-1]["stable_id"]
                     _progress(on_progress, stage=f"reparsing {source}", done=done, total=total,
-                              item=last, _checkpoint={"phase": "reparse", "source": source,
-                                                      "after_stable_id": last})
+                              item=cursor, _checkpoint={"phase": "reparse", "source": source,
+                                                        "after_stable_id": cursor})
         return {"source": source, "total": total, "reparsed": ok, "skipped": skip, "failed": fail}
 
     def _resolve_seeds(self, cat, seeds: list[str] | None, seed_rule: dict | None) -> set[str]:
