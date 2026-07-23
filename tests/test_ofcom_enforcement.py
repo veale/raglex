@@ -164,3 +164,38 @@ def test_non_osa_action_gets_no_forced_osa_edge():
     # the OSA is never named → no interprets edge to the OSA is asserted, and no regime
     assert all(r.dst_id != OSA_ID for r in rec.relations)
     assert "regime" not in rec.extra
+
+
+def test_cursor_passed_old_actions_yield_light_stubs():
+    """With a cursor, an action published before it AND older than the open-
+    investigation window must NOT have its detail page fetched during discovery —
+    the daily run's cost for the settled long tail is one PK-lookup dedup per
+    action, not a re-download of the whole register."""
+
+    class _CountingClient(_FakeClient):
+        def __init__(self, *a):
+            super().__init__(*a)
+            self.detail_gets = 0
+
+        def get(self, url, headers=None):
+            if "/enforcement?" not in url and ".pdf" not in url and "?v=" not in url:
+                self.detail_gets += 1
+            return super().get(url, headers=headers)
+
+    pdf = _tiny_pdf("x " * 40)
+    client = _CountingClient(LISTING, DETAIL, pdf)
+    ad = OfcomEnforcementAdapter(client=client, sweep_days=0)
+    # cursor past the item's 2026-07-16 publication; sweep window closed → light stub
+    stubs = list(ad.discover("2026-07-20"))
+    assert len(stubs) == 1
+    assert client.detail_gets == 0
+    assert "contenthash" not in stubs[0].hints and "detail" not in stubs[0].hints
+    # …but if the light stub turns out not to be held, fetch() gets the page itself
+    rec = ad.fetch(stubs[0])
+    assert client.detail_gets == 1
+    assert rec is not None and rec.extra["status"] == "Open"
+    # without a cursor (backfill) the full detail-hash sweep still happens
+    client2 = _CountingClient(LISTING, DETAIL, pdf)
+    ad2 = OfcomEnforcementAdapter(client=client2, sweep_days=0)
+    stubs2 = list(ad2.discover(None))
+    assert client2.detail_gets == 1 and stubs2[0].hints.get("contenthash")

@@ -81,3 +81,21 @@ def test_watermark_roundtrip(catalogue):
     assert catalogue.get_watermark("uk-caselaw") is None
     catalogue.set_watermark("uk-caselaw", "2024-01-15")
     assert catalogue.get_watermark("uk-caselaw") == "2024-01-15"
+
+
+def test_sqlite_and_postgres_ddl_declare_the_same_tables():
+    """The runtime keeps TWO schema definitions (catalogue.py for SQLite, _postgres.py
+    for Postgres). A table added to one but not the other passes every SQLite-backed
+    test and then fails in production with 'relation does not exist' — which is
+    exactly how source_stats shipped broken."""
+    import re
+
+    from raglex.storage import _postgres, catalogue
+
+    def tables(ddl: str) -> set[str]:
+        return set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", ddl))
+
+    sqlite_tables = tables(catalogue._DDL if hasattr(catalogue, "_DDL") else catalogue.DDL)
+    pg_tables = tables(_postgres.PG_DDL)
+    # embeddings uses backend-specific vector/FTS types but must exist in both
+    assert sqlite_tables == pg_tables

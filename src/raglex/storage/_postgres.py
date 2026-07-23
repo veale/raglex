@@ -204,6 +204,14 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 );
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 
+-- Per-source resolved-outgoing roll-up read by the Explore homepage instead of a
+-- minutes-long live GROUP BY over relations x documents. Rebuilt with citation_counts.
+CREATE TABLE IF NOT EXISTS source_stats (
+    source            TEXT PRIMARY KEY,
+    resolved_outgoing BIGINT NOT NULL DEFAULT 0,
+    rebuilt_at        TEXT NOT NULL
+);
+
 -- Per-document citation-network statistics (PageRank over the resolved mentions
 -- graph, treatments deliberately unweighted — not reliable yet). Rebuilt wholesale.
 -- NB executescript splits this DDL on semicolons WITHOUT stripping comments, so

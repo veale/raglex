@@ -219,9 +219,13 @@ class OfcomEnforcementAdapter(BaseAdapter):
     requires_proxy = False
 
     def __init__(self, *, topic: str = "67866", results: int = 200,
+                 sweep_days: int = 60,
                  client: RateLimitedClient | None = None) -> None:
         self.topic = str(topic)
         self.results = results
+        # actions published within this window are detail-hashed on EVERY run (open
+        # investigations mutate in place); older cursor-passed actions get light stubs
+        self.sweep_days = int(sweep_days)
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     # The listing endpoint is unreliable about NumberOfResults: some values return the
@@ -255,12 +259,31 @@ class OfcomEnforcementAdapter(BaseAdapter):
         return self._client.get(url, headers=_HEADERS)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        from datetime import date, timedelta
+
+        # The listing carries no change signal, so change detection means fetching each
+        # action's page and hashing it. Doing that for EVERY action on EVERY run meant a
+        # daily re-download of the whole register just to conclude "unchanged". The
+        # cursor splits the register: actions already behind the watermark AND older than
+        # the open-investigation window yield a LIGHT stub — the pipeline dedups it by
+        # slug with one PK lookup, no download. Recent actions are still detail-hashed
+        # each run (open investigations mutate in place: status, added case documents).
+        # A silent update to a long-closed action is caught by a backfill (since=None),
+        # which detail-hashes everything again.
+        sweep_floor = (date.today() - timedelta(days=self.sweep_days)).isoformat()
+        cursor = str(since)[:10] if since else None
         for item in self._all_listing_items():
+            url = item.url if item.url.startswith("http") else BASE_URL + item.url
+            pub = item.published.isoformat() if item.published else None
+            if cursor and pub and pub <= cursor and pub < sweep_floor:
+                yield Stub(stable_id=_action_slug(item.url), landing_url=url,
+                           raw_url=item.url, hint_date=item.published,
+                           title=item.title, hints={"item": item})
+                continue
             # fetch the action page to hash its content (status + doc set + narrative) —
             # the reliable update signal; passed on so fetch() need not re-fetch the HTML.
             # A single bad action page (404, transient error, unparseable) must NOT abort
             # the whole crawl — skip it and carry on with the rest.
-            url = item.url if item.url.startswith("http") else BASE_URL + item.url
             try:
                 dresp = self._get(url)
                 dhtml = dresp.content.decode("utf-8", "replace") if isinstance(dresp.content, bytes) else str(dresp.content)
@@ -269,7 +292,7 @@ class OfcomEnforcementAdapter(BaseAdapter):
                 continue
             yield Stub(
                 stable_id=_action_slug(item.url),
-                landing_url=item.url if item.url.startswith("http") else BASE_URL + item.url,
+                landing_url=url,
                 raw_url=item.url,
                 hint_date=item.published or detail.published,
                 title=detail.title or item.title,
@@ -280,7 +303,13 @@ class OfcomEnforcementAdapter(BaseAdapter):
         from ..extraction import extract_bytes
 
         item: ListingItem = stub.hints["item"]
-        detail: Detail = stub.hints["detail"]
+        detail: Detail | None = stub.hints.get("detail")
+        if detail is None:
+            # a light (cursor-passed) stub that turned out NOT to be held — fetch the
+            # action page now; discovery skipped it to spare the daily register sweep
+            resp = self._get(stub.landing_url)
+            html = resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content)
+            detail = parse_detail(html)
         regime = TOPIC_REGIME.get(self.topic, OSA_ID)
 
         # combined text: the HTML narrative + the inlined case-document PDFs
