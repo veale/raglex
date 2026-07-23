@@ -4060,7 +4060,6 @@ function UnfetchablePanel() {
   }, [data?._warming]);
   const [upRef, setUpRef] = useState<string | null>(null);
   const [linkRef, setLinkRef] = useState<string | null>(null);
-  const [holMsg, setHolMsg] = useState("");
   const [jur, setJur] = useState<string | null>(null);
   const all: any[] = data?.references || [];
   // Facet over the WHOLE set so the token counts stay honest while one is selected.
@@ -4081,15 +4080,7 @@ function UnfetchablePanel() {
           <span className="muted"> — most-cited authorities the system can’t fetch (classic reporters, cases by name). Follow the link, then upload the file to resolve every citation to it at once.</span>
           {data?.total != null && <span className="tag" style={{ marginLeft: 8 }}>{data.total.toLocaleString()}</span>}
         </h3>
-        <button className="mini" style={{ flex: "0 0 auto" }}
-          title="Scrape the House of Lords archive (1996–2009) and match reporter-only citations ('[1998] AC 1') to the harvested cases by name + year. Runs in the background — see the Jobs panel."
-          onClick={async () => {
-            try { await api.harvestHoL(); setHolMsg("✓ queued — watch the Jobs panel"); }
-            catch (e: any) { setHolMsg("✗ " + e); }
-          }}>
-          ⚖ scrape House of Lords + match</button>
       </div>
-      {holMsg && <p className={holMsg.startsWith("✗") ? "err" : "ok"} style={{ fontSize: 12 }}>{holMsg}</p>}
       <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
         <label style={{ fontSize: 13 }}
           title="How many documents must cite a reference for it to appear. Most hanging references are cited exactly once; including them makes this list much slower to build.">

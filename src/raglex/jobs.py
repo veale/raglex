@@ -37,7 +37,7 @@ log = logging.getLogger("raglex.jobs")
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "backfill-eu-stubs",
-    "rebuild-citation-counts", "rebuild-authority", "auto-drain", "harvest-hol", "match-reports",
+    "rebuild-citation-counts", "rebuild-authority", "auto-drain", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
     # one relation-range cursor over the whole graph — two would double-resolve ranges
@@ -158,7 +158,6 @@ RUNNERS: dict[str, Callable] = {
     "expand-citing": lambda f, p, cb, cancel: f.expand_citing_cases(**p, on_progress=cb, cancel_check=cancel),
     "refresh-category": lambda f, p, cb, cancel: f.refresh_category(**p, on_progress=cb, cancel_check=cancel),
     "seed-text": lambda f, p, cb, cancel: f.seed_from_text(**p, on_progress=cb, cancel_check=cancel),
-    "harvest-hol": lambda f, p, cb, cancel: f.harvest_house_of_lords(**p, on_progress=cb, cancel_check=cancel),
     "match-reports": lambda f, p, cb, cancel: f.match_report_citations(on_progress=cb, cancel_check=cancel),
     "import-bailii-corpus": lambda f, p, cb, cancel: f.import_bailii_corpus(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-zip": lambda f, p, cb, cancel: f.import_bailii_zip(**p, on_progress=cb, cancel_check=cancel),

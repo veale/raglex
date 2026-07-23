@@ -222,7 +222,6 @@ export const api = {
     req<any>(`/refinement-flags/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
   unfetchable: (limit = 200, min_citing?: number) =>
     req<any>(`/unresolved/unfetchable?limit=${limit}${min_citing ? `&min_citing=${min_citing}` : ""}`),
-  harvestHoL: () => req<any>("/jobs/harvest-hol", { method: "POST", body: "{}" }),
   radiate: (body: Record<string, unknown>) =>
     req<any>("/radiate", { method: "POST", body: JSON.stringify(body) }),
   discoverCiting: (target: string, via = "auto") =>
