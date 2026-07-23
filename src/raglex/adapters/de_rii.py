@@ -23,6 +23,10 @@ from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..formats.rii_xml import parse_rii
 from ..citations.german import case_alias
+# YYYYMMDD → date; shared with the gii ToC (both juris exports use compact dates).
+# Referenced unimported here previously, so the ToC-diff network path — the only
+# no-download way to run de-rii — died with a NameError on its first item.
+from .de_gii import _compact_date
 
 TOC_URL = "https://www.rechtsprechung-im-internet.de/rii-toc.xml"
 

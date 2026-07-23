@@ -172,3 +172,65 @@ def test_bulk_sources_registered():
     cat = {r["key"]: r for r in source_catalog()}
     assert cat["de-gii"]["jurisdiction"] == "DE"
     assert cat["fr-dila"]["kind"] == "caselaw"
+
+
+# -- bulk harvest recovery ---------------------------------------------------
+
+def test_de_rii_toc_discovery_survives_without_local_path(monkeypatch):
+    """The ToC-diff network path previously died with a NameError (`_compact_date`
+    was never imported) on its FIRST item — the only no-download way to run de-rii
+    was entirely unusable."""
+    toc = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel><item>
+      <gericht>BGH</gericht><entsch-datum>20210512</entsch-datum>
+      <aktenzeichen>VI ZR 100/20</aktenzeichen>
+      <link>https://www.rechtsprechung-im-internet.de/jportal/docs/bsjrs/KORE123</link>
+      <modified>2021-05-13</modified>
+    </item></channel></rss>"""
+
+    class FakeResp:
+        status_code = 200
+        content = toc
+
+    adapter = DeRiiAdapter()
+    monkeypatch.setattr(adapter, "_client", type("C", (), {
+        "get": lambda self, url, **kw: FakeResp()})())
+    stubs = list(adapter.discover(None))
+    assert len(stubs) == 1
+    assert stubs[0].stable_id == "KORE123"
+    from datetime import date
+    assert stubs[0].hint_date == date(2021, 5, 12)
+
+
+def test_bulk_harvest_recovers_stored_but_unextracted_backlog(tmp_path):
+    """An ECLI-keyed bulk source stores under the ECLI resolved at fetch, so the
+    pipeline's per-stub held check (keyed on the FILE name) never matches on restart —
+    the durable-backlog rebuild must pick those documents up for extraction anyway."""
+    from raglex.config import Config
+    from raglex.core.models import Record
+    from raglex.facade import Facade
+
+    data_dir = tmp_path / "data"
+    f = Facade(Config(
+        data_dir=data_dir, catalogue_path=data_dir / "cat.sqlite",
+        raw_dir=data_dir / "raw", text_dir=data_dir / "text",
+        settings_path=data_dir / "settings.json",
+        embed_provider="local-hashing", embed_model=None,
+    ))
+    # simulate an interrupted earlier run: document stored, never extracted
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source="fr-dila", stable_id="ECLI:FR:CCASS:2021:C100400",
+                     ecli="ECLI:FR:CCASS:2021:C100400", doc_type=DocType.JUDGMENT,
+                     title="Cass civ 1", text="Sur le moyen unique, la Cour casse.")
+        rec.ensure_payload_hash()
+        text_path = str(ts.put(rec.payload_hash, rec.text))
+        cat.upsert_document(rec, raw_path=None, text_path=text_path)
+        assert cat.get_document(rec.stable_id)["last_extracted_at"] is None
+    # a fresh harvest over an EMPTY corpus dir discovers nothing new, but the
+    # bulk-source backlog rebuild must still finish the stored document
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    f.harvest("fr-dila", backfill=True, max_pages=None,
+              options={"path": str(empty), "fond": "CASS"})
+    with f._open() as (cat, _rs, _ts):
+        assert cat.get_document("ECLI:FR:CCASS:2021:C100400")["last_extracted_at"]

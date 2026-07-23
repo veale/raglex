@@ -153,13 +153,19 @@ class RuleEngine:
                     applied.append(rule["tag"])
         return applied
 
-    def run_on_documents(self, stable_ids, *, on_progress=None, cancel_check=None) -> int:
+    def run_on_documents(self, stable_ids, *, start: int = 0,
+                         on_progress=None, cancel_check=None) -> int:
         """Apply enabled rules to a bulk-import set with one compiled rule snapshot.
 
         ``run_on_document`` deliberately reloads rules so an interactive ingest sees
         edits immediately. Repeating that lookup millions of times in a bulk import is
         pure overhead; this path loads and parses each rule once and remains resumable
         because tag upserts are idempotent.
+
+        ``start`` offsets the reported/checkpointed position when the caller already
+        sliced an ordered worklist (a resumed bulk post-process passes the tail and the
+        number of documents its predecessor completed), so ``done``/``completed`` stay
+        absolute across attempts.
         """
         compiled = []
         for rule in self.catalogue.list_rules(enabled_only=True):
@@ -167,7 +173,7 @@ class RuleEngine:
             compiled.append((rule, tree, root_method(tree)))
         if not compiled:
             return 0
-        total = len(stable_ids)
+        total = start + len(stable_ids)
         written = 0
         for i, stable_id in enumerate(stable_ids, 1):
             if cancel_check and cancel_check():
@@ -184,10 +190,11 @@ class RuleEngine:
                         rule_version=rule["version"],
                     ):
                         written += 1
-            if on_progress and (i == 1 or i % 1000 == 0 or i == total):
+            done = start + i
+            if on_progress and (i == 1 or i % 1000 == 0 or done == total):
                 on_progress(
-                    stage="tagging harvested documents", done=i, total=total,
+                    stage="tagging harvested documents", done=done, total=total,
                     item=stable_id,
-                    _checkpoint={"phase": "tag", "completed": i, "last_id": stable_id},
+                    _checkpoint={"phase": "tag", "completed": done, "last_id": stable_id},
                 )
         return written

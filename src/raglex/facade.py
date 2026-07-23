@@ -4226,7 +4226,15 @@ class Facade:
                 cat.commit()
 
                 # extract each new judgment's own outgoing citations (pending edges), then
-                # one whole-graph resolve links everything the new nodes/aliases satisfy.
+                # resolve in bounded relation ranges. The worklist is this run's imports
+                # UNION the durable backlog (stored, never stamped, no citation rows) —
+                # an interrupted previous run's imports dedup as "already held" on resume,
+                # so an in-memory queue alone would strand them without a citation graph.
+                to_extract = list(dict.fromkeys([
+                    *to_extract,
+                    *cat.text_document_ids(source="uk-caselaw", only_unextracted=True,
+                                           only_never_extracted=True),
+                ]))
                 for i, sid in enumerate(to_extract):
                     if cancel_check and cancel_check():
                         break
@@ -4239,7 +4247,8 @@ class Facade:
                         cat.commit()
                         _progress(on_progress, stage="extracting citations", done=i, total=len(to_extract))
                 cat.commit()
-                resolved = Resolver(cat).run()
+                resolved = Resolver(cat).run_batched(
+                    on_progress=on_progress, cancel_check=cancel_check)
         finally:
             if out_f:
                 out_f.close()
@@ -4787,7 +4796,10 @@ class Facade:
             if extract and not (cancel_check and cancel_check()):
                 from .citations import extract_document
                 aliases = cat.named_alias_map()
-                pending = cat.text_document_ids(source="in-caselaw", only_unextracted=True)
+                # never-stamped AND no rows: don't re-extract citation-free judgments
+                # on every resume (see import_bailii_parquet for the full rationale).
+                pending = cat.text_document_ids(source="in-caselaw", only_unextracted=True,
+                                                only_never_extracted=True)
                 for i, sid in enumerate(pending):
                     if cancel_check and cancel_check():
                         break
@@ -4802,8 +4814,8 @@ class Facade:
                     if i % 200 == 0:
                         cat.commit()
                 cat.commit()
-                _progress(on_progress, stage="resolving citations", done=0, total=0)
-                resolved_n = Resolver(cat).run().resolved
+                resolved_n = Resolver(cat).run_batched(
+                    on_progress=on_progress, cancel_check=cancel_check).resolved
         st["resolved_edges"] = resolved_n
         self._invalidate_caches()
         return st
@@ -5233,7 +5245,16 @@ class Facade:
             if extract and not (cancel_check and cancel_check()):
                 from .citations import extract_document
                 aliases = cat.named_alias_map()
-                pending = cat.text_document_ids(doc_types=["judgment"], only_unextracted=True)
+                # The backlog is "never stamped AND no citation rows". The old
+                # ``only_unextracted``-only select re-picked every legitimately
+                # citation-free judgment on each resume — over the tribunal long tail
+                # that re-extracted a large slice of the 551k dump per relaunch. The
+                # stamp alone would instead sweep in every pre-stamp-era FCL document
+                # (extracted, cited, but never stamped); ANDing both selects exactly
+                # the unfinished remainder.
+                pending = cat.text_document_ids(doc_types=["judgment"],
+                                                only_unextracted=True,
+                                                only_never_extracted=True)
                 for i, sid in enumerate(pending):
                     if cancel_check and cancel_check():
                         break
@@ -5248,8 +5269,10 @@ class Facade:
                     if i % 200 == 0:
                         cat.commit()
                 cat.commit()
-                _progress(on_progress, stage="resolving citations", done=0, total=0)
-                resolved_n = Resolver(cat).run().resolved
+                # Bounded, cancellable relation ranges with real progress — not one
+                # whole-graph UPDATE in a single transaction reported as "0/0".
+                resolved_n = Resolver(cat).run_batched(
+                    on_progress=on_progress, cancel_check=cancel_check).resolved
         st["resolved_edges"] = resolved_n
         st["files"] = files
         self._invalidate_caches()
@@ -6870,7 +6893,13 @@ class Facade:
                               total=total, item=sid,
                               _checkpoint={"phase": "extract", "completed": i + 1,
                                            "last_id": sid, "run_id": run_id})
-            resolved = Resolver(cat).run()
+            # Large rescans regenerate millions of pending edges; resolve them in
+            # bounded, cancellable ranges rather than one whole-graph transaction.
+            if total >= 10000:
+                resolved = Resolver(cat).run_batched(
+                    on_progress=on_progress, cancel_check=cancel_check)
+            else:
+                resolved = Resolver(cat).run()
         report["extract"] = {"docs_reextracted": docs, "citations": cites,
                              "resolved_edges": resolved.resolved, "total": total}
         self._invalidate_caches()
@@ -7772,6 +7801,7 @@ class Facade:
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
         refetch_held: bool = False, use_llm: bool | None = None,
+        postprocess_after_relation_id: int = 0,
         on_progress=None, cancel_check=None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
@@ -7788,12 +7818,31 @@ class Facade:
             adapter = get_adapter(source, **(options or {}))
         except (KeyError, TypeError) as exc:
             return {"error": str(exc)}
+
+        # Keep the durable discovery cursor visible on EVERY later phase's checkpoint.
+        # Discovery persists {"phase": "discover", "resume_offset": N}; without merging,
+        # the first extract/resolve/tag checkpoint OVERWRITES it — so a job interrupted
+        # after discovery would resume by replaying the entire upstream walk from 0
+        # (the exact failure the offset exists to prevent).
+        discover_cursor: dict = {}
+
+        def _phase_progress(**p) -> None:
+            ck = p.get("_checkpoint")
+            if isinstance(ck, dict):
+                if ck.get("phase") == "discover":
+                    discover_cursor.update(
+                        {k: ck[k] for k in ("source", "resume_offset") if ck.get(k) is not None})
+                elif discover_cursor:
+                    for k, v in discover_cursor.items():
+                        ck.setdefault(k, v)
+            _progress(on_progress, **p)
+
         with self._open() as (cat, rs, ts):
             pipe = Pipeline(cat, rs, textstore=ts)
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
                              refetch_held=refetch_held,
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,
-                             on_progress=on_progress, cancel_check=cancel_check)
+                             on_progress=_phase_progress, cancel_check=cancel_check)
             # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.
             # (Re-extracting all ~20k docs on every harvest was O(minutes) of pure-CPU
             # grammar work; resolution already links existing pending edges to the new
@@ -7801,12 +7850,25 @@ class Facade:
             # re-fetched (contenthash changed) aren't "new" but their text changed, so
             # they get the same re-extract/classify pass.
             new_ids = list(dict.fromkeys([*stats.stored_ids, *stats.refreshed_ids]))
-            # A cursor-resumed discovery intentionally skips the already-walked prefix.
-            # Rebuild its downstream worklist from durable state instead of replaying
-            # hundreds of thousands of upstream records merely to repopulate a Python
-            # list. ``last_extracted_at`` is stamped even for citation-free documents,
-            # so this selects precisely the stored-but-unfinished backlog.
-            if (options or {}).get("start_offset"):
+            # Bulk primary-law/caselaw sources: no guidance can occur in them (skip the
+            # per-document classification PK lookups) and their post-processing must be
+            # rebuilt from durable state on restart (see below).
+            primary_bulk_sources = {
+                "fr-dila", "fr-dila-legi", "de-rii", "de-gii", "de-gesetze",
+                "de-gesetze-im-internet", "nl-rechtspraak", "nl-legislation",
+            }
+            # Rebuild the extraction worklist from durable state instead of an in-memory
+            # list two ways of losing it:
+            # - a cursor-resumed discovery (``start_offset``) intentionally skips the
+            #   already-walked prefix, so ``stored_ids`` misses everything stored before
+            #   the restart;
+            # - ECLI-keyed bulk sources (de-rii, the DILA jurisprudence funds) key their
+            #   stubs on the FILE name but store under the ECLI resolved at fetch, so the
+            #   pipeline's held-but-unextracted carry-forward never matches them and a
+            #   restart would strand the whole stored backlog with no citation graph.
+            # ``last_extracted_at`` is stamped even for citation-free documents, so this
+            # selects precisely the stored-but-unfinished backlog and converges.
+            if (options or {}).get("start_offset") or adapter.source in primary_bulk_sources:
                 new_ids = list(dict.fromkeys([
                     *cat.text_document_ids(source=adapter.source, only_never_extracted=True),
                     *new_ids,
@@ -7816,11 +7878,16 @@ class Facade:
             llm_cite, classifier = self._llm_passes(use_llm)
             aliases = cat.named_alias_map()
             total_new = len(new_ids)
+            # Per-document progress is right for a 30-item watch, wrong for a 1.7m-doc
+            # bulk seed: every callback yields the GIL for 3ms in the job runner, which
+            # alone is ~90 minutes across 1.7m documents. Throttle large runs.
+            report_every = 1 if total_new <= 2000 else 200
             for i, sid in enumerate(new_ids, 1):
                 if cancel_check and cancel_check():
                     break
-                if on_progress:
-                    on_progress(stage="extracting citations", done=i, total=total_new, item=sid)
+                if i == 1 or i % report_every == 0 or i == total_new:
+                    _phase_progress(stage="extracting citations", done=i, total=total_new,
+                                    item=sid, _checkpoint={"phase": "extract", "done": i})
                 extract_document(cat, ts, sid, llm=llm_cite, aliases=aliases)
                 classify_corpus(cat, ts, classifier=classifier, stable_id=sid)
             # Guidance classification (§1.9/§4a): every guidance-typed document — and
@@ -7830,17 +7897,13 @@ class Facade:
             # edpb-oss: those are national DPA decisions, not Board guidance.
             # Bulk primary-law/caselaw sources cannot contain guidance. Avoid millions
             # of pointless PK lookups after DILA, RII/GII, or Rechtspraak imports.
-            primary_bulk_sources = {
-                "fr-dila", "fr-dila-legi", "de-rii", "de-gii", "de-gesetze",
-                "de-gesetze-im-internet", "nl-rechtspraak", "nl-legislation",
-            }
             if adapter.source not in primary_bulk_sources:
                 for i, sid in enumerate(new_ids, 1):
                     if cancel_check and cancel_check():
                         break
-                    if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
-                        on_progress(stage="classifying harvested documents", done=i,
-                                    total=len(new_ids), item=sid)
+                    if i == 1 or i % 1000 == 0 or i == len(new_ids):
+                        _phase_progress(stage="classifying harvested documents", done=i,
+                                        total=len(new_ids), item=sid)
                     doc = cat.get_document(sid)
                     if doc is not None and (doc["doc_type"] == "guidance" or doc["source"] == "edpb"):
                         self._classify_guidance_into(cat, ts, sid)
@@ -7859,21 +7922,25 @@ class Facade:
                 if len(new_ids) >= bulk_threshold:
                     # Never issue one target-side UPDATE per imported document. At DILA
                     # scale that meant 1.7m scans and a months-long "silent" phase.
+                    # ``postprocess_after_relation_id`` is the relation cursor a resumed
+                    # job restores so an interrupted resolve continues instead of
+                    # rescanning already-committed ranges.
                     bulk = resolver.run_batched(
-                        on_progress=on_progress, cancel_check=cancel_check,
+                        after_id=postprocess_after_relation_id,
+                        on_progress=_phase_progress, cancel_check=cancel_check,
                     )
                     resolved_n += bulk.resolved
                     if not (cancel_check and cancel_check()):
                         rules.run_on_documents(
-                            new_ids, on_progress=on_progress, cancel_check=cancel_check,
+                            new_ids, on_progress=_phase_progress, cancel_check=cancel_check,
                         )
                 else:
                     for i, sid in enumerate(new_ids, 1):
                         if cancel_check and cancel_check():
                             break
-                        if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
-                            on_progress(stage="resolving harvested citations", done=i,
-                                        total=len(new_ids), item=sid)
+                        if i == 1 or i % 1000 == 0 or i == len(new_ids):
+                            _phase_progress(stage="resolving harvested citations", done=i,
+                                            total=len(new_ids), item=sid)
                         doc = cat.get_document(sid)
                         resolved_n += cat.resolve_pending_from(sid)
                         resolved_n += resolver.run_for(sid, doc["ecli"] if doc else None)
@@ -7882,6 +7949,52 @@ class Facade:
             result.pop("stored_ids", None)  # internal and potentially hundreds of thousands
             return {**result, "resolved_edges": resolved_n,
                     "new_documents": len(new_ids)}
+
+    def finish_bulk_postprocess(self, *, source: str | None = None, resolve: bool = True,
+                                tag: bool = True, batch_size: int = 50000,
+                                after_relation_id: int = 0, tag_start: int = 0,
+                                on_progress=None, cancel_check=None) -> dict:
+        """Complete the resolve/tag phases of a bulk import WITHOUT re-running discovery
+        or citation extraction — the recovery path for a large harvest whose
+        post-processing was interrupted (or ran under the old one-UPDATE-per-document
+        algorithm and had to be cancelled).
+
+        Resolution runs set-wise over bounded relation-id ranges
+        (:meth:`Resolver.run_batched`), committing and checkpointing each range;
+        ``after_relation_id`` restores the persisted cursor so a resumed job continues
+        rather than rescanning. Tagging applies the enabled rules once over ``source``'s
+        text documents in stable (sorted) id order; ``tag_start`` skips the prefix a
+        previous attempt completed. Both phases are idempotent, so replaying the last
+        bounded range after an interruption is safe.
+
+        The invariant this protects: a large import must NEVER perform incoming-target
+        resolution once per imported document — that is what turned the 1.7m-document
+        DILA import's final phase into months of repeated pending-edge scans.
+        """
+        from .tagging import RuleEngine
+
+        out: dict = {"source": source or "*"}
+        with self._open() as (cat, _rs, _ts):
+            if resolve:
+                stats = Resolver(cat).run_batched(
+                    batch_size=batch_size, after_id=after_relation_id,
+                    on_progress=on_progress, cancel_check=cancel_check)
+                out["resolved_edges"] = stats.resolved
+                if stats.still_pending:
+                    out["still_pending"] = stats.still_pending
+            if tag and not (cancel_check and cancel_check()):
+                rules = RuleEngine(cat)
+                # sorted() pins the order: text_document_ids orders by the extraction
+                # stamp, which the NEXT extraction pass would reshuffle under a resumed
+                # tag cursor. No extraction runs inside this job, but sorting makes the
+                # ``tag_start`` offset stable against that hazard for free.
+                ids = sorted(cat.text_document_ids(source=source))
+                out["tag_total"] = len(ids)
+                out["tagged"] = rules.run_on_documents(
+                    ids[tag_start:], start=tag_start,
+                    on_progress=on_progress, cancel_check=cancel_check)
+        self._invalidate_caches()
+        return out
 
     def list_sources(self) -> list[str]:
         from .adapters.registry import ADAPTERS

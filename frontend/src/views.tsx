@@ -2990,6 +2990,7 @@ function SourceCaps({ info }: { info: any }) {
 function KeepCurrentPanel() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ppSource, setPpSource] = useState("");
   const runNow = (kind: any, label: string) => fireJob(kind, {}, (m) => setMsg(`${label}: ${m}`));
   const auto = [
     ["Pull EU case names / subjects (EUR-Lex)", "daily", "Fills missing CJEU case names so their OSCOLA citations read properly."],
@@ -3030,6 +3031,16 @@ function KeepCurrentPanel() {
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain. Never-scanned documents go FIRST, and anything already scanned in the last 7 days is skipped (pass stale_days:0 to force a full redo).">⟳ Full relink (judgments)</button>
         <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain. Never-scanned first; skips anything scanned in the last 7 days.">⟳ Full relink (all)</button>
         <button onClick={() => fireJob("rescan", { stale_days: 7 }, (m) => setMsg(`rescan stale (>1 week): ${m}`))} title="Re-extract only documents NOT scanned in the last 7 days, then run the resolution chain. Reads the last-extracted stamp (and, retroactively, the newest citation timestamp) so it skips whatever a current/recent rescan already covered — cheap to run after a restart.">⟳ Rescan stale (&gt;1 week)</button>
+      </div>
+      <div className="row" style={{ marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={() => fireJob("finish-bulk-postprocess", ppSource.trim() ? { source: ppSource.trim() } : {}, (m) => setMsg(`finish bulk post-processing: ${m}`))}
+          title="Finish an interrupted bulk import's resolve + tag phases WITHOUT re-running discovery or citation extraction. Resolution runs in bounded, checkpointed relation-id batches (safe to cancel and restart — it continues from its saved cursor); tagging is one idempotent pass. Use after cancelling a huge harvest (DILA, RII/GII, Rechtspraak) whose extraction already finished.">⛭ Finish bulk post-processing</button>
+        <label style={{ flex: "0 0 auto", fontSize: 12 }} className="muted">source for the tag pass (blank = resolve only, whole graph)
+          <input value={ppSource} onChange={(e) => setPpSource(e.target.value)} placeholder="e.g. fr-dila" style={{ width: 160, marginLeft: 6 }} list="pp-bulk-sources" />
+          <datalist id="pp-bulk-sources">
+            {["fr-dila", "de-rii", "de-gii", "nl-rechtspraak", "nl-legislation", "uk-caselaw", "in-caselaw"].map((s) => <option key={s} value={s} />)}
+          </datalist>
+        </label>
       </div>
       {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
     </div>
@@ -3486,18 +3497,26 @@ export function JobsPanel() {
           const p = j.progress || {};
           const pct = p.total ? Math.round((100 * (p.done || 0)) / p.total) : 0;
           const isOpen = openId === j.id;
+          // The current phase from the persisted checkpoint (extract → resolve → tag),
+          // so a multi-phase bulk import shows WHICH pass its numbers count, not just a
+          // bare fraction whose meaning silently changed.
+          const phase = j.resume?.checkpoint?.phase;
           return (
             <div key={j.id} className={`job${j.stalled ? " job-stalled" : ""}`}>
               <div className="row" style={{ alignItems: "center", gap: 6 }}>
                 <a onClick={() => setOpenId(isOpen ? null : j.id)} style={{ flex: 1, cursor: "pointer", fontSize: 12 }}>
                   {isOpen ? "▾" : "▸"} {j.label || j.kind}
+                  {phase && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }} title="Current pipeline phase (from the job's saved checkpoint)">{phase}</span>}
                   {j.origin === "scheduler" && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }} title="Started by the background scheduler, not from this UI">scheduler</span>}</a>
                 {j.stalled && <span className="job-stall-tag" title={`No progress for ${Math.round(j.idle_s)}s — the job is probably frozen (its network connection died, e.g. after the host slept). Restart to resume from where the data left off; it skips work already done.`}>frozen?</span>}
                 <button className="mini" title="Re-run this job from where its saved data left off (skips work already done). Use it when a job has frozen after the machine slept/woke." onClick={() => api.restartJob(j.id)}>↻ restart</button>
                 <button className="mini" onClick={() => api.cancelJob(j.id)}>cancel</button>
               </div>
               <div className="job-bar"><div style={{ width: `${pct}%` }} /></div>
-              <div className="muted" style={{ fontSize: 11 }}>{j.last || (p.stage ? `${p.stage} ${p.done ?? 0}/${p.total ?? "?"}` : "starting…")}</div>
+              <div className="muted" style={{ fontSize: 11 }}>
+                {j.last || (p.stage ? `${p.stage} ${p.done ?? 0}/${p.total ?? "?"}` : "starting…")}
+                {j.eta_s != null && j.eta_s > 0 && <span style={{ marginLeft: 6 }} title={j.rate_per_s ? `${j.rate_per_s}/s` : undefined}>· ~{fmtEta(j.eta_s)} left</span>}
+              </div>
               {isOpen && detail?.log && (
                 <pre className="job-log">{(detail.log || []).slice(-14).join("\n")}</pre>
               )}
@@ -3513,6 +3532,14 @@ export function JobsPanel() {
       </div>}
     </div>
   );
+}
+
+// Compact remaining-time estimate for the jobs dock: "3d 4h", "2h 10m", "5m", "40s".
+function fmtEta(s: number): string {
+  if (s >= 86400) return `${Math.floor(s / 86400)}d ${Math.round((s % 86400) / 3600)}h`;
+  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+  if (s >= 60) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s)}s`;
 }
 
 function summariseRun(r: any): string {

@@ -175,6 +175,118 @@ def test_job_status_exposes_resume_lineage_and_liveness():
     assert row["process_alive"] is True
 
 
+def test_harvest_restart_keeps_discovery_cursor_after_later_phases(monkeypatch):
+    """The extract/resolve checkpoints carry the discovery offset forward, so an
+    interruption AFTER discovery must still restore ``start_offset`` — otherwise the
+    resumed job replays the whole upstream SRU walk from 0."""
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job(
+            "nl-old", "harvest-source", "NL backfill",
+            {"source": "nl-rechtspraak", "backfill": True, "options": {}},
+            origin="api", checkpoint={
+                "phase": "resolve", "relation_id": 4_200_000, "through_id": 9_000_000,
+                "source": "nl-rechtspraak", "resume_offset": 1_100_000,
+            },
+        )
+        cat.finish_job("nl-old", "interrupted", {})
+    started: dict = {}
+    mgr = JobManager(f, origin="api")
+    monkeypatch.setattr(mgr, "start",
+                        lambda kind, label, params, **resume: started.update(params=params) or {"job_id": "n"})
+    mgr.restart("nl-old")
+    assert started["params"]["options"]["start_offset"] == 1_100_000
+    # …and the committed relation cursor resumes the batched resolve mid-walk.
+    assert started["params"]["postprocess_after_relation_id"] == 4_200_000
+
+
+def test_finish_bulk_postprocess_restart_maps_phase_cursors(monkeypatch):
+    f = _facade()
+    mgr = JobManager(f, origin="api")
+    started: dict = {}
+    monkeypatch.setattr(mgr, "start",
+                        lambda kind, label, params, **resume: started.update(kind=kind, params=params) or {"job_id": "n"})
+    # interrupted mid-resolve → continue the relation-range walk from the cursor
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("pp1", "finish-bulk-postprocess", "finish fr-dila",
+                       {"source": "fr-dila"}, origin="api",
+                       checkpoint={"phase": "resolve", "relation_id": 250_000})
+        cat.finish_job("pp1", "interrupted", {})
+    mgr.restart("pp1")
+    assert started["params"]["after_relation_id"] == 250_000
+    # interrupted mid-tag → resolution is done; never redo it, continue tagging
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("pp2", "finish-bulk-postprocess", "finish fr-dila",
+                       {"source": "fr-dila"}, origin="api",
+                       checkpoint={"phase": "tag", "completed": 12_000, "last_id": "x"})
+        cat.finish_job("pp2", "interrupted", {})
+    mgr.restart("pp2")
+    assert started["params"]["resolve"] is False
+    assert started["params"]["tag_start"] == 12_000
+
+
+def test_worker_flushes_final_progress_before_finishing():
+    """The throttled heartbeat can be a second of events stale; the terminal write must
+    carry the LAST progress or a completed phase displays frozen forever (the French
+    import's 1,737,199/1,737,278)."""
+    f = _facade()
+    mgr = JobManager(f, origin="api")
+    from raglex import jobs as jobs_mod
+
+    def runner(facade, params, cb, cancel):
+        for i in range(1, 4):
+            cb(stage="extracting citations", done=i, total=3, item=f"doc/{i}")
+        return {"ok": True}
+
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("flush2", "_test-final-flush", "flush", {})
+    jobs_mod.RUNNERS["_test-final-flush"] = runner
+    try:
+        mgr._worker("flush2", "_test-final-flush", {})
+    finally:
+        del jobs_mod.RUNNERS["_test-final-flush"]
+    row = mgr.get("flush2")
+    assert row["status"] == "done"
+    assert row["progress"] == {"stage": "extracting citations", "done": 3,
+                               "total": 3, "item": "doc/3"}
+
+
+def test_finish_bulk_postprocess_resolves_and_tags_without_extraction():
+    """The recovery job: pending edges whose targets exist flip to resolved in bounded
+    ranges, tags apply, and no discovery/extraction runs (documents keep their stamps)."""
+    from raglex.core.models import DocType, Record, RelationshipType, TypedRelation
+
+    f = _facade()
+    with f._open() as (cat, _rs, ts):
+        for sid, cites in (("fr/a", "fr/b"), ("fr/b", None)):
+            rels = []
+            if cites:
+                rels = [TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                      raw_citation_string=cites, dst_id=None)]
+            rec = Record(source="fr-dila", stable_id=sid, doc_type=DocType.JUDGMENT,
+                         title=sid, text="corps du jugement", relations=rels)
+            rec.ensure_payload_hash()
+            text_path = str(ts.put(rec.payload_hash, rec.text))
+            cat.upsert_document(rec, raw_path=None, text_path=text_path)
+        # persist the candidate the resolver keys on (extraction normally does this)
+        cat.conn.execute(
+            "UPDATE relations SET candidate_id = 'fr/b', resolution_status = 'pending'")
+        cat.conn.commit()
+
+    events: list[dict] = []
+    out = f.finish_bulk_postprocess(source="fr-dila",
+                                    on_progress=lambda **p: events.append(p))
+    assert out["resolved_edges"] == 1
+    stages = {e.get("stage") for e in events}
+    assert "resolving harvested citations" in stages
+    with f._open() as (cat, _rs, _ts):
+        row = cat.conn.execute(
+            "SELECT dst_id, resolution_status FROM relations").fetchone()
+        assert row["resolution_status"] == "resolved" and row["dst_id"] == "fr/b"
+        # no extraction ran: the stamp is untouched
+        assert cat.get_document("fr/a")["last_extracted_at"] is None
+
+
 # -- the alert that would have caught the seventeen-day silence --------------
 
 def test_drain_stall_alert_fires_when_every_reference_is_cooling_off():

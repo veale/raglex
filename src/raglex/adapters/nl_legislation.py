@@ -45,6 +45,10 @@ DEFAULT_IDS = (
 def _date(value: str | None) -> date | None:
     if not value:
         return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 def _bulk_identity(data: bytes, name: str = "") -> tuple[str, str] | None:
@@ -61,10 +65,6 @@ def _bulk_identity(data: bytes, name: str = "") -> tuple[str, str] | None:
     if not dm:
         dm = re.search(r"(\d{4}-\d{2}-\d{2})", name)
     return (bwb.group(1).upper(), dm.group(1) if dm else "0001-01-01")
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
-    except ValueError:
-        return None
 
 
 class NLLegislationAdapter(BaseAdapter):

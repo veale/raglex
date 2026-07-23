@@ -40,6 +40,8 @@ SINGLETON_KINDS = frozenset({
     "rebuild-citation-counts", "rebuild-authority", "auto-drain", "harvest-hol", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
+    # one relation-range cursor over the whole graph — two would double-resolve ranges
+    "finish-bulk-postprocess",
     # only ever one indexing pass: two would race over the same pending_embedding queue
     "embed",
 })
@@ -66,6 +68,8 @@ RESUME_POLICIES = {
     "import-westlaw-zip": "deduplicate", "import-westlaw-dir": "deduplicate",
     "import-caselaw-zip": "deduplicate", "import-caselaw-dir": "deduplicate",
     "gap-scan": "deduplicate", "repair-au-cth": "deduplicate",
+    # resumes from the persisted relation-id / tag cursors (see _resume_row)
+    "finish-bulk-postprocess": "checkpoint",
 }
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 _SCAN_KINDS = frozenset({"rescan-citations", "rescan"})
@@ -180,6 +184,11 @@ RUNNERS: dict[str, Callable] = {
     # rather than a request that has to return.
     "harvest-source": lambda f, p, cb, cancel: f.harvest(
         **p, on_progress=cb, cancel_check=cancel),
+    # Finish an interrupted bulk import's resolve/tag phases without re-running
+    # discovery or extraction — batched, checkpointed, cancellable.
+    "finish-bulk-postprocess": lambda f, p, cb, cancel: f.finish_bulk_postprocess(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
 }
 
@@ -258,7 +267,7 @@ class JobManager:
 
     def _worker(self, job_id: str, kind: str, params: dict) -> None:
         state = {"progress": {}, "checkpoint": None, "log": [], "cancel": False,
-                 "last_poll": 0.0, "last_write": 0.0}
+                 "last_poll": 0.0, "last_write": 0.0, "last_stage": None}
         stopped = threading.Event()
 
         def cancel_check() -> bool:
@@ -285,8 +294,13 @@ class JobManager:
                 if len(state["log"]) > 300:
                     del state["log"][:100]
             # The heartbeat is a write; throttle it to ~1/s or a 20k-document loop turns
-            # into 20k UPDATEs.
-            if time.monotonic() - state["last_write"] >= 1.0:
+            # into 20k UPDATEs. A phase transition bypasses the throttle: the switch
+            # from "extracting" to "resolving" must be visible immediately, not hidden
+            # behind the last extraction line for however long the next phase's first
+            # batch takes.
+            stage_changed = p.get("stage") != state["last_stage"]
+            state["last_stage"] = p.get("stage")
+            if stage_changed or time.monotonic() - state["last_write"] >= 1.0:
                 state["last_write"] = time.monotonic()
                 try:
                     with self.facade._open() as (cat, _rs, _ts):
@@ -318,6 +332,14 @@ class JobManager:
             stopped.set()
         try:
             with self.facade._open() as (cat, _rs, _ts):
+                # Persist the FINAL progress + checkpoint before closing the row. The
+                # throttled heartbeat can be up to a second of events stale, which is
+                # how a French bulk import "froze" at 1,737,199/1,737,278 forever: the
+                # last 79 documents finished inside the throttle window and their
+                # progress was never written.
+                if state["progress"]:
+                    cat.heartbeat_job(job_id, state["progress"], state["log"],
+                                      checkpoint=state["checkpoint"])
                 cat.finish_job(job_id, status, result, state["log"])
                 finished = dict(cat.get_job(job_id))
         except Exception:  # noqa: BLE001
@@ -412,14 +434,32 @@ class JobManager:
         # Some very large catalogues expose a durable discovery cursor. Restore it
         # into the adapter options before relaunching: document deduplication prevents
         # duplicate storage, but without the cursor an NL backfill at offset 930,000
-        # still spends many hours walking those 930,000 records again.
-        if (row.get("kind") == "harvest-source"
-                and checkpoint.get("phase") == "discover"
-                and checkpoint.get("source") == params.get("source")
-                and checkpoint.get("resume_offset") is not None):
-            options = dict(params.get("options") or {})
-            options["start_offset"] = int(checkpoint["resume_offset"])
-            params["options"] = options
+        # still spends many hours walking those 930,000 records again. The cursor is
+        # honoured in ANY phase — harvest merges it into its extract/resolve/tag
+        # checkpoints precisely so an interruption after discovery doesn't restart
+        # the upstream walk from 0.
+        if row.get("kind") == "harvest-source":
+            if (checkpoint.get("source") == params.get("source")
+                    and checkpoint.get("resume_offset") is not None):
+                options = dict(params.get("options") or {})
+                options["start_offset"] = int(checkpoint["resume_offset"])
+                params["options"] = options
+            # An interrupted bulk resolve phase left a committed relation-id cursor;
+            # restore it so the resumed job continues the range walk instead of
+            # rescanning already-resolved ranges.
+            if (checkpoint.get("phase") == "resolve"
+                    and checkpoint.get("relation_id") is not None):
+                params["postprocess_after_relation_id"] = int(checkpoint["relation_id"])
+        elif row.get("kind") == "finish-bulk-postprocess":
+            phase = checkpoint.get("phase")
+            if phase == "resolve" and checkpoint.get("relation_id") is not None:
+                params["after_relation_id"] = int(checkpoint["relation_id"])
+            elif phase == "tag":
+                # resolution completed before the interruption — don't redo it, and
+                # continue tagging from the persisted absolute position.
+                params["resolve"] = False
+                if checkpoint.get("completed") is not None:
+                    params["tag_start"] = int(checkpoint["completed"])
         root = row.get("root_job_id") or row["job_id"]
         res = self.start(row["kind"], row["label"], params,
                          resumed_from=row["job_id"], root_job_id=root,

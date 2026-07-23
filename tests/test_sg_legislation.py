@@ -183,7 +183,7 @@ def test_seed_imports_sections_and_recovers_full_title_without_reconcile(facade,
     body = facade.document_body("sg/act/accountants-act-2004")
     assert body["text"] and "Short title" in "".join(
         s["label"] for s in body["segments"])
-    doc = facade.get_document("sg/act/accountants-act-2004")
+    doc = facade.get_document("sg/act/accountants-act-2004")["document"]
     assert doc["title"] == "Accountants Act 2004"        # full, not truncated
     assert doc["doc_type"] == "legislation"
 
@@ -203,7 +203,7 @@ def test_seed_reconciles_truncated_name_to_sso_code(facade, tmp_path, monkeypatc
     st = facade.import_sg_seed(dir_path=path, reconcile=True)
     assert st["reconciled"] == 2 and st["unmatched"] == 0
     # keyed by the real SSO code, full title, landing url present
-    doc = facade.get_document("sg/act/acraa2004")
+    doc = facade.get_document("sg/act/acraa2004")["document"]
     assert doc["title"] == "Accounting and Corporate Regulatory Authority Act 2004"
     assert doc["landing_url"] == "https://sso.agc.gov.sg/Act/ACRAA2004"
 

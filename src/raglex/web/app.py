@@ -622,6 +622,30 @@ def create_app(config: Config | None = None) -> FastAPI:
         verb = "backfill" if params["backfill"] else "harvest"
         return _start_job("harvest-source", f"{verb} {source} — {scope}", params)
 
+    @app.post("/jobs/finish-bulk-postprocess")
+    def job_finish_bulk_postprocess_ep(payload: dict = Body(default={})) -> dict:
+        """Finish an interrupted bulk import's resolve/tag phases WITHOUT re-running
+        discovery or citation extraction — batched relation ranges with a persisted
+        cursor, then one idempotent tagging pass over the source. The recovery job for
+        a large harvest (DILA, RII/GII, Rechtspraak) whose post-processing was cancelled
+        or died: extraction work already stored durably is never repeated."""
+        payload = payload or {}
+        params: dict = {}
+        if payload.get("source"):
+            params["source"] = str(payload["source"])
+        for key in ("resolve", "tag"):
+            if payload.get(key) is not None:
+                params[key] = bool(payload[key])
+        # No source scope → resolve-only by default: an unscoped tag pass would walk
+        # EVERY text document in the corpus, which is never what "finish this import"
+        # means. An explicit ``tag: true`` still allows it.
+        if "source" not in params and "tag" not in params:
+            params["tag"] = False
+        if payload.get("batch_size"):
+            params["batch_size"] = int(payload["batch_size"])
+        label = f"finish bulk post-processing — {params.get('source') or 'whole graph'}"
+        return _start_job("finish-bulk-postprocess", label, params)
+
     @app.get("/health/embedding")
     def embedding_health() -> dict:
         return facade.provider_health()

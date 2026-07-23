@@ -136,7 +136,7 @@ def test_import_creates_one_judgment_with_every_report_alias(facade, tmp_path):
     st = facade.import_indian_sci(dir_path=path, extract=False)
     assert st["judgments"] == 1 and st["imported"] == 1
 
-    doc = facade.get_document("insc/2020/387")
+    doc = facade.get_document("insc/2020/387")["document"]
     assert doc["stable_id"] == "insc/2020/387"
     with facade._open() as (cat, _rs, _ts):
         # both report citations resolve to the one judgment
