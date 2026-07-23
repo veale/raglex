@@ -213,25 +213,16 @@ def _iso_date(iso: str | None) -> date | None:
         return None
 
 
-# ── Federal Court & High Court: the same pattern, different backends ──────────
-# Both slot in as sibling adapters (``au-fca``, ``au-hca``) with the identical
-# incremental shape used above — a date-ordered index walked newest-first to the
-# watermark, then a per-decision fetch — reusing ``au_case_slug`` so their ids
-# (``fca/2024/255``, ``fcafc/2024/12``, ``hca/2024/1``) unify with the OALC bulk and
-# resolve pending citations. What differs is only the fetch tier:
+# ── Federal Court & High Court ───────────────────────────────────────────────
+# **au-fca** is built (see au_fca_caselaw.py): the same incremental shape as this module
+# over the Federal Court's Funnelback search (sort=date, newest-first), through the
+# stealth tier (the search WAFs plain HTTP), identity from the judgment URL segment.
+# Covers FCA + FCAFC + the federal tribunals + Norfolk Island SC.
 #
-# * **au-fca** — the Funnelback search at ``search.judgments.fedcourt.gov.au`` already
-#   sorts by ``adate``; request it *descending* and page by ``start_rank`` until a
-#   result predates the cursor. Two quirks the OALC ``federal_court_of_australia``
-#   scraper documents must be carried over: judgment pages are **windows-1250**, not
-#   UTF-8, and a decision with no HTML body exposes an "Original Word Document" link
-#   whose **DOCX** is the text (mammoth/DOCX extraction; a legacy ``.doc`` is skipped).
-#   Norfolk Island SC decisions ride this database but are jurisdiction ``norfolk_island``.
-#
-# * **au-hca** — the ``eresources.hcourt.gov.au`` SERP across its collections
-#   (``col=0/1/2`` + the historical set), filtered by year; walk the most-recent year(s)
-#   for currency. A decision is HTML unless a download button is present, in which case
-#   it is a **PDF/DOCX/RTF** to extract (OCR the PDF scans, as ``edpb``/this module do).
-#
-# Kept out of this file so its clean HTTP/JSON path isn't entangled with the heavier
-# DOCX/OCR fetchers; they are the obvious next two adapters once NSW is proven live.
+# **au-hca** is NOT built yet. On probing, the OALC creator's High Court endpoints
+# (``eresources.hcourt.gov.au/search?col=…``) returned only a ~50 KB app shell with no
+# cases in the markup on every judgments URL — the site appears to be down / serving a
+# fallback (to be retried; it may just be a bad day for hcourt.gov.au). Once the site is
+# back, au-hca is the same incremental shape as this module over the HCA judgments index
+# — HTML body, or the PDF/DOCX/RTF a download button points at (now that DOCX is a
+# first-class extractor). Deliberately HCA-site-only; AustLII is out of scope.

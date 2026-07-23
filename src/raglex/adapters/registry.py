@@ -16,6 +16,7 @@ from .a29wp import A29WPAdapter
 from .au_legislation import CommonwealthAdapter, LawMakerAdapter
 from .au_caselaw import AustralianCaseLawAdapter
 from .au_nsw_caselaw import NSWCaselawAdapter
+from .au_fca_caselaw import FCACaselawAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_legislation import CanadaFederalAdapter
 from .canlii import CanLIIAdapter
@@ -137,6 +138,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # crawl of caselaw.nsw.gov.au's browse JSON, stopping at the watermark; neutral-cite
     # identity (nswsc/2024/1) unifies with au-caselaw. Run as a weekly (staggered) watch.
     "au-nsw-caselaw": NSWCaselawAdapter,
+    # Federal Court of Australia (+ FCAFC + federal tribunals + Norfolk Island SC) — the
+    # live federal layer. Newest-first Funnelback crawl of the judgments database (stealth,
+    # sort=date), watermark stop; identity from the URL segment (fca/2026/981) unifies
+    # with au-caselaw. Weekly (staggered) watch.
+    "au-fca": FCACaselawAdapter,
     # US case law — CourtListener v4. Keyed by reporter citation (us/us/576/644), the
     # same slug the US matcher mints, so harvesting a case resolves the citations the
     # corpus already holds pending. Free tier is 125 requests/day, enforced by a
@@ -538,6 +544,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "'[2024] NSWSC 1' citations already held pending. Best run as a staggered weekly watch.",
         (),
         ("neutral citation ([2024] NSWSC 1)", "nswsc/2024/1", "caselaw.nsw.gov.au decision id"),
+    ),
+    "au-fca": SourceInfo(
+        "au-fca", "Federal Court of Australia (live incremental)", "caselaw", "AU", False,
+        "The federal currency layer over the OALC bulk: a newest-first crawl of the Federal "
+        "Court judgments database (search.judgments.fedcourt.gov.au, Funnelback, sort=date), "
+        "covering FCA, the Full Court (FCAFC), the federal tribunals (IRCA/ACOMPT/ACOPYT/"
+        "ADFDAT/FPDT) and the Supreme Court of Norfolk Island. The search WAFs plain HTTP, so "
+        "it runs through the stealth tier. Identity is the neutral-citation slug read from the "
+        "judgment URL (fca/2026/981), unifying with au-caselaw and resolving pending "
+        "'[2026] FCA 981' citations. Stops at the watermark — run as a staggered weekly watch.",
+        (),
+        ("neutral citation ([2026] FCA 981)", "fca/2026/981", "judgments.fedcourt.gov.au URL"),
     ),
     "us-caselaw": SourceInfo(
         "us-caselaw", "US case law (CourtListener API)", "caselaw", "US", False,

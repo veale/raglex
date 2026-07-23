@@ -192,12 +192,64 @@ class RtfExtractor:
         return Extracted(text=text, engine=self.name, engine_version="1")
 
 
+class DocxExtractor:
+    """DOCX → plain text (§5c). A ``.docx`` is a zip whose ``word/document.xml`` holds
+    the body; the visible text is the ``<w:t>`` runs, paragraphs are ``<w:p>`` and
+    cells/tabs/breaks add their own whitespace. Extracted straight from the zip so it
+    needs no third-party library — the same "don't store the raw markup as the text"
+    fix the RTF provider makes, for the Word format the FCA/HCA judgments (and user
+    uploads) arrive in. Falls back to python-docx only if the zip layout is unusual."""
+
+    name = "docx-zip"
+
+    def handles(self, ext: str, mime: str | None) -> bool:
+        return ext.lower().lstrip(".") == "docx" or (mime or "") == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    def extract(self, data: bytes, *, ext: str, mime: str | None = None) -> Extracted:
+        import html as _html
+        import io
+        import zipfile
+
+        text = ""
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = [n for n in z.namelist()
+                         if n == "word/document.xml" or re.fullmatch(r"word/document\d*\.xml", n)]
+                parts: list[str] = []
+                for name in names or ["word/document.xml"]:
+                    xml = z.read(name).decode("utf-8", "replace")
+                    # normalise structural markup to whitespace, then keep the run text
+                    xml = re.sub(r"<w:tab\b[^>]*/?>", "\t", xml)
+                    xml = re.sub(r"<w:br\b[^>]*/?>", "\n", xml)
+                    for para in re.split(r"</w:p\s*>", xml):
+                        runs = re.findall(r"<w:t\b[^>]*>(.*?)</w:t\s*>", para, re.S)
+                        if runs:
+                            parts.append(_html.unescape("".join(runs)))
+                text = "\n".join(parts).strip()
+        except (zipfile.BadZipFile, KeyError, OSError):
+            text = ""
+        if not text:
+            # a labelled-DOCX that is really a legacy .doc, or an odd layout — try the lib
+            try:
+                import docx  # python-docx, if installed
+
+                import io as _io
+                doc = docx.Document(_io.BytesIO(data))
+                text = "\n".join(p.text for p in doc.paragraphs).strip()
+            except Exception:  # noqa: BLE001 — no lib / not a real docx → empty, flagged
+                text = ""
+        return Extracted(text=text, engine=self.name, engine_version="1",
+                         needs_ocr=not text)
+
+
 # Router (§5c): try providers in order — the structured PDF engine outranks pypdf
 # when PyMuPDF is installed (its handles() declines otherwise, so the fallback holds).
 DEFAULT_PROVIDERS: tuple[ExtractionProvider, ...] = (
     StructuredPdfExtractor(),
     PdfExtractor(),
     RtfExtractor(),
+    DocxExtractor(),
     HtmlExtractor(),
     PlainTextExtractor(),
 )
