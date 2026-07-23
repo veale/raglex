@@ -901,11 +901,31 @@ class Catalogue:
 
     def add_relations(self, src_id: str, rels: list[TypedRelation], *,
                       commit: bool = True) -> None:
-        """Bulk-add edges (one commit) — used by the citation-extraction stage.
-        ``commit=False`` lets the parallel bulk extractor batch many documents into
-        one transaction (its run is restartable off the extraction stamps)."""
+        """Bulk-add edges — used by the citation-extraction stage. One executemany,
+        not a round trip per edge: a dense judgment (an NL decision with its LiDO
+        graph) carries hundreds of edges, and per-row INSERTs left the parallel
+        extractor's parent thread living inside psycopg while its workers starved
+        (caught live by py-spy). ``commit=False`` lets the bulk extractor batch many
+        documents into one transaction (restartable off the extraction stamps)."""
+        rows = []
         for rel in rels:
-            self._add_relation(src_id, rel)
+            candidate_id, raw_fold = self._edge_keys(rel)
+            rows.append((
+                src_id, rel.dst_id, rel.raw_citation_string, candidate_id, raw_fold,
+                str(rel.resolution_status), str(rel.relationship_type),
+                str(rel.extracted_via), rel.src_anchor, rel.dst_anchor,
+                rel.context_start, rel.context_end,
+            ))
+        self.conn.executemany(
+            """
+            INSERT INTO relations (
+                src_id, dst_id, raw_citation_string, candidate_id, raw_fold,
+                resolution_status, relationship_type, extracted_via, src_anchor,
+                dst_anchor, context_start, context_end
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            rows,
+        )
         if commit:
             self.conn.commit()
 
@@ -2316,6 +2336,29 @@ class Catalogue:
                     f"SELECT stable_id, last_extracted_at FROM documents "
                     f"WHERE stable_id IN ({qs})", chunk).fetchall():
                 out[r["stable_id"]] = bool(r["last_extracted_at"])
+        return out
+
+    def alias_targets(self, refs: list[str]) -> dict[str, str]:
+        """``{ref: dst_id}`` for refs that resolve through ``citation_aliases`` — the
+        pipeline prefilter's third rung, for adapters whose stub id is an upstream
+        surrogate of a held document (de-rii's doknr → the ECLI it's held under).
+        Keys are matched the way put_alias stores them (fold_citation), and the
+        ORIGINAL ref spelling keys the result so the caller needn't re-fold."""
+        from ..core.text import fold_citation
+
+        refs = [r for r in dict.fromkeys(refs) if r]
+        if not refs:
+            return {}
+        folded = {fold_citation(r) or r: r for r in refs}
+        out: dict[str, str] = {}
+        keys = list(folded)
+        for i in range(0, len(keys), 400):
+            chunk = keys[i:i + 400]
+            qs = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                    f"SELECT alias, dst_id FROM citation_aliases WHERE alias IN ({qs})",
+                    chunk).fetchall():
+                out[folded[row["alias"]]] = row["dst_id"]
         return out
 
     def document_ids_by_landing_urls(self, urls: list[str]) -> dict[str, str]:

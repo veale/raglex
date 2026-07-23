@@ -332,11 +332,23 @@ class Pipeline:
         by_url = self.catalogue.document_ids_by_landing_urls(
             [s.landing_url for s in buf
              if s.landing_url and s.stable_id not in state])
+        # third rung: a stub id that is an upstream surrogate of a held document
+        # (de-rii's doknr aliases onto the ECLI the decision is held under) — the
+        # only alternative was reading + parsing the file to learn its real id
+        misses = [s.stable_id for s in buf
+                  if s.stable_id and s.stable_id not in state
+                  and (s.landing_url or "") not in by_url]
+        by_alias = self.catalogue.alias_targets(misses) if misses else {}
+        alias_state = self.catalogue.held_extraction_state(
+            list(by_alias.values())) if by_alias else {}
         for s in buf:
             if s.stable_id and s.stable_id in state:
                 yield s, s.stable_id, state[s.stable_id]
             elif s.landing_url and s.landing_url in by_url:
                 yield s, by_url[s.landing_url], None
+            elif s.stable_id and by_alias.get(s.stable_id) in alias_state:
+                dst = by_alias[s.stable_id]
+                yield s, dst, alias_state[dst]
             else:
                 yield s, None, None
 

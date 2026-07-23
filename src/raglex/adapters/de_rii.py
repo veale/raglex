@@ -143,6 +143,16 @@ class DeRiiAdapter(BaseAdapter):
                 "region": parsed.metadata.get("region"),
                 "publisher": parsed.metadata.get("publisher"),
                 "access_rights": parsed.metadata.get("access_rights"),
-                "aliases": [case_alias(court, docket)] if court and docket else None,
+                # the doknr the ToC/zip filename knows this decision by (jb-KORE…),
+                # ALONGSIDE the case-number alias. A resume walk's stubs carry only
+                # the doknr — without this alias every re-walk had to read + parse
+                # every zip just to learn each file's ECLI before it could dedup;
+                # with it, the pipeline's batched alias prefilter answers "held"
+                # without touching the file. Minted even for content-deduped
+                # re-fetches (aliases are written before the dedup early-return).
+                "aliases": [a for a in (
+                    case_alias(court, docket) if court and docket else None,
+                    stub.stable_id if stub.stable_id != stable_id else None,
+                ) if a] or None,
             }.items() if v},
         )

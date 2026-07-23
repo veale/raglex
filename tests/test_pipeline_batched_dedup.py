@@ -83,6 +83,27 @@ def test_resume_walk_dedups_in_batches_and_fetches_only_the_new(tmp_path, monkey
         assert calls["state"] == 2
 
 
+def test_alias_rung_dedups_upstream_surrogate_ids(tmp_path):
+    """The de-rii pattern: the held decision is keyed by ECLI, the resume walk's
+    stubs by the upstream doknr. With the doknr minted as an alias, the prefilter's
+    alias rung dedups WITHOUT reading the file (adapter.fetch never called)."""
+    facade = Facade(_config(tmp_path))
+    with facade._open() as (cat, rs, ts):
+        rec = Record(source="fake", stable_id="ECLI:DE:BGH:2020:XYZ",
+                     doc_type=DocType.JUDGMENT, title="Real", text="t",
+                     extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        ts.put(rec.payload_hash, rec.text)
+        cat.upsert_document(rec)
+        cat.mark_extracted(rec.stable_id)
+        cat.put_alias("jb-KORE609062024", rec.stable_id, source="adapter-alias")
+
+        adapter = _FakeAdapter([Stub(stable_id="jb-KORE609062024")])
+        stats = Pipeline(cat, rs, textstore=ts).run(adapter, record_health=False)
+        assert stats.deduped == 1 and stats.stored == 0
+        assert adapter.fetched == []
+
+
 def test_url_fallback_still_dedups_provisional_ids(tmp_path):
     """An adapter whose stub id is provisional (NZ pattern): the held document is
     keyed by its real citation but shares the landing URL — batched prefilter must
