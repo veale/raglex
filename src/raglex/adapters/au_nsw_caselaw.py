@@ -219,10 +219,10 @@ def _iso_date(iso: str | None) -> date | None:
 # stealth tier (the search WAFs plain HTTP), identity from the judgment URL segment.
 # Covers FCA + FCAFC + the federal tribunals + Norfolk Island SC.
 #
-# **au-hca** is NOT built yet. On probing, the OALC creator's High Court endpoints
-# (``eresources.hcourt.gov.au/search?col=…``) returned only a ~50 KB app shell with no
-# cases in the markup on every judgments URL — the site appears to be down / serving a
-# fallback (to be retried; it may just be a bad day for hcourt.gov.au). Once the site is
-# back, au-hca is the same incremental shape as this module over the HCA judgments index
-# — HTML body, or the PDF/DOCX/RTF a download button points at (now that DOCX is a
-# first-class extractor). Deliberately HCA-site-only; AustLII is out of scope.
+# **au-hca** is built (see au_hca_caselaw.py) as a listing importer: the HCA judgments
+# index is server-rendered, one page per year, no pagination. The catch is the WAF —
+# it admits only a real desktop Chrome (httpx 403s; the stealth tier's Firefox and a
+# container's headless Chromium are both blocked), so au-hca imports saved listing HTML
+# (path=) today and can fetch live once a real-Chrome fetch is wired. Rows become
+# metadata-stub judgments (coram/date/link, identity hca/2026/22) that resolve citations;
+# full text is deferred behind the same WAF. Deliberately HCA-site-only, not AustLII.

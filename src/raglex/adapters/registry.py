@@ -17,6 +17,7 @@ from .au_legislation import CommonwealthAdapter, LawMakerAdapter
 from .au_caselaw import AustralianCaseLawAdapter
 from .au_nsw_caselaw import NSWCaselawAdapter
 from .au_fca_caselaw import FCACaselawAdapter
+from .au_hca_caselaw import HCACaselawAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_legislation import CanadaFederalAdapter
 from .canlii import CanLIIAdapter
@@ -143,6 +144,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # sort=date), watermark stop; identity from the URL segment (fca/2026/981) unifies
     # with au-caselaw. Weekly (staggered) watch.
     "au-fca": FCACaselawAdapter,
+    # High Court of Australia — the judgments index (hcourt.gov.au), one page per year
+    # (no pagination). Imports saved listing HTML (path=) now, or fetches live once a
+    # real-Chrome fetch is available (the site WAFs everything else). Metadata-stub
+    # judgments keyed hca/2026/22, resolving citations + linking to the HCA site.
+    "au-hca": HCACaselawAdapter,
     # US case law — CourtListener v4. Keyed by reporter citation (us/us/576/644), the
     # same slug the US matcher mints, so harvesting a case resolves the citations the
     # corpus already holds pending. Free tier is 125 requests/day, enforced by a
@@ -556,6 +562,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "'[2026] FCA 981' citations. Stops at the watermark — run as a staggered weekly watch.",
         (),
         ("neutral citation ([2026] FCA 981)", "fca/2026/981", "judgments.fedcourt.gov.au URL"),
+    ),
+    "au-hca": SourceInfo(
+        "au-hca", "High Court of Australia (judgments index)", "caselaw", "AU", False,
+        "The High Court judgments index (hcourt.gov.au) — one server-rendered page per year "
+        "(items_per_page=100; the Court delivers well under 100 a year, so no pagination). "
+        "The site WAFs everything but a real desktop Chrome, so run it either by importing "
+        "saved listing HTML (path= a year page saved from Chrome) or live once a real-Chrome "
+        "fetch is available (years=all|2020-2026|current). Each judgment becomes a metadata "
+        "stub keyed by its neutral citation (hca/2026/22) — coram, date and a 'view on the "
+        "High Court' link, resolving pending '[2026] HCA 22' citations; full text is a later "
+        "enrichment once the judgment pages can be fetched.",
+        (SourceOption("path", "Saved listing HTML", "a year page (or folder) saved from Chrome"),
+         SourceOption("years", "Years to fetch live", "current (default) | all | 2020-2026")),
+        ("neutral citation ([2026] HCA 22)", "hca/2026/22", "hcourt.gov.au judgment URL"),
     ),
     "us-caselaw": SourceInfo(
         "us-caselaw", "US case law (CourtListener API)", "caselaw", "US", False,
