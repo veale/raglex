@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from raglex.adapters.au_hca_caselaw import HCACaselawAdapter, parse_listing, _year_range
+from raglex.adapters.au_hca_caselaw import HCACaselawAdapter, judgment_doc_urls, parse_listing
 from raglex.core.models import DocType
 
 ROW = """<div class="views-row"><div class="views-field views-field-nothing-2"><span class="field-content">
@@ -49,28 +49,62 @@ def test_saved_html_import(tmp_path):
     assert all(s.court == "hca" for s in stubs)
 
 
-def test_metadata_stub_record():
-    ad = HCACaselawAdapter(path="/nonexistent")  # fetch works off the stub hints
+class _FakeHTTP:
+    """Serves the detail page and the DOCX bytes by URL."""
+
+    def __init__(self, detail_html: str, docx_bytes: bytes):
+        self.detail_html = detail_html
+        self.docx_bytes = docx_bytes
+
+    def get(self, url: str):
+        if url.endswith(".docx"):
+            return 200, self.docx_bytes
+        return 200, self.detail_html.encode("utf-8")
+
+
+def _tiny_docx(text: str) -> bytes:
+    import io
+    import zipfile
+    doc = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           f"<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml", doc)
+    return buf.getvalue()
+
+
+def test_fetch_pulls_docx_full_text():
+    detail = ('<html><body><a href="/sites/default/files/eresources/2026-06-17/HCA/'
+              'Chaplin%20%5B2026%5D%20HCA%2022.docx">DOCX</a></body></html>')
+    ad = HCACaselawAdapter(http=_FakeHTTP(detail, _tiny_docx("HIGH COURT OF AUSTRALIA. The appeal is dismissed.")))
     stub = ad._stub(parse_listing(LISTING)[0])
     rec = ad.fetch(stub)
     assert rec.doc_type is DocType.JUDGMENT
     assert rec.stable_id == "hca/2026/22"
-    assert rec.court == "hca"
-    assert rec.text is None                     # metadata stub — no body
-    assert rec.extra["metadata_only"] is True
-    assert rec.extra["needs_fetch"] is True
-    assert rec.extra["neutral_citation"] == "[2026] HCA 22"
+    assert "appeal is dismissed" in rec.text          # full text from the DOCX
+    assert rec.extra["document_url"].endswith(".docx")
+    assert "metadata_only" not in rec.extra           # not a stub — we got the text
     assert "[2026] hca 22" in rec.extra["aliases"]
     assert rec.decision_date.isoformat() == "2026-06-17"
 
 
-def test_year_range_parsing():
-    import datetime
-    now = datetime.datetime.now().year
-    assert _year_range(None) == [now]
-    assert _year_range("current") == [now]
-    assert _year_range("2020-2022") == [2022, 2021, 2020]
-    assert _year_range("all")[0] == now and _year_range("all")[-1] == 1998
+def test_fetch_falls_back_to_metadata_stub_when_no_doc():
+    class _NoDoc:
+        def get(self, url):
+            return 200, b"<html><body>no document link here</body></html>"
+    ad = HCACaselawAdapter(http=_NoDoc())
+    rec = ad.fetch(ad._stub(parse_listing(LISTING)[0]))
+    assert rec.text is None
+    assert rec.extra["metadata_only"] is True
+    assert rec.extra["neutral_citation"] == "[2026] HCA 22"
+
+
+def test_judgment_doc_urls_prefers_docx():
+    detail = ('<a href="/sites/default/files/eresources/2026-06-17/HCA/x%20HCA%2022.pdf">PDF</a>'
+              '<a href="/sites/default/files/eresources/2026-06-17/HCA/x%20HCA%2022.docx">DOCX</a>')
+    urls = judgment_doc_urls(detail)
+    assert urls[0].endswith(".docx") and urls[0].startswith("https://www.hcourt.gov.au")
+    assert urls[1].endswith(".pdf")
 
 
 def test_non_judgment_rows_skipped():

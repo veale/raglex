@@ -564,17 +564,16 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("neutral citation ([2026] FCA 981)", "fca/2026/981", "judgments.fedcourt.gov.au URL"),
     ),
     "au-hca": SourceInfo(
-        "au-hca", "High Court of Australia (judgments index)", "caselaw", "AU", False,
-        "The High Court judgments index (hcourt.gov.au) — one server-rendered page per year "
-        "(items_per_page=100; the Court delivers well under 100 a year, so no pagination). "
-        "The site WAFs everything but a real desktop Chrome, so run it either by importing "
-        "saved listing HTML (path= a year page saved from Chrome) or live once a real-Chrome "
-        "fetch is available (years=all|2020-2026|current). Each judgment becomes a metadata "
-        "stub keyed by its neutral citation (hca/2026/22) — coram, date and a 'view on the "
-        "High Court' link, resolving pending '[2026] HCA 22' citations; full text is a later "
-        "enrichment once the judgment pages can be fetched.",
-        (SourceOption("path", "Saved listing HTML", "a year page (or folder) saved from Chrome"),
-         SourceOption("years", "Years to fetch live", "current (default) | all | 2020-2026")),
+        "au-hca", "High Court of Australia (full text)", "caselaw", "AU", False,
+        "Full-text High Court judgments from hcourt.gov.au. The site WAFs everything but a "
+        "real Chrome, so it is fetched with curl_cffi's Chrome-TLS impersonation (no browser): "
+        "the listing (items_per_page=100&page=N, ~14 pages for 1998→present, newest-first, "
+        "watermark stop) → each judgment's detail page → its DOCX (extracted to text). Keyed "
+        "by neutral citation (hca/2026/22), unifying with au-caselaw and resolving pending "
+        "'[2026] HCA 22' citations; a judgment whose DOCX is unreachable falls back to a "
+        "metadata stub. path= imports a listing page saved from a browser instead of live.",
+        (SourceOption("path", "Saved listing HTML", "a listing page (or folder) saved from a browser"),
+         SourceOption("max_pages", "Listing page cap", "40 (default); 100 judgments/page")),
         ("neutral citation ([2026] HCA 22)", "hca/2026/22", "hcourt.gov.au judgment URL"),
     ),
     "us-caselaw": SourceInfo(

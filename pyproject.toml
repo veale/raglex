@@ -10,6 +10,11 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
     "socksio>=1.0.0",
+    # Chrome-TLS-impersonating HTTP client. Some sources (the High Court of Australia's
+    # judgments site) sit behind a WAF that fingerprints the TLS/HTTP2 handshake and
+    # admits only a real Chrome — httpx and even a headless/Firefox browser are 403'd,
+    # but curl_cffi's ``impersonate="chrome"`` clears it with no browser at all.
+    "curl_cffi>=0.7",
     # Offline German legal-reference parser/normaliser.  Extraction uses no corpus
     # download; GII/NeuRIS remain RagLex's authoritative resolution targets.
     "bundesrecht>=0.1.3,<0.2",
