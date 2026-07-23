@@ -62,6 +62,32 @@ def _find(root: ET.Element, tag: str) -> ET.Element | None:
     return next((e for e in root.iter() if localname(e.tag).lower() == tag), None)
 
 
+def _child(el: ET.Element, name: str) -> ET.Element | None:
+    return next((c for c in el if localname(c.tag).lower() == name), None)
+
+
+def _zone_blocks(el: ET.Element, label: str) -> list[tuple[str, str, str]]:
+    """A judgment zone → assemble() blocks. juris rii encodes numbered paragraphs as
+    ``<dl class="RspDL"><dt><a name="rd_N">N</a></dt><dd>…</dd></dl>`` — so where a zone
+    carries them, emit one **paragraph** block per ``<dd>`` (its Randnummer, from the
+    ``<dt>``, as the label) instead of flattening the whole zone into one blob. Flattening
+    was what buried the paragraph breaks and pulled every Randnummer inline into the body.
+    A zone with no RspDL (Leitsatz, Tenor, header fields) stays a single zone block."""
+    dls = [c for c in el.iter()
+           if localname(c.tag).lower() == "dl" and "RspDL" in (c.get("class") or "")]
+    if not dls:
+        body = " ".join(element_text(el).split())
+        return [(label, "zone", body)] if body else []
+    out: list[tuple[str, str, str]] = [(label, "heading", label)]  # section heading line
+    for dl in dls:
+        dt, dd = _child(dl, "dt"), _child(dl, "dd")
+        rn = " ".join(element_text(dt).split()) if dt is not None else ""
+        body = " ".join(element_text(dd).split()) if dd is not None else ""
+        if body:
+            out.append((rn or label, "paragraph", body))
+    return out
+
+
 def _text(root: ET.Element, tag: str) -> str | None:
     el = _find(root, tag)
     if el is None:
@@ -107,9 +133,7 @@ def parse_rii(data: bytes) -> ParsedDoc:
         el = _find(doc, tag)
         if el is None:
             continue
-        body = " ".join(element_text(el).split())
-        if body:
-            blocks.append((label, "zone", body))
+        blocks.extend(_zone_blocks(el, label))
     text, segments = assemble(blocks)
 
     identifier = _text(doc, "identifier")

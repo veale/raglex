@@ -169,6 +169,10 @@ def _sniff_format(raw: bytes) -> str | None:
         return "formex-legislation"
     if b"toestand" in low or b"<wetgeving" in low:
         return "bwb"
+    # juris rii case-law XML (de-rii): a <dokument> with the court field <gertyp>.
+    # Distinguishes it from de-gii legislation XML, which has no gertyp.
+    if b"<dokument" in low and (b"gertyp" in low or b"<doknr" in low):
+        return "rii-xml"
     if b'id="fragview"' in low or b"topheadingparagraph" in low or b"headingparagraph" in low:
         return "lawmaker-html"
     return None

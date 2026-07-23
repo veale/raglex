@@ -54,15 +54,34 @@ def _iso(value: str | None) -> date | None:
         return None
 
 
+def _render_br(el: ET.Element) -> str:
+    """Serialise a ``<CONTENU>`` block preserving its ``<br/>`` structure as line breaks.
+    JADE decision bodies are HTML-in-XML whose only paragraphing is ``<br/>`` — a double
+    ``<br/><br/>`` between paragraphs, a single one for a line break. ``itertext()`` drops
+    them, which is what collapsed the whole decision into one blob; here each ``<br/>``
+    becomes a newline, then a blank line (double-br) reads as a paragraph break."""
+    buf: list[str] = []
+
+    def walk(e: ET.Element) -> None:
+        if e.text:
+            buf.append(e.text)
+        for ch in e:
+            if localname(ch.tag).lower() == "br":
+                buf.append("\n")
+            else:
+                walk(ch)
+            if ch.tail:
+                buf.append(ch.tail)
+
+    walk(el)
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in "".join(buf).split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 def _contenu_text(root: ET.Element) -> str:
-    """Flatten every ``<CONTENU>`` block (the body is HTML-in-XML) to readable text."""
-    parts: list[str] = []
-    for c in root.iter():
-        if localname(c.tag).upper() == "CONTENU":
-            txt = " ".join(" ".join(c.itertext()).split())
-            if txt:
-                parts.append(txt)
-    return "\n\n".join(parts)
+    """Every ``<CONTENU>`` block → readable text with its paragraph breaks intact."""
+    parts = [_render_br(c) for c in root.iter() if localname(c.tag).upper() == "CONTENU"]
+    return "\n\n".join(p for p in parts if p)
 
 
 @dataclass(slots=True)
