@@ -3659,10 +3659,11 @@ class Facade:
             # first parse — no progress, heavy memory. Instead pull ``batch`` rows past a
             # stable_id cursor at a time (PK-indexed, no OFFSET scan); the cursor doubles
             # as the resume checkpoint.
+            # the catalogue Row is keyed by column name (not index), so alias the count
             total = cat.conn.execute(
-                "SELECT count(*) FROM documents WHERE source=? AND raw_path IS NOT NULL "
+                "SELECT count(*) AS n FROM documents WHERE source=? AND raw_path IS NOT NULL "
                 "AND payload_hash IS NOT NULL AND stable_id > ?",
-                (source, after_stable_id or "")).fetchone()[0]
+                (source, after_stable_id or "")).fetchone()["n"]
             ok = skip = fail = 0
 
             def _work(r: dict) -> str:
