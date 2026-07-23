@@ -53,6 +53,20 @@ class PgConnShim:
         # then translate the catalogue's portable ? placeholders.
         return self.raw.execute(sql.replace("%", "%%").replace("?", "%s"), params)
 
+    # "CREATE INDEX IF NOT EXISTS <name>" — the statements that must be pre-checked
+    # against the catalog rather than executed: Postgres acquires the table's SHARE
+    # lock BEFORE noticing the index already exists, so on a busy table (a resumed
+    # bulk resolve holding row-exclusive locks on `relations` for minutes at a time)
+    # every process start queued behind the writer and the API sat silent, unbound —
+    # the CREATE INDEX flavour of the check-before-ALTER startup deadlock.
+    _CREATE_INDEX_RE = re.compile(
+        r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+(?P<name>[a-z0-9_]+)", re.IGNORECASE)
+
+    def _index_exists(self, name: str) -> bool:
+        cur = self.raw.execute(
+            "SELECT 1 FROM pg_class WHERE relname = %s AND relkind = 'i'", (name,))
+        return cur.fetchone() is not None
+
     def executescript(self, script: str) -> None:
         # Tolerate the concurrent-startup race: the api and scheduler containers (and
         # several api threads) all run the CREATE-IF-NOT-EXISTS DDL at boot, and
@@ -64,6 +78,11 @@ class PgConnShim:
 
         for stmt in script.split(";"):
             if not stmt.strip():
+                continue
+            # an index that already exists is skipped WITHOUT the table lock the
+            # real statement would take just to discover the same thing
+            m = self._CREATE_INDEX_RE.search(stmt)
+            if m and self._index_exists(m.group("name")):
                 continue
             try:
                 self.raw.execute(stmt)
