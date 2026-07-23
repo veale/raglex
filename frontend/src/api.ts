@@ -165,9 +165,11 @@ export const api = {
   citedBySlice: (id: string, jurisdiction: string, kind?: string, limit = 60) =>
     req<{ incoming: any[] }>(
       `/cited-by-slice?id=${encodeURIComponent(id)}&jurisdiction=${encodeURIComponent(jurisdiction)}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}&limit=${limit}`),
-  mentions: (id: string, anchor?: string, sort?: string) =>
+  mentions: (id: string, anchor?: string, sort?: string, offset?: number, limit?: number) =>
     req<any>(`/mentions?id=${encodeURIComponent(id)}${anchor ? `&anchor=${encodeURIComponent(anchor)}` : ""}`
-      + (sort ? `&sort=${encodeURIComponent(sort)}` : "")),
+      + (sort ? `&sort=${encodeURIComponent(sort)}` : "")
+      + (offset ? `&offset=${offset}` : "")
+      + (limit ? `&limit=${limit}` : "")),
   citationsOut: (id: string, family: "cases" | "statute") =>
     req<any>(`/citations-out?id=${encodeURIComponent(id)}&family=${family}`),
   countDocuments: (filters: Record<string, string> = {}) =>

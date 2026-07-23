@@ -8,7 +8,7 @@
 // always states exactly what the panel is showing. PageRank ranks throughout.
 import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import { Oscola } from "./views";
+import { FlagIcon, Oscola } from "./views";
 
 const FMT = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M"
   : n >= 10_000 ? Math.round(n / 1000) + "k"
@@ -399,7 +399,7 @@ export function ExploreView({ open, goSearch }:
                   <tr className={`shape-row${on ? " on" : ""}`}
                     onClick={() => setExpanded(on ? null : r.jurisdiction)}>
                     <td className="chev">{on ? "▾" : "▸"}</td>
-                    <td className="jname">{r.jurisdiction}
+                    <td className="jname"><FlagIcon jurisdiction={r.jurisdiction} opacity={0.85} /> {r.jurisdiction}
                       <div className="muted jsub">{FMT(r.with_text)} with text · {FMT(r.embedded)} embedded</div></td>
                     <td className="num jtotal">{r.total.toLocaleString()}</td>
                     <td className="jbar"><KindBar r={r} /></td>

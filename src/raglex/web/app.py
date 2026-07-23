@@ -734,10 +734,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.corpus_map_cites(category=category)
 
     @app.get("/mentions")
-    def mentions(id: str, anchor: str | None = None, sort: str = "pagerank") -> dict:
+    def mentions(id: str, anchor: str | None = None, sort: str = "pagerank",
+                 offset: int = 0, limit: int = 40) -> dict:
         """Who mentions this document (optionally one paragraph), grouped by citing document
-        and ranked by the citer's own authority — for the "Mentioned by …" line + tray."""
-        return facade.document_mentions(id, anchor=anchor, sort=sort)
+        and ranked by the citer's own authority — for the "Mentioned by …" line + tray.
+        Paginated (``offset``/``limit``) so the tray lazy-loads previews for every citer."""
+        return facade.document_mentions(id, anchor=anchor, sort=sort,
+                                        offset=max(0, offset), limit=max(1, min(limit, 200)))
 
     @app.get("/cited-by-breakdown")
     def cited_by_breakdown_ep(id: str) -> dict:
@@ -1389,6 +1392,10 @@ def serve_app(config: Config | None = None) -> FastAPI:
     if dist is None:
         return app
     app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
+    # Vite copies public/ (the bundled circle-flags SVGs) to the dist root; mount it so
+    # /flags/gb.svg serves the file instead of falling through to the SPA catch-all.
+    if (dist / "flags").is_dir():
+        app.mount("/flags", StaticFiles(directory=str(dist / "flags")), name="flags")
 
     @app.get("/")
     @app.get("/{_path:path}")  # SPA fallback (tabs are client state, not routes)

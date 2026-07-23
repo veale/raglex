@@ -1061,6 +1061,7 @@ class Facade:
     }
 
     def document_mentions(self, stable_id: str, *, anchor: str | None = None,
+                          offset: int = 0, limit: int = 40,
                           snippet_docs: int = 40, max_groups: int = 120,
                           sort: str = "pagerank") -> dict:
         """Who mentions this document (and, optionally, one paragraph of it), grouped by the
@@ -1164,8 +1165,14 @@ class Facade:
             groups = [g for g in groups if g["src_kind"] != "preparatory"]
 
             # snippets (the passages where the top citers cite this) — from the citation's
-            # stored context span, so we read each citer's text at most once.
-            snippet_groups = [*groups[:snippet_docs], *preparatory_groups[:snippet_docs]]
+            # stored context span, so we read each citer's text at most once. Computed for
+            # the requested PAGE (offset:offset+limit) so the reader's "all mentions" tray
+            # can lazy-load previews for every citer as it scrolls, not just the first page
+            # (a heavily-cited authority used to show snippets for the first 40 and then a
+            # long tail of preview-less rows). preparatory snippets ride the first page.
+            total_groups = len(groups)
+            page = groups[offset: offset + limit] if limit else groups[offset:]
+            snippet_groups = [*page, *(preparatory_groups[:snippet_docs] if offset == 0 else [])]
             for g in snippet_groups:
                 sdoc = srcs[g["src_id"]]
                 text = None
@@ -1221,15 +1228,20 @@ class Facade:
                     }
             by_anchor = {lab: sorted(v.values(), key=lambda x: -x["authority"])
                          for lab, v in by_anchor.items()}
+            end = (offset + limit) if limit else total_groups
             return {"target": stable_id, "anchor": anchor,
-                    "total": len(groups), "groups": groups[:max_groups],
+                    "total": total_groups, "groups": page,
+                    "offset": offset, "limit": limit,
+                    "has_more": end < total_groups,
+                    # preparatory + the per-anchor rollup are whole-set summaries, so they
+                    # ride the first page only (subsequent lazy-load pages stay light)
                     "preparatory_count": len(preparatory_groups),
-                    "preparatory_groups": preparatory_groups[:max_groups],
+                    "preparatory_groups": preparatory_groups[:max_groups] if offset == 0 else [],
                     "preparatory_note": (f"Preparatory documents exist for this item — "
                                          f"{len(preparatory_groups)} available."
-                                         if preparatory_groups else None),
+                                         if preparatory_groups and offset == 0 else None),
                     "sort": sort, "sorts": dict(self.MENTION_SORTS),
-                    "by_anchor": by_anchor}
+                    "by_anchor": by_anchor if offset == 0 else {}}
 
     _STATUTE_KINDS = {"act", "regulation", "directive", "treaty", "eu_instrument"}
 

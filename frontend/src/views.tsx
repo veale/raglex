@@ -1,4 +1,4 @@
-import { Component, createContext, Fragment, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
@@ -132,6 +132,44 @@ function SnipText({ s }: { s: any }) {
   );
 }
 
+// Jurisdiction → ISO-3166 alpha-2 for the circle-flags icon set. Accepts the corpus's
+// human-readable bucket names ("United Kingdom", "European Union") and bare codes.
+const _FLAG_CODE: Record<string, string> = {
+  "european union": "eu", "united kingdom": "gb", "uk": "gb", "gb": "gb", "eu": "eu",
+  england: "gb", "england & wales": "gb", scotland: "gb", "northern ireland": "gb",
+  ireland: "ie", "data protection commission (ireland)": "ie",
+  germany: "de", france: "fr", netherlands: "nl", italy: "it", spain: "es",
+  belgium: "be", austria: "at", poland: "pl", greece: "gr", romania: "ro",
+  hungary: "hu", sweden: "se", denmark: "dk", finland: "fi", norway: "no",
+  iceland: "is", portugal: "pt", czechia: "cz", "czech republic": "cz",
+  slovakia: "sk", slovenia: "si", croatia: "hr", bulgaria: "bg", lithuania: "lt",
+  latvia: "lv", estonia: "ee", luxembourg: "lu", malta: "mt", cyprus: "cy",
+  liechtenstein: "li", australia: "au", "united states": "us", usa: "us", us: "us",
+  canada: "ca", "new zealand": "nz", singapore: "sg", "hong kong": "hk", india: "in",
+};
+
+function flagCode(jurisdiction?: string | null): string | null {
+  if (!jurisdiction) return null;
+  return _FLAG_CODE[jurisdiction.trim().toLowerCase()] || null;
+}
+
+// A small circle flag (HatScripts/circle-flags). Renders nothing for an unmapped
+// jurisdiction so mixed/unknown buckets simply carry no flag.
+// `size` is in em, so the flag scales with the surrounding text (a header flag grows
+// with the header). Bundled locally (frontend/public/flags, HatScripts/circle-flags).
+export function FlagIcon({ jurisdiction, size = 1, opacity }: { jurisdiction?: string | null; size?: number; opacity?: number }) {
+  const cc = flagCode(jurisdiction);
+  if (!cc) return null;
+  return (
+    <img className="flag-icon" loading="lazy"
+      src={`${import.meta.env.BASE_URL}flags/${cc}.svg`}
+      alt={jurisdiction || ""} title={jurisdiction || ""}
+      style={{ width: `${size}em`, height: `${size}em`, verticalAlign: "-0.15em",
+               borderRadius: "50%", flex: "0 0 auto",
+               ...(opacity != null ? { opacity } : {}) }} />
+  );
+}
+
 // Grouped-by-citer mentions of a document (or one of its paragraphs), most-authoritative
 // first — with the passages where each cites it, and a jump to the full citing document.
 function MentionsTray({ target, anchor, open }: { target: string; anchor?: string; open: (id: string, a?: string) => void }) {
@@ -139,16 +177,50 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   // PageRank by default — raw citation counts flatter the merely-popular over the
   // judgment that actually settled the point
   const [sort, setSort] = useState("pagerank");
-  // Hooks must be created on the loading render too.  Keeping this below the
-  // early return made the loaded render add a hook, which React treats as a fatal
-  // render-order error (the entire app appeared as a blank page on click).
   const [slice, setSlice] = useState<string | null>(null);
-  const [data, error, retry] = useAsync(() => api.mentions(target, anchor, sort), [target, anchor, sort]);
-  if (error) return <div className="error-box">Could not load mentions. <button className="mini" onClick={retry}>retry</button></div>;
-  if (!data) return <p className="muted loading-pulse">Loading mentions…</p>;
-  const groups: any[] = (Array.isArray(data.groups) ? data.groups : [])
-    .filter((g: any) => g && typeof g === "object")
-    .map((g: any) => ({ ...g, snippets: Array.isArray(g.snippets) ? g.snippets : [] }));
+  // Paginated accumulation: previews load for EVERY citer, a page at a time, as the
+  // tray scrolls — a heavily-cited authority no longer runs out of previews partway.
+  const PAGE = 40;
+  const [groups, setGroups] = useState<any[]>([]);
+  const [meta, setMeta] = useState<any | null>(null);
+  const [nextOffset, setNextOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const sentinel = useRef<HTMLDivElement | null>(null);
+  const norm = (g: any) => ({ ...g, snippets: Array.isArray(g.snippets) ? g.snippets : [] });
+
+  useEffect(() => {
+    let live = true;
+    setGroups([]); setMeta(null); setNextOffset(0); setFailed(false); setLoading(true);
+    api.mentions(target, anchor, sort, 0, PAGE).then((d) => {
+      if (!live) return;
+      setGroups((Array.isArray(d.groups) ? d.groups : []).filter((g: any) => g && typeof g === "object").map(norm));
+      setMeta(d); setNextOffset(PAGE); setLoading(false);
+    }).catch(() => { if (live) { setFailed(true); setLoading(false); } });
+    return () => { live = false; };
+  }, [target, anchor, sort]);
+
+  const loadMore = useCallback(() => {
+    if (loading || !meta || !meta.has_more) return;
+    setLoading(true);
+    api.mentions(target, anchor, sort, nextOffset, PAGE).then((d) => {
+      setGroups((prev) => [...prev, ...(Array.isArray(d.groups) ? d.groups : []).filter((g: any) => g && typeof g === "object").map(norm)]);
+      setMeta((m: any) => (m ? { ...m, has_more: d.has_more } : m));
+      setNextOffset((o) => o + PAGE); setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [loading, meta, nextOffset, sort, target, anchor]);
+
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el || !meta || !meta.has_more) return;
+    const io = new IntersectionObserver((es) => { if (es[0]?.isIntersecting) loadMore(); }, { rootMargin: "300px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadMore, meta]);
+
+  if (failed) return <div className="error-box">Could not load mentions. <button className="mini" onClick={() => setSort((s) => s)}>retry</button></div>;
+  if (!meta) return <p className="muted loading-pulse">Loading mentions…</p>;
+  const data = meta;
   const sorts: Record<string, string> = data.sorts && typeof data.sorts === "object" ? data.sorts : {};
   const sorter = Object.keys(sorts).length > 0 && (
     <div className="tray-sort">
@@ -188,6 +260,7 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
         <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
       </div>
       <div className="mgroup-meta muted">
+        <FlagIcon jurisdiction={g.src_jurisdiction} />{" "}
         {[g.src_court_label || g.src_court, g.src_jurisdiction].filter(Boolean).join(" · ")}
         {g.src_date ? ` · ${String(g.src_date).slice(0, 4)}` : ""}
         {g.count > 1 ? ` · ${g.count} passages` : ""}
@@ -213,7 +286,7 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
             <button key={key} className={`tag tag-btn${slice === key ? " on" : ""}`}
               title={`Show only ${f.jur} ${KIND_LABEL[f.kind] || f.kind} citing this`}
               onClick={() => setSlice(slice === key ? null : key)}>
-              {f.jur} {KIND_LABEL[f.kind] || f.kind} <b>{f.n}</b></button>
+              <FlagIcon jurisdiction={f.jur} size={0.9} /> {f.jur} {KIND_LABEL[f.kind] || f.kind} <b>{f.n}</b></button>
           ))}
           {slice && (
             <button className="tag tag-btn tag-clear" onClick={() => setSlice(null)}
@@ -223,6 +296,13 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
       )}
       {data.total > groups.length && <p className="muted" style={{ fontSize: 12 }}>{data.total} citing documents · showing {groups.length}</p>}
       {shown.map((g, i) => mentionGroup(g, i, "mention"))}
+      {/* infinite-scroll sentinel: loads the next page of previews as it nears view */}
+      {data.has_more && !slice && <div ref={sentinel} style={{ height: 1 }} />}
+      {loading && groups.length > 0 && <p className="muted loading-pulse" style={{ fontSize: 12 }}>Loading more…</p>}
+      {data.has_more && slice && (
+        <button className="mini" style={{ margin: "6px 0" }} onClick={loadMore} disabled={loading}>
+          Load more (filtered view)</button>
+      )}
       {preparatory.length > 0 && (
         <section className="preparatory-documents" style={{ marginTop: 18 }}>
           <h4>Preparatory documents <span className="tag">{data.preparatory_count}</span></h4>
@@ -1876,6 +1956,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         {/* who decided this, and where — "Court of Appeal (Civil Division) ·
             England & Wales", matching the typology the explorer uses */}
         <div className="doc-provenance muted">
+          <FlagIcon jurisdiction={doc.jurisdiction} opacity={0.85} />{" "}
           {provenance([doc.court_label || d.court, doc.jurisdiction])}
           {d.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
           {d.landing_url && (
@@ -2084,7 +2165,7 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
             <button key={key} className={`tag tag-btn${slice === key ? " on" : ""}`}
               title={`Show only ${f.jur} ${KIND_LABEL[f.kind] || f.kind} citing this`}
               onClick={() => { setSlice(slice === key ? null : key); setPage(0); }}>
-              {f.jur} {KIND_LABEL[f.kind] || f.kind} <b>{f.n}</b></button>
+              <FlagIcon jurisdiction={f.jur} size={0.9} /> {f.jur} {KIND_LABEL[f.kind] || f.kind} <b>{f.n}</b></button>
           ))}
           {slice && (
             <button className="tag tag-btn tag-clear" onClick={() => { setSlice(null); setPage(0); }}
@@ -2100,7 +2181,8 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
           <Fragment key={g.key}>
             <tr>
               <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
-              <td><a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
+              <td><FlagIcon jurisdiction={r.src_jurisdiction} />{" "}
+                <a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
                 {r.dst_anchor && <span className="muted"> → {r.dst_anchor}</span>}
                 {r.src_cited_by ? <span className="muted" style={{ fontSize: 11 }}>
                   {" "}[cited by {r.src_cited_by.toLocaleString()}]</span> : null}
