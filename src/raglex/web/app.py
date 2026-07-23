@@ -740,11 +740,13 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/mentions")
     def mentions(id: str, anchor: str | None = None, sort: str = "pagerank",
-                 offset: int = 0, limit: int = 40) -> dict:
+                 exact: bool = False, offset: int = 0, limit: int = 40) -> dict:
         """Who mentions this document (optionally one paragraph), grouped by citing document
         and ranked by the citer's own authority — for the "Mentioned by …" line + tray.
-        Paginated (``offset``/``limit``) so the tray lazy-loads previews for every citer."""
-        return facade.document_mentions(id, anchor=anchor, sort=sort,
+        Paginated (``offset``/``limit``) so the tray lazy-loads previews for every citer.
+        ``exact`` restricts an anchor to that precise pinpoint (a sub-paragraph badge)
+        rather than the whole provision family."""
+        return facade.document_mentions(id, anchor=anchor, exact=exact, sort=sort,
                                         offset=max(0, offset), limit=max(1, min(limit, 200)))
 
     @app.get("/cited-by-breakdown")

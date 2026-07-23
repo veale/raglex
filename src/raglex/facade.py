@@ -1061,7 +1061,7 @@ class Facade:
     }
 
     def document_mentions(self, stable_id: str, *, anchor: str | None = None,
-                          offset: int = 0, limit: int = 40,
+                          exact: bool = False, offset: int = 0, limit: int = 40,
                           snippet_docs: int = 40, max_groups: int = 120,
                           sort: str = "pagerank") -> dict:
         """Who mentions this document (and, optionally, one paragraph of it), grouped by the
@@ -1074,7 +1074,16 @@ class Facade:
         """
         with self._open() as (cat, _rs, ts):
             rels = [r for r in cat.relations_to(stable_id) if r["extracted_via"] != "inferred"]
-            if anchor:
+            if anchor and exact:
+                # A specific SUB-provision: the sub-paragraph mention badges want only the
+                # documents pinned to exactly this pinpoint (Article 47(1)), not the whole
+                # Article 47 family. Match on a whitespace/case-normalised anchor so
+                # "Article 47(1)" and "article 47 (1)" coincide.
+                def _norm(a: str | None) -> str:
+                    return re.sub(r"\s+", "", (a or "")).lower()
+                want = _norm(anchor)
+                rels = [r for r in rels if _norm(r["dst_anchor"]) == want]
+            elif anchor:
                 # A provision heading represents its whole family. "Mentions of
                 # Article 22" includes citations pinned to Article 22(1), 22(2), …;
                 # exact string equality made the UI inherit whichever subparagraph

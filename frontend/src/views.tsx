@@ -30,7 +30,7 @@ export function PeekProvider({ children }: { children: any }) {
 // A stack of side trays that offset like bookmarks: opening a link inside a tray pushes
 // a new one on top (you still see the ones beneath), each with its own close cross.
 type Tray =
-  | { kind: "mentions"; target: string; anchor?: string; label: any }
+  | { kind: "mentions"; target: string; anchor?: string; exact?: boolean; label: any }
   | { kind: "cites"; target: string; family: "cases" | "statute"; label: any }
   | { kind: "doc"; id: string; highlightTarget?: string; highlightAnchor?: string;
       occurrenceStart?: number; label: any };
@@ -111,7 +111,7 @@ function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => v
   if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget}
     highlightAnchor={t.highlightAnchor} occurrenceStart={t.occurrenceStart} open={open} />;
   if (t.kind === "cites") return <CitesTray target={t.target} family={t.family} open={open} />;
-  return <MentionsTray target={t.target} anchor={t.anchor} open={open} />;
+  return <MentionsTray target={t.target} anchor={t.anchor} exact={t.exact} open={open} />;
 }
 
 // A mention snippet with the citation that produced the edge marked out — the reader
@@ -174,7 +174,7 @@ export function FlagIcon({ jurisdiction, size = 1, opacity }: { jurisdiction?: s
 
 // Grouped-by-citer mentions of a document (or one of its paragraphs), most-authoritative
 // first — with the passages where each cites it, and a jump to the full citing document.
-function MentionsTray({ target, anchor, open }: { target: string; anchor?: string; open: (id: string, a?: string) => void }) {
+function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?: string; exact?: boolean; open: (id: string, a?: string) => void }) {
   const { push } = useTray();
   // PageRank by default — raw citation counts flatter the merely-popular over the
   // judgment that actually settled the point
@@ -194,7 +194,7 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   useEffect(() => {
     let live = true;
     setGroups([]); setMeta(null); setNextOffset(0); setFailed(false); setLoading(true);
-    api.mentions(target, anchor, sort, 0, PAGE).then((d) => {
+    api.mentions(target, anchor, sort, 0, PAGE, exact).then((d) => {
       if (!live) return;
       setGroups((Array.isArray(d.groups) ? d.groups : []).filter((g: any) => g && typeof g === "object").map(norm));
       setMeta(d); setNextOffset(PAGE); setLoading(false);
@@ -205,7 +205,7 @@ function MentionsTray({ target, anchor, open }: { target: string; anchor?: strin
   const loadMore = useCallback(() => {
     if (loading || !meta || !meta.has_more) return;
     setLoading(true);
-    api.mentions(target, anchor, sort, nextOffset, PAGE).then((d) => {
+    api.mentions(target, anchor, sort, nextOffset, PAGE, exact).then((d) => {
       setGroups((prev) => [...prev, ...(Array.isArray(d.groups) ? d.groups : []).filter((g: any) => g && typeof g === "object").map(norm)]);
       setMeta((m: any) => (m ? { ...m, has_more: d.has_more } : m));
       setNextOffset((o) => o + PAGE); setLoading(false);
@@ -444,6 +444,65 @@ function MentionedBy({ list, target, anchor }: { list: any[]; target: string; an
       ))}
       {more > 0 && <span> and {more} more</span>}.{" "}
       <a className="mb-all" onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>See all mentions</a>
+    </div>
+  );
+}
+
+// A neat speech bubble (rounded rect + tail) — a pill so any count, single- or
+// many-digit, sits comfortably inside.
+function SpeechBubble({ n }: { n: number }) {
+  return (
+    <span className="mbubble" aria-hidden="true">
+      <svg viewBox="0 0 20 16" className="mbubble-svg" width="1em" height="1em">
+        <path d="M3 1h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8l-4 3v-3H3a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2z"
+          fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      </svg>
+      <span className="mbubble-n">{n.toLocaleString()}</span>
+    </span>
+  );
+}
+
+// The parenthetical pinpoint beyond a provision's base number:
+// "section 7(1)(a)" → "(1)(a)", "Article 47(2)" → "(2)"; null for a bare provision.
+function subPart(anchor: string): string | null {
+  const m = /\d+[a-z]?((?:\s*\([^()]+\))+)\s*$/i.exec((anchor || "").trim());
+  return m ? m[1].replace(/\s+/g, "") : null;
+}
+
+// Sub-paragraph mention badges for one provision (segment): the specific
+// sub-provisions that are cited, each a subtle, clickable speech-bubble with its
+// citer count. ADDITIONAL to the provision-level "Mentioned by" line — clicking opens
+// the mentions tray filtered to exactly that sub-paragraph.
+function SubParaMentions({ byAnchorRaw, sectionLabel, target }:
+  { byAnchorRaw: Record<string, any[]>; sectionLabel: string; target: string }) {
+  const { push } = useTray();
+  const sk = anchorKey(sectionLabel);
+  if (!sk) return null;
+  // merge citer lists across anchor spellings of the same sub-paragraph
+  const byPart: Record<string, { anchor: string; part: string; srcs: Set<string> }> = {};
+  for (const [a, list] of Object.entries(byAnchorRaw || {})) {
+    if (anchorKey(a) !== sk) continue;      // only this provision's family
+    const part = subPart(a);
+    if (!part) continue;                    // the bare provision → the MentionedBy line
+    const cur = byPart[part] || (byPart[part] = { anchor: a, part, srcs: new Set() });
+    for (const m of (list || [])) cur.srcs.add(m.src_id);
+  }
+  const subs = Object.values(byPart)
+    .map((s) => ({ anchor: s.anchor, part: s.part, count: s.srcs.size }))
+    .filter((s) => s.count > 0)
+    .sort((a, b) => a.part.localeCompare(b.part, undefined, { numeric: true }));
+  if (!subs.length) return null;
+  return (
+    <div className="subpara-mentions">
+      {subs.map((sp, i) => (
+        <button key={i} className="subpara-badge"
+          title={`${sp.count.toLocaleString()} document${sp.count === 1 ? "" : "s"} cite ${sp.part} specifically — see them`}
+          onClick={() => push({ kind: "mentions", target, anchor: sp.anchor, exact: true,
+            label: <>Mentions of {(sectionLabel.match(/^\s*(?:art(?:icle)?|s(?:ection)?|reg(?:ulation)?)\.?\s*\d+[a-z]?/i)?.[0] || sectionLabel).trim()}{sp.part}</> })}>
+          <span className="sp-part">{sp.part}</span>
+          <SpeechBubble n={sp.count} />
+        </button>
+      ))}
     </div>
   );
 }
@@ -1582,6 +1641,9 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
               onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>
             {sb.showLabel && <span className="seg-label">{s.label}</span>}
             <span className="seg-body">{sb.body}</span>
+            {/* subtle per-sub-paragraph mention badges (art 47(1), s 3(1)(a)…) — additional
+                to the provision-level "Mentioned by" line below */}
+            <SubParaMentions byAnchorRaw={mentions?.by_anchor || {}} sectionLabel={s.label} target={id} />
             {pinned(s.label).map((r, j) => (
               <div className="pinned" key={j}>💬 {r.relationship_type}: <a onClick={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</a>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>

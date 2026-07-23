@@ -521,6 +521,27 @@ tbody tr:hover { background: var(--surface-2); }
 .suggestion button.sug-yes:hover { background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .suggestion button.sug-no { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
 .suggestion button.sug-no:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+/* Per-sub-paragraph mention badges — subtle by default, lifting on hover. Pills, so a
+   count of any width sits neatly inside the speech bubble. */
+.subpara-mentions { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 2px; }
+.subpara-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: .72rem; line-height: 1; padding: 2px 8px 2px 7px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  color: var(--subtext); cursor: pointer; opacity: .55;
+  transition: opacity .14s ease, border-color .14s ease, color .14s ease, background .14s ease;
+}
+.subpara-badge:hover, .subpara-badge:focus-visible {
+  opacity: 1; border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--text); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  outline: none;
+}
+.subpara-badge .sp-part { font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+.mbubble { display: inline-flex; align-items: center; gap: 3px; color: color-mix(in srgb, var(--accent) 75%, currentColor); }
+.mbubble-svg { display: block; flex: 0 0 auto; }
+.mbubble-n { font-variant-numeric: tabular-nums; font-weight: 600; font-size: .95em; }
+
 .also-cited { font-size: .8125rem; margin: 0 0 var(--sp-2); }
 .also-cited b { font-weight: 500; color: var(--text); }
 .original-sources { font-size: .8125rem; margin: 0 0 var(--sp-2); }
