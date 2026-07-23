@@ -850,10 +850,11 @@ class Catalogue:
             ),
         )
             # Edges are re-derived from the record each upsert (a re-derivable
-            # projection, §1.2): clear this src's prior edges, then re-add.
+            # projection, §1.2): clear this src's prior edges, then re-add —
+            # batched, for the same reason as the extraction stage (an adapter
+            # shipping its own citation network writes hundreds of edges per doc).
             self.conn.execute("DELETE FROM relations WHERE src_id = ?", (record.stable_id,))
-            for rel in record.relations:
-                self._add_relation(record.stable_id, rel)
+            self.add_relations(record.stable_id, record.relations, commit=False)
 
     @staticmethod
     def _edge_keys(rel: TypedRelation) -> tuple[str | None, str | None]:
