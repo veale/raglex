@@ -168,6 +168,29 @@ def test_resolve_pending_from_only_touches_the_new_source(catalogue):
     assert catalogue.relations_for("src-2")[0]["resolution_status"] == "pending"
 
 
+def test_batched_resolver_is_set_based_checkpointed_and_cancellable(catalogue):
+    for year in range(2020, 2025):
+        _doc(catalogue, f"uksc/{year}/1")
+        _doc(catalogue, f"src-{year}", citing=f"[{year}] UKSC 1")
+    progress = []
+    stats = Resolver(catalogue).run_batched(
+        batch_size=2, on_progress=lambda **p: progress.append(p),
+    )
+    assert stats.resolved == 5
+    assert catalogue.count_pending_relations() == 0
+    assert len(progress) >= 3
+    assert progress[-1]["_checkpoint"]["phase"] == "resolve"
+    assert progress[-1]["done"] == progress[-1]["total"]
+
+    _doc(catalogue, "uksc/2026/1")
+    _doc(catalogue, "src-2026", citing="[2026] UKSC 1")
+    cancelled = Resolver(catalogue).run_batched(
+        batch_size=1, cancel_check=lambda: True,
+    )
+    assert "cancelled" in cancelled.notes
+    assert catalogue.relations_for("src-2026")[0]["resolution_status"] == "pending"
+
+
 def test_cite_count_ranks_worklist(catalogue):
     _doc(catalogue, "src-1", citing="[2024] UKSC 12")
     _doc(catalogue, "src-2", citing="[2024] UKSC 12")

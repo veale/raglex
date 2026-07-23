@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -7800,6 +7801,16 @@ class Facade:
             # re-fetched (contenthash changed) aren't "new" but their text changed, so
             # they get the same re-extract/classify pass.
             new_ids = list(dict.fromkeys([*stats.stored_ids, *stats.refreshed_ids]))
+            # A cursor-resumed discovery intentionally skips the already-walked prefix.
+            # Rebuild its downstream worklist from durable state instead of replaying
+            # hundreds of thousands of upstream records merely to repopulate a Python
+            # list. ``last_extracted_at`` is stamped even for citation-free documents,
+            # so this selects precisely the stored-but-unfinished backlog.
+            if (options or {}).get("start_offset"):
+                new_ids = list(dict.fromkeys([
+                    *cat.text_document_ids(source=adapter.source, only_never_extracted=True),
+                    *new_ids,
+                ]))
             from .citations import extract_document
             from .treatment import classify_corpus
             llm_cite, classifier = self._llm_passes(use_llm)
@@ -7817,15 +7828,22 @@ class Facade:
             # opinions carry the same citable series numbers) — gets its issuer /
             # identity / version / status / regime fields the moment it lands. NOT
             # edpb-oss: those are national DPA decisions, not Board guidance.
-            for i, sid in enumerate(new_ids, 1):
-                if cancel_check and cancel_check():
-                    break
-                if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
-                    on_progress(stage="classifying harvested documents", done=i,
-                                total=len(new_ids), item=sid)
-                doc = cat.get_document(sid)
-                if doc is not None and (doc["doc_type"] == "guidance" or doc["source"] == "edpb"):
-                    self._classify_guidance_into(cat, ts, sid)
+            # Bulk primary-law/caselaw sources cannot contain guidance. Avoid millions
+            # of pointless PK lookups after DILA, RII/GII, or Rechtspraak imports.
+            primary_bulk_sources = {
+                "fr-dila", "fr-dila-legi", "de-rii", "de-gii", "de-gesetze",
+                "de-gesetze-im-internet", "nl-rechtspraak", "nl-legislation",
+            }
+            if adapter.source not in primary_bulk_sources:
+                for i, sid in enumerate(new_ids, 1):
+                    if cancel_check and cancel_check():
+                        break
+                    if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
+                        on_progress(stage="classifying harvested documents", done=i,
+                                    total=len(new_ids), item=sid)
+                    doc = cat.get_document(sid)
+                    if doc is not None and (doc["doc_type"] == "guidance" or doc["source"] == "edpb"):
+                        self._classify_guidance_into(cat, ts, sid)
             # ``resolve=False`` lets a batch caller (e.g. seed-from-text over many seeds)
             # resolve ONCE at the end instead of re-resolving the whole graph per call.
             # Ingest changes only two bounded sets: edges emitted BY each new document,
@@ -7837,16 +7855,29 @@ class Facade:
             if resolve:
                 resolver = Resolver(cat)
                 rules = RuleEngine(cat)
-                for i, sid in enumerate(new_ids, 1):
-                    if cancel_check and cancel_check():
-                        break
-                    if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
-                        on_progress(stage="resolving harvested citations", done=i,
-                                    total=len(new_ids), item=sid)
-                    doc = cat.get_document(sid)
-                    resolved_n += cat.resolve_pending_from(sid)
-                    resolved_n += resolver.run_for(sid, doc["ecli"] if doc else None)
-                    rules.run_on_document(sid)
+                bulk_threshold = int(os.environ.get("RAGLEX_BULK_POSTPROCESS_THRESHOLD") or 10000)
+                if len(new_ids) >= bulk_threshold:
+                    # Never issue one target-side UPDATE per imported document. At DILA
+                    # scale that meant 1.7m scans and a months-long "silent" phase.
+                    bulk = resolver.run_batched(
+                        on_progress=on_progress, cancel_check=cancel_check,
+                    )
+                    resolved_n += bulk.resolved
+                    if not (cancel_check and cancel_check()):
+                        rules.run_on_documents(
+                            new_ids, on_progress=on_progress, cancel_check=cancel_check,
+                        )
+                else:
+                    for i, sid in enumerate(new_ids, 1):
+                        if cancel_check and cancel_check():
+                            break
+                        if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
+                            on_progress(stage="resolving harvested citations", done=i,
+                                        total=len(new_ids), item=sid)
+                        doc = cat.get_document(sid)
+                        resolved_n += cat.resolve_pending_from(sid)
+                        resolved_n += resolver.run_for(sid, doc["ecli"] if doc else None)
+                        rules.run_on_document(sid)
             result = asdict(stats)
             result.pop("stored_ids", None)  # internal and potentially hundreds of thousands
             return {**result, "resolved_edges": resolved_n,

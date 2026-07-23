@@ -152,3 +152,42 @@ class RuleEngine:
                 ):
                     applied.append(rule["tag"])
         return applied
+
+    def run_on_documents(self, stable_ids, *, on_progress=None, cancel_check=None) -> int:
+        """Apply enabled rules to a bulk-import set with one compiled rule snapshot.
+
+        ``run_on_document`` deliberately reloads rules so an interactive ingest sees
+        edits immediately. Repeating that lookup millions of times in a bulk import is
+        pure overhead; this path loads and parses each rule once and remains resumable
+        because tag upserts are idempotent.
+        """
+        compiled = []
+        for rule in self.catalogue.list_rules(enabled_only=True):
+            tree = json.loads(rule["condition_tree_json"])
+            compiled.append((rule, tree, root_method(tree)))
+        if not compiled:
+            return 0
+        total = len(stable_ids)
+        written = 0
+        for i, stable_id in enumerate(stable_ids, 1):
+            if cancel_check and cancel_check():
+                break
+            row = self.catalogue.get_document(stable_id)
+            if row is not None:
+                doc = _docview(row)
+                for rule, tree, method in compiled:
+                    if evaluate(tree, doc) and self.catalogue.upsert_document_tag(
+                        stable_id,
+                        rule["tag"],
+                        method=method,
+                        assigned_by_rule_id=rule["rule_id"],
+                        rule_version=rule["version"],
+                    ):
+                        written += 1
+            if on_progress and (i == 1 or i % 1000 == 0 or i == total):
+                on_progress(
+                    stage="tagging harvested documents", done=i, total=total,
+                    item=stable_id,
+                    _checkpoint={"phase": "tag", "completed": i, "last_id": stable_id},
+                )
+        return written

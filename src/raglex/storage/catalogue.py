@@ -1807,6 +1807,75 @@ class Catalogue:
                 total += max(cur.rowcount, 0)
         return total
 
+    def pending_relation_batch(self, after_id: int, *, through_id: int,
+                               batch_size: int = 50000) -> tuple[int, int] | None:
+        """Return ``(first_id, last_id)`` for the next bounded relation-id window.
+
+        The window is based on *all* relations, not only rows that are currently
+        pending. Otherwise a batch containing permanently-unresolvable references
+        would be selected forever. A fixed ``through_id`` snapshots the graph at job
+        start; edges arriving concurrently belong to the next run.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT relation_id FROM relations
+            WHERE relation_id > ? AND relation_id <= ?
+            ORDER BY relation_id
+            LIMIT ?
+            """,
+            (after_id, through_id, batch_size),
+        ).fetchall()
+        if not rows:
+            return None
+        return int(rows[0]["relation_id"]), int(rows[-1]["relation_id"])
+
+    def max_relation_id(self) -> int:
+        row = self.conn.execute("SELECT COALESCE(MAX(relation_id), 0) AS n FROM relations").fetchone()
+        return int(row["n"] if row else 0)
+
+    def resolve_pending_range(self, first_id: int, last_id: int) -> int:
+        """Resolve pending edges inside one durable relation-id range.
+
+        This is the bulk-import counterpart to ``resolve_pending_for``. Three
+        set-based joins over 50k rows are fast and bounded; calling the target-side
+        resolver once for each of 1.7m imported documents caused months of repeated
+        scans over the same pending-edge indexes.
+        """
+        passes = (
+            """
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM documents d
+            WHERE relations.relation_id >= ? AND relations.relation_id <= ?
+              AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NOT NULL
+              AND (d.stable_id = relations.candidate_id OR d.ecli = relations.candidate_id)
+            """,
+            """
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM citation_aliases a JOIN documents d
+              ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+            WHERE relations.relation_id >= ? AND relations.relation_id <= ?
+              AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NOT NULL
+              AND a.alias = lower(relations.candidate_id)
+            """,
+            """
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM citation_aliases a JOIN documents d
+              ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+            WHERE relations.relation_id >= ? AND relations.relation_id <= ?
+              AND relations.resolution_status = 'pending'
+              AND relations.raw_fold IS NOT NULL
+              AND a.alias = relations.raw_fold
+            """,
+        )
+        total = 0
+        with self._atomic():
+            for sql in passes:
+                cur = self.conn.execute(sql, (first_id, last_id))
+                total += max(cur.rowcount, 0)
+        return total
+
     def resolve_pending_for(self, stable_id: str, ecli: str | None = None) -> int:
         """The incremental case: only edges pointing at THIS document (just harvested)
         can newly resolve, so a single indexed lookup replaces a whole-graph pass."""
@@ -2075,6 +2144,7 @@ class Catalogue:
                           doc_types: list[str] | None = None,
                           source: str | None = None,
                           only_unextracted: bool = False,
+                          only_never_extracted: bool = False,
                           stale_days: int | None = None,
                           exclude_extraction_run_id: str | None = None) -> list[str]:
         """Document ids that have extractable text, in id order — the target set for a
@@ -2114,6 +2184,12 @@ class Catalogue:
             params.append(exclude_extraction_run_id)
         if only_unextracted:
             sql += " AND NOT EXISTS (SELECT 1 FROM citations c WHERE c.src_id = d.stable_id)"
+        if only_never_extracted:
+            # Unlike ``only_unextracted`` this uses the durable completion stamp, so
+            # a legitimately citation-free document is not selected again. This is
+            # the exact recovery backlog after a bulk harvest stored text but the
+            # process restarted before its extraction phase.
+            sql += " AND d.last_extracted_at IS NULL"
         if stale_days is not None:
             cutoff = _iso_days_ago(stale_days)
             # fresh = stamped recently OR has a recently-created citation row → skip it.

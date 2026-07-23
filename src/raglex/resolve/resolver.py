@@ -82,6 +82,46 @@ class Resolver:
         log.info(stats.summary())
         return stats
 
+    def run_batched(self, *, batch_size: int = 50000, on_progress=None,
+                    cancel_check=None, after_id: int = 0) -> ResolveStats:
+        """Resolve a snapshot of the graph in bounded, cancellable set-based ranges.
+
+        Intended for bulk imports. Progress is a relation-id cursor rather than a
+        document counter because resolution operates on edges; every completed range
+        commits independently and is safe to replay after interruption.
+        """
+        stats = ResolveStats()
+        through_id = self.catalogue.max_relation_id()
+        cursor = max(0, int(after_id))
+        while cursor < through_id:
+            if cancel_check and cancel_check():
+                stats.notes.append("cancelled")
+                break
+            window = self.catalogue.pending_relation_batch(
+                cursor, through_id=through_id, batch_size=batch_size,
+            )
+            if window is None:
+                cursor = through_id
+                break
+            first_id, last_id = window
+            stats.resolved += self.catalogue.resolve_pending_range(first_id, last_id)
+            cursor = last_id
+            if on_progress:
+                on_progress(
+                    stage="resolving harvested citations",
+                    done=cursor,
+                    total=through_id,
+                    item=f"relations {first_id}–{last_id}",
+                    _checkpoint={
+                        "phase": "resolve", "relation_id": cursor,
+                        "through_id": through_id,
+                    },
+                )
+        if not (cancel_check and cancel_check()):
+            stats.still_pending = self.catalogue.count_pending_relations()
+        log.info(stats.summary())
+        return stats
+
     def run_for(self, stable_id: str, ecli: str | None = None) -> int:
         """Resolve only the edges that point at one just-harvested document. Nothing else
         can have become resolvable, so the whole-graph pass is wasted work on ingest."""
