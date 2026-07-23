@@ -73,6 +73,8 @@ RESUME_POLICIES = {
     "gap-scan": "deduplicate", "repair-au-cth": "deduplicate",
     # resumes from the persisted relation-id / tag cursors (see _resume_row)
     "finish-bulk-postprocess": "checkpoint",
+    # resumes the whole-source reparse from the last stable_id checkpoint
+    "reparse-source": "checkpoint",
 }
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 _SCAN_KINDS = frozenset({"rescan-citations", "rescan"})
@@ -189,6 +191,11 @@ RUNNERS: dict[str, Callable] = {
     # Finish an interrupted bulk import's resolve/tag phases without re-running
     # discovery or extraction — batched, checkpointed, cancellable.
     "finish-bulk-postprocess": lambda f, p, cb, cancel: f.finish_bulk_postprocess(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
+    # Whole-source reparse from stored raw (a parser upgrade reaching held docs) —
+    # parallel, progress-reported, cancellable, and resumable from the stable_id cursor.
+    "reparse-source": lambda f, p, cb, cancel: f.reparse_source(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
@@ -483,6 +490,11 @@ class JobManager:
                 params["resolve"] = False
                 if checkpoint.get("completed") is not None:
                     params["tag_start"] = int(checkpoint["completed"])
+        # A whole-source reparse continues from the last stable_id it committed.
+        if (row.get("kind") == "reparse-source"
+                and checkpoint.get("after_stable_id")
+                and checkpoint.get("source") == params.get("source")):
+            params["after_stable_id"] = checkpoint["after_stable_id"]
         root = row.get("root_job_id") or row["job_id"]
         res = self.start(row["kind"], row["label"], params,
                          resumed_from=row["job_id"], root_job_id=root,

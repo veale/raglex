@@ -3638,6 +3638,65 @@ class Facade:
         n = sum(1 for sid in ids if self.reparse_document(stable_id=sid).get("reparsed"))
         return {"candidates": len(ids), "reparsed": n}
 
+    def reparse_source(self, *, source: str, workers: int = 12, after_stable_id: str = "",
+                       on_progress=None, cancel_check=None) -> dict:
+        """Re-derive text + segments for a whole SOURCE from its immutable raw, in
+        parallel — the background job behind a parser upgrade reaching an already-harvested
+        corpus (e.g. the rii Randnummer / DILA <br/> paragraphing fixes over de-rii's 83k
+        and fr-dila's ~2.9M docs). Work is file-read → parse → file-write (I/O-bound), so a
+        thread pool of ``workers`` beats the one-doc-at-a-time path many-fold. Reports
+        progress by document and checkpoints the last stable_id, so an interrupted or
+        cancelled run RESUMES from ``after_stable_id`` rather than restarting."""
+        import json as _json
+        from concurrent.futures import ThreadPoolExecutor
+
+        from .formats import parse as parse_format
+        hints = {"akn", "bwb", "formex-legislation", "rii-xml", "dila-xml"}
+
+        with self._open() as (cat, _rs, ts):
+            rows = [dict(r) for r in cat.conn.execute(
+                "SELECT stable_id, raw_path, payload_hash, meta_json FROM documents "
+                "WHERE source=? AND raw_path IS NOT NULL AND payload_hash IS NOT NULL "
+                "AND stable_id > ? ORDER BY stable_id", (source, after_stable_id or "")).fetchall()]
+            total = len(rows)
+            ok = skip = fail = 0
+
+            def _work(r: dict) -> str:
+                try:
+                    with open(r["raw_path"], "rb") as fh:
+                        raw = fh.read()
+                    meta = _json.loads(r["meta_json"]) if r["meta_json"] else {}
+                    hint = str(meta.get("format") or "").strip().lower()
+                    fmt = hint if hint in hints else _sniff_format(raw)
+                    if fmt is None:
+                        return "skip"
+                    pd = parse_format(fmt, raw)
+                    if not pd.text:
+                        return "skip"
+                    ts.put(r["payload_hash"], pd.text)
+                    ts.put_segments(r["payload_hash"], pd.segments)
+                    return "ok"
+                except Exception:  # noqa: BLE001 — a bad file must never stop the sweep
+                    return "fail"
+
+            done = 0
+            batch = 2000
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+                for start in range(0, total, batch):
+                    if cancel_check and cancel_check():
+                        break
+                    chunk = rows[start: start + batch]
+                    for res in ex.map(_work, chunk):
+                        done += 1
+                        ok += res == "ok"
+                        skip += res == "skip"
+                        fail += res == "fail"
+                    last = chunk[-1]["stable_id"]
+                    _progress(on_progress, stage=f"reparsing {source}", done=done, total=total,
+                              item=last, _checkpoint={"phase": "reparse", "source": source,
+                                                      "after_stable_id": last})
+        return {"source": source, "total": total, "reparsed": ok, "skipped": skip, "failed": fail}
+
     def _resolve_seeds(self, cat, seeds: list[str] | None, seed_rule: dict | None) -> set[str]:
         """Turn a seed spec into a concrete set of document/candidate ids. Seeds can
         be given explicitly, or *by rule* — the building blocks for "find cases related

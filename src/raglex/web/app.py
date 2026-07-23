@@ -434,6 +434,19 @@ def create_app(config: Config | None = None) -> FastAPI:
         cat = (payload or {}).get("category", "")
         return _start_job("refresh-category", f"total refresh — {cat}", {"category": cat})
 
+    @app.post("/jobs/reparse-source")
+    def job_reparse_source_ep(payload: dict = Body(...)) -> dict:
+        """Reparse a whole source's held documents from their stored raw (a parser
+        upgrade reaching the corpus) — a tracked, cancellable, resumable background job
+        with per-document progress, unlike the fire-and-forget CLI path."""
+        source = (payload or {}).get("source")
+        if not source:
+            return {"error": "source is required"}
+        params: dict = {"source": str(source)}
+        if payload.get("workers") is not None:
+            params["workers"] = int(payload["workers"])
+        return _start_job("reparse-source", f"reparse {source} from raw", params)
+
     @app.post("/jobs/match-reports")
     def job_match_reports_ep() -> dict:
         """Match reporter-only citations ("[1998] AC 1") to harvested cases by name+year."""
