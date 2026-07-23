@@ -126,3 +126,29 @@ class Resolver:
         """Resolve only the edges that point at one just-harvested document. Nothing else
         can have become resolvable, so the whole-graph pass is wasted work on ingest."""
         return self.catalogue.resolve_pending_for(stable_id, ecli)
+
+    def run_for_documents(self, ids, *, cancel_check=None) -> ResolveStats:
+        """Bounded resolution after a targeted fetch of a KNOWN document set.
+
+        Exactly two edge populations can have become resolvable: the edges these
+        documents just emitted (their fresh extractions, resolved by ``src_id``) and
+        the pending edges anywhere in the graph that point AT them — directly or via
+        the aliases minted with them. Probing those is a handful of indexed lookups
+        per document; the whole-graph ``run()`` it replaces re-joined every pending
+        edge in the corpus, which at 5.5M pending costs minutes per call — per
+        drained reference, per watch tick, per gap-scan item.
+        """
+        stats = ResolveStats()
+        seen: set[str] = set()
+        for sid in ids:
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            if cancel_check and cancel_check():
+                break
+            doc = self.catalogue.get_document(sid)
+            if doc is None:
+                continue
+            stats.resolved += self.catalogue.resolve_pending_from(sid)
+            stats.resolved += self.catalogue.resolve_pending_for(sid, doc["ecli"])
+        return stats

@@ -228,3 +228,46 @@ def test_citation_folding_keeps_decimal_pinpoints_intact(catalogue):
     abbreviation, and collapsing it to "52" would point at a different paragraph."""
     catalogue.put_alias("practice direction 5.2", "pd/5-2", source="named")
     assert catalogue.get_alias("practice direction 5.2") == "pd/5-2"
+
+
+def test_run_for_documents_is_bounded_and_complete(catalogue):
+    """The targeted-fetch resolver: edges FROM the fetched docs and edges pointing
+    AT them (directly or via their aliases) flip — nothing else is touched, and no
+    whole-graph pass runs."""
+    from raglex.core.models import DocType, Record, RelationshipType, TypedRelation
+    from raglex.resolve.resolver import Resolver
+
+    # an old document with a pending edge citing the (about-to-arrive) target
+    citer = Record(source="x", stable_id="old/1", doc_type=DocType.JUDGMENT, title="old",
+                   relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                            raw_citation_string="NEW/1", dst_id=None)])
+    citer.ensure_payload_hash()
+    catalogue.upsert_document(citer, raw_path=None, text_path=None)
+    catalogue.conn.execute(
+        "UPDATE relations SET candidate_id = 'new/1', resolution_status = 'pending'")
+    catalogue.conn.commit()
+    # an unrelated pending edge that must stay untouched
+    other = Record(source="x", stable_id="old/2", doc_type=DocType.JUDGMENT, title="o",
+                   relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                            raw_citation_string="ELSEWHERE", dst_id=None)])
+    other.ensure_payload_hash()
+    catalogue.upsert_document(other, raw_path=None, text_path=None)
+
+    # the target arrives (a bounded fetch), citing the old doc in turn
+    target = Record(source="x", stable_id="new/1", doc_type=DocType.JUDGMENT, title="new",
+                    relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                             raw_citation_string="old/1", dst_id=None)])
+    target.ensure_payload_hash()
+    catalogue.upsert_document(target, raw_path=None, text_path=None)
+    catalogue.conn.execute(
+        "UPDATE relations SET candidate_id = 'old/1', resolution_status = 'pending' "
+        "WHERE src_id = 'new/1'")
+    catalogue.conn.commit()
+
+    stats = Resolver(catalogue).run_for_documents(["new/1", "new/1", None])
+    assert stats.resolved == 2  # incoming (old/1 → new/1) and outgoing (new/1 → old/1)
+    rows = {(r["src_id"], r["dst_id"], r["resolution_status"])
+            for r in catalogue.conn.execute("SELECT * FROM relations")}
+    assert ("old/1", "new/1", "resolved") in rows
+    assert ("new/1", "old/1", "resolved") in rows
+    assert any(s == "old/2" and st == "pending" for s, _d, st in rows)

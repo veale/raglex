@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 CREATE INDEX IF NOT EXISTS citation_counts_cand_idx ON citation_counts (candidate_id);
 
+-- Per-source resolved-outgoing-edge roll-up. The Explore homepage's citation-density
+-- figure used to be a live relations×documents GROUP BY on every cache refresh —
+-- minutes of IO at 17M+ edges. Rebuilt alongside citation_counts on the same cadence.
+CREATE TABLE IF NOT EXISTS source_stats (
+    source            TEXT PRIMARY KEY,
+    resolved_outgoing INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at        TEXT NOT NULL
+);
+
 -- Per-document citation-network statistics (PageRank over the resolved mentions
 -- graph — treatment types deliberately NOT weighted, they aren't reliable yet).
 -- Rebuilt wholesale by rebuild_authority() on a cadence, like citation_counts.
@@ -382,6 +391,12 @@ _POST_MIGRATE_INDEXES = (
     "WHERE resolution_status = 'pending'",
     "CREATE INDEX IF NOT EXISTS relations_pending_fold_idx ON relations (raw_fold) "
     "WHERE resolution_status = 'pending'",
+    # The alias rung of every resolution pass compares lower(candidate_id) — an
+    # expression the plain candidate_id index cannot serve, so each targeted
+    # resolve_pending_for() probe degenerated into a scan of the ENTIRE pending set
+    # (2-3s per call at 5.5M pending; the per-document bulk post-processing pathology).
+    "CREATE INDEX IF NOT EXISTS relations_pending_candidate_lower_idx ON relations "
+    "(lower(candidate_id)) WHERE resolution_status = 'pending'",
     # Serves the Corpus browser's ORDER BY decision_date DESC, stable_id LIMIT n
     # directly — without it every page load sorts the whole documents table. On a
     # large live table create it CONCURRENTLY by hand first; this statement then
@@ -1031,6 +1046,26 @@ class Catalogue:
         return self.conn.execute(
             "SELECT COUNT(*) AS n FROM citation_counts"
         ).fetchone()["n"]
+
+    def refresh_source_stats(self) -> int:
+        """Recompute the per-source resolved-outgoing roll-up (one heavy aggregate,
+        on the citation-counts cadence — never inline in a page load)."""
+        with self._atomic():
+            self.conn.execute("DELETE FROM source_stats")
+            self.conn.execute(
+                "INSERT INTO source_stats (source, resolved_outgoing, rebuilt_at) "
+                "SELECT d.source, COUNT(*), ? FROM relations r "
+                "JOIN documents d ON d.stable_id = r.src_id "
+                "WHERE r.resolution_status = 'resolved' AND r.src_id <> r.dst_id "
+                "GROUP BY d.source",
+                (_now(),),
+            )
+        return self.conn.execute("SELECT COUNT(*) AS n FROM source_stats").fetchone()["n"]
+
+    def source_stats(self) -> dict[str, int]:
+        """The roll-up, or {} when it has never been rebuilt (caller falls back live)."""
+        return {r["source"]: r["resolved_outgoing"] for r in self.conn.execute(
+            "SELECT source, resolved_outgoing FROM source_stats")}
 
     def clear_relations(self, src_id: str, *, extracted_via: str) -> None:
         """Drop a source's edges from one extraction method, so re-running that

@@ -119,11 +119,14 @@ class Pipeline:
         with different queries see different slices of the feed — sharing the source-wide
         cursor means whichever ran last pushes the other's cursor past everything it would
         have found, so a fresh query-watch never sees a single document."""
+        import time as _time
+
         stats = RunStats(source=adapter.source)
         wm_key = watermark_key or adapter.source
         watermark = None if ignore_watermark else (since if backfill else self.catalogue.get_watermark(wm_key))
         highest = watermark
         wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
+        last_emit = 0.0
 
         try:
             for stub in adapter.discover(watermark, max_pages=max_pages):
@@ -131,10 +134,18 @@ class Pipeline:
                     stats.notes.append("cancelled")
                     break
                 stats.discovered += 1
-                # Per-stub heartbeat so a long crawl (the EDPB backfill fetches hundreds
-                # of PDFs at a slow, WAF-safe pace) keeps the job alive and shows live
-                # progress, instead of looking frozen behind one silent "harvesting" line.
-                if on_progress:
+                # Heartbeat so a long crawl (the EDPB backfill fetches hundreds of PDFs
+                # at a slow, WAF-safe pace) keeps the job alive and shows live progress,
+                # instead of looking frozen behind one silent "harvesting" line.
+                # Time-throttled, not per-stub: each callback costs a ~3ms GIL-yield in
+                # the job runner, which across a million-stub dedup walk is ~50 minutes
+                # of pure sleep. A slow crawl (seconds per item) still reports every
+                # item; a fast walk reports a few times a second. The resume-offset
+                # checkpoint rides these events, so at worst a restart replays the few
+                # hundred stubs since the last emit — all deduped.
+                now = _time.monotonic()
+                if on_progress and now - last_emit >= 0.25:
+                    last_emit = now
                     progress = {
                         "stage": f"harvesting {adapter.source}",
                         "done": stats.discovered,

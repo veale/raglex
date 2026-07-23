@@ -1781,12 +1781,16 @@ class Facade:
                 "COUNT(*) AS n, SUM(has_text) AS with_text, SUM(has_embedding) AS embedded "
                 "FROM documents GROUP BY source, doc_type, court, substr(decision_date, 1, 4)"
             ).fetchall()
-            # resolved outgoing edges per source → citation density per document
-            dens = {r["source"]: r["n"] for r in cat.conn.execute(
-                "SELECT d.source, COUNT(*) AS n FROM relations r "
-                "JOIN documents d ON d.stable_id = r.src_id "
-                "WHERE r.resolution_status = 'resolved' AND r.src_id <> r.dst_id "
-                "GROUP BY d.source").fetchall()}
+            # resolved outgoing edges per source → citation density per document.
+            # Read from the source_stats roll-up (rebuilt with citation_counts on the
+            # hourly cadence): the live relations×documents GROUP BY it replaces took
+            # minutes of IO at 17M+ edges and ran on every cold cache refresh. A DB
+            # whose roll-up has never been built (fresh install, tests) computes live
+            # once and seeds it.
+            dens = cat.source_stats()
+            if not dens:
+                cat.refresh_source_stats()
+                dens = cat.source_stats()
             courts = cat.conn.execute(
                 "SELECT source, court, doc_type, COUNT(*) AS n FROM documents "
                 "WHERE court IS NOT NULL AND court <> '' "
@@ -2426,8 +2430,11 @@ class Facade:
         """Refresh the snowball's frequency roll-up (scheduler; ~13s over 10M citations)."""
         with self._open() as (cat, _rs, _ts):
             n = cat.rebuild_citation_counts()
+            # same cadence, same shape of work: the per-source density roll-up the
+            # Explore homepage reads instead of a minutes-long live GROUP BY
+            srcs = cat.refresh_source_stats()
         self._invalidate_caches()
-        return {"candidates": n}
+        return {"candidates": n, "sources": srcs}
 
     def backfill_edge_keys(self, *, on_progress=None, cancel_check=None) -> dict:
         """One-off: populate candidate_id/raw_fold on edges written before those columns
@@ -3281,7 +3288,7 @@ class Facade:
                 if "error" not in res:
                     frontier.add(res["candidate"])
             self._extract_ids(cat, ts, frontier)  # only the seeds, not the whole corpus
-            Resolver(cat).run()
+            Resolver(cat).run_for_documents(frontier)
             seen = set(frontier)
 
             for deg in range(1, max(1, degrees) + 1):
@@ -3304,7 +3311,7 @@ class Facade:
                     if cancel_check and cancel_check():
                         summary["cancelled"] = True
                         self._extract_ids(cat, ts, newly)
-                        Resolver(cat).run()
+                        Resolver(cat).run_for_documents(newly)
                         return summary
                     attempts += 1
                     seen.add(c)
@@ -3316,7 +3323,7 @@ class Facade:
                     _progress(on_progress, stage=f"degree {deg}", done=len(newly), total=target,
                               item=res.get("candidate") or c, ok=ok)
                 self._extract_ids(cat, ts, newly)  # only the newly fetched docs
-                Resolver(cat).run()
+                Resolver(cat).run_for_documents(newly)
                 summary["degrees"].append({"degree": deg, "candidates": len(cands),
                                            "harvested": len(newly)})
                 summary["harvested"] += newly
@@ -3654,8 +3661,11 @@ class Facade:
             # fetch loop, so report them as their own stages (this is the phase that
             # looked "stuck" because the progress bar had finished the harvest loop).
             self._extract_ids(cat, ts, fetched_ids, on_progress=on_progress)
-            _progress(on_progress, stage="resolving citations", done=0, total=0)
-            resolved = Resolver(cat).run()
+            _progress(on_progress, stage="resolving citations",
+                      done=0, total=len(fetched_ids))
+            # bounded: only the fetched docs' own edges + edges pointing at them can
+            # newly resolve — the whole-graph pass here cost minutes per drain batch
+            resolved = Resolver(cat).run_for_documents(fetched_ids)
         self._invalidate_caches()  # refresh the worklist's per-source "remaining" counts
         remaining = len(candidates) - skipped - len(fetched)
         return {"attempted": len(rows), "harvested": len(fetched),
@@ -6044,7 +6054,7 @@ class Facade:
             # extract only the newly-fetched doc (NOT the whole 20k-doc corpus), then
             # resolve — the same fix as harvest(); a single click shouldn't re-mine everything.
             self._extract_ids(cat, ts, [res["candidate"]])
-            resolved = Resolver(cat).run()
+            resolved = Resolver(cat).run_for_documents([res["candidate"]])
             now = cat.find_document_id(res["candidate"])
         self._invalidate_caches()
         return {"ref": ref, "candidate": res["candidate"],
@@ -6141,7 +6151,7 @@ class Facade:
             # their edges (and any onward hanging references) enter the graph.
             if fetched_ids:
                 self._extract_ids(cat, ts, fetched_ids)
-                resolved = Resolver(cat).run()
+                resolved = Resolver(cat).run_for_documents(fetched_ids)
                 result["resolved_edges"] = resolved.resolved
         result["fetched_ids"] = fetched_ids
         if fetched_ids:
@@ -6740,7 +6750,7 @@ class Facade:
                 adapter, max_pages=limit, record_health=True)
             stored_ids = [s for s in cat.all_stable_ids() - before]
             self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
-            resolved = Resolver(cat).run()
+            resolved = Resolver(cat).run_for_documents(stored_ids)
         matched = {}
         if match_reports and not (cancel_check and cancel_check()):
             matched = self.match_report_citations(on_progress=on_progress, cancel_check=cancel_check)
@@ -6991,7 +7001,7 @@ class Facade:
                     adapter, record_health=False).stored
             stored_ids = list(cat.all_stable_ids() - before)
             self._extract_ids(cat, ts, stored_ids, on_progress=on_progress)
-            resolved = Resolver(cat).run()
+            resolved = Resolver(cat).run_for_documents(stored_ids)
         matched = {}
         if match_after and not (cancel_check and cancel_check()):
             matched = self.match_echr_reports(on_progress=on_progress, cancel_check=cancel_check)
@@ -7337,7 +7347,8 @@ class Facade:
                     out["harvest"] = self._fetch_reference(
                         cat, rs, ts, ref=suggested_id, candidate=suggested_id, patient=True)
                 if resolve:
-                    resolved = Resolver(cat).run()
+                    # bounded: only edges keyed on the confirmed alias/target can flip
+                    resolved = Resolver(cat).run_for_documents([suggested_id])
                     out["resolved_edges"] = resolved.resolved
         self._invalidate_caches()
         return out
@@ -7733,12 +7744,16 @@ class Facade:
             # the cursor: the watermark still jumps to the newest item seen.
             max_pages = (spec.get("max_pages_incremental", 40) if has_cursor
                          else spec.get("max_pages", 1))
-            h = self.harvest(source, backfill=bool(spec.get("backfill")),
+            # ``backfill`` means "the FIRST run walks deep" — not "ignore the cursor
+            # forever". A backfill harvest reads no watermark at all, so a recurring
+            # watch spec with backfill:true re-walked its entire upstream register on
+            # every cadence tick (the NL Rechtspraak daily sync re-paged a million-row
+            # SRU feed from 0 each day). Once a cursor exists the walk has happened;
+            # every later run follows it incrementally.
+            h = self.harvest(source, backfill=bool(spec.get("backfill")) and not has_cursor,
                              max_pages=max_pages, options=opts, watermark_key=wm_key,
                              use_llm=spec.get("use_llm"), on_progress=on_progress)
             result["harvest"] = h
-            seed_ids = self._keyword_seed_docs(source, keywords, limit=spec.get("max_seeds", 60))
-            result["seeds_from_source"] = len(seed_ids)
 
         # Forward-citation discovery: NEW cases citing a target (the renewing seed).
         disc = spec.get("discover")
@@ -7749,16 +7764,16 @@ class Facade:
             result["discover"] = {k: d.get(k) for k in ("via", "query", "count")}
             seed_ids = list({*seed_ids, *d.get("discovered", [])})
 
-        degrees = int(spec.get("degrees", 1))
-        _emit("snowballing", total=len(seed_ids))
-        rad = self.radiate(seeds=seed_ids or None, seed_rule=spec.get("seed_rule"),
-                           degrees=degrees, max_per_degree=spec.get("max_per_degree", 40),
-                           on_progress=on_progress, cancel_check=cancel_check)
-        result["radiate"] = rad
-
-        # tag everything this watch brought in (seeds + snowballed) into a collection
+        # NO snowballing. A watch is the systematic path now: harvest the register's
+        # delta, extract, resolve — done. The old radiate stage re-fetched every
+        # keyword-matched "seed" one at a time (the mysterious "seeding 1/23" a watch
+        # froze on at WAF pace) and then chased citations ``degrees`` hops, even when
+        # degrees was 0. Full-register backfills + set-based resolution made that
+        # expansion obsolete; ``radiate`` survives only as an explicit one-off job.
         if spec.get("tag"):
-            brought = list({*seed_ids, *rad.get("harvested", [])})
+            brought = list({*seed_ids,
+                            *self._keyword_seed_docs(source, keywords,
+                                                     limit=spec.get("max_seeds", 60))})
             if brought:
                 self.tag_many(doc_ids=brought, tag=spec["tag"])
                 result["tagged"] = len(brought)
@@ -7823,8 +7838,16 @@ class Facade:
         # Discovery persists {"phase": "discover", "resume_offset": N}; without merging,
         # the first extract/resolve/tag checkpoint OVERWRITES it — so a job interrupted
         # after discovery would resume by replaying the entire upstream walk from 0
-        # (the exact failure the offset exists to prevent).
+        # (the exact failure the offset exists to prevent). Seeded from the restored
+        # ``start_offset`` because a resumed discovery that lands exactly at the feed's
+        # end yields zero stubs — and therefore zero discover checkpoints to merge from
+        # (observed in production: the NL job's extract checkpoint lost its offset).
         discover_cursor: dict = {}
+        if (options or {}).get("start_offset"):
+            # adapter.source, not the registry key: "fr-dila-legi" resolves to an
+            # adapter whose checkpoints (and _resume_row's comparison) say "fr-dila".
+            discover_cursor.update(source=adapter.source,
+                                   resume_offset=int(options["start_offset"]))
 
         def _phase_progress(**p) -> None:
             ck = p.get("_checkpoint")

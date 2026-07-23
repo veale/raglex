@@ -138,3 +138,36 @@ def test_run_watch_uses_per_watch_watermark(monkeypatch):
         cat.set_watermark(wm_key, "2026-01-01T00:00:00+00:00")
     f.run_watch(watch_id=w["watch_id"])
     assert calls[1]["max_pages"] == 40
+
+
+def test_run_watch_never_snowballs(monkeypatch):
+    """Watches are the systematic path: harvest the register's delta, extract,
+    resolve — no radiate stage. The old seeding pass re-fetched every keyword seed
+    one at a time (each followed by a whole-graph resolve), freezing watch jobs for
+    hours at WAF pace even with degrees: 0."""
+    f = _facade()
+    w = f.create_watch(name="DP", spec={"source": "uk-grc", "degrees": 2,
+                                        "max_pages": 1})
+    monkeypatch.setattr(f, "harvest", lambda source, **kw: {"stored": 0})
+    monkeypatch.setattr(f, "radiate", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("watches must not snowball")))
+    res = f.run_watch(watch_id=w["watch_id"])
+    assert "radiate" not in res
+
+
+def test_run_watch_backfill_is_first_run_only(monkeypatch):
+    """backfill:true means 'the FIRST walk goes deep', not 'ignore the cursor
+    forever' — a recurring backfill watch re-walked a million-row SRU feed from 0
+    on every cadence tick."""
+    f = _facade()
+    w = f.create_watch(name="NL", spec={"source": "uk-grc", "backfill": True,
+                                        "degrees": 0, "max_pages": None})
+    calls: list[dict] = []
+    monkeypatch.setattr(f, "harvest",
+                        lambda source, **kw: calls.append(kw) or {"stored": 0})
+    f.run_watch(watch_id=w["watch_id"])
+    assert calls[0]["backfill"] is True          # no cursor yet → deep walk
+    with f._open() as (cat, _rs, _ts):
+        cat.set_watermark(f"watch:{w['watch_id']}:uk-grc", "2026-07-23")
+    f.run_watch(watch_id=w["watch_id"])
+    assert calls[1]["backfill"] is False         # cursor exists → incremental
