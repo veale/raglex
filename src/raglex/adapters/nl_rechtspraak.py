@@ -261,10 +261,12 @@ class NLRechtspraakAdapter(BaseAdapter):
     requires_proxy = False
 
     def __init__(self, *, per_page: int = 1000, path: str | None = None,
+                 start_offset: int = 0,
                  lido_links: bool = False,
                  client: RateLimitedClient | None = None) -> None:
         self.per_page = per_page
         self.path = Path(path) if path else None
+        self.start_offset = max(0, int(start_offset))
         self.lido_links = bool(lido_links)
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
@@ -284,7 +286,7 @@ class NLRechtspraakAdapter(BaseAdapter):
                 for xml in sorted(self.path.rglob("*.xml")):
                     yield Stub(stable_id=xml.stem, hints={"file": str(xml)})
             return
-        offset = 0
+        offset = self.start_offset
         pages = 0
         while True:
             params = {"return": "DOC", "max": self.per_page, "from": offset}
@@ -294,7 +296,14 @@ class NLRechtspraakAdapter(BaseAdapter):
             page = parse_index(resp.content)
             if page.count == 0:
                 return
-            yield from page.stubs
+            # Persist the *next* safe SRU offset on every processed stub. A container
+            # restart can then continue near the tail of a million-result backfill
+            # instead of replaying every already-held ECLI merely to rebuild an
+            # in-memory worklist. The cursor is advisory (the live result set can move);
+            # the normal modified-date incremental pass catches any shifted arrivals.
+            for position, stub in enumerate(page.stubs, 1):
+                stub.hints["resume_offset"] = offset + position
+                yield stub
             offset += page.count
             pages += 1
             if max_pages is not None and pages >= max_pages:

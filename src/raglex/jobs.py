@@ -409,6 +409,17 @@ class JobManager:
             checkpoint = _json.loads(row.get("checkpoint_json") or "{}")
         except (ValueError, TypeError):
             params, checkpoint = {}, {}
+        # Some very large catalogues expose a durable discovery cursor. Restore it
+        # into the adapter options before relaunching: document deduplication prevents
+        # duplicate storage, but without the cursor an NL backfill at offset 930,000
+        # still spends many hours walking those 930,000 records again.
+        if (row.get("kind") == "harvest-source"
+                and checkpoint.get("phase") == "discover"
+                and checkpoint.get("source") == params.get("source")
+                and checkpoint.get("resume_offset") is not None):
+            options = dict(params.get("options") or {})
+            options["start_offset"] = int(checkpoint["resume_offset"])
+            params["options"] = options
         root = row.get("root_job_id") or row["job_id"]
         res = self.start(row["kind"], row["label"], params,
                          resumed_from=row["job_id"], root_job_id=root,

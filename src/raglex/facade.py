@@ -7817,7 +7817,12 @@ class Facade:
             # opinions carry the same citable series numbers) — gets its issuer /
             # identity / version / status / regime fields the moment it lands. NOT
             # edpb-oss: those are national DPA decisions, not Board guidance.
-            for sid in new_ids:
+            for i, sid in enumerate(new_ids, 1):
+                if cancel_check and cancel_check():
+                    break
+                if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
+                    on_progress(stage="classifying harvested documents", done=i,
+                                total=len(new_ids), item=sid)
                 doc = cat.get_document(sid)
                 if doc is not None and (doc["doc_type"] == "guidance" or doc["source"] == "edpb"):
                     self._classify_guidance_into(cat, ts, sid)
@@ -7832,7 +7837,12 @@ class Facade:
             if resolve:
                 resolver = Resolver(cat)
                 rules = RuleEngine(cat)
-                for sid in new_ids:
+                for i, sid in enumerate(new_ids, 1):
+                    if cancel_check and cancel_check():
+                        break
+                    if on_progress and (i == 1 or i % 1000 == 0 or i == len(new_ids)):
+                        on_progress(stage="resolving harvested citations", done=i,
+                                    total=len(new_ids), item=sid)
                     doc = cat.get_document(sid)
                     resolved_n += cat.resolve_pending_from(sid)
                     resolved_n += resolver.run_for(sid, doc["ecli"] if doc else None)

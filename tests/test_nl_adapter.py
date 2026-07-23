@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from raglex.adapters.nl_rechtspraak import parse_content, parse_index
+from raglex.adapters.nl_rechtspraak import NLRechtspraakAdapter, parse_content, parse_index
 from raglex.core.models import RelationshipType
 from raglex.resolve import Resolver
 
@@ -50,6 +50,29 @@ def test_parse_index_yields_ecli_stubs():
     assert stub.court == "Hoge Raad"
     assert stub.hint_date == date(2021, 9, 17)
     assert stub.raw_url.endswith("?id=ECLI:NL:HR:2021:1303")
+
+
+def test_discovery_resume_offset_is_applied_and_advanced():
+    class Response:
+        content = INDEX
+
+    class Client:
+        def __init__(self):
+            self.params = []
+
+        def get(self, _url, *, params):
+            self.params.append(params)
+            # One page followed by the empty terminator.
+            if len(self.params) > 1:
+                return type("Empty", (), {"content": b"<feed xmlns='http://www.w3.org/2005/Atom'/>"})()
+            return Response()
+
+    client = Client()
+    stubs = list(NLRechtspraakAdapter(
+        start_offset=930_000, client=client,
+    ).discover(None))
+    assert client.params[0]["from"] == 930_000
+    assert stubs[0].hints["resume_offset"] == 930_001
 
 
 def test_parse_content_extracts_metadata_typed_edge_and_body():

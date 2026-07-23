@@ -135,8 +135,19 @@ class Pipeline:
                 # of PDFs at a slow, WAF-safe pace) keeps the job alive and shows live
                 # progress, instead of looking frozen behind one silent "harvesting" line.
                 if on_progress:
-                    on_progress(stage=f"harvesting {adapter.source}", done=stats.discovered,
-                                stored=stats.stored, item=stub.stable_id)
+                    progress = {
+                        "stage": f"harvesting {adapter.source}",
+                        "done": stats.discovered,
+                        "stored": stats.stored,
+                        "item": stub.stable_id,
+                    }
+                    if stub.hints.get("resume_offset") is not None:
+                        progress["_checkpoint"] = {
+                            "phase": "discover",
+                            "source": adapter.source,
+                            "resume_offset": int(stub.hints["resume_offset"]),
+                        }
+                    on_progress(**progress)
 
                 # Skip a stub we ALREADY hold before paying to download+parse it (dedup
                 # otherwise only fires on the payload hash, *after* the fetch). A query/

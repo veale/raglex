@@ -87,6 +87,30 @@ def test_restart_rebuilds_from_stored_params(monkeypatch):
     assert started["resume"]["root_job_id"] == "old"
 
 
+def test_harvest_restart_restores_discovery_cursor(monkeypatch):
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job(
+            "nl-old", "harvest-source", "NL backfill",
+            {"source": "nl-rechtspraak", "backfill": True, "options": {}},
+            origin="api", checkpoint={
+                "phase": "discover", "source": "nl-rechtspraak",
+                "resume_offset": 930_001,
+            },
+        )
+        cat.finish_job("nl-old", "interrupted", {})
+    started: dict = {}
+    mgr = JobManager(f, origin="api")
+
+    def fake_start(kind, label, params, **resume):
+        started.update(kind=kind, params=params, resume=resume)
+        return {"job_id": "nl-new"}
+
+    monkeypatch.setattr(mgr, "start", fake_start)
+    mgr.restart("nl-old")
+    assert started["params"]["options"]["start_offset"] == 930_001
+
+
 def test_checkpoint_is_distinct_from_display_progress():
     f = _facade()
     with f._open() as (cat, _rs, _ts):
