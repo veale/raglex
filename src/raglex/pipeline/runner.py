@@ -273,6 +273,29 @@ class Pipeline:
                     continue
                 stats.fetched += 1
 
+                # Provisional-id dedup (§5). Some adapters can only mint a stub's real
+                # identity by fetching it: the id is the neutral citation printed inside
+                # the PDF (NZ Supreme Court) or read off the judgment's detail page
+                # (Ireland), so the discovery stub carries a placeholder id the prefilter
+                # can't match against a copy already held under its real citation — e.g. a
+                # case seeded by a bulk import. Without this, re-reaching such a case would
+                # archive the held version and supersede it with this source's copy on
+                # every backfill. When fetch() reveals a real id different from the stub's
+                # and we already hold it, treat it as deduped (unless a deliberate
+                # refetch/refresh). A genuine upstream revision still stores: it keeps the
+                # stub's id, or is flagged `refreshed` by the contenthash-change path.
+                if (record.stable_id != stub.stable_id and not refetch_held
+                        and not refreshed
+                        and self.catalogue.held_extraction_state([record.stable_id])):
+                    stats.deduped += 1
+                    if not wm_frozen:
+                        highest = _max_watermark(
+                            highest,
+                            stub.hints.get("watermark")
+                            or (stub.hint_date and stub.hint_date.isoformat()),
+                        )
+                    continue
+
                 if self._ingest(record, stats):
                     stats.stored += 1
                     stats.stored_ids.append(record.stable_id)

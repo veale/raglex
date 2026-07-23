@@ -122,3 +122,62 @@ def test_url_fallback_still_dedups_provisional_ids(tmp_path):
         stats = Pipeline(cat, rs, textstore=ts).run(adapter, record_health=False)
         assert stats.deduped == 1 and stats.stored == 0
         assert adapter.fetched == []
+
+
+class _RekeyAdapter:
+    """A provisional-id adapter (Ireland/NZ pattern) whose stub id can't be matched
+    against a bulk-seeded copy until fetch() reveals the real neutral-cite id."""
+
+    source = "rekey"
+    min_interval = 0.0
+    requires_js = False
+    requires_proxy = False
+
+    def __init__(self, stubs, real_ids):
+        self._stubs = stubs
+        self._real = real_ids  # stub id → real id fetch() mints
+        self.fetched: list[str] = []
+
+    def discover(self, since, *, max_pages=None):
+        yield from self._stubs
+
+    def fetch(self, stub):
+        self.fetched.append(stub.stable_id)
+        rid = self._real[stub.stable_id]
+        return Record(source=self.source, stable_id=rid, doc_type=DocType.JUDGMENT,
+                      title=rid, text=f"native courts.ie body of {rid}",
+                      extracted_via=ExtractedVia.STRUCTURED)
+
+
+def test_provisional_id_dedups_after_fetch_reveals_bulk_seeded_id(tmp_path):
+    """A wrong/absent filename slug slips the pre-filter, so the case IS fetched; but once
+    fetch() mints the real neutral-cite id and we already hold it (from a bulk import), the
+    runner must NOT store — otherwise it would archive the held copy and supersede it with
+    this source's copy on every backfill. A genuinely new case still stores."""
+    facade = Facade(_config(tmp_path))
+    with facade._open() as (cat, rs, ts):
+        # a bulk-seeded case, keyed by its neutral citation, with DIFFERENT payload bytes
+        bulk = Record(source="ie-bulk", stable_id="iesc/2025/49", doc_type=DocType.JUDGMENT,
+                      title="Bulk copy", text="bulk-import body (different bytes)",
+                      extracted_via=ExtractedVia.STRUCTURED)
+        bulk.ensure_payload_hash()
+        ts.put(bulk.payload_hash, bulk.text)
+        cat.upsert_document(bulk)
+        cat.mark_extracted("iesc/2025/49")
+        before = cat.get_document("iesc/2025/49")
+
+        stubs = [Stub(stable_id="ie-caselaw/uuid-A"),   # filename unparseable → provisional
+                 Stub(stable_id="iehc/2026/999")]       # a genuinely new case
+        adapter = _RekeyAdapter(
+            stubs, {"ie-caselaw/uuid-A": "iesc/2025/49", "iehc/2026/999": "iehc/2026/999"})
+        stats = Pipeline(cat, rs, textstore=ts).run(adapter, record_health=False)
+
+        # both were fetched (the pre-filter couldn't match the provisional ids)…
+        assert adapter.fetched == ["ie-caselaw/uuid-A", "iehc/2026/999"]
+        # …but only the genuinely-new case was stored; the bulk-seeded one was deduped
+        assert stats.stored == 1 and stats.deduped == 1
+        assert cat.get_document("iehc/2026/999") is not None
+        # the held bulk copy is untouched — same source, same version (not superseded)
+        after = cat.get_document("iesc/2025/49")
+        assert after["source"] == "ie-bulk"
+        assert after["version"] == before["version"]

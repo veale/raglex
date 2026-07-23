@@ -44,6 +44,7 @@ from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
 from .eu_preparatory import EUPreparatoryAdapter
 from .hol import HouseOfLordsAdapter
+from .ie_caselaw import IrishCaseLawAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
@@ -160,6 +161,12 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # New Zealand Supreme Court — the Courts of NZ RSS feed → case page → judgment PDF,
     # keyed by the neutral citation printed in the PDF ("[2026] NZSC 88" → nzsc/2026/88).
     "nz-caselaw": NZSupremeCourtAdapter,
+    # Ireland (Supreme/Court of Appeal/High Court) — ww2.courts.ie register. Landing page
+    # for keep-current, year-search facet for backfill (to 2001); each row's /view/ detail
+    # page carries the authoritative Neutral Citation (never the PDF filename). Keyed by the
+    # neutral-cite slug ("[2025] IESC 49" → iesc/2025/49); multi-judgment cases store one
+    # opinion per PDF, grouped by case_citation, the lead owning the bare slug.
+    "ie-caselaw": IrishCaseLawAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -624,6 +631,22 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("rss_url", "RSS feed URL", "defaults to the Supreme Court feed"),
          SourceOption("rss_path", "Local RSS fallback", "path to a saved feed XML")),
         ("neutral citation ([2026] NZSC 88)", "nzsc/2026/88"),
+    ),
+    "ie-caselaw": SourceInfo(
+        "ie-caselaw", "Ireland — Supreme Court / Court of Appeal / High Court", "caselaw",
+        "IE", False,
+        "Judgments from the Courts Service register (ww2.courts.ie). A keep-current run "
+        "walks the /judgments landing page (newest first) and stops at the first case "
+        "already held; a backfill walks the year-search facet by (court, year) back to "
+        "2001. Each row's /view/ detail page carries the authoritative Neutral Citation, "
+        "Record Number, court, judge and delivery date — identity is taken from there, "
+        "never the unreliable PDF filename. The judgment PDF is fetched and its numbered "
+        "paragraphs become citable segments. Keyed by the neutral-cite slug "
+        "(\"[2025] IESC 49\" → iesc/2025/49), so held cases resolve pending citations. A "
+        "multi-judgment case (one PDF per judge) stores each opinion separately, grouped "
+        "by case_citation, with the lead opinion owning the bare slug.",
+        (SourceOption("path", "Saved listing HTML", "a saved /judgments or year-search page/folder"),),
+        ("neutral citation ([2025] IESC 49)", "iesc/2025/49"),
     ),
     "hk-legislation": SourceInfo(
         "hk-legislation", "Hong Kong legislation (e-Legislation bulk XML)", "legislation",
