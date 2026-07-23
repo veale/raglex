@@ -382,6 +382,12 @@ _POST_MIGRATE_INDEXES = (
     "WHERE resolution_status = 'pending'",
     "CREATE INDEX IF NOT EXISTS relations_pending_fold_idx ON relations (raw_fold) "
     "WHERE resolution_status = 'pending'",
+    # Serves the Corpus browser's ORDER BY decision_date DESC, stable_id LIMIT n
+    # directly — without it every page load sorts the whole documents table. On a
+    # large live table create it CONCURRENTLY by hand first; this statement then
+    # no-ops (IF NOT EXISTS) instead of taking a write-blocking lock at startup.
+    "CREATE INDEX IF NOT EXISTS documents_date_id_idx ON documents "
+    "(decision_date DESC, stable_id)",
 )
 
 
@@ -3223,15 +3229,20 @@ class Catalogue:
     ) -> list[sqlite3.Row]:
         """Browse/filter documents — lets an agent iterate, e.g., a law's sections
         to augment each with secondary material."""
-        sql = "SELECT DISTINCT d.* FROM documents d"
+        # No DISTINCT: every filter is an EXISTS (including tag, below), so rows can't
+        # fan out. ``SELECT DISTINCT d.*`` forced a full sort/hash of the whole table
+        # before the LIMIT could apply — invisible at 20k documents, but at 4.9M it
+        # spilled to disk for minutes per page load and took the Corpus browser down.
+        # Without it, the (decision_date DESC, stable_id) index serves LIMIT directly.
+        sql = "SELECT d.* FROM documents d"
         params: list[object] = []
-        if tag:
-            sql += " JOIN document_tags t ON t.doc_id = d.stable_id"
         clauses, fparams = self._doc_filter_clauses(
             source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
             year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by)
         if tag:
-            clauses.insert(0, "t.tag = ?"); params.append(tag)
+            clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t "
+                              "WHERE t.doc_id = d.stable_id AND t.tag = ?)")
+            params.append(tag)
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -3275,15 +3286,18 @@ class Catalogue:
                         cites_pinpoint: str | None = None) -> int:
         """Total documents matching the same filters as :meth:`list_documents` — for
         the Corpus page's true count + pagination."""
-        sql = "SELECT COUNT(DISTINCT d.stable_id) AS n FROM documents d"
+        # COUNT(*) + EXISTS, not JOIN + COUNT(DISTINCT): same no-fan-out reasoning as
+        # list_documents, and a distinct-aggregation over millions of ids is what made
+        # the Corpus page's total/pagination time out after the bulk imports.
+        sql = "SELECT COUNT(*) AS n FROM documents d"
         params: list[object] = []
-        if tag:
-            sql += " JOIN document_tags t ON t.doc_id = d.stable_id"
         clauses, fparams = self._doc_filter_clauses(
             source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
             year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by, cites_pinpoint=cites_pinpoint)
         if tag:
-            clauses.insert(0, "t.tag = ?"); params.append(tag)
+            clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t "
+                              "WHERE t.doc_id = d.stable_id AND t.tag = ?)")
+            params.append(tag)
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
