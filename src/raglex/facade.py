@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Iterator
+
+
+log = logging.getLogger("raglex.facade")
 
 
 def _now_iso() -> str:
@@ -484,8 +488,13 @@ class Facade:
             def _run():
                 try:
                     self._cache[key] = (_t.time(), fn())
-                except Exception:  # noqa: BLE001 — keep serving stale / retry next time
-                    pass
+                except Exception as exc:  # noqa: BLE001 — keep serving stale / retry next time
+                    # NEVER silently: a warm that fails every retry means the UI shows
+                    # an empty placeholder forever with no trace anywhere (a KeyError
+                    # blanked the Explore homepage for days). Stale/placeholder is
+                    # still served; the log is how the failure becomes diagnosable.
+                    log.warning("cache warm %r failed: %s: %s",
+                                key, type(exc).__name__, exc)
                 finally:
                     self._refreshing.discard(key)
             threading.Thread(target=_run, daemon=True).start()
@@ -1798,7 +1807,7 @@ class Facade:
 
             juris: dict[str, dict] = {}
 
-            _KINDS = ("cases", "legislation", "guidance", "administrative")
+            _KINDS = ("cases", "legislation", "guidance", "administrative", "preparatory")
 
             def _blank_slice() -> dict:
                 return {"years": {}, "courts": {}, "sources": {}}
@@ -1806,7 +1815,7 @@ class Facade:
             def _bucket_named(j: str) -> dict:
                 return juris.setdefault(j, {
                     "jurisdiction": j, "total": 0, "cases": 0, "legislation": 0,
-                    "guidance": 0, "administrative": 0, "other": 0,
+                    "guidance": 0, "administrative": 0, "preparatory": 0, "other": 0,
                     "with_text": 0, "embedded": 0,
                     "years": {}, "sources": {}, "citations": 0, "courts": {},
                     # per-kind rail data: selecting a kind in the drill re-scopes
@@ -1824,7 +1833,11 @@ class Facade:
                 b["embedded"] += r["embedded"] or 0
                 b["sources"][r["source"]] = b["sources"].get(r["source"], 0) + n
                 kind = self._doc_kind(r["source"], r["doc_type"], r["court"])
-                b[kind] += n
+                # .get() so a kind _doc_kind learns before this dict does can NEVER
+                # crash the whole homepage again — "preparatory" did exactly that:
+                # one unknown kind → KeyError inside the silent cache warm → Explore
+                # served its empty placeholder for days.
+                b[kind] = b.get(kind, 0) + n
                 ks = b["kinds"].get(kind)
                 if ks is not None:
                     ks["sources"][r["source"]] = ks["sources"].get(r["source"], 0) + n

@@ -341,3 +341,27 @@ def test_cited_by_counts_ignores_inferred_and_self_edges(catalogue, tmp_path):
     _edge(catalogue, "B", "A", via="inferred")   # heuristic carry-forward
     _edge(catalogue, "A", "A")                   # self-citation
     assert catalogue.cited_by_counts(["A"])["A"] == 1
+
+
+def test_corpus_shape_survives_every_doc_kind(tmp_path):
+    """One document of a kind the bucket dict doesn't pre-declare must NEVER crash
+    the homepage build — a single 'preparatory' doc raised KeyError inside the
+    silent cache warm and blanked the Explore page for days."""
+    from datetime import date as _d
+
+    from raglex.core.models import DocType, Record
+
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        for sid, src, dt in [("celex/52026DC0371", "eu-preparatory", "preparatory"),
+                             ("ico/guide-1", "ico", "guidance"),
+                             ("uksc/2020/9", "uk-caselaw", "judgment")]:
+            r = Record(source=src, stable_id=sid, doc_type=DocType(dt), title=sid,
+                       decision_date=_d(2026, 1, 1), language="en",
+                       text="x " * 30, raw_bytes=sid.encode())
+            r.ensure_payload_hash()
+            cat.upsert_document(r, text_path=str(ts.put(r.payload_hash, r.text)))
+    shape = f._corpus_shape_uncached()
+    assert shape["total"] == 3
+    juris = {j["jurisdiction"]: j for j in shape["jurisdictions"]}
+    assert juris["European Union"]["preparatory"] == 1
