@@ -12,6 +12,11 @@ one Postgres instance, with the same one-backup story.
 
 from __future__ import annotations
 
+import logging
+import re
+
+log = logging.getLogger("raglex.storage.postgres")
+
 
 def is_postgres_dsn(dsn: str) -> bool:
     return dsn.startswith("postgresql://") or dsn.startswith("postgres://")
@@ -49,9 +54,26 @@ class PgConnShim:
         return self.raw.execute(sql.replace("%", "%%").replace("?", "%s"), params)
 
     def executescript(self, script: str) -> None:
+        # Tolerate the concurrent-startup race: the api and scheduler containers (and
+        # several api threads) all run the CREATE-IF-NOT-EXISTS DDL at boot, and
+        # Postgres's IF NOT EXISTS check is not atomic — two simultaneous CREATE
+        # TABLEs can both pass the check and one loses with a UniqueViolation on the
+        # pg_type/pg_class catalog. The object exists either way, which is all IF NOT
+        # EXISTS ever promised, so that specific failure is safely ignored.
+        from psycopg import errors as _pgerr
+
         for stmt in script.split(";"):
-            if stmt.strip():
+            if not stmt.strip():
+                continue
+            try:
                 self.raw.execute(stmt)
+            except (_pgerr.UniqueViolation, _pgerr.DuplicateTable,
+                    _pgerr.DuplicateObject) as exc:
+                if not re.search(r"\bCREATE\b", stmt, re.IGNORECASE):
+                    raise
+                # someone else just created it — the desired end state
+                log.debug("startup DDL race (already created): %s", exc)
+                self.raw.rollback()
         self.raw.commit()
 
     def commit(self) -> None:
