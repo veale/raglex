@@ -4038,10 +4038,11 @@ class Facade:
         from .citations import extract_document
 
         ids = list(set(candidates))
+        aliases = cat.named_alias_map() if ids else None  # once, not per document
         for i, cand in enumerate(ids, 1):
             _progress(on_progress, stage="extracting citations", done=i, total=len(ids), item=cand)
             real = cat.find_document_id(cand) or cand
-            extract_document(cat, ts, real)
+            extract_document(cat, ts, real, aliases=aliases)
 
     def _fetch_reference(self, cat, rs, ts, *, ref: str, candidate: str | None,
                          patient: bool = False):
@@ -4601,18 +4602,11 @@ class Facade:
                     *cat.text_document_ids(source="uk-caselaw", only_unextracted=True,
                                            only_never_extracted=True),
                 ]))
-                for i, sid in enumerate(to_extract):
-                    if cancel_check and cancel_check():
-                        break
-                    try:
-                        extract_document(cat, ts, sid)
-                        st["extracted"] += 1
-                    except Exception:  # noqa: BLE001 — one bad doc mustn't sink the batch
-                        pass
-                    if i % 200 == 0:
-                        cat.commit()
-                        _progress(on_progress, stage="extracting citations", done=i, total=len(to_extract))
-                cat.commit()
+                from .citations import extract_documents_parallel
+                ex = extract_documents_parallel(
+                    cat, ts, to_extract, on_progress=on_progress,
+                    cancel_check=cancel_check)
+                st["extracted"] += ex.processed
                 resolved = Resolver(cat).run_batched(
                     on_progress=on_progress, cancel_check=cancel_check)
         finally:
@@ -5160,26 +5154,16 @@ class Facade:
             cat.commit()
             resolved_n = 0
             if extract and not (cancel_check and cancel_check()):
-                from .citations import extract_document
+                from .citations import extract_documents_parallel
                 aliases = cat.named_alias_map()
                 # never-stamped AND no rows: don't re-extract citation-free judgments
                 # on every resume (see import_bailii_parquet for the full rationale).
                 pending = cat.text_document_ids(source="in-caselaw", only_unextracted=True,
                                                 only_never_extracted=True)
-                for i, sid in enumerate(pending):
-                    if cancel_check and cancel_check():
-                        break
-                    if i % 100 == 0:
-                        _progress(on_progress, stage="extracting citations",
-                                  done=i + 1, total=len(pending), item=sid)
-                    try:
-                        extract_document(cat, ts, sid, aliases=aliases)
-                        st["extracted"] += 1
-                    except Exception:  # noqa: BLE001
-                        pass
-                    if i % 200 == 0:
-                        cat.commit()
-                cat.commit()
+                ex = extract_documents_parallel(
+                    cat, ts, pending, aliases=aliases,
+                    on_progress=on_progress, cancel_check=cancel_check)
+                st["extracted"] += ex.processed
                 resolved_n = Resolver(cat).run_batched(
                     on_progress=on_progress, cancel_check=cancel_check).resolved
         st["resolved_edges"] = resolved_n
@@ -5617,7 +5601,7 @@ class Facade:
             # so re-launching after a crash converges instead of starting over.
             resolved_n = 0
             if extract and not (cancel_check and cancel_check()):
-                from .citations import extract_document
+                from .citations import extract_documents_parallel
                 aliases = cat.named_alias_map()
                 # The backlog is "never stamped AND no citation rows". The old
                 # ``only_unextracted``-only select re-picked every legitimately
@@ -5629,20 +5613,10 @@ class Facade:
                 pending = cat.text_document_ids(doc_types=["judgment"],
                                                 only_unextracted=True,
                                                 only_never_extracted=True)
-                for i, sid in enumerate(pending):
-                    if cancel_check and cancel_check():
-                        break
-                    if i % 100 == 0:
-                        _progress(on_progress, stage="extracting citations",
-                                  done=i + 1, total=len(pending), item=sid)
-                    try:
-                        extract_document(cat, ts, sid, aliases=aliases)
-                        st["extracted"] += 1
-                    except Exception:  # noqa: BLE001 — one unreadable doc mustn't sink the pass
-                        pass
-                    if i % 200 == 0:
-                        cat.commit()
-                cat.commit()
+                ex = extract_documents_parallel(
+                    cat, ts, pending, aliases=aliases,
+                    on_progress=on_progress, cancel_check=cancel_check)
+                st["extracted"] += ex.processed
                 # Bounded, cancellable relation ranges with real progress — not one
                 # whole-graph UPDATE in a single transaction reported as "0/0".
                 resolved_n = Resolver(cat).run_batched(
@@ -6753,25 +6727,19 @@ class Facade:
         lands (e.g. the law-report grammars, ECHR app numbers) so already-stored docs pick
         them up. ``source`` scopes it (e.g. just ``uk-caselaw``) — reports are cited by case
         law, so a scoped re-scan is far faster than the whole corpus. Heavy → run as a job."""
-        from .citations import extract_document
+        from .citations import extract_documents_parallel
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()
             ids = cat.text_document_ids(source=source,
                                         exclude_extraction_run_id=run_id)
-            docs = cites = 0
-            cancelled = False
-            for i, sid in enumerate(ids, 1):
-                if cancel_check and cancel_check():
-                    cancelled = True
-                    break
-                n = extract_document(cat, ts, sid, aliases=aliases, run_id=run_id)
-                if n:
-                    docs += 1
-                    cites += n
-                _progress(on_progress, stage="re-scanning citations", done=i, total=len(ids),
-                          item=sid, _checkpoint={"phase": "extract", "completed": i,
-                                                "last_id": sid, "run_id": run_id})
+            ex = extract_documents_parallel(
+                cat, ts, ids, aliases=aliases, run_id=run_id,
+                stage="re-scanning citations",
+                checkpoint_fn=lambda done, sid: {"phase": "extract", "completed": done,
+                                                 "last_id": sid, "run_id": run_id},
+                on_progress=on_progress, cancel_check=cancel_check)
+            docs, cites, cancelled = ex.documents, ex.citations, ex.cancelled
             # don't run the (long, un-interruptible) resolve if the user cancelled —
             # so a cancel actually stops promptly instead of grinding to completion.
             if cancelled:
@@ -7241,7 +7209,7 @@ class Facade:
         works retroactively against an in-flight or just-finished rescan (which is stamping
         those timestamps as it goes): running "rescan stale (>1 week)" now targets only
         what the current run hasn't already reached."""
-        from .citations import extract_document
+        from .citations import extract_documents_parallel
 
         report: dict = {}
 
@@ -7254,19 +7222,17 @@ class Facade:
                                         only_unextracted=only_unextracted, stale_days=stale_days,
                                         exclude_extraction_run_id=run_id)
             total = len(ids)
-            docs = cites = 0
-            for i, sid in enumerate(ids):
-                if _cancelled():
-                    break
-                n = extract_document(cat, ts, sid, aliases=aliases, run_id=run_id)
-                if n:
-                    docs += 1
-                    cites += n
-                if on_progress and (i % 100 == 0 or i + 1 == total):
-                    _progress(on_progress, stage="re-extracting corpus", done=i + 1,
-                              total=total, item=sid,
-                              _checkpoint={"phase": "extract", "completed": i + 1,
-                                           "last_id": sid, "run_id": run_id})
+            # the pooled bulk extractor: regex on N cores, writes overlapped in the
+            # parent, commits batched. Resume-safe under the SAME contract as the old
+            # serial loop — the run_id-scoped last_extracted_at stamp — so a rescan
+            # interrupted under the old code continues under this one and vice versa.
+            ex = extract_documents_parallel(
+                cat, ts, ids, aliases=aliases, run_id=run_id,
+                stage="re-extracting corpus", report_every=100,
+                checkpoint_fn=lambda done, sid: {"phase": "extract", "completed": done,
+                                                 "last_id": sid, "run_id": run_id},
+                on_progress=on_progress, cancel_check=cancel_check)
+            docs, cites = ex.documents, ex.citations
             # Large rescans regenerate millions of pending edges; resolve them in
             # bounded, cancellable ranges rather than one whole-graph transaction.
             if total >= 10000:
@@ -8260,23 +8226,23 @@ class Facade:
                     *cat.text_document_ids(source=adapter.source, only_never_extracted=True),
                     *new_ids,
                 ]))
-            from .citations import extract_document
+            from .citations import extract_documents_parallel
             from .treatment import classify_corpus
             llm_cite, classifier = self._llm_passes(use_llm)
             aliases = cat.named_alias_map()
-            total_new = len(new_ids)
-            # Per-document progress is right for a 30-item watch, wrong for a 1.7m-doc
-            # bulk seed: every callback yields the GIL for 3ms in the job runner, which
-            # alone is ~90 minutes across 1.7m documents. Throttle large runs.
-            report_every = 1 if total_new <= 2000 else 200
-            for i, sid in enumerate(new_ids, 1):
-                if cancel_check and cancel_check():
-                    break
-                if i == 1 or i % report_every == 0 or i == total_new:
-                    _phase_progress(stage="extracting citations", done=i, total=total_new,
-                                    item=sid, _checkpoint={"phase": "extract", "done": i})
-                extract_document(cat, ts, sid, llm=llm_cite, aliases=aliases)
-                classify_corpus(cat, ts, classifier=classifier, stable_id=sid)
+            # The pooled extractor: regex on N cores, batched commits, progress
+            # throttled for bulk seeds (per-doc callbacks alone cost ~90 minutes over
+            # 1.7m documents). Resume-safe like the loop it replaces: the backlog
+            # select above is stamp-driven, so a crash re-extracts at most one
+            # uncommitted batch. With an LLM pass it falls back to the serial path
+            # (the extractor is unpicklable and network-bound anyway).
+            extract_documents_parallel(
+                cat, ts, new_ids, aliases=aliases, llm=llm_cite,
+                stage="extracting citations",
+                checkpoint_fn=lambda done, sid: {"phase": "extract", "done": done},
+                post_fn=lambda sid: classify_corpus(cat, ts, classifier=classifier,
+                                                    stable_id=sid),
+                on_progress=_phase_progress, cancel_check=cancel_check)
             # Guidance classification (§1.9/§4a): every guidance-typed document — and
             # every EDPB publication regardless of doc_type (binding decisions and
             # opinions carry the same citable series numbers) — gets its issuer /

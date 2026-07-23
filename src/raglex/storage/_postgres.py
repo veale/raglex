@@ -67,6 +67,16 @@ class PgConnShim:
             "SELECT 1 FROM pg_class WHERE relname = %s AND relkind = 'i'", (name,))
         return cur.fetchone() is not None
 
+    def executemany(self, sql: str, rows) -> None:
+        """Batch INSERT — one round trip per batch instead of per row (the citation
+        writes were the parallel extractor's parent-side bottleneck). Same escape +
+        placeholder translation as execute()."""
+        rows = list(rows)
+        if not rows:
+            return
+        with self.raw.cursor() as cur:
+            cur.executemany(sql.replace("%", "%%").replace("?", "%s"), rows)
+
     def executescript(self, script: str) -> None:
         # Tolerate the concurrent-startup race: the api and scheduler containers (and
         # several api threads) all run the CREATE-IF-NOT-EXISTS DDL at boot, and

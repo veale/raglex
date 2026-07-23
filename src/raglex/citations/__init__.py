@@ -7,7 +7,8 @@ from .grammars import GRAMMARS, Grammar, register
 from .llm_extractor import LLMCitationExtractor
 from .models import Citation
 from .snowball import Frontier, snowball
-from .stage import ExtractStats, extract_corpus, extract_document
+from .stage import (ExtractStats, extract_corpus, extract_document,
+                    extract_documents_parallel)
 
 __all__ = [
     "extract_citations",
@@ -26,4 +27,5 @@ __all__ = [
     "ExtractStats",
     "extract_corpus",
     "extract_document",
+    "extract_documents_parallel",
 ]

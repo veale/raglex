@@ -151,9 +151,252 @@ _GUARD = _ExtractionGuard()
 class ExtractStats:
     documents: int = 0
     citations: int = 0
+    # how many ids the parallel pass actually completed (documents counts only the
+    # ones that yielded citations, matching extract_corpus's historical meaning)
+    processed: int = 0
+    cancelled: bool = False
 
     def summary(self) -> str:
         return f"[cite-extract] documents={self.documents} citations={self.citations}"
+
+
+# --- the parallel bulk path ---------------------------------------------------
+# One guarded worker preserves the single-runaway containment; N of them buy the
+# other N-1 cores back. The grammar pass is CPU-bound pure Python (the GIL made
+# thread pools useless), documents are independent, and the DB half of the stage
+# needs the shared connection anyway — so the shape is: a pool of spawn'd workers
+# doing regex, and the PARENT doing what it always did (guards + writes) as
+# results stream back. Each worker keeps the guard's semantics: its own pipe, its
+# own wall-clock budget per document, killed and respawned on a runaway.
+
+def _pool_size(workers: int | None) -> int:
+    if workers is not None:
+        return max(1, int(workers))
+    raw = os.environ.get("RAGLEX_EXTRACT_WORKERS", "").strip()
+    if raw.isdigit():
+        return max(1, int(raw))
+    return max(1, (os.cpu_count() or 2) - 1)   # leave one core for the writer/API
+
+
+class _PoolWorker:
+    """One guarded worker: spawn process + pipe + the doc currently in flight."""
+
+    __slots__ = ("proc", "conn", "item", "deadline")
+
+    def __init__(self) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        self.conn, child = ctx.Pipe()
+        self.proc = ctx.Process(target=_extract_worker, args=(child,), daemon=True)
+        self.proc.start()
+        child.close()
+        self.item = None        # (stable_id, doc_row, text) while busy
+        self.deadline = 0.0
+
+    def kill(self) -> None:
+        try:
+            if self.proc.is_alive():
+                self.proc.terminate()
+                self.proc.join(timeout=5)
+        finally:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+
+
+def extract_documents_parallel(
+    catalogue: Catalogue, textstore: TextStore, ids, *,
+    aliases: dict[str, str] | None = None,
+    llm: CitationExtractor | None = None,
+    run_id: str | None = None,
+    workers: int | None = None,
+    commit_every: int = 50,
+    on_progress=None, cancel_check=None,
+    stage: str = "extracting citations",
+    report_every: int | None = None,
+    checkpoint_fn=None,
+    post_fn=None,
+) -> ExtractStats:
+    """Extract citations over ``ids`` using a pool of guarded worker processes.
+
+    The drop-in bulk form of calling :func:`extract_document` in a loop, with three
+    changes that matter at import scale:
+
+    * the grammar pass runs on N cores instead of one (workers default to
+      ``cpu_count-1``, overridable via ``RAGLEX_EXTRACT_WORKERS``);
+    * DB writes overlap the regex work (the parent writes finished documents while
+      the workers chew the next ones);
+    * commits are batched (``commit_every``) instead of several per document — safe
+      because every driver of this path resumes off the durable
+      ``last_extracted_at`` stamp / citation rows, so a crash merely re-extracts at
+      most one uncommitted batch, idempotently.
+
+    Progress/checkpoint events are only emitted **after** a commit, so a resumed
+    job can never trust a checkpoint whose rows were lost. ``checkpoint_fn(done,
+    last_id)`` builds the caller's checkpoint payload; ``post_fn(stable_id)`` runs
+    in the parent after each finished document (the harvest path's per-document
+    treatment classification).
+
+    Serial fallbacks, preserving exact single-worker semantics: an ``llm``
+    extractor (unpicklable, network-bound), ``workers=1`` on a 1-core box, or
+    ``RAGLEX_EXTRACT_INPROC`` (tests).
+    """
+    import time as _time
+    from multiprocessing.connection import wait as _mpwait
+
+    ids = list(ids)
+    total = len(ids)
+    stats = ExtractStats()
+    if not ids:
+        return stats
+    if aliases is None:
+        aliases = catalogue.named_alias_map()
+    if report_every is None:
+        # per-document progress is right for a 30-item watch, wrong for a 1.7m-doc
+        # bulk seed (each callback yields the GIL in the job runner)
+        report_every = 1 if total <= 2000 else 200
+
+    def _emit(done: int, sid: str, *, with_checkpoint: bool = True) -> None:
+        if on_progress and (done == 1 or done % report_every == 0 or done == total):
+            payload = {"stage": stage, "done": done, "total": total, "item": sid}
+            # a checkpoint must never run ahead of committed rows — between batch
+            # commits the event carries progress only, never a resume point
+            if checkpoint_fn is not None and with_checkpoint:
+                payload["_checkpoint"] = checkpoint_fn(done, sid)
+            on_progress(**payload)
+
+    n_workers = _pool_size(workers)
+    # A pool only pays once there's enough work to amortise the spawns (~100ms each):
+    # a 5-document watch tick or a unit test is faster — and identical — serial.
+    if (llm is not None or n_workers <= 1 or total < 32
+            or os.environ.get("RAGLEX_EXTRACT_INPROC")):
+        # serial path — identical to the historical loop, one commit per document
+        for i, sid in enumerate(ids, 1):
+            if cancel_check and cancel_check():
+                stats.cancelled = True
+                break
+            try:
+                n = extract_document(catalogue, textstore, sid, llm=llm,
+                                     aliases=aliases, run_id=run_id)
+            except Exception:  # noqa: BLE001 — one bad doc must not sink the batch
+                log.exception("[cite-extract] %s failed", sid)
+                n = 0
+            if post_fn is not None:
+                post_fn(sid)
+            stats.processed += 1
+            if n:
+                stats.documents += 1
+                stats.citations += n
+            _emit(i, sid)
+        return stats
+
+    budget = _ExtractionGuard.timeout_s()
+    pool = [_PoolWorker() for _ in range(n_workers)]
+    queue = iter(ids)
+    done = 0
+    since_commit = 0
+    cancelled = False
+
+    def _load_next(worker: _PoolWorker) -> bool:
+        """Feed the next usable document to a free worker; False when exhausted."""
+        for sid in queue:
+            doc = catalogue.get_document(sid)
+            if doc is None or not doc["payload_hash"]:
+                _count_done(sid, 0)
+                continue
+            try:
+                text = textstore.get(doc["payload_hash"])
+            except OSError:
+                _count_done(sid, 0)
+                continue
+            try:
+                worker.conn.send((text, aliases))
+            except (OSError, ValueError):
+                return False        # worker torn down — caller respawns
+            worker.item = (sid, doc, text)
+            worker.deadline = _time.monotonic() + budget
+            return True
+        return False
+
+    def _count_done(sid: str, n: int) -> None:
+        nonlocal done, since_commit
+        done += 1
+        stats.processed += 1
+        if n:
+            stats.documents += 1
+            stats.citations += n
+        since_commit += 1
+        committed = False
+        if since_commit >= commit_every or done == total:
+            catalogue.commit()
+            since_commit = 0
+            committed = True
+        _emit(done, sid, with_checkpoint=committed)
+
+    def _finish(sid: str, doc, text: str, payload) -> None:
+        cites, raw_defs = payload
+        try:
+            n = _finish_document(catalogue, doc, text, cites, raw_defs,
+                                 stable_id=sid, run_id=run_id, commit=False)
+        except Exception:  # noqa: BLE001
+            log.exception("[cite-extract] %s failed in finish", sid)
+            n = 0
+        if post_fn is not None:
+            post_fn(sid)
+        _count_done(sid, n)
+
+    try:
+        for w in pool:
+            if not _load_next(w):
+                break
+        while any(w.item is not None for w in pool):
+            if cancel_check and cancel_check():
+                cancelled = True
+            busy = [w for w in pool if w.item is not None]
+            next_deadline = min(w.deadline for w in busy)
+            timeout = max(0.05, next_deadline - _time.monotonic())
+            ready = _mpwait([w.conn for w in busy], timeout=timeout)
+            now = _time.monotonic()
+            for w in busy:
+                if w.conn in ready:
+                    sid, doc, text = w.item
+                    try:
+                        status, payload = w.conn.recv()
+                    except (EOFError, OSError):
+                        # worker CRASHED mid-document (OOM, broken spawn env) — run
+                        # this one in the parent, like the single guard does, and
+                        # replace the worker
+                        log.warning("[cite-extract] worker died on %s — in-process", sid)
+                        w.kill()
+                        pool[pool.index(w)] = w = _PoolWorker()
+                        defs: list[dict] = []
+                        cites = extract_citations(text, aliases=aliases, defs_out=defs)
+                        _finish(sid, doc, text, (cites, defs))
+                    else:
+                        w.item = None
+                        if status == "err":
+                            log.warning("[cite-extract] %s: %s", sid, payload)
+                            _count_done(sid, 0)
+                        else:
+                            _finish(sid, doc, text, payload)
+                elif w.deadline <= now:
+                    # runaway document: kill this worker only, stamp the doc so
+                    # staleness-scoped reruns converge (the guard's exact semantics)
+                    sid = w.item[0]
+                    log.warning("[cite-extract] %s: grammar pass exceeded %.0fs budget "
+                                "— skipped", sid, budget)
+                    w.kill()
+                    pool[pool.index(w)] = w = _PoolWorker()
+                    catalogue.mark_extracted(sid, run_id=run_id, commit=False)
+                    _count_done(sid, 0)
+                if w.item is None and not cancelled:
+                    _load_next(w)
+        stats.cancelled = cancelled
+    finally:
+        catalogue.commit()
+        for w in pool:
+            w.kill()
+    return stats
 
 
 # A CJEU case is identified by an EU ECLI (C = Court of Justice, T = General Court,
@@ -375,6 +618,21 @@ def extract_document(
         raw_defs = []
         cites = extract_citations(text, llm=llm, aliases=aliases, defs_out=raw_defs)
 
+    return _finish_document(catalogue, doc, text, cites, raw_defs,
+                            stable_id=stable_id, run_id=run_id)
+
+
+def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
+                     *, stable_id: str, run_id: str | None = None,
+                     commit: bool = True) -> int:
+    """Everything after the grammar pass: the jurisdiction guards, shorthand store,
+    suppression veto, and the citation/edge writes. Split out of extract_document so
+    the parallel bulk path can run the (CPU-bound, picklable) grammar pass in a pool
+    of worker processes and feed the results through here in the parent — the guards
+    need catalogue lookups and the writes need the one shared connection, so this
+    half stays serial by design. ``commit=False`` lets a bulk caller batch many
+    documents into one transaction (the run is restartable off the
+    ``last_extracted_at`` stamp, so per-document durability buys nothing there)."""
     if not _allows_us_reporters(doc):
         cites = [c for c in cites if c.method != "us_reporter"]
 
@@ -490,9 +748,11 @@ def extract_document(
 
     # idempotent re-run: clear this source's prior observations + machine edges
     # (both literal-regex and the heuristic carry-forward 'inferred' edges)
-    catalogue.clear_citations(stable_id)
-    catalogue.clear_relations(stable_id, extracted_via=str(ExtractedVia.REGEX))
-    catalogue.clear_relations(stable_id, extracted_via=str(ExtractedVia.INFERRED))
+    catalogue.clear_citations(stable_id, commit=commit)
+    catalogue.clear_relations(stable_id, extracted_via=str(ExtractedVia.REGEX),
+                              commit=commit)
+    catalogue.clear_relations(stable_id, extracted_via=str(ExtractedVia.INFERRED),
+                              commit=commit)
 
     catalogue.add_citations(stable_id, [
         {
@@ -501,7 +761,7 @@ def extract_document(
             "method": c.method, "confidence": c.confidence,
         }
         for c in cites
-    ])
+    ], commit=commit)
 
     # collapse repeated citations of the same target into one edge
     edges: dict[tuple[str | None, str | None], TypedRelation] = {}
@@ -522,10 +782,10 @@ def extract_document(
                 context_end=c.char_end,
             )
     edges = _drop_self_citations(catalogue, stable_id, edges)
-    catalogue.add_relations(stable_id, list(edges.values()))
+    catalogue.add_relations(stable_id, list(edges.values()), commit=commit)
     # durable "last rescanned at" stamp — set even when the document cited nothing, so a
     # staleness-scoped rescan can skip it next time (§5).
-    catalogue.mark_extracted(stable_id, run_id=run_id)
+    catalogue.mark_extracted(stable_id, run_id=run_id, commit=commit)
     return len(cites)
 
 

@@ -879,36 +879,46 @@ class Catalogue:
         self._add_relation(src_id, rel)
         self.conn.commit()
 
-    def add_relations(self, src_id: str, rels: list[TypedRelation]) -> None:
-        """Bulk-add edges (one commit) — used by the citation-extraction stage."""
+    def add_relations(self, src_id: str, rels: list[TypedRelation], *,
+                      commit: bool = True) -> None:
+        """Bulk-add edges (one commit) — used by the citation-extraction stage.
+        ``commit=False`` lets the parallel bulk extractor batch many documents into
+        one transaction (its run is restartable off the extraction stamps)."""
         for rel in rels:
             self._add_relation(src_id, rel)
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     # -- extracted citations (§5, the audit/observation layer) -------------
-    def add_citations(self, src_id: str, rows: list[dict]) -> None:
-        """Bulk-record extracted citations (one commit). Each row: raw, entity_kind,
-        candidate_id, pinpoint, char_start, char_end, method, confidence."""
+    def add_citations(self, src_id: str, rows: list[dict], *, commit: bool = True) -> None:
+        """Bulk-record extracted citations (one commit; ``commit=False`` for the
+        batched bulk extractor). One executemany, not a round trip per row — a
+        citation-dense judgment writes hundreds of observation rows, and per-row
+        execute was the parallel extractor's parent-side bottleneck."""
         now = _now()
-        for r in rows:
-            self.conn.execute(
-                """
-                INSERT INTO citations (
-                    src_id, raw, entity_kind, candidate_id, pinpoint,
-                    char_start, char_end, method, confidence, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
-                """,
+        self.conn.executemany(
+            """
+            INSERT INTO citations (
+                src_id, raw, entity_kind, candidate_id, pinpoint,
+                char_start, char_end, method, confidence, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
                 (
                     src_id, r["raw"], r.get("entity_kind"), r.get("candidate_id"),
                     r.get("pinpoint"), r.get("char_start"), r.get("char_end"),
                     r.get("method"), r.get("confidence"), now,
-                ),
-            )
-        self.conn.commit()
+                )
+                for r in rows
+            ],
+        )
+        if commit:
+            self.conn.commit()
 
-    def clear_citations(self, src_id: str) -> None:
+    def clear_citations(self, src_id: str, *, commit: bool = True) -> None:
         self.conn.execute("DELETE FROM citations WHERE src_id = ?", (src_id,))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def mark_extracted(self, src_id: str, *, run_id: str | None = None,
                        commit: bool = True) -> None:
@@ -1187,7 +1197,8 @@ class Catalogue:
             "SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'legislation'"
         ).fetchone()["n"]
 
-    def clear_relations(self, src_id: str, *, extracted_via: str) -> None:
+    def clear_relations(self, src_id: str, *, extracted_via: str,
+                        commit: bool = True) -> None:
         """Drop a source's edges from one extraction method, so re-running that
         extractor is idempotent (a re-derivable projection, §1.2). Leaves
         structurally-extracted and manual edges intact."""
@@ -1195,7 +1206,8 @@ class Catalogue:
             "DELETE FROM relations WHERE src_id = ? AND extracted_via = ?",
             (src_id, extracted_via),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def clear_relations_of_type(self, src_id: str, relationship_type: str) -> None:
         """Drop a source's edges of one relationship type — so re-deriving them (e.g.
