@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS documents (
     fetched_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
+-- keyset pagination of a whole source in stable_id order (the reparse-source job) —
+-- without it an ORDER BY stable_id + source filter falls back to a full scan/sort.
+CREATE INDEX IF NOT EXISTS documents_source_stable_idx ON documents (source, stable_id);
 CREATE INDEX IF NOT EXISTS documents_ecli_idx ON documents (ecli);
 CREATE INDEX IF NOT EXISTS documents_payload_hash_idx ON documents (payload_hash);
 CREATE INDEX IF NOT EXISTS documents_landing_url_idx ON documents (landing_url);
