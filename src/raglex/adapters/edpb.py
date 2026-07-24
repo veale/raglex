@@ -60,6 +60,17 @@ from ..core.models import (
 BASE_URL = "https://www.edpb.europa.eu"
 GDPR_CELEX = "32016R0679"
 
+# Drop a parenthetical article NAME from a legal-ref pinpoint but keep a subsection
+# pinpoint: a name paren contains a space ("(Automated individual decision-making, …)"),
+# a subsection one doesn't ("(1)", "(f)", "(1)(f)").
+_ARTICLE_NAME_PAREN = re.compile(r"\s*\([^)]*\s[^)]*\)")
+
+
+def _article_pinpoint(ref: str) -> str:
+    """"Article 22 (Automated individual decision-making, including profiling)" → "Article
+    22"; "Article 6(1)(f)" unchanged."""
+    return _ARTICLE_NAME_PAREN.sub("", ref or "").strip()
+
 # A browser-shaped UA — europa.eu's WAF treats the default library UA as a bot.
 _HEADERS = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                            "Gecko/20100101 Firefox/128.0")}
@@ -507,11 +518,15 @@ class EDPBAdapter(BaseAdapter):
                 needs_ocr = True
 
         # the register's "main legal reference" → interprets edges to the GDPR,
-        # pinpointed to the article(s) the decision applies
+        # pinpointed to the article(s) the decision applies. The pinpoint is the article
+        # number only — the register spells some refs with the article's NAME in parens
+        # ("Article 22 (Automated individual decision-making, including profiling)"), which
+        # is not a pinpoint and cluttered the reader's sub-paragraph mention badges. A
+        # subsection paren ("Article 6(1)(f)") has no space and is kept; a title paren does.
         relations = [TypedRelation(
             relationship_type=RelationshipType.INTERPRETS,
             raw_citation_string=f"{ref} GDPR",
-            dst_id=GDPR_CELEX, dst_anchor=ref,
+            dst_id=GDPR_CELEX, dst_anchor=_article_pinpoint(ref),
             extracted_via=ExtractedVia.STRUCTURED,
             resolution_status=ResolutionStatus.PENDING,
         ) for ref in d.legal_refs]
