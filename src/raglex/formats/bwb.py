@@ -13,13 +13,33 @@ from __future__ import annotations
 from xml.etree import ElementTree as ET
 
 from ..core.models import Segment
-from ..core.segmentation import SEP, element_text, localname
+from ..core.segmentation import SEP, element_text, flow_text, localname
 from .base import ParsedDoc, register
 
 _HEADING_TAGS = {"hoofdstuk", "afdeling", "paragraaf", "titeldeel", "boek", "deel"}
 _UNIT_TAGS = {"artikel"}
 _PASS_TAGS = {"toestand", "wetgeving", "wettekst", "wet-besluit", "body", "regeling",
               "regeling-tekst", "circulaire", "circulaire-tekst"}
+# Annotation subtrees carried inside the content (Juriconnect change notes, source data,
+# editorial corrections) — pruned before rendering so their dates/numbers ("2001 584
+# 18-12-2001") don't bleed into the article body or the title.
+_DROP_TAGS = {"meta-data", "kadata", "redactie", "bwb-inputbestand", "bwb-wijzigingen",
+              "redactionele-correcties", "wetsdelen"}
+# Sub-units that each start a new line, so a numbered provision reads as a list instead of
+# one flat wall: a "lid" (numbered member) and a "li" (enumerated list item). NB: "al"
+# (alinea) is deliberately NOT here — an <al> is the body of its lid/li, and breaking before
+# it would strip the "1"/"1°." marker onto its own line.
+_LINE_TAGS = {"lid", "li"}
+
+
+def _prune(elem: ET.Element) -> None:
+    """Recursively remove annotation subtrees (`_DROP_TAGS`) so only enacted content
+    remains. ElementTree has no parent links, so we drop matching children at each level."""
+    for child in list(elem):
+        if localname(child.tag).lower() in _DROP_TAGS:
+            elem.remove(child)
+        else:
+            _prune(child)
 
 
 def _kop_label(elem: ET.Element, prefix: str = "") -> str:
@@ -50,7 +70,10 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]])
     for child in elem:
         name = localname(child.tag).lower()
         if name in _UNIT_TAGS:
-            text = element_text(child)
+            # Render the article body like law: omit the <kop> label (it's the segment
+            # label) and start each <lid>/<li> on its own line (§6b), instead of the flat
+            # space-joined blob element_text() produced.
+            text = flow_text(child, skip_tags={"kop"}, line_tags=_LINE_TAGS)
             if text.strip():
                 blocks.append((_kop_label(child, "Artikel"), "article", text, level))
         elif name in _HEADING_TAGS:
@@ -67,6 +90,7 @@ def parse_bwb(data: bytes) -> ParsedDoc:
         root = ET.fromstring(data)
     except ET.ParseError:
         return ParsedDoc()
+    _prune(root)   # strip change-note / source-data annotations before rendering
     blocks: list[tuple[str, str, str, int]] = []
     _walk(root, 0, blocks)
     if not blocks:
