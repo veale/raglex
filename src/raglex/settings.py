@@ -125,6 +125,10 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("RAGLEX_SCRAPLING_MCP_KEY", "Scrapling MCP key", True, "Network"),
     SettingSpec("RAGLEX_AUTOHARVEST", "Auto-drain worklist (refs/tick)", False, "Network",
                 "0 = off; e.g. 25 — the scheduler slowly fetches routable citations each tick"),
+    SettingSpec("RAGLEX_CANLII_ENRICH", "Auto-enrich Canadian cases (per pass)", False, "Network",
+                "0 = off; e.g. 50 — the scheduler enriches that many Canadian decisions with "
+                "CanLII metadata + citator edges every ~15 min, metered by the CanLII budget, "
+                "so the backlog drains without manual clicks"),
     SettingSpec("RAGLEX_AUTOEMBED", "Auto-index backlog (docs/tick)", False, "Embeddings",
                 "0 = off; e.g. 500 — the scheduler indexes that many un-embedded documents "
                 "each tick, building the keyword (FTS) + vector index search reads. Resumable: "

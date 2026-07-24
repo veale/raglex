@@ -283,6 +283,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_authority = time.time() - 86400 + 3600
         last_au_repair = 0.0
         last_resolve = 0.0
+        last_canlii = 0.0
         eurlex_broken_until = 0.0
         last_night_harvest_day = -1  # tm_yday of the last overnight idle-harvest kick-off
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
@@ -360,6 +361,20 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print("[watch] auto-embed: previous tick still running; skipping")
                     elif started.get("error"):
                         print(f"[watch] auto-embed: {started['error']}")
+                # CanLII metadata/citator enrichment drains a few Canadian decisions each
+                # pass — but the CanLII key is hard rate-limited (free tier), so one manual
+                # click only ever does a handful before the budget ledger says stop, leaving
+                # the backlog stranded. Drain it on a cadence instead: a singleton job every
+                # ~15 min (RAGLEX_CANLII_ENRICH = batch size), metered by the budget — spent
+                # ticks return fast without real API calls, replenished ones make progress.
+                canlii_batch = int(os.environ.get("RAGLEX_CANLII_ENRICH") or 0)
+                if canlii_batch > 0 and time.time() - last_canlii >= 900:
+                    last_canlii = time.time()
+                    started = jobs.start("canlii-enrich",
+                                         f"CanLII enrich ({canlii_batch}/pass)",
+                                         {"limit": canlii_batch})
+                    if started.get("error"):
+                        print(f"[watch] canlii-enrich: {started['error']}")
                 # Link whatever has become linkable since the last tick. Resolution is a
                 # set-based SQL pass — ~9s to flip 64k edges — but it only ran at the END
                 # of a job, so during a multi-hour extraction every freshly-extracted
