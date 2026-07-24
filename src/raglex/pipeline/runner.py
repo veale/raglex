@@ -144,6 +144,12 @@ class Pipeline:
         wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
         last_emit = 0.0
 
+        # An immediate heartbeat so the Jobs panel shows "discovering …" the moment the run
+        # starts, not "starting…". The held-prefilter below buffers ~200 stubs before the
+        # loop yields its first item, and against a rate-limited feed that fill can take a
+        # while — without this the job looks frozen until the first batch completes.
+        if on_progress:
+            on_progress(stage=f"discovering {adapter.source}", done=0)
         stubs = adapter.discover(discover_since, max_pages=max_pages)
         # Batched held-lookup: a backfill's resume pass re-walks the source's whole
         # catalogue mostly re-seeing held documents, and one point SELECT per stub
@@ -177,6 +183,14 @@ class Pipeline:
                         "stored": stats.stored,
                         "item": stub.stable_id,
                     }
+                    # A feed crawl doesn't normally know how many items exist until it has
+                    # walked the whole feed, so the harvest phase shows a running count and
+                    # no progress bar. When the adapter's API DOES report a total (e.g.
+                    # CourtListener's paginated ``count``), it rides in on the stub as
+                    # ``feed_total`` — surface it so the Jobs panel can draw a real bar.
+                    feed_total = stub.hints.get("feed_total")
+                    if feed_total:
+                        progress["total"] = int(feed_total)
                     if stub.hints.get("resume_offset") is not None:
                         progress["_checkpoint"] = {
                             "phase": "discover",

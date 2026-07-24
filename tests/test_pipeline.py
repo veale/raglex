@@ -222,6 +222,25 @@ def test_future_dated_item_clamps_watermark_to_today(catalogue, rawstore):
     assert catalogue.get_watermark("fake") == date.today().isoformat()
 
 
+def test_harvest_progress_carries_feed_total_for_a_bar(catalogue, rawstore):
+    # a feed that reports its total count (CourtListener's `count`) rides in on the stub as
+    # feed_total; the pipeline surfaces it as progress `total` so the Jobs panel can draw a
+    # real bar instead of "40/?".
+    class TotalAdapter(SinceCapturingAdapter):
+        def discover(self, since, *, max_pages=None) -> Iterator[Stub]:
+            for rec in self._records:
+                yield Stub(stable_id=rec.stable_id, hint_date=rec.decision_date,
+                           hints={"feed_total": 100})
+
+    events: list[dict] = []
+    ad = TotalAdapter([_rec("a", "x", d=date(2024, 6, 20))])
+    Pipeline(catalogue, rawstore).run(ad, on_progress=lambda **p: events.append(p))
+    harvest_events = [e for e in events if str(e.get("stage", "")).startswith("harvesting")]
+    assert harvest_events and all(e["total"] == 100 for e in harvest_events)
+    # and the very first emit sets a "discovering" stage so the panel is never blank
+    assert events[0]["stage"].startswith("discovering")
+
+
 def test_rate_limit_pauses_without_advancing_watermark(catalogue, rawstore):
     records = [
         _rec("a", "personal data GDPR 2016/679", d=date(2024, 5, 1)),

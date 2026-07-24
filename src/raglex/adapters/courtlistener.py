@@ -355,9 +355,15 @@ class CourtListenerAdapter(BaseAdapter):
             while url:
                 page = self._get(url, params)
                 params = None       # the `next` cursor already carries them
+                # v4 responses report the total matching clusters — pass it through so the
+                # Jobs panel can draw a real progress bar for the harvest phase (otherwise a
+                # feed crawl only knows how many it has SEEN, not how many exist).
+                feed_total = page.get("count")
                 for cluster in page.get("results") or []:
                     stub = _stub_for_cluster(cluster)
                     if stub:
+                        if feed_total:
+                            stub.hints["feed_total"] = int(feed_total)
                         yield stub
                 pages += 1
                 if max_pages is not None and pages >= max_pages:
