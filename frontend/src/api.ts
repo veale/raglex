@@ -274,6 +274,11 @@ export const api = {
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
     return postForm("/unresolved/resolve-file", fd);
   },
+  queueStatus: () => req<{ running: number; queued: number; max_concurrent: number; scheduler_paused: boolean }>("/jobs/queue-status"),
+  schedulerPause: (paused: boolean) =>
+    req<{ scheduler_paused: boolean }>("/jobs/scheduler-pause", { method: "POST", body: JSON.stringify({ paused }) }),
+  setMaxConcurrent: (max_concurrent: number) =>
+    req<{ max_concurrent?: number; error?: string }>("/jobs/max-concurrent", { method: "POST", body: JSON.stringify({ max_concurrent }) }),
   sourceList: () => req<string[]>("/sources/list"),
   harvest: (body: Record<string, unknown>) =>
     req<any>("/harvest", { method: "POST", body: JSON.stringify(body) }),

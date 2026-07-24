@@ -3735,13 +3735,19 @@ class Catalogue:
                         id_in: list | None = None,
                         year_from: str | None = None, year_to: str | None = None,
                         cites: str | None = None, cited_by: str | None = None,
-                        cites_pinpoint: str | None = None) -> int:
+                        cites_pinpoint: str | None = None, cap: int | None = None) -> int:
         """Total documents matching the same filters as :meth:`list_documents` — for
-        the Corpus page's true count + pagination."""
+        the Corpus page's true count + pagination.
+
+        ``cap`` bounds the count: a keyword search on a common term ("data") matches a huge
+        slice of the 5M-row corpus, and counting ALL of them — which no LIMIT can shortcut
+        for an exact COUNT — is what made a common-word search take seconds even though the
+        page only shows 8 rows. With ``cap`` the scan stops after cap+1 matching rows, so the
+        caller can show "N+" for anything past the cap; the exact count is kept for the
+        unbounded Corpus browse."""
         # COUNT(*) + EXISTS, not JOIN + COUNT(DISTINCT): same no-fan-out reasoning as
         # list_documents, and a distinct-aggregation over millions of ids is what made
         # the Corpus page's total/pagination time out after the bulk imports.
-        sql = "SELECT COUNT(*) AS n FROM documents d"
         params: list[object] = []
         clauses, fparams = self._doc_filter_clauses(
             source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
@@ -3752,8 +3758,13 @@ class Catalogue:
                               "WHERE t.doc_id = d.stable_id AND t.tag = ?)")
             params.append(tag)
         params.extend(fparams)
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        if cap and cap > 0:
+            # count only up to cap+1 rows: bounds the work to a small slice regardless of
+            # how many the term matches overall.
+            sql = f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM documents d{where} LIMIT {int(cap) + 1}) x"
+        else:
+            sql = f"SELECT COUNT(*) AS n FROM documents d{where}"
         return self.conn.execute(sql, params).fetchone()["n"]
 
     def document_facets(self, *, dims=("source", "doc_type", "court", "year"), top: int = 40,
@@ -3903,17 +3914,42 @@ class Catalogue:
     def create_job(self, job_id: str, kind: str, label: str, params: dict,
                    *, origin: str = "api", root_job_id: str | None = None,
                    resumed_from: str | None = None, resume_policy: str = "restart",
-                   attempt: int = 1, checkpoint: dict | None = None) -> None:
+                   attempt: int = 1, checkpoint: dict | None = None,
+                   status: str = "running") -> None:
         now = _now()
         self.conn.execute(
             "INSERT INTO jobs (job_id, kind, label, params_json, status, origin, "
             "started_at, heartbeat_at, lease_heartbeat_at, root_job_id, resumed_from, resume_policy, attempt, checkpoint_json) "
-            "VALUES (?,?,?,?,'running',?,?,?,?,?,?,?,?,?)",
-            (job_id, kind, label, json.dumps(params or {}), origin, now, now, now,
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, kind, label, json.dumps(params or {}), status, origin, now, now, now,
              root_job_id or job_id, resumed_from, resume_policy, attempt,
              json.dumps(checkpoint or {})),
         )
         self.conn.commit()
+
+    def queued_jobs(self) -> list[sqlite3.Row]:
+        """Jobs waiting for a concurrency slot, oldest first (FIFO promotion)."""
+        return self.conn.execute(
+            "SELECT * FROM jobs WHERE status = 'queued' ORDER BY started_at").fetchall()
+
+    def claim_queued_job(self, job_id: str) -> bool:
+        """Atomically move a queued job to running — the guard against two processes (the
+        API and the scheduler both promote) starting the same queued job. Returns True to
+        exactly one caller."""
+        cur = self.conn.execute(
+            "UPDATE jobs SET status = 'running', started_at = ?, heartbeat_at = ?, "
+            "lease_heartbeat_at = ? WHERE job_id = ? AND status = 'queued'",
+            (_now(), _now(), _now(), job_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def cancel_queued_job(self, job_id: str) -> bool:
+        """Drop a job that is still waiting in the queue (never started)."""
+        cur = self.conn.execute(
+            "UPDATE jobs SET status = 'cancelled', finished_at = ? "
+            "WHERE job_id = ? AND status = 'queued'", (_now(), job_id))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def pulse_job(self, job_id: str) -> None:
         """Prove the owning process is alive without pretending work progressed."""

@@ -3209,6 +3209,27 @@ export function SettingsView() {
   );
 }
 
+// A cadence picker in human terms (daily/weekly/…) over the stored minutes. "Custom" keeps
+// the raw minutes input for anything off the presets, so existing odd cadences still edit.
+const FREQ_PRESETS: [string, number][] = [
+  ["Hourly", 60], ["Every 6 hours", 360], ["Daily", 1440], ["Weekly", 10080],
+  ["Fortnightly", 20160], ["Monthly", 43200],
+];
+function FrequencySelect({ minutes, onChange }: { minutes: number; onChange: (m: number) => void }) {
+  const isPreset = FREQ_PRESETS.some(([, m]) => m === minutes);
+  return (
+    <span className="row" style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+      <select value={isPreset ? String(minutes) : "custom"}
+              onChange={(e) => { if (e.target.value !== "custom") onChange(+e.target.value); }}>
+        {FREQ_PRESETS.map(([label, m]) => <option key={m} value={m}>{label}</option>)}
+        <option value="custom">Custom…</option>
+      </select>
+      {!isPreset && <><input type="number" min={5} value={minutes}
+        onChange={(e) => onChange(+e.target.value || 1440)} style={{ width: 70 }} /> min</>}
+    </span>
+  );
+}
+
 // --- Watches (scheduled keyword harvest + autosnowball) --------------------
 // Plain-language capability chips for a source — so it's obvious what a watch on it can and
 // can't do (search at the API vs post-filter, incremental "new since last run", forward-
@@ -3461,6 +3482,7 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
         </p>
         <DbSizeStat />
       </div>
+      <JobsQueuePanel />
       <KeepCurrentPanel />
       <BackfillPanel />
       <GapFillPanel />
@@ -3468,6 +3490,52 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
       <RefinementFlagsPanel open={open} />
       <WatchesView />
       <RulesView open={open} />
+    </div>
+  );
+}
+
+// Job concurrency + scheduler controls: how many jobs run at once (extras queue), a live
+// running/queued count, and a "pause all scheduled jobs" switch. The queue itself is
+// automatic (overflow past the cap waits and promotes FIFO); this just surfaces + tunes it.
+function JobsQueuePanel() {
+  const [st, , reload] = useAsync(() => api.queueStatus(), []);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [maxInput, setMaxInput] = useState<number | null>(null);
+  useEffect(() => { const t = setInterval(reload, 5000); return () => clearInterval(t); }, [reload]);
+  if (!st) return null;
+  const max = maxInput ?? st.max_concurrent;
+  const saveMax = async () => {
+    setBusy("max");
+    try { await api.setMaxConcurrent(max); setMaxInput(null); reload(); }
+    finally { setBusy(null); }
+  };
+  const togglePause = async () => {
+    setBusy("pause");
+    try { await api.schedulerPause(!st.scheduler_paused); reload(); }
+    finally { setBusy(null); }
+  };
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Jobs &amp; queue</h3>
+      <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 16 }}>
+        <span title="Jobs running now vs the concurrency cap">
+          <b style={{ color: "var(--ok)" }}>{st.running}</b> running
+          {st.queued > 0 && <> · <b>{st.queued}</b> queued</>}
+          <span className="muted"> / max {st.max_concurrent}</span>
+        </span>
+        <label style={{ flex: "0 0 auto" }} title="How many jobs run at once; extras queue and start as slots free. Lower it on a busy box.">
+          max concurrent{" "}
+          <input type="number" min={1} max={32} value={max}
+                 onChange={(e) => setMaxInput(+e.target.value || 1)} style={{ width: 56 }} />
+          {maxInput !== null && maxInput !== st.max_concurrent &&
+            <button className="primary" disabled={busy === "max"} style={{ marginLeft: 4 }} onClick={saveMax}>set</button>}
+        </label>
+        <button className={st.scheduler_paused ? "primary" : ""} disabled={busy === "pause"} onClick={togglePause}
+                title="Pause the scheduler's recurring jobs + due watches. Manual and queued jobs keep running.">
+          {st.scheduler_paused ? "▶ Resume scheduled jobs" : "⏸ Pause all scheduled jobs"}
+        </button>
+        {st.scheduler_paused && <span className="muted">scheduled jobs paused — manual &amp; queued still run</span>}
+      </div>
     </div>
   );
 }
@@ -3613,7 +3681,7 @@ export function WatchesView() {
           <label style={{ flex: "0 0 auto" }} title="Enrich each newly-found case by fetching what it cites, N hops out">enrich each case <select value={degrees} onChange={(e) => setDegrees(+e.target.value)}>{[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n} degree{n !== 1 ? "s" : ""}</option>)}</select></label>
           {source && <label style={{ flex: "0 0 auto" }}>pages <input type="number" min={1} max={20} value={maxPages} onChange={(e) => setMaxPages(+e.target.value || 1)} style={{ width: 50 }} /></label>}
           <input value={tag} onChange={(e) => setTag(e.target.value)} placeholder="tag results into collection (optional)" style={{ maxWidth: 220 }} />
-          <label style={{ flex: "0 0 auto" }}>every <input type="number" min={5} value={cadence} onChange={(e) => setCadence(+e.target.value || 1440)} style={{ width: 84 }} /> min</label>
+          <label style={{ flex: "0 0 auto" }} title="How often the scheduler runs this watch (staggered so equal-cadence watches don't all fire at once)">runs <FrequencySelect minutes={cadence} onChange={setCadence} /></label>
           <button className="primary" disabled={busy === "new"} style={{ flex: "0 0 auto" }} onClick={create}>{busy === "new" ? "saving…" : "+ Create watch"}</button>
         </div>
         {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ wordBreak: "break-word" }}>{msg}</p>}
@@ -3635,7 +3703,10 @@ export function WatchesView() {
                 {!(w.spec.source || w.spec.discover) && <span title="No renewing source — a backward snowball converges, so scheduling adds little" style={{ color: "var(--warn)" }}> · one-shot</span>}
                 {w.last_result && <span> · <i>{summariseRun(w.last_result)}</i></span>}
               </td>
-              <td className="muted">{w.spec.source || w.spec.discover ? `${w.cadence_minutes}m` : "—"}</td>
+              <td className="muted">{w.spec.source || w.spec.discover
+                ? <FrequencySelect minutes={w.cadence_minutes}
+                    onChange={async (m) => { await api.updateWatch(w.watch_id, { cadence_minutes: m }); reload(); }} />
+                : "—"}</td>
               <td className="muted">{w.last_run_at ? String(w.last_run_at).slice(0, 16).replace("T", " ") : "never"}</td>
               <td style={{ whiteSpace: "nowrap" }}>
                 <button disabled={busy === w.watch_id} onClick={() => run(w.watch_id)}>{busy === w.watch_id ? "…" : "▸ run"}</button>{" "}

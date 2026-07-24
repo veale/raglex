@@ -288,6 +288,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
         pushed_alerts: set = set()  # (code, subject) already notified — don't nag
         while True:
             try:
+                # Refresh settings→env each tick so a UI change to max-concurrent / pause
+                # takes effect in this (separate) process, then promote any queued jobs into
+                # free slots — belt-and-suspenders with the per-job-finish promotion, and the
+                # cross-process path for jobs queued by the API. Promotion runs even when
+                # paused: pause holds the scheduler's OWN recurring work (enforced in
+                # JobManager.start by origin), not the manual queue.
+                Config.from_env()
+                try:
+                    jobs.promote_queued()
+                except Exception:  # noqa: BLE001
+                    pass
                 # Start a background job per due watch (so each shows in the Jobs panel
                 # with progress) instead of running them inline where nothing can see them.
                 due = f.due_watch_ids()

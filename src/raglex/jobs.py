@@ -21,6 +21,7 @@ which is why the UI can cancel a job running inside the scheduler.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -82,6 +83,13 @@ AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 # All three write the citations table; a re-anchor and a rescan of the SAME source must
 # not run at once (they'd race the same offsets), but disjoint sources may.
 _SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations"})
+
+
+def scheduler_paused() -> bool:
+    """Whether the operator has paused the scheduler's recurring jobs + due watches
+    (RAGLEX_SCHEDULER_PAUSED, UI-toggleable). Manual and queued jobs are unaffected."""
+    return str(os.environ.get("RAGLEX_SCHEDULER_PAUSED") or "").strip().lower() in (
+        "1", "true", "on", "yes")
 
 
 def _scan_scope(kind: str, params: dict) -> str | None:
@@ -250,11 +258,49 @@ class JobManager:
                     self._resume_row(row)
         return n
 
+    def _max_concurrent(self) -> int:
+        """How many jobs run at once — UI-configurable (RAGLEX_MAX_CONCURRENT_JOBS), so a
+        busy box can be throttled without a redeploy. Extras queue (see :meth:`start`)."""
+        try:
+            return max(1, int(os.environ.get("RAGLEX_MAX_CONCURRENT_JOBS") or MAX_CONCURRENT_JOBS))
+        except (TypeError, ValueError):
+            return MAX_CONCURRENT_JOBS
+
+    def _dedup_hit(self, kind: str, params: dict, pool) -> dict | None:
+        """If an identical job (singleton kind, or a DEDUP kind with the same params) is
+        already in ``pool`` (running and/or queued), the 'already there' response — so a
+        second identical request neither double-runs nor stacks in the queue."""
+        if kind in SINGLETON_KINDS and kind not in _SCAN_KINDS:
+            for j in pool:
+                if j["kind"] == kind:
+                    return {"job_id": j["job_id"], "already_running": True}
+        elif kind in DEDUP_KINDS:
+            want = json.dumps(params, sort_keys=True)
+            for j in pool:
+                if j["kind"] == kind and json.dumps(
+                        json.loads(j["params_json"] or "{}"), sort_keys=True) == want:
+                    return {"job_id": j["job_id"], "already_running": True}
+        return None
+
+    def _blocked_by_running(self, kind: str, params: dict, running) -> bool:
+        """Whether a queued job of ``kind`` must keep waiting because a RUNNING job would
+        conflict with it (scan-scope overlap, singleton, or same-params dedup)."""
+        if any(_scan_conflict(kind, params, j) for j in running):
+            return True
+        return self._dedup_hit(kind, params, running) is not None
+
     def start(self, kind: str, label: str, params: dict | None = None, *,
               resumed_from: str | None = None, root_job_id: str | None = None,
-              attempt: int = 1, checkpoint: dict | None = None) -> dict:
+              attempt: int = 1, checkpoint: dict | None = None, queue: bool = False) -> dict:
+        """Start a job, or QUEUE it. It runs immediately if a concurrency slot is free and
+        ``queue`` is False; otherwise (``queue=True`` — "add to queue" — or the box is at
+        ``_max_concurrent``) it's recorded ``queued`` and promoted FIFO as slots free."""
         if kind not in RUNNERS:
             return {"error": f"unknown job kind {kind!r}"}
+        # "Pause scheduled jobs" holds the SCHEDULER's own recurring work + due watches only
+        # (origin='scheduler'); manual (origin='api') and already-queued jobs still run.
+        if self.origin == "scheduler" and scheduler_paused():
+            return {"paused": True}
         params = dict(params or {})
         with self.facade._open() as (cat, _rs, _ts):
             running = cat.running_jobs()
@@ -262,32 +308,51 @@ class JobManager:
                 if _scan_conflict(kind, params, j):
                     return {"job_id": j["job_id"], "already_running": True,
                             "conflict": "citation extraction scope overlaps"}
-            if kind in SINGLETON_KINDS and kind not in _SCAN_KINDS:
-                for j in running:
-                    if j["kind"] == kind:
-                        return {"job_id": j["job_id"], "already_running": True}
-            # Keyed jobs (a watch, a court/year gap-scan): don't launch an identical one while
-            # one is already in flight — the scheduler ticks faster than a watch can finish, and
-            # last_run_at only updates when it ends, so without this a slow watch double-runs.
-            elif kind in DEDUP_KINDS:
-                import json as _json
-
-                want = _json.dumps(params, sort_keys=True)
-                for j in running:
-                    if j["kind"] == kind and _json.dumps(_json.loads(j["params_json"] or "{}"), sort_keys=True) == want:
-                        return {"job_id": j["job_id"], "already_running": True}
-            if len(running) >= MAX_CONCURRENT_JOBS:
-                return {"error": f"too many jobs running ({len(running)}); let some finish first"}
+            # Dedup against running AND already-queued, so a repeat click doesn't stack.
+            hit = self._dedup_hit(kind, params, list(running) + list(cat.queued_jobs()))
+            if hit is not None:
+                return hit
             job_id = uuid.uuid4().hex[:8]
             policy = RESUME_POLICIES.get(kind, "restart")
             root = root_job_id or job_id
             if policy == "checkpoint":
                 params["_resume_run_id"] = root
+            at_capacity = len(running) >= self._max_concurrent()
+            status = "queued" if (queue or at_capacity) else "running"
             cat.create_job(job_id, kind, label, params, origin=self.origin,
                            root_job_id=root, resumed_from=resumed_from,
-                           resume_policy=policy, attempt=attempt, checkpoint=checkpoint)
-        threading.Thread(target=self._worker, args=(job_id, kind, params), daemon=True).start()
-        return {"job_id": job_id}
+                           resume_policy=policy, attempt=attempt, checkpoint=checkpoint,
+                           status=status)
+        if status == "running":
+            threading.Thread(target=self._worker, args=(job_id, kind, params), daemon=True).start()
+            return {"job_id": job_id}
+        return {"job_id": job_id, "queued": True}
+
+    def promote_queued(self) -> list[str]:
+        """Start queued jobs (oldest first) up to the concurrency cap, skipping any that
+        would conflict with a running job. Called when a slot frees (a job finishes) and on
+        every scheduler tick, so promotion survives a crash and works across processes — the
+        atomic claim (:meth:`Catalogue.claim_queued_job`) ensures each job starts once."""
+        started: list[str] = []
+        with self.facade._open() as (cat, _rs, _ts):
+            while True:
+                running = cat.running_jobs()
+                if len(running) >= self._max_concurrent():
+                    break
+                picked = None
+                for q in cat.queued_jobs():
+                    p = json.loads(q["params_json"] or "{}")
+                    if self._blocked_by_running(q["kind"], p, running):
+                        continue
+                    if cat.claim_queued_job(q["job_id"]):
+                        picked = (q["job_id"], q["kind"], p)
+                        break
+                if picked is None:
+                    break
+                jid, k, p = picked
+                threading.Thread(target=self._worker, args=(jid, k, p), daemon=True).start()
+                started.append(jid)
+        return started
 
     def _worker(self, job_id: str, kind: str, params: dict) -> None:
         state = {"progress": {}, "checkpoint": None, "log": [], "cancel": False,
@@ -382,6 +447,12 @@ class JobManager:
             finished = None
         if finished and finished.get("restart_requested"):
             self._resume_row(finished)
+        # A slot just freed → promote the next queued job(s). Best-effort: the scheduler
+        # tick also promotes, so a failure here self-heals within a tick.
+        try:
+            self.promote_queued()
+        except Exception:  # noqa: BLE001
+            log.exception("promote_queued after job %s failed", job_id)
 
     # -- reads -------------------------------------------------------------
     @staticmethod
@@ -442,6 +513,10 @@ class JobManager:
 
     def cancel(self, job_id: str) -> dict:
         with self.facade._open() as (cat, _rs, _ts):
+            # A queued job hasn't started — drop it outright; a running one gets the
+            # cooperative cancel flag its worker polls.
+            if cat.cancel_queued_job(job_id):
+                return {"job_id": job_id, "cancelled": True, "was_queued": True}
             return {"job_id": job_id, "cancelling": cat.request_job_cancel(job_id)}
 
     def restart(self, job_id: str) -> dict:

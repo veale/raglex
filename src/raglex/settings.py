@@ -137,6 +137,12 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
                 "blank = open. Set it and the REST API + MCP endpoint both require it"),
     SettingSpec("RAGLEX_ALERT_WEBHOOK", "Alert webhook URL", True, "Network",
                 "ntfy.sh/your-topic — pushes source-failure and drain-stalled alerts"),
+    SettingSpec("RAGLEX_MAX_CONCURRENT_JOBS", "Max concurrent jobs", False, "Jobs",
+                "how many jobs run at once; extras queue and start as slots free (default 6). "
+                "Lower it on a busy box so heavy imports don't starve interactive queries"),
+    SettingSpec("RAGLEX_SCHEDULER_PAUSED", "Pause scheduled jobs", False, "Jobs",
+                "1 = pause the scheduler's recurring jobs and due watches (manual and queued "
+                "jobs still run); blank/0 = normal"),
 )
 _SPEC_BY_KEY = {s.key: s for s in KNOWN_SETTINGS}
 

@@ -69,8 +69,42 @@ def create_app(config: Config | None = None) -> FastAPI:
     )
     _install_auth(app)
 
-    def _start_job(kind: str, label: str, params: dict | None = None) -> dict:
-        return jobs.start(kind, label, params or {})
+    def _start_job(kind: str, label: str, params: dict | None = None, *,
+                   queue: bool = False) -> dict:
+        return jobs.start(kind, label, params or {}, queue=queue)
+
+    @app.get("/jobs/queue-status")
+    def jobs_queue_status_ep() -> dict:
+        """The queue's live state for the Jobs/Maintain UI: how many are running vs the
+        cap, how many are waiting, and whether the scheduler is paused."""
+        import os as _os
+        from ..jobs import scheduler_paused
+        with facade._open() as (cat, _rs, _ts):
+            running = len(cat.running_jobs())
+            queued = len(cat.queued_jobs())
+        return {"running": running, "queued": queued,
+                "max_concurrent": jobs._max_concurrent(),
+                "scheduler_paused": scheduler_paused()}
+
+    @app.post("/jobs/scheduler-pause")
+    def jobs_scheduler_pause_ep(payload: dict = Body(default={})) -> dict:
+        """Toggle "pause all scheduled jobs" (the scheduler's recurring work + due watches).
+        Manual and already-queued jobs keep running. Persists RAGLEX_SCHEDULER_PAUSED."""
+        paused = bool((payload or {}).get("paused", True))
+        facade.update_settings({"RAGLEX_SCHEDULER_PAUSED": "1" if paused else ""})
+        return {"scheduler_paused": paused}
+
+    @app.post("/jobs/max-concurrent")
+    def jobs_max_concurrent_ep(payload: dict = Body(...)) -> dict:
+        """Set how many jobs run at once (extras queue). Persists RAGLEX_MAX_CONCURRENT_JOBS
+        and immediately promotes queued jobs if the cap was raised."""
+        try:
+            n = max(1, int((payload or {}).get("max_concurrent")))
+        except (TypeError, ValueError):
+            return {"error": "max_concurrent must be a positive integer"}
+        facade.update_settings({"RAGLEX_MAX_CONCURRENT_JOBS": str(n)})
+        jobs.promote_queued()
+        return {"max_concurrent": n}
 
     # -- ops (build/observe first, §8) ------------------------------------
     @app.get("/health")
@@ -445,7 +479,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         params: dict = {"source": str(source)}
         if payload.get("workers") is not None:
             params["workers"] = int(payload["workers"])
-        return _start_job("reparse-source", f"reparse {source} from raw", params)
+        return _start_job("reparse-source", f"reparse {source} from raw", params, queue=bool(payload.get("queue")))
 
     @app.post("/jobs/reanchor-citations")
     def job_reanchor_citations_ep(payload: dict = Body(...)) -> dict:
@@ -458,7 +492,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         if not source:
             return {"error": "source is required"}
         return _start_job("reanchor-citations", f"re-anchor {source} citations",
-                          {"source": str(source)})
+                          {"source": str(source)}, queue=bool(payload.get("queue")))
 
     @app.post("/jobs/match-reports")
     def job_match_reports_ep() -> dict:
@@ -638,7 +672,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             params["use_llm"] = bool(payload["use_llm"])
         scope = "everything" if params["max_pages"] is None else f"{params['max_pages']} page(s)"
         verb = "backfill" if params["backfill"] else "harvest"
-        return _start_job("harvest-source", f"{verb} {source} — {scope}", params)
+        return _start_job("harvest-source", f"{verb} {source} — {scope}", params, queue=bool(payload.get("queue")))
 
     @app.post("/jobs/finish-bulk-postprocess")
     def job_finish_bulk_postprocess_ep(payload: dict = Body(default={})) -> dict:

@@ -1312,6 +1312,8 @@ class Facade:
     # handled separately, so an unknown key can't leak into the SQL builder)
     _SEARCH_FILTERS = ("source", "doc_type", "tag", "query", "court", "id_prefix",
                        "year_from", "year_to", "cites", "cited_by", "cites_pinpoint")
+    # Search result counts stop here; the UI shows "N+" past it (see search_corpus).
+    _SEARCH_COUNT_CAP = 1000
 
     def _citation_query_ids(self, cat, query: str) -> list[str]:
         """If the search text is itself a citation ("[2011] IESC 26", an ECLI, a report
@@ -1361,7 +1363,13 @@ class Facade:
                 d = dict(r)
                 d["oscola"] = _oscola_cite(r, _row_meta(r))
                 items.append(d)
-            out = {"items": items, "total": cat.count_documents(**f),
+            # Cap the exact total (a common-word match set is millions of rows; counting all
+            # is the only slow part of an otherwise sub-second search). Beyond the cap the UI
+            # shows "N+" via total_capped; an unfiltered browse still gets the exact count.
+            cap = self._SEARCH_COUNT_CAP
+            raw_total = cat.count_documents(cap=cap, **f)
+            total_capped = raw_total > cap
+            out = {"items": items, "total": min(raw_total, cap), "total_capped": total_capped,
                    "limit": limit, "offset": offset, "sort": sort or "date"}
             if facets:
                 out["facets"] = cat.document_facets(**f)
