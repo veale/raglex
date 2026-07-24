@@ -456,6 +456,14 @@ _POST_MIGRATE_INDEXES = (
     # no-ops (IF NOT EXISTS) instead of taking a write-blocking lock at startup.
     "CREATE INDEX IF NOT EXISTS documents_date_id_idx ON documents "
     "(decision_date DESC, stable_id)",
+    # The Unresolved page's with_citing lookup filters pending edges by
+    # COALESCE(candidate_id, raw_citation_string) IN (…visible refs…) — an expression the
+    # plain candidate_id index can't serve, so it seq-scanned ~1.8M pending rows per page
+    # (the /unresolved 20s hang). A partial expression index on the pending slice makes it
+    # an index probe. On the big live table build CONCURRENTLY by hand first; this no-ops.
+    "CREATE INDEX IF NOT EXISTS relations_pending_ref_idx ON relations "
+    "(COALESCE(candidate_id, raw_citation_string)) "
+    "WHERE resolution_status = 'pending' AND extracted_via <> 'inferred'",
 )
 
 # Postgres-only trigram indexes for substring search (§7): the corpus search matches a
@@ -2555,9 +2563,13 @@ class Catalogue:
                 SELECT COALESCE(r.candidate_id, r.raw_citation_string) AS ref,
                        MAX(r.candidate_id), MIN(r.raw_citation_string), MIN(r.dst_anchor),
                        {agg}, COUNT(*), COUNT(DISTINCT r.src_id),
-                       MAX(CASE WHEN d.source = 'echr' THEN 1 ELSE 0 END), ?
+                       -- ECHR-cited flag via a membership test against the (small) set of
+                       -- echr documents, NOT a JOIN over all ~5M documents: the join made
+                       -- this build ~6 min, the IN-subquery ~20s.
+                       MAX(CASE WHEN r.src_id IN
+                           (SELECT stable_id FROM documents WHERE source = 'echr')
+                           THEN 1 ELSE 0 END), ?
                 FROM relations r
-                JOIN documents d ON d.stable_id = r.src_id
                 WHERE r.resolution_status = 'pending'
                   AND r.extracted_via <> 'inferred'
                   AND COALESCE(r.candidate_id, r.raw_citation_string) IS NOT NULL
