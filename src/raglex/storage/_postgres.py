@@ -456,6 +456,27 @@ CREATE TABLE IF NOT EXISTS sources (
     requires_proxy       INTEGER NOT NULL DEFAULT 0
 );
 
+-- Per-run harvest history (§keep-current) — the row-per-run log the Maintain diagnosis
+-- view reads. See the sqlite DDL in catalogue.py for the rationale.
+CREATE TABLE IF NOT EXISTS source_runs (
+    run_id       BIGSERIAL PRIMARY KEY,
+    source_key   TEXT NOT NULL,
+    watch_id     BIGINT,
+    trigger      TEXT NOT NULL DEFAULT 'manual',
+    backfill     INTEGER NOT NULL DEFAULT 0,
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT,
+    discovered   INTEGER NOT NULL DEFAULT 0,
+    stored       INTEGER NOT NULL DEFAULT 0,
+    deduped      INTEGER NOT NULL DEFAULT 0,
+    refreshed    INTEGER NOT NULL DEFAULT 0,
+    errors       INTEGER NOT NULL DEFAULT 0,
+    not_found    INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    watermark    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_source_runs_key ON source_runs(source_key, run_id DESC);
+
 CREATE TABLE IF NOT EXISTS watches (
     watch_id         BIGSERIAL PRIMARY KEY,
     name             TEXT NOT NULL,

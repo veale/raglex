@@ -252,6 +252,7 @@ export const api = {
   cancelJob: (id: string) => req<any>(`/jobs/${id}/cancel`, { method: "POST", body: "{}" }),
   restartJob: (id: string) => req<any>(`/jobs/${id}/restart`, { method: "POST", body: "{}" }),
   sourceCatalog: () => req<any[]>("/sources/catalog"),
+  keepCurrent: () => req<{ overlap_default_days: number; sources: any[] }>("/sources/keep-current"),
   watches: () => req<any[]>("/watches"),
   createWatch: (body: Record<string, unknown>) =>
     req<any>("/watches", { method: "POST", body: JSON.stringify(body) }),
@@ -292,6 +293,8 @@ export const api = {
     req<any>("/tag", { method: "POST", body: JSON.stringify({ doc_id, tag }) }),
   link: (src_id: string, dst_id: string, relationship: string, src_anchor?: string, dst_anchor?: string) =>
     req<any>("/link", { method: "POST", body: JSON.stringify({ src_id, dst_id, relationship, src_anchor, dst_anchor }) }),
+  linkAtSelection: (body: { doc_id: string; target_id: string; selected_text: string; context?: string; pinpoint?: string }) =>
+    req<any>("/link-at-selection", { method: "POST", body: JSON.stringify(body) }),
   attach: async (doc_id: string, file: File, kind: string) => {
     const fd = new FormData();
     fd.append("file", file);

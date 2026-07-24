@@ -83,6 +83,35 @@ def test_watermark_roundtrip(catalogue):
     assert catalogue.get_watermark("uk-caselaw") == "2024-01-15"
 
 
+def test_manual_citation_survives_clear(catalogue):
+    # a hand-authored anchored link (method='manual') must outlive a re-extraction, which
+    # clears a document's machine-extracted citation spans.
+    catalogue.add_manual_citation("doc1", candidate_id="tgt", raw="Foo v Bar",
+                                  char_start=13, char_end=22)
+    catalogue.add_citations("doc1", [{"raw": "x", "candidate_id": "y", "method": "law_report",
+                                       "char_start": 0, "char_end": 1}])
+    catalogue.clear_citations("doc1")  # keep_manual defaults True
+    rows = [dict(r) for r in catalogue.conn.execute(
+        "SELECT method, candidate_id FROM citations WHERE src_id = 'doc1'")]
+    assert rows == [{"method": "manual", "candidate_id": "tgt"}]
+    # re-linking the SAME span replaces rather than duplicates
+    catalogue.add_manual_citation("doc1", candidate_id="tgt", raw="Foo v Bar",
+                                  char_start=13, char_end=22)
+    n = catalogue.conn.execute("SELECT COUNT(*) AS n FROM citations WHERE src_id='doc1'").fetchone()["n"]
+    assert n == 1
+
+
+def test_source_runs_history_is_bounded_and_ordered(catalogue):
+    for i in range(45):
+        catalogue.record_source_run("uk-caselaw", started_at=f"2026-07-24T{i:02d}:00:00",
+            finished_at="2026-07-24T00:01:00", discovered=i, stored=i % 3, deduped=1,
+            refreshed=0, errors=0, not_found=0, rate_limited=False, backfill=False,
+            watermark="2026-07-24", trigger="watch", watch_id=1)
+    recent = catalogue.recent_source_runs("uk-caselaw", limit=100)
+    assert len(recent) == catalogue._SOURCE_RUNS_KEEP  # trimmed to the cap
+    assert recent[0]["discovered"] == 44  # newest first
+
+
 def test_sqlite_and_postgres_ddl_declare_the_same_tables():
     """The runtime keeps TWO schema definitions (catalogue.py for SQLite, _postgres.py
     for Postgres). A table added to one but not the other passes every SQLite-backed

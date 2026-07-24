@@ -160,6 +160,68 @@ def test_watermark_advances_even_when_every_stub_is_deduped(catalogue, rawstore)
     assert catalogue.get_watermark("fake") == "2024-06-01"  # cursor still moved forward
 
 
+class SinceCapturingAdapter(BaseAdapter):
+    """Records the ``since`` it was asked to discover from — so a test can assert what
+    overlap window the pipeline requested."""
+
+    source = "fake"
+    min_interval = 0.0
+
+    def __init__(self, records):
+        self._records = records
+        self.seen_since: str | None = "__unset__"
+
+    def discover(self, since, *, max_pages=None) -> Iterator[Stub]:
+        self.seen_since = since
+        for rec in self._records:
+            yield Stub(stable_id=rec.stable_id, title=rec.title, court=rec.court,
+                       hint_date=rec.decision_date,
+                       hints={"watermark": rec.decision_date.isoformat()} if rec.decision_date else {})
+
+    def fetch(self, stub):
+        return next(r for r in self._records if r.stable_id == stub.stable_id)
+
+
+def test_incremental_overlap_rolls_since_back(catalogue, rawstore):
+    catalogue.set_watermark("fake", "2024-06-10")
+    ad = SinceCapturingAdapter([_rec("a", "x", d=date(2024, 6, 20))])
+    Pipeline(catalogue, rawstore).run(ad, overlap_days=3)
+    # discover() was asked from 3 days BEFORE the stored cursor…
+    assert ad.seen_since == "2024-06-07"
+    # …but the stored cursor only ever moves FORWARD to the newest item seen.
+    assert catalogue.get_watermark("fake") == "2024-06-20"
+
+
+def test_incremental_overlap_preserves_time_suffix(catalogue, rawstore):
+    catalogue.set_watermark("fake", "2024-06-10T14:30:00+00:00")
+    ad = SinceCapturingAdapter([])
+    Pipeline(catalogue, rawstore).run(ad, overlap_days=2)
+    assert ad.seen_since == "2024-06-08T14:30:00+00:00"
+
+
+def test_incremental_overlap_noop_on_nondate_cursor(catalogue, rawstore):
+    catalogue.set_watermark("fake", "act_public_2026_9_en")
+    ad = SinceCapturingAdapter([])
+    Pipeline(catalogue, rawstore).run(ad, overlap_days=5)
+    assert ad.seen_since == "act_public_2026_9_en"  # unchanged: not a date
+
+
+def test_overlap_skipped_on_backfill(catalogue, rawstore):
+    catalogue.set_watermark("fake", "2024-06-10")
+    ad = SinceCapturingAdapter([])
+    Pipeline(catalogue, rawstore).run(ad, backfill=True, overlap_days=3)
+    assert ad.seen_since is None  # backfill ignores the cursor entirely
+
+
+def test_future_dated_item_clamps_watermark_to_today(catalogue, rawstore):
+    from datetime import timedelta
+    future = date.today() + timedelta(days=400)
+    ad = SinceCapturingAdapter([_rec("a", "x", d=future)])
+    Pipeline(catalogue, rawstore).run(ad)
+    # the future date must NOT be stored — it would strand every genuinely-new item
+    assert catalogue.get_watermark("fake") == date.today().isoformat()
+
+
 def test_rate_limit_pauses_without_advancing_watermark(catalogue, rawstore):
     records = [
         _rec("a", "personal data GDPR 2016/679", d=date(2024, 5, 1)),

@@ -13,8 +13,10 @@ the step-1 ingest path.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from ..core.adapter import Adapter
 from ..core.errors import FetchError, RateLimitException
@@ -99,6 +101,7 @@ class Pipeline:
         ignore_watermark: bool = False,
         record_health: bool = True,
         watermark_key: str | None = None,
+        overlap_days: int | None = None,
         on_progress=None,
         cancel_check=None,
     ) -> RunStats:
@@ -124,11 +127,24 @@ class Pipeline:
         stats = RunStats(source=adapter.source)
         wm_key = watermark_key or adapter.source
         watermark = None if ignore_watermark else (since if backfill else self.catalogue.get_watermark(wm_key))
+        # ``highest`` seeds from the STORED cursor, never the overlap-adjusted one, so a
+        # quiet run (nothing new, only the re-scanned overlap window) can never regress the
+        # watermark backwards. The overlap only widens what discover() is *asked* for.
         highest = watermark
+        # Incremental overlap (§keep-current): re-ask the feed for a small window BEFORE the
+        # stored cursor so a late-arriving or same-boundary item isn't stranded, and future-
+        # dated items can't push the cursor past reality. Backfills (no cursor) and targeted
+        # searches (ignore_watermark) are exempt. Re-seen items dedup by PK before any fetch,
+        # so the cost is ~nil. Generalises the CanLII ``today−2d`` re-scan window.
+        discover_since = watermark
+        if watermark and not backfill and not ignore_watermark:
+            overlap = _overlap_days(overlap_days)
+            if overlap > 0:
+                discover_since = _apply_overlap(watermark, overlap)
         wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
         last_emit = 0.0
 
-        stubs = adapter.discover(watermark, max_pages=max_pages)
+        stubs = adapter.discover(discover_since, max_pages=max_pages)
         # Batched held-lookup: a backfill's resume pass re-walks the source's whole
         # catalogue mostly re-seeing held documents, and one point SELECT per stub
         # made that walk crawl at ~20 stubs/s against Postgres (hours of no-op over
@@ -322,8 +338,12 @@ class Pipeline:
                 )
 
         # Advance the watermark only on a clean (non-rate-limited) crawl (§5) — never for
-        # a targeted search, which isn't an incremental pass over the recency feed.
+        # a targeted search, which isn't an incremental pass over the recency feed. Clamp a
+        # date cursor to today first: a single future-dated item (a data-entry error, an
+        # embargo/commencement date) would otherwise jump the cursor past real time and
+        # silently strand every genuinely-new item dated "today" until the clock caught up.
         if highest and not stats.rate_limited and not ignore_watermark:
+            highest = _clamp_future(highest)
             self.catalogue.set_watermark(wm_key, highest)
             stats.watermark = highest
 
@@ -471,6 +491,59 @@ def _chamberless_alias(stable_id: str) -> str | None:
             and len(parts[2]) == 4 and parts[2].isdigit() and parts[3].isdigit()):
         return f"{parts[0]}/{parts[2]}/{parts[3]}".casefold()
     return None
+
+
+_DEFAULT_OVERLAP_DAYS = 2  # the CanLII re-scan window, generalised
+_ISO_DATE_HEAD = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def _overlap_days(override: int | None) -> int:
+    """Per-run override → global ``RAGLEX_INCREMENTAL_OVERLAP_DAYS`` → default. A value of
+    0 disables the overlap (exact-cursor behaviour, as before)."""
+    if override is not None:
+        return max(0, override)
+    raw = (os.environ.get("RAGLEX_INCREMENTAL_OVERLAP_DAYS") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_OVERLAP_DAYS
+
+
+def _shift_date_head(wm: str, days: int) -> str | None:
+    """Shift the leading ``YYYY-MM-DD`` of a watermark by ``days`` (negative = earlier),
+    preserving any time/timezone suffix exactly. Returns None if the watermark doesn't
+    start with an ISO date — serials (edpb-oss ``00003927``) and id-shaped cursors
+    (nz-legislation ``act_public_…``) are left for the caller to pass through unchanged."""
+    m = _ISO_DATE_HEAD.match(wm)
+    if not m:
+        return None
+    try:
+        shifted = date(int(m[1]), int(m[2]), int(m[3])) + timedelta(days=days)
+    except ValueError:
+        return None
+    return shifted.isoformat() + wm[10:]
+
+
+def _apply_overlap(watermark: str, overlap_days: int) -> str:
+    """The value passed to ``discover()``: the stored cursor rolled back ``overlap_days``.
+    Date-aware; a non-date watermark is returned unchanged (those sources full-walk and
+    filter anyway, so an overlap is a no-op there)."""
+    return _shift_date_head(watermark, -overlap_days) or watermark
+
+
+def _clamp_future(watermark: str) -> str:
+    """Never store a date cursor beyond today — see run(). Non-date watermarks pass through."""
+    m = _ISO_DATE_HEAD.match(watermark)
+    if not m:
+        return watermark
+    try:
+        d = date(int(m[1]), int(m[2]), int(m[3]))
+    except ValueError:
+        return watermark
+    today = date.today()
+    return today.isoformat() + watermark[10:] if d > today else watermark
 
 
 def _max_watermark(current: str | None, candidate: str | None) -> str | None:

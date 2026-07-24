@@ -570,6 +570,11 @@ tbody tr:hover { background: var(--surface-2); }
   border-radius: var(--radius); color: var(--subtext); white-space: nowrap; cursor: help; }
 .cap-chip[data-on="1"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
 .cap-chip[data-on="0"] { color: var(--faint); }
+.cap-chip[data-tone="ok"] { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.cap-chip[data-tone="warn"] { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.cap-chip[data-tone="err"] { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.cap-chip[data-tone="muted"] { color: var(--faint); }
+.warn { color: var(--warn); }
 .gap-status .stat-strip b { font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .gap-status .stat-strip > div { text-align: left; }
 

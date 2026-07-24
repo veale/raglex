@@ -347,7 +347,7 @@ function CitesTray({ target, family, open }: { target: string; family: "cases" |
 function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, open }:
   { id: string; highlightTarget?: string; highlightAnchor?: string; occurrenceStart?: number;
     open: (id: string, a?: string) => void }) {
-  const [body] = useAsync(() => api.documentBody(id), [id]);
+  const [body, , reloadBody] = useAsync(() => api.documentBody(id), [id]);
   const [occIndex, setOccIndex] = useState(0);
   const peek = usePeek();
   const onCite = (c: any) => peek.push(citePeek(c));
@@ -400,7 +400,7 @@ function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, 
   }, [body, occIndex]);
   if (!body) return <p className="muted loading-pulse">Loading…</p>;
   return (
-    <SelectionShorthand docId={id}>
+    <SelectionShorthand docId={id} onLinked={reloadBody}>
       <div className="tray-doc-head">
         <b><Oscola c={body.oscola} fallback={body.title || id} /></b>
         <button className="mini" onClick={() => open(id)}>open full ↗</button>
@@ -1274,7 +1274,7 @@ function matchSegIndex(segs: any[], anchor?: string): number {
 function DocPeek({ id, anchor, raw, onCite, openFull }:
   { id: string; anchor?: string; raw?: string; onCite: (c: any) => void; openFull: (id: string, a?: string) => void }) {
   const [doc, docErr, reload] = useAsync(() => api.document(id), [id]);
-  const [body] = useAsync(() => api.documentBody(id), [id]);
+  const [body, , reloadBody] = useAsync(() => api.documentBody(id), [id]);
   const segs = (body?.segments || []) as any[];
   // jump to the pinpointed paragraph/section once the full text has rendered
   useEffect(() => {
@@ -1299,7 +1299,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
   const d = doc?.document;
   const cites = body?.citations || [];
   return (
-    <SelectionShorthand docId={id}>
+    <SelectionShorthand docId={id} onLinked={reloadBody}>
       <div className="peek-doc-head">
         <b><Oscola c={(doc as any)?.oscola} fallback={d?.title || id} /></b>
         <div className="muted" style={{ fontSize: 12 }}>
@@ -1555,7 +1555,7 @@ function LiiLinks({ id }: { id: string }) {
 
 function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   { id: string; incoming: any[]; pinpoint?: string | null; oscola?: OscolaCite | null; landingUrl?: string; title?: string }) {
-  const [body] = useAsync(() => api.documentBody(id), [id]);
+  const [body, , reloadBody] = useAsync(() => api.documentBody(id), [id]);
   // "original" pane: the stored source file (guidance PDF via the linkified pdf.js
   // viewer, styled BAILII HTML in a sandboxed frame) alongside the extracted text
   const rawKind = body?.raw_ext === "pdf" ? "pdf"
@@ -1683,7 +1683,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     (segs || []).filter((s) => { const mb = mentionsFor(s.label); return mb && mb.list.length > 0; })
       .map((s) => s.label));
   return (
-    <SelectionShorthand docId={id}>
+    <SelectionShorthand docId={id} onLinked={reloadBody}>
       <div className="doc-layout">
         <DocNav segs={segs || []} text={body.text || ""} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
         <div className="doc-main" ref={readerRef}>{chips}{pdfBanner}{tabs}{main}</div>
@@ -1793,9 +1793,10 @@ export function DocAutocomplete({ initial, onPick, placeholder }:
 // paragraph, article, section, schedule or recital — autocompleted from the target's own
 // structure (its segment labels). Used by the highlight-to-link popover.
 function LinkTargetPicker({ initial, onCreate }:
-  { initial: string; onCreate: (id: string, title: string, pinpoint?: string) => void }) {
+  { initial: string; onCreate: (id: string, title: string, pinpoint?: string, alsoAlias?: boolean) => void }) {
   const [target, setTarget] = useState<{ id: string; title: string } | null>(null);
   const [pin, setPin] = useState("");
+  const [alsoAlias, setAlsoAlias] = useState(false);
   const [labels, setLabels] = useState<string[]>([]);
   useEffect(() => {
     if (!target) return;
@@ -1815,8 +1816,13 @@ function LinkTargetPicker({ initial, onCreate }:
           placeholder="pinpoint — paragraph / article / section (optional)" />
         <datalist id="pinpoint-list">{labels.map((l, i) => <option key={i} value={l} />)}</datalist>
         <button className="primary" style={{ flex: "0 0 auto" }}
-          onClick={() => onCreate(target.id, target.title, pin.trim() || undefined)}>Link</button>
+          onClick={() => onCreate(target.id, target.title, pin.trim() || undefined, alsoAlias)}>Link</button>
       </div>
+      <label style={{ fontSize: 11, display: "flex", gap: 5, alignItems: "center", marginTop: 5 }} className="muted"
+        title="Also make this phrase link to the target EVERYWHERE (a corpus-wide shorthand rule, applied on the next re-extraction). Leave off for a one-off link here.">
+        <input type="checkbox" checked={alsoAlias} onChange={(e) => setAlsoAlias(e.target.checked)} />
+        also apply this phrase everywhere (shorthand rule)
+      </label>
     </div>
   );
 }
@@ -1828,7 +1834,7 @@ type SelInfo = {
   links: { text: string; state: string; title: string | null }[];  // citations linked in that segment NOW
 };
 
-function SelectionShorthand({ children, docId }: { children: any; docId?: string }) {
+function SelectionShorthand({ children, docId, onLinked }: { children: any; docId?: string; onLinked?: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [mode, setMode] = useState<"menu" | "link" | "flag">("menu");
@@ -1882,17 +1888,22 @@ function SelectionShorthand({ children, docId }: { children: any; docId?: string
   }, []);
   const dismiss = (delay = 2400) =>
     setTimeout(() => { setSel(null); setMsg(""); setMode("menu"); window.getSelection()?.removeAllRanges(); }, delay);
-  const create = async (id: string, title: string, pinpoint?: string) => {
+  const create = async (id: string, title: string, pinpoint?: string, alsoAlias?: boolean) => {
     if (!sel) return;
     try {
-      // the phrase → target shorthand propagates across the corpus…
-      await api.createAlias(sel.text, id);
-      // …and when a pinpoint is chosen, record a fragment link from THIS passage to the
-      // target's paragraph/article/section as well.
-      if (pinpoint && docId) {
-        try { await api.link(docId, id, "mentions", sel.text.slice(0, 120), pinpoint); } catch { /* non-fatal */ }
+      // Anchor a manual citation AT the highlighted span, so it renders inline right here
+      // (and survives re-extraction) — the fix for "my manual link never showed up".
+      if (docId) {
+        const r = await api.linkAtSelection({ doc_id: docId, target_id: id, selected_text: sel.text,
+          context: sel.context, pinpoint });
+        if (r.error) { setMsg("error: " + r.error); return; }
       }
-      setMsg(`✓ linked “${sel.text}” → ${title}${pinpoint ? " · " + pinpoint : ""}`);
+      // Optionally ALSO define the corpus-wide phrase → target shorthand (propagates to
+      // other documents on the next extraction). Opt-in now, so a one-off link doesn't
+      // silently rewrite every occurrence everywhere.
+      if (alsoAlias) { try { await api.createAlias(sel.text, id); } catch { /* non-fatal */ } }
+      setMsg(`✓ linked “${sel.text}” → ${title}${pinpoint ? " · " + pinpoint : ""}${alsoAlias ? " · +shorthand" : ""}`);
+      onLinked?.();  // refetch the reader body so the new inline link appears immediately
     } catch (e: any) { setMsg("error: " + e.message); }
     setMode("menu");
     dismiss();
@@ -3294,6 +3305,7 @@ function KeepCurrentPanel() {
         }} title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs the daily auto-task now.">⇊ EU case names</button>
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"], only_unextracted: true }, (m) => setMsg(`scan unscanned judgments: ${m}`))} title="Extract ONLY judgments that have no citation edges yet — the never-scanned backlog. Never re-touches an already-scanned document, so it's the cheap way to finish an interrupted run.">⟳ Scan unscanned (judgments)</button>
+        <button onClick={() => fireJob("rescan", { only_unextracted: true }, (m) => setMsg(`resume extraction (whole corpus): ${m}`))} title="Resume citation extraction for EVERYTHING unextracted across the whole corpus — every text document with no citation edges yet, any source. This is what to run after a bulk/backfill import's Extract-Citations phase was cancelled: it's checkpointed and idempotent, so it processes only what never finished, no matter which source it belonged to.">⟳ Resume extraction (whole corpus)</button>
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain. Never-scanned documents go FIRST, and anything already scanned in the last 7 days is skipped (pass stale_days:0 to force a full redo).">⟳ Full relink (judgments)</button>
         <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain. Never-scanned first; skips anything scanned in the last 7 days.">⟳ Full relink (all)</button>
         <button onClick={() => fireJob("rescan", { stale_days: 7 }, (m) => setMsg(`rescan stale (>1 week): ${m}`))} title="Re-extract only documents NOT scanned in the last 7 days, then run the resolution chain. Reads the last-extracted stamp (and, retroactively, the newest citation timestamp) so it skips whatever a current/recent rescan already covered — cheap to run after a restart.">⟳ Rescan stale (&gt;1 week)</button>
@@ -3469,6 +3481,154 @@ function BackfillPanel() {
   );
 }
 
+// --- Keep-current status by jurisdiction -----------------------------------
+// The diagnosis view the audit asked for: for every source, HOW it stays current
+// (server-side / early-stop / full-walk / targeted-only / bulk / closed), whether a
+// watch is actually wired + when it next fires, held count + failure state, and the
+// last few runs' pulled/new/deduped/errors. So dormant keep-current is visible, not folklore.
+const MODE_META: Record<string, { label: string; tone: string; hint: string }> = {
+  server: { label: "server-side", tone: "ok", hint: "The API filters by date — only new rows cross the wire. Ideal." },
+  "early-stop": { label: "early-stop feed", tone: "ok", hint: "Newest-first feed; the crawl stops at the cursor, reading ~1 page. Efficient." },
+  "full-walk": { label: "full re-walk", tone: "warn", hint: "Must re-read the whole source's index each run, then filter past the cursor. Correct but heavy." },
+  targeted: { label: "targeted-only", tone: "err", hint: "Fetched by id only — there is NO feed to poll for new items. A keep-current gap." },
+  bulk: { label: "bulk seed", tone: "muted", hint: "A local-file seed with no live path (usually has a live sibling). Re-seed manually." },
+  closed: { label: "closed archive", tone: "muted", hint: "No new items ever exist — nothing to keep current." },
+  none: { label: "—", tone: "muted", hint: "No incremental path." },
+};
+
+function fmtCadence(min?: number | null): string {
+  if (!min) return "—";
+  if (min % 43200 === 0) return `${min / 43200}mo`;
+  if (min % 10080 === 0) return `${min / 10080}w`;
+  if (min % 1440 === 0) return `${min / 1440}d`;
+  if (min % 60 === 0) return `${min / 60}h`;
+  return `${min}m`;
+}
+function relTime(iso?: string | null): string {
+  if (!iso) return "never";
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return "—";
+  const s = (Date.now() - t) / 1000;
+  const past = s >= 0; const a = Math.abs(s);
+  const n = a < 3600 ? `${Math.round(a / 60)}m` : a < 86400 ? `${Math.round(a / 3600)}h`
+    : a < 2592000 ? `${Math.round(a / 86400)}d` : `${Math.round(a / 2592000)}mo`;
+  return past ? `${n} ago` : `in ${n}`;
+}
+
+function RunDots({ runs }: { runs: any[] }) {
+  // one dot per recent run, newest right; green = new docs, blue = all-deduped (steady),
+  // red = errored / rate-limited. Hover for the counts.
+  if (!runs || !runs.length) return <span className="muted" style={{ fontSize: 11 }}>no runs logged</span>;
+  return (
+    <span style={{ display: "inline-flex", gap: 3, alignItems: "center" }}>
+      {[...runs].reverse().map((r, i) => {
+        const err = r.errors > 0 || r.rate_limited;
+        const color = err ? "var(--bad)" : r.stored > 0 ? "var(--ok)" : "var(--accent)";
+        const when = relTime(r.started_at);
+        return <span key={i} title={`${when} · ${r.trigger}${r.backfill ? " · backfill" : ""}\n` +
+          `discovered ${r.discovered} · +${r.stored} new · ${r.deduped} seen · ${r.refreshed} refreshed` +
+          `${r.errors ? ` · ${r.errors} errors` : ""}${r.rate_limited ? " · RATE-LIMITED" : ""}`}
+          style={{ width: 9, height: 9, borderRadius: "50%", background: color, opacity: 0.55 + 0.45 * (i + 1) / runs.length }} />;
+      })}
+    </span>
+  );
+}
+
+function KeepCurrentStatusPanel() {
+  const [data, err, reload, loading] = useAsync(() => api.keepCurrent(), []);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const runNow = async (key: string, backfill: boolean) => {
+    setBusy(key + backfill); setMsg("");
+    try {
+      const r = await api.harvestSource({ source: key, backfill, max_pages: backfill ? null : 3 });
+      setMsg(r.error ? `✗ ${key}: ${r.error}` : `✓ ${backfill ? "backfill" : "harvest"} ${key} queued — see Jobs`);
+    } catch (e: any) { setMsg("✗ " + e); } finally { setBusy(null); }
+  };
+  const toggleWatch = async (id: number, enabled: boolean) => {
+    setBusy("w" + id);
+    try { await api.updateWatch(id, { enabled }); reload(); } finally { setBusy(null); }
+  };
+  if (err) return <div className="panel"><h3>Keep-current status</h3><p className="err">{err}</p></div>;
+  if (!data) return <div className="panel"><h3>Keep-current status</h3><p className="muted">loading…</p></div>;
+
+  const JURIS: Record<string, string> = { GB: "United Kingdom", EU: "European Union", CoE: "Council of Europe (ECHR)",
+    IE: "Ireland", FR: "France", DE: "Germany", NL: "Netherlands", US: "United States", CA: "Canada",
+    AU: "Australia", NZ: "New Zealand", SG: "Singapore", HK: "Hong Kong", IN: "India", "": "Other" };
+  const groups: Record<string, any[]> = {};
+  for (const s of data.sources) (groups[s.jurisdiction] ||= []).push(s);
+  const order = Object.keys(groups).sort((a, b) => (JURIS[a] || a).localeCompare(JURIS[b] || b));
+  // headline: how many keep-current-capable sources actually have an enabled watch
+  const capable = data.sources.filter((s) => s.can_incremental);
+  const watched = capable.filter((s) => s.watch?.enabled);
+  const gaps = data.sources.filter((s) => s.incremental_mode === "targeted");
+
+  return (
+    <div className="panel">
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+        <h3 style={{ marginTop: 0 }}>Keep-current status <span className="muted">— by jurisdiction</span></h3>
+        <button onClick={reload} disabled={loading} style={{ flex: "0 0 auto" }}>↻ Refresh</button>
+      </div>
+      <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+        <b>{watched.length}/{capable.length}</b> pollable sources have an enabled watch keeping them current.
+        Incremental runs re-check <b>{data.overlap_default_days} day(s)</b> before their cursor by default
+        (Settings → “Incremental overlap”), and never let a future-dated item skip the queue.
+        {gaps.length > 0 && <> {gaps.length} source(s) are <b>targeted-only</b> — no feed to poll (a gap).</>}
+      </p>
+      {order.map((j) => (
+        <div key={j} style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 600, fontSize: 13, margin: "6px 0 2px", borderBottom: "1px solid var(--border)" }}>
+            {JURIS[j] || j} <span className="muted" style={{ fontWeight: 400 }}>({groups[j].length})</span>
+          </div>
+          <table className="grid" style={{ fontSize: 12 }}>
+            <thead><tr>
+              <th>source</th><th>how it updates</th><th>watch</th><th>held</th><th>recent runs</th><th></th>
+            </tr></thead>
+            <tbody>
+              {groups[j].sort((a, b) => a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label)).map((s) => {
+                const m = MODE_META[s.incremental_mode] || MODE_META.none;
+                const w = s.watch;
+                return (
+                  <tr key={s.key}>
+                    <td>
+                      <span title={s.key}>{s.label}</span>
+                      <div className="muted" style={{ fontSize: 10 }}>{s.kind} · {s.key}
+                        {s.consecutive_failures > 0 && <span className="err"> · ⚠ {s.consecutive_failures} fails</span>}
+                      </div>
+                    </td>
+                    <td><span className={`cap-chip`} data-tone={m.tone} title={m.hint}>{m.label}</span>
+                      {s.watermark && <div className="muted" style={{ fontSize: 10 }}>cursor {String(s.watermark).slice(0, 19)}</div>}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      {!w ? (s.can_incremental
+                        ? <span className="muted" title="Pollable, but no watch is wired — it isn't being kept current.">no watch</span>
+                        : <span className="muted">—</span>)
+                        : w.enabled
+                          ? <span className="ok" title={`every ${fmtCadence(w.cadence_minutes)} · last ${relTime(w.last_run_at)} · next ${relTime(w.next_due)}${w.overlap_days != null ? ` · overlap ${w.overlap_days}d` : ""}`}>
+                            ● {fmtCadence(w.cadence_minutes)} · next {relTime(w.next_due)}</span>
+                          : <span className="warn" title="A watch exists but is DISABLED — nothing runs.">○ disabled</span>}
+                    </td>
+                    <td style={{ textAlign: "right" }}>{s.doc_count.toLocaleString()}</td>
+                    <td><RunDots runs={s.recent_runs} /></td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      {s.incremental_mode !== "closed" && s.incremental_mode !== "bulk" &&
+                        <button disabled={busy === s.key + false} style={{ fontSize: 11, padding: "1px 6px" }}
+                          title="Harvest new items now (bounded)" onClick={() => runNow(s.key, false)}>↻</button>}
+                      {w && <button disabled={busy === "w" + w.watch_id} style={{ fontSize: 11, padding: "1px 6px", marginLeft: 4 }}
+                        title={w.enabled ? "Disable this watch" : "Enable this watch"} onClick={() => toggleWatch(w.watch_id, !w.enabled)}>
+                        {w.enabled ? "⏸" : "▶"}</button>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ))}
+      {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
+    </div>
+  );
+}
+
 export function MaintainView({ open }: { open: (id: string) => void }) {
   return (
     <div>
@@ -3483,6 +3643,7 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
         <DbSizeStat />
       </div>
       <JobsQueuePanel />
+      <KeepCurrentStatusPanel />
       <KeepCurrentPanel />
       <BackfillPanel />
       <GapFillPanel />

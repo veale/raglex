@@ -309,6 +309,30 @@ CREATE TABLE IF NOT EXISTS sources (
     requires_proxy       INTEGER NOT NULL DEFAULT 0
 );
 
+-- Per-run harvest history (§keep-current). `sources` keeps only the aggregate last_run
+-- + failure counter; a watch keeps only its LATEST result. This is the row-per-run log
+-- the Maintain "keep-current diagnosis" view reads: how many each run discovered / stored
+-- (new) / deduped / errored, whether it hit a rate limit, and what triggered it. Kept
+-- bounded by a trim (keep the newest N per source) so it can't grow without limit.
+CREATE TABLE IF NOT EXISTS source_runs (
+    run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_key   TEXT NOT NULL,
+    watch_id     INTEGER,                 -- NULL for a direct (non-watch) harvest
+    trigger      TEXT NOT NULL DEFAULT 'manual',  -- watch | manual | scheduler
+    backfill     INTEGER NOT NULL DEFAULT 0,
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT,
+    discovered   INTEGER NOT NULL DEFAULT 0,
+    stored       INTEGER NOT NULL DEFAULT 0,   -- genuinely NEW documents
+    deduped      INTEGER NOT NULL DEFAULT 0,   -- already held (the steady state)
+    refreshed    INTEGER NOT NULL DEFAULT 0,   -- held but re-fetched (upstream revision)
+    errors       INTEGER NOT NULL DEFAULT 0,
+    not_found    INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    watermark    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_source_runs_key ON source_runs(source_key, run_id DESC);
+
 -- Saved harvest plans (§5a) — a watch defines a seed (source + keywords, or a
 -- seed rule like "docs citing the GDPR") and how many degrees to autosnowball,
 -- run on a cadence by the scheduler. spec_json holds the full WatchSpec.
@@ -1021,8 +1045,36 @@ class Catalogue:
         if commit:
             self.conn.commit()
 
-    def clear_citations(self, src_id: str, *, commit: bool = True) -> None:
-        self.conn.execute("DELETE FROM citations WHERE src_id = ?", (src_id,))
+    def clear_citations(self, src_id: str, *, keep_manual: bool = True,
+                        commit: bool = True) -> None:
+        """Drop a document's citation observations before a re-extraction. ``keep_manual``
+        (default) spares rows the user authored by hand (``method='manual'``): a highlight-
+        to-link anchored citation must survive every later rescan, exactly as a manually-
+        suppressed edge already survives ``clear_relations``."""
+        if keep_manual:
+            self.conn.execute(
+                "DELETE FROM citations WHERE src_id = ? AND (method IS NULL OR method != 'manual')",
+                (src_id,))
+        else:
+            self.conn.execute("DELETE FROM citations WHERE src_id = ?", (src_id,))
+        if commit:
+            self.conn.commit()
+
+    def add_manual_citation(self, src_id: str, *, candidate_id: str, raw: str,
+                            char_start: int, char_end: int, pinpoint: str | None = None,
+                            entity_kind: str | None = None, commit: bool = True) -> None:
+        """Record a user-authored anchored citation at a text span (highlight-to-link).
+        Idempotent per (src, span, target): re-linking the same selection replaces the row
+        rather than stacking duplicates."""
+        self.conn.execute(
+            "DELETE FROM citations WHERE src_id = ? AND method = 'manual' "
+            "AND char_start = ? AND char_end = ? AND candidate_id = ?",
+            (src_id, char_start, char_end, candidate_id))
+        self.conn.execute(
+            """INSERT INTO citations (src_id, raw, entity_kind, candidate_id, pinpoint,
+                   char_start, char_end, method, confidence, created_at)
+               VALUES (?,?,?,?,?,?,?, 'manual', 1.0, ?)""",
+            (src_id, raw, entity_kind, candidate_id, pinpoint, char_start, char_end, _now()))
         if commit:
             self.conn.commit()
 
@@ -3180,6 +3232,55 @@ class Catalogue:
         return self.conn.execute(
             "SELECT * FROM sources WHERE key = ?", (source_key,)
         ).fetchone()
+
+    # -- per-run harvest history (§keep-current) ----------------------------
+    _SOURCE_RUNS_KEEP = 40  # newest runs retained per source
+
+    def record_source_run(
+        self, source_key: str, *, started_at: str, finished_at: str,
+        discovered: int, stored: int, deduped: int, refreshed: int,
+        errors: int, not_found: int, rate_limited: bool, backfill: bool,
+        watermark: str | None, trigger: str = "manual", watch_id: int | None = None,
+    ) -> None:
+        """Log one harvest run's outcome for the Maintain diagnosis view, then trim to the
+        newest ``_SOURCE_RUNS_KEEP`` per source so the log stays bounded."""
+        self.conn.execute(
+            """INSERT INTO source_runs
+               (source_key, watch_id, trigger, backfill, started_at, finished_at,
+                discovered, stored, deduped, refreshed, errors, not_found, rate_limited, watermark)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (source_key, watch_id, trigger, 1 if backfill else 0, started_at, finished_at,
+             discovered, stored, deduped, refreshed, errors, not_found,
+             1 if rate_limited else 0, watermark),
+        )
+        self.conn.execute(
+            """DELETE FROM source_runs WHERE source_key = ? AND run_id NOT IN
+               (SELECT run_id FROM source_runs WHERE source_key = ?
+                ORDER BY run_id DESC LIMIT ?)""",
+            (source_key, source_key, self._SOURCE_RUNS_KEEP),
+        )
+        self.conn.commit()
+
+    def recent_source_runs(self, source_key: str, *, limit: int = 10) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM source_runs WHERE source_key = ? ORDER BY run_id DESC LIMIT ?",
+            (source_key, limit),
+        ).fetchall()
+
+    def source_run_summaries(self, *, per_source: int = 10) -> dict[str, list[dict]]:
+        """The newest ``per_source`` runs for EVERY source, keyed by source — one query
+        for the whole Maintain overview rather than N round-trips."""
+        rows = self.conn.execute(
+            """SELECT * FROM (
+                 SELECT *, ROW_NUMBER() OVER (PARTITION BY source_key ORDER BY run_id DESC) AS rn
+                 FROM source_runs
+               ) t WHERE rn <= ? ORDER BY source_key, run_id DESC""",
+            (per_source,),
+        ).fetchall()
+        out: dict[str, list[dict]] = {}
+        for r in rows:
+            out.setdefault(r["source_key"], []).append(dict(r))
+        return out
 
     # -- rule-based tagging engine (§4a) -----------------------------------
     def add_rule(

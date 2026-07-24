@@ -87,6 +87,32 @@ def test_graph_endpoint_returns_typed_neighbourhood(client):
     assert any(n["id"] == "ECLI:EU:C:2020:1" and n["relationship_type"] == "applies" for n in out)
 
 
+def test_link_at_selection_anchors_and_renders(client):
+    # highlight "data protection authority" in doc 2 and link it to doc 1
+    r = client.post("/link-at-selection", json={
+        "doc_id": "ECLI:EU:C:2020:2", "target_id": "ECLI:EU:C:2020:1",
+        "selected_text": "data protection authority"}).json()
+    assert "error" not in r, r
+    assert r["char_start"] < r["char_end"]
+    assert r["target_present"] is True
+    # the reader body now carries an inline manual citation at that span, resolved to doc 1
+    body = client.get("/document-body?id=ECLI:EU:C:2020:2").json()
+    manual = [c for c in body["citations"] if c["method"] == "manual"]
+    assert len(manual) == 1
+    assert manual[0]["candidate_id"] == "ECLI:EU:C:2020:1"
+    assert manual[0]["resolved_id"] == "ECLI:EU:C:2020:1"
+    assert body["text"][manual[0]["char_start"]:manual[0]["char_end"]] == "data protection authority"
+
+
+def test_keep_current_overview_endpoint(client):
+    data = client.get("/sources/keep-current").json()
+    assert "overlap_default_days" in data
+    modes = {s["key"]: s["incremental_mode"] for s in data["sources"]}
+    assert modes.get("us-caselaw") == "server"
+    assert modes.get("echr") == "targeted"
+    assert modes.get("uk-caselaw") == "early-stop"
+
+
 def test_document_endpoint(client):
     data = client.get("/documents/ECLI:EU:C:2020:1").json()
     assert data["document"]["stable_id"] == "ECLI:EU:C:2020:1"

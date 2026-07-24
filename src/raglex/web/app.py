@@ -563,6 +563,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Per-source capabilities — drives the morphing harvest/watch UI."""
         return facade.source_catalog()
 
+    @app.get("/sources/keep-current")
+    def keep_current_ep() -> dict:
+        """Keep-current diagnosis: per-source incremental mode, watch wiring + cadence,
+        held counts, failure state, and recent-run stats — grouped by jurisdiction."""
+        return facade.keep_current_overview()
+
     @app.get("/watches")
     def list_watches_ep() -> list[dict]:
         return facade.list_watches()
@@ -1321,6 +1327,12 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/link")
     def link_ep(payload: dict = Body(...)) -> dict:
         return facade.link(**payload)
+
+    @app.post("/link-at-selection")
+    def link_at_selection_ep(payload: dict = Body(...)) -> dict:
+        """Highlight-to-link: anchor a manual citation at a selected span so it renders
+        inline in the reader and survives re-extraction."""
+        return facade.link_at_selection(**payload)
 
     @app.post("/tag")
     def tag_ep(payload: dict = Body(...)) -> dict:

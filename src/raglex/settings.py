@@ -147,6 +147,10 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec("RAGLEX_SCHEDULER_PAUSED", "Pause scheduled jobs", False, "Jobs",
                 "1 = pause the scheduler's recurring jobs and due watches (manual and queued "
                 "jobs still run); blank/0 = normal"),
+    SettingSpec("RAGLEX_INCREMENTAL_OVERLAP_DAYS", "Incremental overlap (days)", False, "Jobs",
+                "keep-current re-checks this many days BEFORE the stored cursor each run, so a "
+                "late-arriving or boundary item isn't stranded and a future-dated item can't "
+                "jump the cursor past today (re-seen items dedup for free). Default 2; 0 = off"),
 )
 _SPEC_BY_KEY = {s.key: s for s in KNOWN_SETTINGS}
 

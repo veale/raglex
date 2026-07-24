@@ -796,6 +796,46 @@ DISCOVER_CITING_SOURCES = frozenset({"uk-caselaw", "uk-grc", "eu-cellar"})
 # Sources whose ids are sequential neutral citations, so a court/year can be gap-scanned.
 GAP_SCAN_SOURCES = frozenset({"uk-caselaw"})
 
+# How each source keeps current (see raglex design docs/backfill-keepcurrent-audit.md):
+#   server     — the API filters by ``since`` (modified>=, date_start=, publishedAfter=);
+#                only new rows cross the wire. Ideal.
+#   early-stop — a newest-first feed; the crawl BREAKS at the first item <= cursor, so a
+#                routine run reads ~1 page. Efficient.
+#   full-walk  — must read the whole index/listing each run (no server date filter, no
+#                early break), then filter past the cursor. Correct but re-walks everything.
+#   targeted   — fetches by id only; NO discovery crawl (can't find "new" on its own).
+#   bulk       — a local-file seed; no live path (usually has a live sibling).
+#   closed     — a closed archive; no new items ever exist.
+# Unlisted caselaw sources default to early-stop (a newest-first feed crawl).
+INCREMENTAL_MODE: dict[str, str] = {
+    # server-side incremental
+    "us-caselaw": "server", "nl-rechtspraak": "server", "nl-legislation": "server",
+    "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server",
+    "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
+    "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
+    # client-side early-stop on a newest-first feed
+    "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-legislation": "early-stop",
+    "au-nsw-caselaw": "early-stop", "au-fca": "early-stop", "au-hca": "early-stop",
+    "ie-caselaw": "early-stop", "ie-revised": "early-stop", "nz-caselaw": "early-stop",
+    # full-walk-then-filter (correct but re-reads the whole source each run)
+    "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
+    "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
+    "sg-legislation": "full-walk", "sg-sl": "full-walk", "ca-federal": "full-walk",
+    "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
+    "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
+    "au-tas": "full-walk", "ie-legislation": "full-walk",
+    "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
+    # targeted-only — no keep-current crawl (the audit's live-update GAPS)
+    "echr": "targeted", "eu-cellar": "targeted", "eu-legislation": "targeted",
+    "au-nsw": "targeted",
+    # bulk / local-file seeds (no live path)
+    "au-caselaw": "bulk", "ca-caselaw": "bulk", "us-caselaw-bulk": "bulk",
+    "in-caselaw": "bulk", "fr-dila": "bulk", "fr-dila-legi": "bulk",
+    "fr-dila-jade": "bulk", "fr-dila-constit": "bulk", "fr-dila-cnil": "bulk",
+    # closed archives (no new items ever)
+    "a29wp": "closed", "uk-hol": "closed", "uk-ipa-codes": "closed",
+}
+
 
 def source_catalog() -> list[dict]:
     """Capabilities per harvestable source — what it pulls, whether keywords are
@@ -821,25 +861,14 @@ def source_catalog() -> list[dict]:
         # feeds, UK legislation's newest-published search feed (feed=new), and the
         # EDPB sitemap/register cursors. The other legislation/by-id sources are
         # fetched by naming the item — no moving feed.
-        row["can_incremental"] = (row.get("kind") == "caselaw"
-                                  or key in ("uk-legislation", "eu-preparatory", "edpb", "edpb-oss", "dma-cases",
-                                             "ofcom-osa", "ofcom-enforcement",
-                                             # year cursor / "Updated to" cursor
-                                             "ie-legislation", "ie-revised",
-                                             # asMadeRegisteredAt cursor / crawler-feed deltas
-                                             "au-cth", "au-qld", "au-tas",
-                                             # consolidation-date cursors: the Canadian
-                                             # manifest's LastConsolidationDate, the HK
-                                             # drop's filename timestamp, and the NZ
-                                             # API's most_recently_updated sort
-                                             "ca-federal", "hk-legislation",
-                                             "nz-legislation",
-                                             # Légifrance code /list/code lastUpdate cursor,
-                                             # CNIL fund search date, NeuRIS published-from
-                                             "fr-legislation", "fr-cnil",
-                                             "de-neuris-legislation",
-                                             # gii builddate change-detection cursor
-                                             "de-gii"))
+        mode = INCREMENTAL_MODE.get(key, "caselaw-default" if row.get("kind") == "caselaw" else "none")
+        if mode == "caselaw-default":
+            mode = "early-stop"  # an unlisted caselaw feed defaults to a newest-first crawl
+        row["incremental_mode"] = mode
+        # a source can be *polled for new* when its cursor actually narrows the crawl:
+        # server-side, client early-stop, or a full-walk-then-filter. targeted/bulk/closed
+        # cannot (no moving feed / by-id only / no new items ever exist).
+        row["can_incremental"] = mode in ("server", "early-stop", "full-walk")
         out.append(row)
     return out
 

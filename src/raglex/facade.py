@@ -66,6 +66,33 @@ def watch_is_due(watch_id: int, cadence_minutes: int, last_run_at, now) -> bool:
     return slot_now > slot_prev
 
 
+def _locate_span(text: str, selected: str, context: str | None) -> tuple[int, int] | None:
+    """Find the char span of a reader selection in the stored document text. The rendered
+    DOM collapses whitespace (newlines → spaces), so match whitespace-flexibly; when the
+    selection occurs more than once, disambiguate by the enclosing segment ``context``."""
+    if not text or not (selected or "").strip():
+        return None
+    words = selected.split()
+    if not words:
+        return None
+    pat = re.compile(r"\s+".join(re.escape(w) for w in words), re.S)
+    matches = [(m.start(), m.end()) for m in pat.finditer(text)]
+    if not matches:
+        i = text.find(selected)
+        return (i, i + len(selected)) if i >= 0 else None
+    if len(matches) == 1 or not context:
+        return matches[0]
+    cwords = context.split()[:40]
+    if cwords:
+        cpat = re.compile(r"\s+".join(re.escape(w) for w in cwords), re.S)
+        cm = cpat.search(text)
+        if cm:
+            inside = [sp for sp in matches if cm.start() <= sp[0] <= cm.end()]
+            if inside:
+                return inside[0]
+    return matches[0]
+
+
 def _progress(cb, **fields) -> None:
     """Report coarse progress to an optional callback (used by the background-job
     runner so the UI can poll "fetching 5/30"). Never lets a callback error break
@@ -6999,6 +7026,45 @@ class Facade:
     def attach_base64(self, *, doc_id: str, content_base64: str, filename: str, kind: str = "exhibit") -> dict:
         return self.attach(doc_id=doc_id, data=base64.b64decode(content_base64), filename=filename, kind=kind)
 
+    def link_at_selection(self, *, doc_id: str, target_id: str, selected_text: str,
+                          context: str | None = None, pinpoint: str | None = None,
+                          relationship: str = "mentions") -> dict:
+        """Create a user-authored anchored link at a HIGHLIGHTED span (highlight-to-link).
+
+        The reader renders inline links from ``citations`` rows keyed by char offset, so a
+        manual link must land AS one of those rows — the old path only created a corpus-wide
+        alias (which shows nothing until the next re-extraction) plus, iff a pinpoint was
+        typed, a doc→doc relation (no char anchor). Here we locate the selection in the
+        stored text, write a ``method='manual'`` citation at that exact span (so it renders
+        immediately, resolves via candidate_id, and survives every rescan — clear_citations
+        spares manual rows), and also mint the manual graph edge."""
+        with self._open() as (cat, _rs, ts):
+            doc = cat.get_document(doc_id)
+            if doc is None or not doc["payload_hash"]:
+                return {"error": f"no text held for {doc_id}"}
+            try:
+                text = ts.get(doc["payload_hash"])
+            except OSError:
+                text = None
+            if not text:
+                return {"error": f"no text held for {doc_id}"}
+            span = _locate_span(text, selected_text, context)
+            if span is None:
+                return {"error": "couldn't locate the highlighted text in the stored "
+                                 "document — the reader text may differ from the selection"}
+            cs, ce = span
+            present = cat.find_document_id(target_id) is not None
+            cat.add_manual_citation(
+                doc_id, candidate_id=target_id, raw=(selected_text or "")[:200],
+                char_start=cs, char_end=ce, pinpoint=pinpoint)
+            # The graph edge too (extracted_via=manual → survives clear_relations), so the
+            # link is a first-class citation, not only an inline decoration.
+            rel = _rel_type(relationship, RelationshipType.MENTIONS)
+            resolved = link_documents(cat, src_id=doc_id, dst_id=target_id,
+                                      relationship=rel, dst_anchor=pinpoint)
+        return {"doc_id": doc_id, "target_id": target_id, "char_start": cs, "char_end": ce,
+                "pinpoint": pinpoint, "target_present": present, "resolved": resolved}
+
     def link(self, *, src_id: str, dst_id: str, relationship: str,
              src_anchor: str | None = None, dst_anchor: str | None = None) -> dict:
         with self._open() as (cat, _rs, _ts):
@@ -7206,6 +7272,83 @@ class Facade:
         from .adapters.registry import source_catalog
 
         return source_catalog()
+
+    def keep_current_overview(self) -> dict:
+        """The Maintain "keep-current diagnosis" payload: every harvestable source with its
+        incremental mode, whether a watch is wired (+ cadence / last-run / next-due), its
+        held-doc count and failure state, and the last few runs' pulled/new/deduped/errors
+        counts. Grouped by jurisdiction on the client."""
+        import datetime as _dt
+        from .adapters.registry import source_catalog
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        cat_rows = {r["key"]: r for r in source_catalog()}
+        watches = self.list_watches()
+        # source_key → its watches (a source may have several; keep the enabled/most-recent)
+        watches_by_source: dict[str, list[dict]] = {}
+        for w in watches:
+            src = (w.get("spec") or {}).get("source")
+            if src:
+                watches_by_source.setdefault(src, []).append(w)
+
+        with self._open() as (cat, _rs, _ts):
+            states = {r["key"]: dict(r) for r in cat.all_sources()}
+            runs = cat.source_run_summaries(per_source=8)
+            doc_counts = {k: cat.source_doc_count(k) for k in cat_rows}
+
+        overlap_default = 2
+        raw = (os.environ.get("RAGLEX_INCREMENTAL_OVERLAP_DAYS") or "").strip()
+        if raw.isdigit():
+            overlap_default = int(raw)
+
+        rows = []
+        for key, info in cat_rows.items():
+            st = states.get(key, {})
+            src_watches = watches_by_source.get(key, [])
+            # pick the enabled watch if any, else the most-recently-run
+            watch = next((w for w in src_watches if w.get("enabled")), None) \
+                or (max(src_watches, key=lambda w: w.get("last_run_at") or "") if src_watches else None)
+            next_due = None
+            if watch and watch.get("enabled"):
+                cadence = watch.get("cadence_minutes") or 1440
+                last = watch.get("last_run_at")
+                if last:
+                    try:
+                        prev = _dt.datetime.fromisoformat(last)
+                        if prev.tzinfo is None:
+                            prev = prev.replace(tzinfo=_dt.timezone.utc)
+                        next_due = (prev + _dt.timedelta(minutes=cadence)).isoformat()
+                    except (ValueError, TypeError):
+                        next_due = None
+                is_due = watch_is_due(watch["watch_id"], cadence, last, now)
+            else:
+                is_due = False
+            rows.append({
+                "key": key,
+                "label": info.get("label") or key,
+                "jurisdiction": info.get("jurisdiction") or "",
+                "kind": info.get("kind") or "",
+                "incremental_mode": info.get("incremental_mode"),
+                "can_incremental": info.get("can_incremental"),
+                "doc_count": doc_counts.get(key, 0),
+                "watermark": st.get("watermark"),
+                "last_run": st.get("last_run"),
+                "last_yield_at": st.get("last_yield_at"),
+                "consecutive_failures": st.get("consecutive_failures") or 0,
+                "watch": None if not watch else {
+                    "watch_id": watch["watch_id"], "name": watch.get("name"),
+                    "enabled": bool(watch.get("enabled")),
+                    "cadence_minutes": watch.get("cadence_minutes"),
+                    "last_run_at": watch.get("last_run_at"),
+                    "next_due": next_due, "is_due": is_due,
+                    "overlap_days": (watch.get("spec") or {}).get("overlap_days"),
+                    "backfill": bool((watch.get("spec") or {}).get("backfill")),
+                },
+                "watch_count": len(src_watches),
+                "recent_runs": runs.get(key, []),
+            })
+        rows.sort(key=lambda r: (r["jurisdiction"], r["kind"], r["label"]))
+        return {"overlap_default_days": overlap_default, "sources": rows}
 
     def create_watch(self, *, name: str, spec: dict, cadence_minutes: int = 1440,
                      enabled: bool = True) -> dict:
@@ -8408,7 +8551,8 @@ class Facade:
             # every later run follows it incrementally.
             h = self.harvest(source, backfill=bool(spec.get("backfill")) and not has_cursor,
                              max_pages=max_pages, options=opts, watermark_key=wm_key,
-                             use_llm=spec.get("use_llm"), on_progress=on_progress)
+                             use_llm=spec.get("use_llm"), overlap_days=spec.get("overlap_days"),
+                             on_progress=on_progress)
             result["harvest"] = h
 
         # Forward-citation discovery: NEW cases citing a target (the renewing seed).
@@ -8465,6 +8609,7 @@ class Facade:
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
         refetch_held: bool = False, use_llm: bool | None = None,
+        overlap_days: int | None = None,
         postprocess_after_relation_id: int = 0,
         on_progress=None, cancel_check=None,
     ) -> dict:
@@ -8482,6 +8627,18 @@ class Facade:
             adapter = get_adapter(source, **(options or {}))
         except (KeyError, TypeError) as exc:
             return {"error": str(exc)}
+
+        started_at = _now_iso()
+        # A watch harvest carries a ``watch:<id>:<source>`` cursor key — parse it so the
+        # per-run log records what triggered the run and against which watch.
+        run_watch_id: int | None = None
+        run_trigger = "manual"
+        if watermark_key and watermark_key.startswith("watch:"):
+            run_trigger = "watch"
+            try:
+                run_watch_id = int(watermark_key.split(":")[1])
+            except (IndexError, ValueError):
+                run_watch_id = None
 
         # Keep the durable discovery cursor visible on EVERY later phase's checkpoint.
         # Discovery persists {"phase": "discover", "resume_offset": N}; without merging,
@@ -8514,7 +8671,21 @@ class Facade:
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
                              refetch_held=refetch_held,
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,
+                             overlap_days=overlap_days,
                              on_progress=_phase_progress, cancel_check=cancel_check)
+            # Log the run for the Maintain keep-current diagnosis view (bounded history).
+            # Only feed-style harvests are worth logging; a targeted single-item fetch sets
+            # record_health=False upstream and never reaches here with a real crawl.
+            try:
+                cat.record_source_run(
+                    adapter.source, started_at=started_at, finished_at=_now_iso(),
+                    discovered=stats.discovered, stored=stats.stored, deduped=stats.deduped,
+                    refreshed=len(stats.refreshed_ids), errors=stats.errors,
+                    not_found=stats.not_found, rate_limited=stats.rate_limited,
+                    backfill=backfill, watermark=stats.watermark,
+                    trigger=run_trigger, watch_id=run_watch_id)
+            except Exception:  # noqa: BLE001 — logging a run must never fail the harvest
+                log.exception("record_source_run failed for %s", adapter.source)
             # Extract + classify ONLY the newly-fetched documents — NOT the whole corpus.
             # (Re-extracting all ~20k docs on every harvest was O(minutes) of pure-CPU
             # grammar work; resolution already links existing pending edges to the new

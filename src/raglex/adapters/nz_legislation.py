@@ -268,7 +268,15 @@ class NZLegislationAdapter(BaseAdapter):
                    "classification": row.get("act_classification")
                    or row.get("instrument_classification"),
                    "agencies": row.get("administering_agencies") or [],
-                   "watermark": version_id},
+                   # The PCO works API exposes NO update timestamp — the only date signal
+                   # is the trailing point-in-time date inside version_id. Store THAT (a
+                   # real ISO date) as the cursor, not the opaque version_id string: a
+                   # per-work id like "act_public_2026_9_en_2026-04-02" isn't monotonic
+                   # across works, so lexically-maxing it (a) poisoned the cursor and (b)
+                   # made the incremental overlap/future-clamp inapplicable. The feed is
+                   # sorted most_recently_updated, so a watch's bounded incremental pages
+                   # cover any real delta; the date cursor makes it observable + clampable.
+                   **({"watermark": _v.isoformat()} if (_v := _version_date(parsed_version)) else {})},
         )
 
     # -- fetch ---------------------------------------------------------------
