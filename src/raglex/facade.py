@@ -1377,17 +1377,26 @@ class Facade:
 
     def corpus_facet_values(self) -> dict:
         """The available values for each advanced-search facet (sources, doc types, courts,
-        tags) with counts — populates the field dropdowns / autocomplete."""
-        with self._open() as (cat, _rs, _ts):
-            return {
-                "sources": [{"key": k, "n": v} for k, v in cat._count_by("source").items()],
-                "doc_types": [{"key": k, "n": v} for k, v in cat._count_by("doc_type").items()],
-                "courts": [{"key": r["k"], "n": r["n"]} for r in cat.distinct_courts()],
-                "tags": [{"key": k, "n": v} for k, v in cat.tag_counts().items()],
-                # the Westlaw/Lexis retrieval filter's bucket vocabulary
-                "retrieval_jurisdictions": [{"key": k, "label": lb}
-                                            for k, lb in RETRIEVAL_JURISDICTIONS],
-            }
+        tags) with counts — populates the field dropdowns / autocomplete.
+
+        Cached stale-while-revalidate: each facet is a full GROUP BY over ~5M documents
+        (seconds, and uncached it stampeded — a second explore-page pool-killer), so the
+        request never blocks on it — a cold call returns the placeholder + ``_warming`` and
+        a single background pass fills the cache."""
+        rj = [{"key": k, "label": lb} for k, lb in RETRIEVAL_JURISDICTIONS]
+
+        def _compute():
+            with self._open() as (cat, _rs, _ts):
+                return {
+                    "sources": [{"key": k, "n": v} for k, v in cat._count_by("source").items()],
+                    "doc_types": [{"key": k, "n": v} for k, v in cat._count_by("doc_type").items()],
+                    "courts": [{"key": r["k"], "n": r["n"]} for r in cat.distinct_courts()],
+                    "tags": [{"key": k, "n": v} for k, v in cat.tag_counts().items()],
+                    "retrieval_jurisdictions": rj,
+                }
+        return self._cached("facet-values", 300, _compute, sync_wait=1.5,
+                            placeholder={"sources": [], "doc_types": [], "courts": [],
+                                         "tags": [], "retrieval_jurisdictions": rj})
 
     def count_documents(self, **filters) -> dict:
         """Total documents matching the filters (for the Corpus page count/paging)."""
