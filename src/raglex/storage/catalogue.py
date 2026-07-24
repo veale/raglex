@@ -993,6 +993,32 @@ class Catalogue:
             "SELECT * FROM citations WHERE candidate_id = ? ORDER BY src_id", (candidate_id,)
         ).fetchall()
 
+    def citations_for_many(self, src_ids: "list[str]") -> list[sqlite3.Row]:
+        """The offset-bearing citation rows for a batch of documents, in one query — the
+        re-anchor pass reads a whole reparse chunk's citations at once instead of a point
+        SELECT per document."""
+        if not src_ids:
+            return []
+        qs = ",".join("?" * len(src_ids))
+        return self.conn.execute(
+            f"SELECT citation_id, src_id, raw, char_start, char_end FROM citations "
+            f"WHERE src_id IN ({qs}) ORDER BY src_id, char_start", list(src_ids)).fetchall()
+
+    def reanchor_citation_offsets(self, updates: "list[tuple[int, int, int]]", *,
+                                  commit: bool = True) -> int:
+        """Rewrite ``(citation_id, char_start, char_end)`` offsets in one batched
+        ``executemany`` — the whole point of the re-anchor path is that nothing else about
+        the edge (raw, candidate, pinpoint, resolved target) changes, so only these two
+        columns are touched."""
+        if not updates:
+            return 0
+        self.conn.executemany(
+            "UPDATE citations SET char_start = ?, char_end = ? WHERE citation_id = ?",
+            [(s, e, cid) for cid, s, e in updates])
+        if commit:
+            self.conn.commit()
+        return len(updates)
+
     def source_date_ranges(self) -> list[sqlite3.Row]:
         """Per-source document count and decision-date span — the completeness lens:
         what's covered, and over which period (§8). ISO date strings sort

@@ -447,6 +447,19 @@ def create_app(config: Config | None = None) -> FastAPI:
             params["workers"] = int(payload["workers"])
         return _start_job("reparse-source", f"reparse {source} from raw", params)
 
+    @app.post("/jobs/reanchor-citations")
+    def job_reanchor_citations_ep(payload: dict = Body(...)) -> dict:
+        """Re-anchor a source's stored citation offsets to its current text — the light
+        repair after a reparse regenerated text without re-extraction (offsets drift, so
+        the reader highlights the wrong span). No grammar, no re-resolution: only
+        char_start/char_end move. Tracked, cancellable, resumable from the stable_id
+        cursor. New reparses do this inline, so this is for corpora reparsed earlier."""
+        source = (payload or {}).get("source")
+        if not source:
+            return {"error": "source is required"}
+        return _start_job("reanchor-citations", f"re-anchor {source} citations",
+                          {"source": str(source)})
+
     @app.post("/jobs/match-reports")
     def job_match_reports_ep() -> dict:
         """Match reporter-only citations ("[1998] AC 1") to harvested cases by name+year."""

@@ -75,9 +75,13 @@ RESUME_POLICIES = {
     "finish-bulk-postprocess": "checkpoint",
     # resumes the whole-source reparse from the last stable_id checkpoint
     "reparse-source": "checkpoint",
+    # resumes the whole-source citation re-anchor from the last stable_id checkpoint
+    "reanchor-citations": "checkpoint",
 }
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
-_SCAN_KINDS = frozenset({"rescan-citations", "rescan"})
+# All three write the citations table; a re-anchor and a rescan of the SAME source must
+# not run at once (they'd race the same offsets), but disjoint sources may.
+_SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations"})
 
 
 def _scan_scope(kind: str, params: dict) -> str | None:
@@ -196,6 +200,12 @@ RUNNERS: dict[str, Callable] = {
     # Whole-source reparse from stored raw (a parser upgrade reaching held docs) —
     # parallel, progress-reported, cancellable, and resumable from the stable_id cursor.
     "reparse-source": lambda f, p, cb, cancel: f.reparse_source(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
+    # Re-anchor drifted citation offsets to a source's current text (the repair for a
+    # reparse that regenerated text without re-extraction) — no grammar, no re-resolution;
+    # resumable from the stable_id cursor.
+    "reanchor-citations": lambda f, p, cb, cancel: f.reanchor_source(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
@@ -490,8 +500,8 @@ class JobManager:
                 params["resolve"] = False
                 if checkpoint.get("completed") is not None:
                     params["tag_start"] = int(checkpoint["completed"])
-        # A whole-source reparse continues from the last stable_id it committed.
-        if (row.get("kind") == "reparse-source"
+        # A whole-source reparse / re-anchor continues from the last stable_id it committed.
+        if (row.get("kind") in ("reparse-source", "reanchor-citations")
                 and checkpoint.get("after_stable_id")
                 and checkpoint.get("source") == params.get("source")):
             params["after_stable_id"] = checkpoint["after_stable_id"]

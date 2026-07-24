@@ -3694,6 +3694,7 @@ class Facade:
                     return "fail"
 
             done = 0
+            reanchored = 0
             cursor = after_stable_id or ""
             batch = 2000
             with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
@@ -3707,16 +3708,99 @@ class Facade:
                         (source, cursor, batch)).fetchall()]
                     if not chunk:
                         break
-                    for res in ex.map(_work, chunk):
+                    results = list(ex.map(_work, chunk))
+                    for res in results:
                         done += 1
                         ok += res == "ok"
                         skip += res == "skip"
                         fail += res == "fail"
+                    # Re-anchor citation offsets to the text we just rewrote (§1.2): the
+                    # regenerated text shifted every char span, so without this the reader
+                    # highlights the wrong bytes. Only the reparsed ("ok") docs, whose text
+                    # actually changed. Same-transaction as nothing else here writes to the
+                    # catalogue, so one commit per batch persists the offset fixes.
+                    ok_hashes = {c["stable_id"]: c["payload_hash"]
+                                 for c, res in zip(chunk, results) if res == "ok"}
+                    fixed, _dc, _miss = self._reanchor_chunk(cat, ts, ok_hashes)
+                    reanchored += fixed
+                    cat.commit()
                     cursor = chunk[-1]["stable_id"]
                     _progress(on_progress, stage=f"reparsing {source}", done=done, total=total,
                               item=cursor, _checkpoint={"phase": "reparse", "source": source,
                                                         "after_stable_id": cursor})
-        return {"source": source, "total": total, "reparsed": ok, "skipped": skip, "failed": fail}
+        return {"source": source, "total": total, "reparsed": ok, "skipped": skip,
+                "failed": fail, "offsets_reanchored": reanchored}
+
+    def _reanchor_chunk(self, cat, ts, id_to_hash: dict) -> tuple[int, int, int]:
+        """Re-anchor the citation offsets of a batch of documents to their current text.
+        ``id_to_hash`` maps stable_id → payload_hash (both callers already hold it, so no
+        extra document lookup). Reads each doc's citations in one query, re-locates each
+        ``raw`` in the current text, and batches the offset updates (uncommitted — the
+        caller commits). Returns ``(offsets_fixed, docs_changed, unlocatable)``."""
+        from .citations.reanchor import reanchor
+
+        if not id_to_hash:
+            return 0, 0, 0
+        by_src: dict[str, list] = {}
+        for r in cat.citations_for_many(list(id_to_hash)):
+            by_src.setdefault(r["src_id"], []).append(r)
+        updates: list[tuple[int, int, int]] = []
+        docs_changed = unlocatable = 0
+        for sid, rows in by_src.items():
+            ph = id_to_hash.get(sid)
+            if not ph:
+                continue
+            try:
+                text = ts.get(ph)
+            except OSError:
+                continue
+            ups, miss = reanchor(text or "", rows)
+            unlocatable += miss
+            if ups:
+                updates.extend(ups)
+                docs_changed += 1
+        cat.reanchor_citation_offsets(updates, commit=False)
+        return len(updates), docs_changed, unlocatable
+
+    def reanchor_source(self, *, source: str, after_stable_id: str = "",
+                        on_progress=None, cancel_check=None) -> dict:
+        """Re-anchor a whole source's stored citation offsets to its CURRENT text — the
+        cheap, reliable repair for a corpus that was reparsed (text regenerated) without
+        re-extraction, so its ``citations`` char spans drifted (the fr-dila/de-rii
+        paragraphing pass). Unlike :meth:`rescan`, this re-runs no grammar, re-resolves
+        nothing, and rewrites no edges — the raw strings, candidates, pinpoints and
+        resolved targets are all still correct; only ``char_start``/``char_end`` move. One
+        citations SELECT + one batched UPDATE per chunk; keyset-paginated and resumable
+        from the ``after_stable_id`` checkpoint."""
+        with self._open() as (cat, _rs, ts):
+            total = cat.conn.execute(
+                "SELECT count(*) AS n FROM documents WHERE source=? AND payload_hash IS NOT NULL "
+                "AND stable_id > ?", (source, after_stable_id or "")).fetchone()["n"]
+            done = fixed = docs_changed = unlocatable = 0
+            cursor = after_stable_id or ""
+            batch = 2000
+            while True:
+                if cancel_check and cancel_check():
+                    break
+                chunk = [dict(r) for r in cat.conn.execute(
+                    "SELECT stable_id, payload_hash FROM documents "
+                    "WHERE source=? AND payload_hash IS NOT NULL AND stable_id > ? "
+                    "ORDER BY stable_id LIMIT ?", (source, cursor, batch)).fetchall()]
+                if not chunk:
+                    break
+                f, dc, miss = self._reanchor_chunk(
+                    cat, ts, {r["stable_id"]: r["payload_hash"] for r in chunk})
+                cat.commit()
+                fixed += f
+                docs_changed += dc
+                unlocatable += miss
+                done += len(chunk)
+                cursor = chunk[-1]["stable_id"]
+                _progress(on_progress, stage=f"re-anchoring {source}", done=done, total=total,
+                          item=cursor, _checkpoint={"phase": "reanchor", "source": source,
+                                                    "after_stable_id": cursor})
+        return {"source": source, "total": total, "docs_reanchored": docs_changed,
+                "offsets_fixed": fixed, "unlocatable": unlocatable}
 
     def _resolve_seeds(self, cat, seeds: list[str] | None, seed_rule: dict | None) -> set[str]:
         """Turn a seed spec into a concrete set of document/candidate ids. Seeds can
