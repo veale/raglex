@@ -2366,8 +2366,27 @@ class Facade:
     def _all_sources(self) -> list[str]:
         def _compute():
             with self._open() as (cat, _rs, _ts):
-                return {"sources": [r["k"] for r in cat.conn.execute(
-                    "SELECT DISTINCT source AS k FROM documents").fetchall()]}
+                if cat.backend == "postgres":
+                    # `SELECT DISTINCT source` scans all ~5M rows (~100s, and it stampedes
+                    # on a cold cache — the explore-page "hangs forever" pool-killer). A
+                    # loose index skip-scan over documents_source_idx instead jumps to each
+                    # next distinct value: ~one index seek per source (~dozens), milliseconds.
+                    rows = cat.conn.execute("""
+                        WITH RECURSIVE s AS (
+                            (SELECT source FROM documents WHERE source IS NOT NULL
+                             ORDER BY source LIMIT 1)
+                            UNION ALL
+                            SELECT (SELECT source FROM documents
+                                    WHERE source > s.source AND source IS NOT NULL
+                                    ORDER BY source LIMIT 1)
+                            FROM s WHERE s.source IS NOT NULL
+                        )
+                        SELECT source AS k FROM s WHERE source IS NOT NULL
+                    """).fetchall()
+                else:
+                    rows = cat.conn.execute(
+                        "SELECT DISTINCT source AS k FROM documents").fetchall()
+                return {"sources": [r["k"] for r in rows]}
         return self._cached("all-sources", 600, _compute)["sources"]
 
     # "1999/468/EC: Council Decision of 28 June 1999 laying down the procedures…"
