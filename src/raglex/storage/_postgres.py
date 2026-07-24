@@ -257,6 +257,22 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 );
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 
+-- The hanging-reference worklist, pre-aggregated (§5b/§8). The live GROUP BY over the
+-- pending relations slice is ~96s (4.3M rows), which made the Unresolved page crawl and
+-- auto-drain never start. Rebuilt with citation_counts, read top-by-citing_count.
+CREATE TABLE IF NOT EXISTS pending_reference_stats (
+    ref           TEXT PRIMARY KEY,
+    candidate     TEXT,
+    raw           TEXT,
+    anchor        TEXT,
+    methods       TEXT,
+    occurrences   BIGINT NOT NULL DEFAULT 0,
+    citing_count  BIGINT NOT NULL DEFAULT 0,
+    echr_citing   INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_reference_stats_citing_idx ON pending_reference_stats (citing_count DESC);
+
 -- Per-source resolved-outgoing roll-up read by the Explore homepage instead of a
 -- minutes-long live GROUP BY over relations x documents. Rebuilt with citation_counts.
 CREATE TABLE IF NOT EXISTS source_stats (

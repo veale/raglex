@@ -419,13 +419,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     if pc.get("flagged") or pc.get("edges"):
                         print(f"[watch] changes propagate: scanned {pc['scanned']}, "
                               f"flagged {pc['flagged']} for re-pull, {pc['edges']} amends edge(s)")
-                # Hourly: refresh the citation-frequency roll-up the snowball reads. The
-                # live aggregate is a ~13s scan of a 10M-row table; the frontier doesn't
-                # move between ticks, so a page load must never pay for it.
-                if time.time() - last_counts >= 3600:
+                # Weekly: refresh the roll-ups the front page + snowball + Unresolved
+                # worklist read (citation frequencies, source/shape/leg-type stats, and the
+                # ~96s pending-reference worklist). These are corpus-wide aggregates that
+                # barely move between page loads but cost a lot to recompute, so an hourly
+                # rebuild was a big share of the box's recurring load — weekly, plus the
+                # front-page "Refresh" button, keeps reads instant without that churn.
+                # Override with RAGLEX_STATS_REFRESH_SECS.
+                _stats_secs = float(os.environ.get("RAGLEX_STATS_REFRESH_SECS") or 604800)
+                if time.time() - last_counts >= _stats_secs:
                     last_counts = time.time()
                     cc = f.rebuild_citation_counts()
-                    print(f"[watch] citation counts: {cc['candidates']} distinct candidates")
+                    print(f"[watch] stats roll-up: {cc['candidates']} candidates, "
+                          f"{cc.get('pending_refs', 0)} pending refs")
                 # Daily: recompute the PageRank authority roll-up (design §3a) —
                 # search fusion, the citator, related docs, and 'most authoritative'
                 # sort all read it, and it must track the graph as rescans land.

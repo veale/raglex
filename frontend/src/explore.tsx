@@ -324,6 +324,35 @@ function Expanded({ r, open }: { r: ShapeRow; open: (id: string, a?: string) => 
   );
 }
 
+// A subtle "updated X ago · Refresh" for the homepage figures. They come from roll-ups
+// that now refresh weekly (not hourly) to spare the box, so a manual refresh is offered.
+function _ago(iso?: string | null): string {
+  if (!iso) return "not yet";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 90) return "just now";
+  if (s < 5400) return `${Math.round(s / 60)}m ago`;
+  if (s < 172800) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+function StatsRefresh({ at }: { at?: string | null }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  return (
+    <div style={{ textAlign: "right", fontSize: 11, marginBottom: -8 }}
+         title="These corpus figures come from roll-ups refreshed weekly. Refresh to recompute now.">
+      <span className="muted">figures updated {_ago(at)}</span>{" · "}
+      <a style={{ cursor: busy ? "default" : "pointer", opacity: busy ? 0.5 : 0.8 }}
+         onClick={async () => {
+           if (busy) return;
+           setBusy(true);
+           try { const r = await api.rebuildCounts(); setMsg(r.error ? "error" : "refreshing…"); }
+           catch { setMsg("error"); } finally { setBusy(false); }
+         }}>↻ refresh</a>
+      {msg && <span className="muted">{" "}{msg}</span>}
+    </div>
+  );
+}
+
 export function ExploreView({ open, goSearch }:
   { open: (id: string, a?: string) => void; goSearch: (q?: string) => void }) {
   const [shape, setShape] = useState<any | null>(null);
@@ -357,6 +386,7 @@ export function ExploreView({ open, goSearch }:
   const rows: ShapeRow[] = shape?.jurisdictions || [];
   return (
     <div className="explore">
+      <StatsRefresh at={shape?.stats_refreshed_at} />
       <div className="hero">
         <h2 className="hero-title">{shape?.total ? `${shape.total.toLocaleString()} documents` : "RagLex"}
           <span className="muted hero-sub"> — case law, legislation and guidance across {rows.length || "…"} jurisdictions</span></h2>

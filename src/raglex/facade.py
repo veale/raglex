@@ -2036,7 +2036,8 @@ class Facade:
         (PageRank). Drill-down targets are ids, not prefilled searches — the UI
         expands in place. Heavy aggregates → stale-while-revalidate cached."""
         return self._cached("corpus-shape", 600, self._corpus_shape_uncached,
-                            placeholder={"jurisdictions": [], "total": 0})
+                            placeholder={"jurisdictions": [], "total": 0,
+                                         "stats_refreshed_at": None})
 
     _CASE_TYPES = ("judgment", "decision", "opinion")
 
@@ -2187,7 +2188,13 @@ class Facade:
                 b.setdefault("top_authority", [])
                 b.pop("citations", None)
                 out.append(b)
-            return {"jurisdictions": out, "total": sum(b["total"] for b in out)}
+            # When the roll-ups these figures come from were last rebuilt — the front
+            # page shows "updated X ago" + a manual Refresh button (they now refresh
+            # weekly, not hourly, so the timestamp is meaningful and the button matters).
+            refreshed = cat.conn.execute(
+                "SELECT MAX(rebuilt_at) AS t FROM citation_counts").fetchone()
+            return {"jurisdictions": out, "total": sum(b["total"] for b in out),
+                    "stats_refreshed_at": refreshed["t"] if refreshed else None}
 
     _DRILL_SORTS = {
         "authority": "pagerank DESC, cited_by DESC, d.decision_date DESC",
@@ -2872,8 +2879,12 @@ class Facade:
             srcs = cat.refresh_source_stats()
             shape = cat.refresh_corpus_shape_stats()
             leg = self._refresh_leg_type_stats(cat)
+            # the hanging-reference worklist (Unresolved page + auto-drain) — a ~96s live
+            # aggregate, rolled up here so those reads are instant.
+            pend = cat.rebuild_pending_reference_stats()
         self._invalidate_caches()
-        return {"candidates": n, "sources": srcs, "shape_rows": shape, "leg_types": leg}
+        return {"candidates": n, "sources": srcs, "shape_rows": shape, "leg_types": leg,
+                "pending_refs": pend}
 
     def _refresh_leg_type_stats(self, cat) -> int:
         """Rebuild the legislation-type rail roll-up (the Explore drill's
@@ -3040,7 +3051,16 @@ class Facade:
             absent = cat.enrichment_misses("harvest-miss", max_age_days=miss_ttl)
             retry = cat.enrichment_misses("harvest-retry", max_age_days=retry_ttl)
             rows = []
-            for g in cat.pending_reference_groups():
+            # Read the pre-aggregated worklist (ms); fall back to the ~96s live aggregate
+            # only when the roll-up hasn't been built yet (fresh DB / test). The roll-up is
+            # ranked by citing_count, so a bounded read (limit × slack for the junk/cooled
+            # rows dropped below) still returns the most-cited references — and classifying
+            # only those, not all ~930k groups, is what keeps the page + drain responsive.
+            scan = None if limit is None else max(limit * 3, 200)
+            groups = cat.pending_reference_groups_rollup(limit=scan)
+            if not groups:
+                groups = cat.pending_reference_groups(limit=scan)
+            for g in groups:
                 ref = g["ref"]
                 if not ref or _is_junk_ref(ref):
                     continue
@@ -3130,10 +3150,13 @@ class Facade:
         floor = self._UNFETCHABLE_MIN_CITING if min_citing is None else min_citing
         rows = []
         with self._open() as (cat, _rs, _ts):
-            # echr_citing is only consulted by the routable worklist; skipping it here
-            # drops a nested-loop join over 1.8M rows.
-            for g in cat.pending_reference_groups(min_citing=floor, limit=scan_limit,
-                                                  need_echr=False):
+            # Read the pre-aggregated worklist (ms); the live GROUP BY over the pending
+            # slice is ~96s even bounded, so fall back to it only for a fresh/un-rolled DB.
+            groups = cat.pending_reference_groups_rollup(min_citing=floor, limit=scan_limit)
+            if not groups:
+                groups = cat.pending_reference_groups(min_citing=floor, limit=scan_limit,
+                                                      need_echr=False)
+            for g in groups:
                 ref, raw, cand = g["ref"], g["raw"], g["candidate"]
                 if not ref or _is_junk_ref(ref):
                     continue
@@ -4244,7 +4267,14 @@ class Facade:
         # category whose items are each cited only a few times (e.g. UK case-law) is starved
         # out of the global ranking by high-frequency legislation, and a per-category harvest
         # only sees a handful. The full grouping is the same scan coverage already does.
-        candidates = [r for r in self.unresolved_references(limit=None)
+        # Read a bounded top-slice of the (roll-up-backed, citing_count-ranked) worklist
+        # rather than the whole thing: classifying all ~930k groups on every drain tick is
+        # what made auto-drain "never start". A generous multiple of the batch survives the
+        # routable/cooled filtering below; the long tail is reached over successive ticks
+        # (and by the nightly harvest-all). `limit=None` (nightly "everything") still scans
+        # all — that's its job, and it runs when the box is idle.
+        scan = None if limit is None else max(limit * 60, 2000)
+        candidates = [r for r in self.unresolved_references(limit=scan)
                       if r["suggested_adapter"] and r["confidence"] != "low"
                       and r["citing_count"] >= min_citing and not r["needs_identifier"]
                       # optional category filter: harvest just one source, and within UK

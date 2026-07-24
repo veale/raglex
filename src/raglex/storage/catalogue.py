@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS citation_counts (
 CREATE INDEX IF NOT EXISTS citation_counts_occ_idx ON citation_counts (occurrences DESC);
 CREATE INDEX IF NOT EXISTS citation_counts_cand_idx ON citation_counts (candidate_id);
 
+-- The hanging-reference worklist, pre-aggregated (§5b/§8). The live form GROUP BYs the
+-- pending ``relations`` slice — ~4.3M rows into ~930k groups, ~96s — which made the
+-- Unresolved page crawl and the auto-drain "never start" (it built the whole worklist
+-- before fetching a single item). Roll it up on the same cadence the other stats use; the
+-- worklist/drain read the top of this table by citing_count in milliseconds.
+CREATE TABLE IF NOT EXISTS pending_reference_stats (
+    ref           TEXT PRIMARY KEY,
+    candidate     TEXT,
+    raw           TEXT,
+    anchor        TEXT,
+    methods       TEXT,
+    occurrences   INTEGER NOT NULL DEFAULT 0,
+    citing_count  INTEGER NOT NULL DEFAULT 0,
+    echr_citing   INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pending_reference_stats_citing_idx ON pending_reference_stats (citing_count DESC);
+
 -- Per-source resolved-outgoing-edge roll-up. The Explore homepage's citation-density
 -- figure used to be a live relations×documents GROUP BY on every cache refresh —
 -- minutes of IO at 17M+ edges. Rebuilt alongside citation_counts on the same cadence.
@@ -2522,6 +2540,57 @@ class Catalogue:
             """, params
         ).fetchall()
 
+    def rebuild_pending_reference_stats(self) -> int:
+        """Refresh the hanging-reference worklist roll-up — the ~96s live aggregate, run
+        ONCE on a cadence instead of on every worklist/drain read. Includes the ``echr``
+        join (the roll-up pays it once so readers never do)."""
+        with self._maintenance_timeout(), self._atomic():
+            self.conn.execute("DELETE FROM pending_reference_stats")
+            agg = ("string_agg(DISTINCT r.extracted_via, ',')" if self.backend == "postgres"
+                   else "group_concat(DISTINCT r.extracted_via)")
+            self.conn.execute(
+                f"""
+                INSERT INTO pending_reference_stats
+                    (ref, candidate, raw, anchor, methods, occurrences, citing_count, echr_citing, rebuilt_at)
+                SELECT COALESCE(r.candidate_id, r.raw_citation_string) AS ref,
+                       MAX(r.candidate_id), MIN(r.raw_citation_string), MIN(r.dst_anchor),
+                       {agg}, COUNT(*), COUNT(DISTINCT r.src_id),
+                       MAX(CASE WHEN d.source = 'echr' THEN 1 ELSE 0 END), ?
+                FROM relations r
+                JOIN documents d ON d.stable_id = r.src_id
+                WHERE r.resolution_status = 'pending'
+                  AND r.extracted_via <> 'inferred'
+                  AND COALESCE(r.candidate_id, r.raw_citation_string) IS NOT NULL
+                GROUP BY COALESCE(r.candidate_id, r.raw_citation_string)
+                """, (_now(),))
+        return self.conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_reference_stats").fetchone()["n"]
+
+    def pending_reference_groups_rollup(self, *, min_citing: int = 1,
+                                        limit: int | None = None) -> list[sqlite3.Row]:
+        """The worklist from the roll-up (milliseconds), same row shape as
+        :meth:`pending_reference_groups`. Empty until first rebuilt — the caller falls
+        back to the live aggregate then (fresh DB / test)."""
+        params: list = []
+        where = ""
+        if min_citing > 1:
+            where = "WHERE citing_count >= ?"
+            params.append(int(min_citing))
+        tail = ""
+        if limit is not None:
+            tail = "LIMIT ?"
+            params.append(int(limit))
+        return self.conn.execute(
+            f"SELECT ref, candidate, raw, anchor, methods, occurrences, citing_count, "
+            f"echr_citing FROM pending_reference_stats {where} "
+            f"ORDER BY citing_count DESC {tail}", params).fetchall()
+
+    def pending_reference_stats_age(self) -> str | None:
+        """When the worklist roll-up was last rebuilt (ISO), for the 'last refreshed' line."""
+        row = self.conn.execute(
+            "SELECT MAX(rebuilt_at) AS t FROM pending_reference_stats").fetchone()
+        return row["t"] if row else None
+
     def report_citation_contexts(self, *, limit: int = 5000) -> list[sqlite3.Row]:
         """Occurrences of law-report citations that are still unresolved — the raw string,
         the citing document and the char span — so the report matcher can read the case
@@ -2998,9 +3067,15 @@ class Catalogue:
     # The relations graph is the single source of truth for what is unresolved.
 
     def resolution_worklist(self, limit: int = 50) -> list[sqlite3.Row]:
-        """Most-cited unresolved citations first — what to harvest next (§8). Derived
-        live from the relations graph (one aggregate query), so it's always correct and
-        the resolver needn't maintain a separate worklist table on every run."""
+        """Most-cited unresolved citations first — what to harvest next (§8). Served from
+        the ``pending_reference_stats`` roll-up (ms); the live GROUP BY over the pending
+        ``relations`` slice is ~96s, so it's the fallback only for a not-yet-rolled-up DB."""
+        rows = self.conn.execute(
+            "SELECT raw AS raw_citation_string, citing_count AS cite_count "
+            "FROM pending_reference_stats WHERE raw IS NOT NULL "
+            "ORDER BY citing_count DESC LIMIT ?", (limit,)).fetchall()
+        if rows:
+            return rows
         return self.conn.execute(
             """
             SELECT raw_citation_string, COUNT(*) AS cite_count
