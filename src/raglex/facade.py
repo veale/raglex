@@ -686,9 +686,15 @@ class Facade:
 
     # -- read / research ---------------------------------------------------
     def search(self, query: str, *, k: int = 5, filters: dict | None = None) -> list[dict]:
+        # RAGLEX_SEARCH_SEMANTIC: "auto" (default) gates the vector half on an ANN index
+        # existing; "0"/"off" forces lexical-only (e.g. while embeddings are incomplete);
+        # "1"/"on" forces it on.
+        import os
+        _sem = (os.environ.get("RAGLEX_SEARCH_SEMANTIC") or "auto").strip().lower()
+        semantic = None if _sem in ("auto", "") else _sem in ("1", "on", "true", "yes")
         with self._open() as (cat, _rs, _ts):
             engine = SearchEngine(cat, self._provider(), reranker=self._reranker())
-            hits = engine.search(query, k=k, filters=filters or None)
+            hits = engine.search(query, k=k, filters=filters or None, semantic=semantic)
             out = []
             for h in hits:
                 doc = cat.get_document(h.doc_id)
@@ -1307,6 +1313,31 @@ class Facade:
     _SEARCH_FILTERS = ("source", "doc_type", "tag", "query", "court", "id_prefix",
                        "year_from", "year_to", "cites", "cited_by", "cites_pinpoint")
 
+    def _citation_query_ids(self, cat, query: str) -> list[str]:
+        """If the search text is itself a citation ("[2011] IESC 26", an ECLI, a report
+        citation), the document id(s) it resolves to — via the citation grammar's candidate
+        and the folded alias table — so search can match the exact document by id. Empty for
+        an ordinary keyword query, which then falls through to the substring search."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        from .core.text import fold
+        ids: list[str] = []
+        dst = cat.get_alias(fold(q))            # a report/neutral form stored as an alias
+        if dst:
+            ids.append(dst)
+        try:
+            from .citations import extract_citations
+            for c in extract_citations(q):
+                if c.candidate_id:
+                    ids.append(c.candidate_id)  # the slug may itself be the stable_id
+                    hit = cat.find_document_id(c.candidate_id)
+                    if hit:
+                        ids.append(hit)
+        except Exception:  # noqa: BLE001 — never let citation parsing break search
+            pass
+        return list(dict.fromkeys(i for i in ids if i))
+
     def search_corpus(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
                       facets: bool = True, **filters) -> dict:
         """Unified metadata search: filtered, sortable results plus the facet distribution of
@@ -1315,6 +1346,15 @@ class Facade:
         citation and a cited-by count for display and 'most-cited' ranking."""
         f = {k: v for k, v in filters.items() if k in self._SEARCH_FILTERS and v not in (None, "")}
         with self._open() as (cat, _rs, _ts):
+            # Citation-format query ("[2011] IESC 26", an ECLI, a report cite) → resolve to
+            # the exact document id(s) and match by PK, instead of substring-scanning (the
+            # id slug omits the brackets, so the trigram OR would miss it). Ordinary keyword
+            # queries resolve to nothing and fall through to the fast title/id/ECLI search.
+            if f.get("query"):
+                ids = self._citation_query_ids(cat, f["query"])
+                if ids:
+                    f = {k: v for k, v in f.items() if k != "query"}
+                    f["id_in"] = ids
             rows = cat.search_documents(sort=sort, limit=limit, offset=offset, **f)
             items = []
             for r in rows:

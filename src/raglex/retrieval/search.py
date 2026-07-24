@@ -67,11 +67,17 @@ class SearchEngine:
         filters: dict | None = None,
         expand_graph: bool = True,
         relationship_types: list[str] | None = None,
+        semantic: bool | None = None,
     ) -> list[SearchHit]:
-        # 2) hybrid retrieval over the (pre-filtered) slice, fused by RRF
-        vec = vector_search(
-            self.catalogue, self.provider, query, limit=candidate_pool, filters=filters
-        )
+        # 2) hybrid retrieval over the (pre-filtered) slice, fused by RRF.
+        # The semantic half is gated (§7): a `<=>` scan with no ANN index reads the whole
+        # embeddings table (14M+ rows), so unless a usable HNSW index exists we skip it and
+        # serve the fast lexical (FTS) half alone. `semantic` forces it on/off; None = auto.
+        use_semantic = (self.catalogue.has_vector_index(self.provider.dimensions)
+                        if semantic is None else semantic)
+        vec = (vector_search(self.catalogue, self.provider, query,
+                             limit=candidate_pool, filters=filters)
+               if use_semantic else [])
         lex = fts_search(
             self.catalogue, self.provider, query, limit=candidate_pool, filters=filters
         )

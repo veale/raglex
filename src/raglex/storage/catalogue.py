@@ -440,6 +440,21 @@ _POST_MIGRATE_INDEXES = (
     "(decision_date DESC, stable_id)",
 )
 
+# Postgres-only trigram indexes for substring search (§7): the corpus search matches a
+# tokenised query as a SUBSTRING of the title, id, ECLI, or a citation alias
+# (``lower(col) LIKE '%tok%'``) — which a btree can't serve, so without these it seq-scans
+# ~5M documents (tens of seconds, the "search hangs" report). pg_trgm GIN turns each into an
+# index scan. gin_trgm_ops needs the pg_trgm extension and has no SQLite analogue, so this
+# runs only on Postgres. As with the date index above: on the big live table build these
+# CONCURRENTLY by hand first and this plain CREATE no-ops; on a fresh/dev DB it builds inline.
+_PG_TRGM_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS documents_title_trgm ON documents USING gin (lower(title) gin_trgm_ops)",
+    "CREATE INDEX IF NOT EXISTS documents_stable_id_trgm ON documents USING gin (lower(stable_id) gin_trgm_ops)",
+    "CREATE INDEX IF NOT EXISTS documents_ecli_trgm ON documents USING gin (lower(ecli) gin_trgm_ops)",
+    # aliases are stored folded (lower-case), so index the column directly (no lower()).
+    "CREATE INDEX IF NOT EXISTS citation_aliases_alias_trgm ON citation_aliases USING gin (alias gin_trgm_ops)",
+)
+
 
 # DSNs whose schema this process has already ensured. Postgres DDL is idempotent but not
 # free, and the catalogue is opened per request.
@@ -640,6 +655,27 @@ class Catalogue:
                     self.conn.execute(stmt)
             except Exception:  # noqa: BLE001 — a migration mustn't block startup
                 pass
+        # Postgres-only trigram indexes (substring search). Ensure the extension, then the
+        # same check-before-create guard so a startup never blocks on a write lock.
+        if self.backend == "postgres":
+            try:
+                self.conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            except Exception:  # noqa: BLE001 — no CREATE privilege / already present
+                pass
+            for stmt in _PG_TRGM_INDEXES:
+                try:
+                    name = re.search(r"IF NOT EXISTS\s+([a-z0-9_]+)", stmt, re.I).group(1)
+                    if self.conn.execute(
+                            "SELECT 1 FROM pg_class WHERE relname = ? AND relkind = 'i'",
+                            (name,)).fetchone():
+                        continue
+                    self.conn.execute("SET lock_timeout = '5s'")
+                    try:
+                        self.conn.execute(stmt)
+                    finally:
+                        self.conn.execute("SET lock_timeout = 0")
+                except Exception:  # noqa: BLE001 — a migration mustn't block startup
+                    pass
 
     @staticmethod
     def reset_schema_cache() -> None:
@@ -3466,6 +3502,22 @@ class Catalogue:
         return True
 
     # -- observability / ops aggregates (§8) -------------------------------
+    def has_vector_index(self, dimensions: int | None = None) -> bool:
+        """Whether a usable pgvector ANN index exists for the family dimension — the gate
+        for semantic search (§7). Without it, the ``<=>`` scan would read the WHOLE
+        embeddings table (14M+ rows → tens of seconds), so hybrid search must fall back to
+        the lexical (FTS) half alone. SQLite scores in Python over the (small dev) family,
+        so it always reports available there."""
+        if self.backend != "postgres":
+            return True
+        name = f"embeddings_hnsw_{int(dimensions)}" if dimensions else "embeddings_hnsw_"
+        try:
+            return self.conn.execute(
+                "SELECT 1 FROM pg_class WHERE relname = ? AND relkind = 'i'", (name,)
+            ).fetchone() is not None
+        except Exception:  # noqa: BLE001
+            return False
+
     def _count_by(self, column: str) -> dict[str, int]:
         rows = self.conn.execute(
             f"SELECT {column} AS k, COUNT(*) AS n FROM documents GROUP BY {column} ORDER BY n DESC"
@@ -3528,8 +3580,8 @@ class Catalogue:
 
     @staticmethod
     def _doc_filter_clauses(*, source=None, doc_type=None, tag=None, query=None, court=None,
-                            id_prefix=None, year_from=None, year_to=None, cites=None, cited_by=None,
-                            cites_pinpoint=None):
+                            id_prefix=None, id_in=None, year_from=None, year_to=None, cites=None,
+                            cited_by=None, cites_pinpoint=None):
         """Shared WHERE-clause builder for list/count/search/facets (so every surface filters
         with identical semantics). ``court`` matches the stored court token; ``id_prefix``
         matches one or more slug heads (comma-separated). ``query`` is tokenised — each
@@ -3550,14 +3602,29 @@ class Catalogue:
             if heads:
                 clauses.append("(" + " OR ".join("d.stable_id LIKE ?" for _ in heads) + ")")
                 params.extend(f"{h}/%" for h in heads)
+        if id_in:
+            # Exact id set — the citation-query path resolves "[2011] IESC 26" to a document
+            # id via the grammar/aliases (see Facade._citation_query_ids) and matches it here
+            # by PK, instead of substring-scanning. Kept small (a handful of resolved ids).
+            ids = list(dict.fromkeys(i for i in id_in if i))
+            if ids:
+                qs = ",".join("?" for _ in ids)
+                clauses.append(f"(d.stable_id IN ({qs}) OR d.ecli IN ({qs}))")
+                params.extend(ids)
+                params.extend(ids)
         if query:
             # Case-insensitive (Postgres LIKE is case-sensitive; SQLite's is not) AND tokenised
-            # — every word must hit the title or id, in any order/position. No title index
-            # exists, so lower() costs nothing here.
+            # — every word must hit the title, id, or ECLI, in any order/position ("erasure
+            # data" finds "…data … erasure"). All three branches are pg_trgm-GIN-indexed
+            # (§7), so the OR is a BitmapOr, not a seq scan. Citation-FORMAT queries ("[2011]
+            # IESC 26") don't come through here — the facade resolves them to `id_in` above,
+            # because folding a report/neutral cite into this substring OR would either miss
+            # (the id slug omits the brackets) or, if unioned in, defeat the bitmap.
             for tok in str(query).split():
-                clauses.append("(lower(d.title) LIKE ? OR lower(d.stable_id) LIKE ?)")
+                clauses.append(
+                    "(lower(d.title) LIKE ? OR lower(d.stable_id) LIKE ? OR lower(d.ecli) LIKE ?)")
                 like = f"%{tok.lower()}%"
-                params.extend([like, like])
+                params.extend([like, like, like])
         if year_from:
             clauses.append("substr(d.decision_date, 1, 4) >= ?"); params.append(str(year_from))
         if year_to:
@@ -3665,6 +3732,7 @@ class Catalogue:
     def count_documents(self, *, source: str | None = None, doc_type: str | None = None,
                         tag: str | None = None, query: str | None = None,
                         court: str | None = None, id_prefix: str | None = None,
+                        id_in: list | None = None,
                         year_from: str | None = None, year_to: str | None = None,
                         cites: str | None = None, cited_by: str | None = None,
                         cites_pinpoint: str | None = None) -> int:
@@ -3677,7 +3745,8 @@ class Catalogue:
         params: list[object] = []
         clauses, fparams = self._doc_filter_clauses(
             source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
-            year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by, cites_pinpoint=cites_pinpoint)
+            id_in=id_in, year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by,
+            cites_pinpoint=cites_pinpoint)
         if tag:
             clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t "
                               "WHERE t.doc_id = d.stable_id AND t.tag = ?)")
