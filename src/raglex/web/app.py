@@ -22,37 +22,16 @@ from ..config import Config
 from ..facade import Facade
 from ..jobs import JobManager
 
-# Endpoints reachable without the API token: the liveness probe (so a healthcheck needn't
-# hold a secret) and the CORS preflight the browser sends before it can add a header.
-_PUBLIC_PATHS = frozenset({"/health"})
-
-
-def _install_auth(app: FastAPI) -> None:
-    """Require a bearer token when ``RAGLEX_API_TOKEN`` is set.
-
-    Unauthenticated, the write surface lets anyone on the network rewrite settings —
-    including the stored API keys — and run corrections against the corpus. The token is
-    opt-in so existing local/dev setups keep working untouched; set it and the whole API
-    (and the MCP endpoint mounted beside it) is closed.
-    """
-    token = os.environ.get("RAGLEX_API_TOKEN")
-    if not token:
-        return
-
-    @app.middleware("http")
-    async def _require_token(request: Request, call_next):  # noqa: ANN001
-        if request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
-            return await call_next(request)
-        header = request.headers.get("authorization", "")
-        supplied = header[7:] if header.lower().startswith("bearer ") else \
-            request.headers.get("x-api-key", "")
-        # constant-time compare: a token check that leaks timing is a token check that
-        # can be guessed byte by byte.
-        import hmac
-
-        if not hmac.compare_digest(supplied, token):
-            return JSONResponse({"error": "unauthorised"}, status_code=401)
-        return await call_next(request)
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("RAGLEX_CORS_ORIGINS")
+    if raw:
+        return [o.strip() for o in raw.replace(";", ",").split(",") if o.strip()]
+    # With auth enabled, refuse cross-origin by default: a permissive CORS policy would let a
+    # malicious page preflight-and-forge state-changing requests from an IP-allow-listed
+    # browser. Same-origin (the bundled SPA) needs no CORS at all. Open deployments keep the
+    # historical wildcard.
+    from .auth import auth_enabled
+    return [] if auth_enabled() else ["*"]
 
 
 def create_app(config: Config | None = None) -> FastAPI:
@@ -63,11 +42,20 @@ def create_app(config: Config | None = None) -> FastAPI:
     # new attempt automatically; conservative job kinds remain visibly interrupted.
     jobs.reap_orphans(auto_resume=True)
     app = FastAPI(title="RagLex", version="0.1.0", summary="Legal corpus ops + research API")
-    # The React dev server lives on another origin; allow it (tighten in prod).
+    # In production the SPA is served from this same origin, so no CORS is exercised;
+    # set RAGLEX_CORS_ORIGINS (comma-separated) for a cross-origin front-end, which then
+    # gets credentialed CORS (cookies). A wildcard cannot carry credentials, so we only
+    # allow credentials when explicit origins are named.
+    origins = _cors_origins()
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+        CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"],
+        allow_credentials=origins != ["*"],
     )
-    _install_auth(app)
+    # Role-based auth (reader/admin passwords, dual IP allow-lists, passkeys) + read-only
+    # enforcement. Opt-in: with nothing configured the API stays open (dev/test). The old
+    # RAGLEX_API_TOKEN keeps working as an admin bearer token.
+    from .auth import install_web_auth
+    install_web_auth(app, facade)
 
     def _start_job(kind: str, label: str, params: dict | None = None, *,
                    queue: bool = False) -> dict:
@@ -712,6 +700,30 @@ def create_app(config: Config | None = None) -> FastAPI:
     def system_storage_ep() -> dict:
         """Database disk footprint (total + largest tables) for the Maintain page."""
         return facade.system_storage()
+
+    @app.get("/system/db-health")
+    def system_db_health_ep() -> dict:
+        """DB diagnostics for a sluggish box: planner-stat freshness, bloat, seq-scan-heavy
+        tables, unused indexes, cache hit ratio, connections, long queries + hints."""
+        return facade.db_health()
+
+    @app.post("/system/db-maintenance")
+    def system_db_maintenance_ep(payload: dict = Body(default={})) -> dict:
+        """Run ANALYZE (and optionally VACUUM ANALYZE) to refresh planner stats / reclaim
+        bloat. Admin-only (write)."""
+        p = payload or {}
+        return facade.db_maintenance(analyze=bool(p.get("analyze", True)),
+                                     vacuum=bool(p.get("vacuum", False)))
+
+    @app.post("/jobs/hpc-embed")
+    def job_hpc_embed_ep(payload: dict = Body(default={})) -> dict:
+        """Drive the Myriad bulk-embed relay as a background job. Dry-run unless
+        ``{"go": true}`` — a paid GPU submission is always explicit."""
+        p = payload or {}
+        params = {k: p[k] for k in ("go", "pilot", "model", "dimensions", "ntasks", "out")
+                  if k in p}
+        return _start_job("hpc-embed",
+                          "HPC embed relay" + ("" if p.get("go") else " (dry-run)"), params)
 
     # -- research ----------------------------------------------------------
     @app.get("/stats")
@@ -1444,6 +1456,13 @@ def serve_app(config: Config | None = None) -> FastAPI:
     app = FastAPI(title="RagLex", version="0.1.0", lifespan=lifespan)
     app.mount("/api", api)
     app.mount("/mcp", mcp_app)
+
+    # MCP OAuth (opt-in): the consent page + the root-level well-known metadata that the
+    # mounted sub-app can't serve at the origin root. No-op when OAuth is disabled.
+    _provider = getattr(mcp, "_raglex_oauth_provider", None)
+    if _provider is not None:
+        from .mcp_oauth import install_mcp_oauth_routes
+        install_mcp_oauth_routes(app, _provider, mcp_app)
 
     # The mounted app's endpoint is /mcp/ (mount prefix + its "/" route). A client hitting
     # /mcp (no trailing slash) would otherwise fall through to the SPA catch-all below and

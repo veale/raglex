@@ -2971,6 +2971,20 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             return cat.storage_size()
 
+    def db_health(self) -> dict:
+        """Read-only DB diagnostic for "the whole thing is sluggish": planner-stat freshness,
+        bloat, seq-scan-heavy tables, unused indexes, cache hit ratio, connection pressure,
+        long-running queries, plus actionable hints. Postgres-substantive, SQLite stub."""
+        with self._open() as (cat, _rs, _ts):
+            return cat.db_health()
+
+    def db_maintenance(self, *, analyze: bool = True, vacuum: bool = False) -> dict:
+        """Run ANALYZE (refresh planner stats — the cheap big lever after a corpus grows) and
+        optionally VACUUM ANALYZE (reclaim dead-tuple bloat; online, no exclusive lock)."""
+        with self._open() as (cat, _rs, _ts):
+            out = cat.db_analyze(vacuum=vacuum) if (analyze or vacuum) else {"skipped": True}
+        return out
+
     def backfill_edge_keys(self, *, on_progress=None, cancel_check=None) -> dict:
         """One-off: populate candidate_id/raw_fold on edges written before those columns
         existed, so the set-based resolver and the SQL worklist see the whole graph."""
@@ -7201,25 +7215,47 @@ class Facade:
                         "relationship_type": rel_type.value}
             return {"error": "nothing to do — pass treatment, dst_id, or suppress"}
 
+    def embed_source_scope(self) -> list[str] | None:
+        """Resolve the RAGLEX_EMBED_JURISDICTIONS setting to a source-key list, or ``None``
+        for "embed everything". The setting is a comma-separated list of jurisdiction names
+        (as shown by jurisdictions(), e.g. "United Kingdom, European Union") — indexing the
+        whole ~5M-doc corpus is infeasible on a small box, so this lets an operator embed
+        only the jurisdictions that matter. An unrecognised/empty entry contributes no
+        sources; if the setting is set but resolves to nothing, embedding is scoped to
+        nothing (rather than silently indexing everything)."""
+        raw = self.settings.resolve("RAGLEX_EMBED_JURISDICTIONS")
+        if not raw or not raw.strip():
+            return None
+        names = [n.strip() for n in raw.replace(";", ",").split(",") if n.strip()]
+        sources: list[str] = []
+        for name in names:
+            sources.extend(self.sources_for_jurisdiction(name))
+        # dedupe, preserve order; empty list ≠ None → scope to nothing
+        return list(dict.fromkeys(sources))
+
     def embed(self, *, limit: int | None = None, on_progress=None, cancel_check=None) -> dict:
         """Embed/index documents that have text but no vectors in the current embedding
         family — the lexical (FTS) + semantic (vector) index both search reads. Resumable
         and cancellable; run as the ``embed`` background job so it shows progress and can be
-        stopped. Returns per-run stats (documents, chunks, skipped)."""
+        stopped. Scoped by RAGLEX_EMBED_JURISDICTIONS (see embed_source_scope). Returns
+        per-run stats (documents, chunks, skipped)."""
+        scope = self.embed_source_scope()
         with self._open() as (cat, _rs, ts):
-            stats = asdict(EmbedStage(cat, self._provider(), textstore=ts).run(
+            stats = asdict(EmbedStage(cat, self._provider(), textstore=ts, sources=scope).run(
                 limit=limit, on_progress=on_progress, cancel_check=cancel_check))
         self._invalidate_caches()  # has_embedding changed → coverage/search availability
         return stats
 
     def embedding_backlog(self) -> dict:
         """How much of the corpus is indexed in the current embedding family — the number
-        a UI shows next to the 'Embed' button so it's clear how much work remains."""
+        a UI shows next to the 'Embed' button so it's clear how much work remains. Reflects
+        the RAGLEX_EMBED_JURISDICTIONS scope so the count matches what will actually embed."""
         p = self._provider()
+        scope = self.embed_source_scope()
         with self._open() as (cat, _rs, _ts):
-            pending = len(cat.pending_embedding(p.name, p.model, p.model_version))
+            pending = len(cat.pending_embedding(p.name, p.model, p.model_version, sources=scope))
             total = cat.count_documents()
-        return {"provider": p.name, "model": p.model,
+        return {"provider": p.name, "model": p.model, "scope": scope,
                 "pending": pending, "indexed": max(total - pending, 0), "total": total}
 
     def resolve(self) -> dict:

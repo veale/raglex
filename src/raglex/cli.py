@@ -195,6 +195,42 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hash_password(args: argparse.Namespace) -> int:
+    """Print a scrypt hash for a web-auth password (store it hashed, not in plaintext)."""
+    from .web.auth import hash_password
+
+    password = args.password
+    if not password:
+        import getpass
+        password = getpass.getpass("password: ")
+    if not password:
+        print("no password given")
+        return 1
+    print(hash_password(password))
+    return 0
+
+
+def cmd_hpc_embed(args: argparse.Namespace) -> int:
+    """Drive the Myriad bulk-embed relay end-to-end (dry-run unless --go)."""
+    from .facade import Facade
+    from .hpc_orchestrator import run_hpc_embed
+
+    facade = Facade(Config.from_env())
+    params = {"go": args.go, "pilot": args.pilot, "model": args.model,
+              "dimensions": args.dimensions, "ntasks": args.ntasks, "out": args.out}
+    result = run_hpc_embed(
+        facade, {k: v for k, v in params.items() if v is not None},
+        on_progress=lambda **p: None, cancel_check=lambda: False)
+    for line in result.get("log", []):
+        print(line)
+    if result.get("error"):
+        print(f"\n✗ {result['error']}")
+        return 1
+    if not args.go:
+        print("\n(dry-run — re-run with --go to execute; first real run should be supervised)")
+    return 0
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     """Run the MCP server — exposes every API operation as MCP tools."""
     try:
@@ -274,6 +310,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         # An auto-drain quietly storing zero documents for a fortnight was invisible before.
         jobs = JobManager(f, origin="scheduler")
         jobs.reap_orphans()
+        last_hygiene = 0.0
+        last_analyze = 0.0
         last_backfill = 0.0
         last_effects = 0.0
         last_counts = 0.0
@@ -300,6 +338,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     jobs.promote_queued()
                 except Exception:  # noqa: BLE001
                     pass
+                # Job-table hygiene every ~15 min: reap jobs whose process stopped pulsing
+                # (slept/woke or crashed container) and prune the finished-job backlog, so
+                # ghosts don't linger and the jobs table (scanned by the panel + worklist)
+                # stays small. Cross-process safe — keyed on the lease heartbeat, not origin.
+                if time.time() - last_hygiene >= 900:
+                    last_hygiene = time.time()
+                    try:
+                        reaped = jobs.reap_stalled()
+                        if reaped:
+                            print(f"[watch] hygiene: reaped {reaped} stalled job(s)")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[watch] hygiene error: {exc}")
                 # Start a background job per due watch (so each shows in the Jobs panel
                 # with progress) instead of running them inline where nothing can see them.
                 due = f.due_watch_ids()
@@ -442,18 +492,29 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # front-page "Refresh" button, keeps reads instant without that churn.
                 # Override with RAGLEX_STATS_REFRESH_SECS.
                 _stats_secs = float(os.environ.get("RAGLEX_STATS_REFRESH_SECS") or 604800)
+                # Route the periodic roll-ups through the job table (not an inline call) so
+                # they share the singleton lock with the post-harvest chain (jobs._chain_
+                # postprocess) — two PageRank walks racing the relations table is exactly the
+                # double-work that made the box sluggish — and show up in the Jobs panel.
                 if time.time() - last_counts >= _stats_secs:
                     last_counts = time.time()
-                    cc = f.rebuild_citation_counts()
-                    print(f"[watch] stats roll-up: {cc['candidates']} candidates, "
-                          f"{cc.get('pending_refs', 0)} pending refs")
+                    jobs.start("rebuild-citation-counts", "weekly stats roll-up", {})
                 # Daily: recompute the PageRank authority roll-up (design §3a) —
                 # search fusion, the citator, related docs, and 'most authoritative'
                 # sort all read it, and it must track the graph as rescans land.
                 if time.time() - last_authority >= 86400:
                     last_authority = time.time()
-                    au = f.rebuild_authority()
-                    print(f"[watch] authority (PageRank): {au['documents']} documents ranked")
+                    jobs.start("rebuild-authority", "daily authority (PageRank) rebuild", {})
+                # Daily: refresh planner statistics so the query planner tracks the growing
+                # corpus. Cheap and online; stale stats are a classic cause of a box that
+                # "used to be fast" — the planner picks a seq scan it wouldn't on fresh stats.
+                if time.time() - last_analyze >= 86400:
+                    last_analyze = time.time()
+                    try:
+                        f.db_maintenance(analyze=True, vacuum=False)
+                        print("[watch] db: planner statistics refreshed (ANALYZE)")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[watch] db ANALYZE error: {exc}")
                 # Weekly: top up the statute gazetteer from legislation.gov.uk, so acts
                 # passed after the vendored lists were cut still confirm by name.
                 if time.time() - last_gazetteer >= 7 * 86400:
@@ -923,6 +984,22 @@ def build_parser() -> argparse.ArgumentParser:
     mc = sub.add_parser("mcp", help="run the MCP server (all API ops as tools)")
     mc.add_argument("--http", action="store_true", help="HTTP transport instead of stdio")
     mc.set_defaults(func=cmd_mcp)
+
+    hp = sub.add_parser("hash-password",
+                        help="hash a web-auth password for RAGLEX_{ADMIN,READER}_PASSWORD_HASH")
+    hp.add_argument("password", nargs="?", help="password (omit to be prompted, not echoed)")
+    hp.set_defaults(func=cmd_hash_password)
+
+    hpc = sub.add_parser("hpc-embed",
+                         help="drive the whole Myriad bulk-embed relay in one resumable command")
+    hpc.add_argument("--go", action="store_true",
+                     help="actually run it (default is dry-run: print the plan + remote commands)")
+    hpc.add_argument("--pilot", type=int, help="export only N documents first (a cheap end-to-end trial)")
+    hpc.add_argument("--model", help="override RAGLEX_HPC_MODEL / RAGLEX_EMBED_MODEL")
+    hpc.add_argument("--dimensions", type=int, help="override vector width")
+    hpc.add_argument("--ntasks", type=int, help="array size (must match the jobscript -t range)")
+    hpc.add_argument("--out", help="shard/export directory (default data_dir/embed-export)")
+    hpc.set_defaults(func=cmd_hpc_embed)
 
     emb = sub.add_parser("embed", help="embed documents with text (§6)")
     emb.add_argument("--limit", type=int, default=None, help="max documents this run")

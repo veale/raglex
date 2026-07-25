@@ -66,9 +66,13 @@ class EmbedStage:
         textstore: TextStore | None = None,
         config: ChunkConfig | None = None,
         batch_size: int = 64,
+        sources: list[str] | None = None,
     ) -> None:
         self.catalogue = catalogue
         self.provider = provider
+        # Optional source scope (the resolution of RAGLEX_EMBED_JURISDICTIONS) — index only
+        # these sources' documents. None = the whole corpus.
+        self.sources = sources
         # If given, segments persisted by the pipeline are loaded for structure-
         # aware chunking (§6b); without it the chunker derives units from text.
         self.textstore = textstore
@@ -83,7 +87,8 @@ class EmbedStage:
         ``done``/``total`` for the jobs panel; ``cancel_check`` lets a job stop cleanly."""
         p = self.provider
         stats = EmbedStats(provider=p.name, model=p.model)
-        pending = self.catalogue.pending_embedding(p.name, p.model, p.model_version)
+        pending = self.catalogue.pending_embedding(p.name, p.model, p.model_version,
+                                                   sources=self.sources)
         if limit is not None:
             pending = pending[:limit]
         total = len(pending)

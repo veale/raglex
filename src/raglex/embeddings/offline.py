@@ -69,6 +69,7 @@ def export_shards(
     provider_label: str = "hf",
     chunks_per_shard: int = 25_000,
     limit: int | None = None,
+    sources: list[str] | None = None,
     chunk_config: ChunkConfig | None = None,
     include_doc_text: bool = True,
     doc_vector: bool = True,
@@ -93,7 +94,7 @@ def export_shards(
     cfg = chunk_config or ChunkConfig()
     stats = ExportStats()
 
-    pending = catalogue.pending_embedding(provider_label, model, model_version)
+    pending = catalogue.pending_embedding(provider_label, model, model_version, sources=sources)
     if limit is not None:
         pending = pending[:limit]
     total = len(pending)

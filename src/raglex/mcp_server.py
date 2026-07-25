@@ -21,9 +21,17 @@ from __future__ import annotations
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .config import Config
 from .facade import Facade
+
+# Tool behaviour hints (MCP spec) — clients read these to decide auto-approval + safety UX.
+# Most of the first-class surface is pure corpus reads. lookup() is special: it can silently
+# FETCH a missing authority from an external source, so it is neither read-only nor
+# closed-world. search() reads the local corpus only.
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_FETCHING = ToolAnnotations(readOnlyHint=False, openWorldHint=True, idempotentHint=True)
 
 
 _INSTRUCTIONS = (
@@ -47,7 +55,20 @@ _INSTRUCTIONS = (
 
 def build_server(config: Config | None = None) -> FastMCP:
     facade = Facade(config or Config.from_env())
-    mcp = FastMCP("raglex", instructions=_INSTRUCTIONS)
+    # OAuth 2.1 for the HTTP transport (opt-in via RAGLEX_MCP_PASSWORD + RAGLEX_PUBLIC_URL).
+    # The SDK wires the whole AS/RS surface from these; we only supply the provider (storage
+    # + shared-password consent). Unconfigured → no auth, so stdio/local stays untouched.
+    from .web.mcp_oauth import auth_settings, build_provider
+
+    _auth = auth_settings()
+    if _auth is not None:
+        _provider = build_provider(facade)
+        mcp = FastMCP("raglex", instructions=_INSTRUCTIONS,
+                      auth_server_provider=_provider, auth=_auth)
+        mcp._raglex_oauth_provider = _provider  # retrieved by serve_app for the consent page
+    else:
+        mcp = FastMCP("raglex", instructions=_INSTRUCTIONS)
+        mcp._raglex_oauth_provider = None
 
     # Maintenance/mutation operations are NOT registered as individual tools (their schemas
     # would swamp an agent's context for tools it rarely uses). Each is collected into
@@ -60,7 +81,7 @@ def build_server(config: Config | None = None) -> FastMCP:
         return fn
 
     # -- read / research --------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def search(query: str, k: int = 8, jurisdiction: Optional[str] = None,
                kind: Optional[str] = None, source: Optional[str] = None,
                doc_type: Optional[str] = None, tag: Optional[str] = None,
@@ -88,20 +109,20 @@ def build_server(config: Config | None = None) -> FastMCP:
             filters["year_from"] = year_from
         return facade.search(query, k=k, filters=filters or None)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def overview() -> dict:
         """The dense, parsimonious balance of holdings — per jurisdiction, how much
         case-law / legislation / guidance is HELD and what can be FETCHED on demand. Read
         this first to know what the corpus can be relied on for."""
         return facade.holdings_overview()
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def jurisdictions() -> list[dict]:
         """The selectable jurisdictions (natural-language names) with their held-document
         counts — the vocabulary the ``jurisdiction`` filter on search() accepts."""
         return facade.jurisdictions()
 
-    @mcp.tool()
+    @mcp.tool(annotations=_FETCHING)
     def lookup(citation: str, pincite: Optional[str] = None, context: int = 1,
                full: bool = False, cited_by: bool = True, similar: bool = True,
                autofetch: bool = True) -> dict:
@@ -123,7 +144,7 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.lookup(citation=citation, pincite=pincite, context=context, full=full,
                              cited_by=cited_by, similar=similar, autofetch=autofetch)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def list_documents(source: Optional[str] = None, doc_type: Optional[str] = None,
                        tag: Optional[str] = None, query: Optional[str] = None,
                        limit: int = 100) -> list[dict]:
@@ -131,13 +152,13 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.list_documents(source=source, doc_type=doc_type, tag=tag,
                                      query=query, limit=limit)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def get_document(stable_id: str) -> dict:
         """Full document: metadata, tags, relations, attachments, and a
         ``preparatory_documents`` availability/count flag when legislative history exists."""
         return facade.get_document(stable_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def preparatory_documents(stable_id: str, limit: int = 50) -> dict:
         """Preparatory/legislative-history documents linked to an item: impact
         assessments, Commission proposals and communications, explanatory material,
@@ -151,13 +172,13 @@ def build_server(config: Config | None = None) -> FastMCP:
             "documents": result.get("preparatory_groups", []),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def get_document_body(stable_id: str) -> dict:
         """The document's full text + structural segments (legislation articles /
         sections, judgment paragraphs) with their citable labels and levels."""
         return facade.document_body(stable_id)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def get_provision(stable_id: str, label: Optional[str] = None,
                       char_start: Optional[int] = None, context: int = 1) -> dict:
         """ONE provision/paragraph of a document by its citable label ("Article 17",
@@ -167,13 +188,13 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.get_provision(stable_id, label=label, char_start=char_start,
                                     context=context)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def graph_neighbours(stable_id: str, relationship_types: Optional[list[str]] = None) -> dict:
         """1-hop typed citation/commentary neighbourhood of a document, most
         authoritative neighbours first (PageRank-ranked, design §3c)."""
         return facade.graph(stable_id, rel=relationship_types)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def related_documents(stable_id: str, limit: int = 12) -> dict:
         """Related documents via the citation network (not vector similarity):
         ``co_cited`` = most often cited together with this one in the same citing
@@ -181,7 +202,7 @@ def build_server(config: Config | None = None) -> FastMCP:
         coupling). The practical "cases like this one" for legal research."""
         return facade.related_documents(stable_id, limit=limit)
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READ_ONLY)
     def citator(stable_id: str) -> dict:
         """How this authority currently stands: citation volume, how many citing
         documents are recent, its network-authority percentile (PageRank), and the
@@ -654,6 +675,34 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.backfill_edge_keys()
 
     @admin
+    def db_health() -> dict:
+        """Diagnose a sluggish database: planner-stat freshness, table bloat (dead tuples),
+        sequential-scan-heavy tables (missing-index hints), unused indexes, buffer-cache hit
+        ratio, connection pressure, and the longest-running queries — with actionable hints.
+        Read-only (system catalogs/stat views only)."""
+        return facade.db_health()
+
+    @admin
+    def db_maintenance(analyze: bool = True, vacuum: bool = False) -> dict:
+        """Refresh planner statistics (ANALYZE — the cheap big lever after the corpus grows)
+        and optionally reclaim bloat (VACUUM ANALYZE, online). Run db_health() first."""
+        return facade.db_maintenance(analyze=analyze, vacuum=vacuum)
+
+    @admin
+    def hpc_embed(go: bool = False, pilot: Optional[int] = None,
+                  model: Optional[str] = None, dimensions: Optional[int] = None) -> dict:
+        """Drive the UCL-Myriad bulk-embed relay (export→ship→qsub→poll→fetch→import) as one
+        resumable, queue-aware, deadline-guarded job. DRY-RUN unless go=True — it prints the
+        plan + every remote command without touching the cluster; a paid GPU submission is
+        always explicit. Scoped by RAGLEX_EMBED_JURISDICTIONS. Needs SSH access to the
+        RAGLEX_HPC_HOST alias. Returns the started job (poll it for progress)."""
+        from .jobs import JobManager
+        params = {"go": go, "pilot": pilot, "model": model, "dimensions": dimensions}
+        return JobManager(facade, origin="mcp").start(
+            "hpc-embed", "HPC embed relay" + ("" if go else " (dry-run)"),
+            {k: v for k, v in params.items() if v is not None})
+
+    @admin
     def get_settings() -> dict:
         """View configured settings/credentials (secrets masked; shows env vs file)."""
         return facade.get_settings()
@@ -675,7 +724,8 @@ def build_server(config: Config | None = None) -> FastMCP:
         return {"summary": (first[:200] + ("…" if len(first) > 200 else "")),
                 "args": params}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True,
+                                          idempotentHint=False, openWorldHint=True))
     def maintenance(op: str = "help", args: Optional[dict] = None) -> dict:
         """The gated admin surface: harvesting, imports, watches, aliases, resolution,
         settings, probes, backfills — every operation that CHANGES the corpus, behind one

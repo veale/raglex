@@ -1,5 +1,6 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
+import { useAuth } from "./auth";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -1555,6 +1556,7 @@ function LiiLinks({ id }: { id: string }) {
 
 function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   { id: string; incoming: any[]; pinpoint?: string | null; oscola?: OscolaCite | null; landingUrl?: string; title?: string }) {
+  const { canWrite } = useAuth();  // gate per-paragraph "link authority" (＋) for readers
   const [body, , reloadBody] = useAsync(() => api.documentBody(id), [id]);
   // "original" pane: the stored source file (guidance PDF via the linkified pdf.js
   // viewer, styled BAILII HTML in a sandboxed frame) alongside the extracted text
@@ -1637,8 +1639,8 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
                 <span className="rail-line" />
               </span>
             )}
-            <a className="seg-plus" title="Link commentary or an authority to this paragraph"
-              onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>
+            {canWrite && <a className="seg-plus" title="Link commentary or an authority to this paragraph"
+              onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>}
             {sb.showLabel && <span className="seg-label">{s.label}</span>}
             <span className="seg-body">{sb.body}</span>
             {/* subtle per-sub-paragraph mention badges (art 47(1), s 3(1)(a)…) — additional
@@ -1835,6 +1837,9 @@ type SelInfo = {
 };
 
 function SelectionShorthand({ children, docId, onLinked }: { children: any; docId?: string; onLinked?: () => void }) {
+  // Linking-by-highlight mutates the citation graph → admins only. Flagging a passage is a
+  // reader-safe write, so it stays. (Both are enforced server-side too.)
+  const { canWrite } = useAuth();
   const ref = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<SelInfo | null>(null);
   const [mode, setMode] = useState<"menu" | "link" | "flag">("menu");
@@ -1932,7 +1937,7 @@ function SelectionShorthand({ children, docId, onLinked }: { children: any; docI
             <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
               {/* a shorthand rule wants a short phrase; hide Link for a long passage
                   selection (which is a flag-for-refinement, not an alias) */}
-              {sel.text.length <= 80 && (
+              {canWrite && sel.text.length <= 80 && (
                 <button style={{ flex: "0 0 auto" }} onClick={() => setMode("link")}>
                   🔖 Link “{sel.text.length > 24 ? sel.text.slice(0, 24) + "…" : sel.text}” to…</button>
               )}
@@ -2019,6 +2024,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
   // behind a subtle toggle so the reading surface stays uncluttered.
   const [showOpts, setShowOpts] = useState(false);
   const tray = useTray();
+  const { canWrite } = useAuth();  // readers get a read-only document view
   if (err) return <p className="err">{err}</p>;
   if (!doc) return <p className="muted loading-pulse">Loading…</p>;
   if (doc.error) return <p className="err">{doc.error}: {id}</p>;
@@ -2066,17 +2072,17 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         {showOpts && (
           <div className="opts-tray">
             <div className="row" style={{ alignItems: "flex-start" }}>
-              <Snowball seed={d.stable_id} onDone={reload} />
-              <button onClick={() => setEditing((e) => !e)} style={{ flex: "0 0 auto" }}>✎ {editing ? "cancel" : "fix metadata"}</button>
+              {canWrite && <Snowball seed={d.stable_id} onDone={reload} />}
+              {canWrite && <button onClick={() => setEditing((e) => !e)} style={{ flex: "0 0 auto" }}>✎ {editing ? "cancel" : "fix metadata"}</button>}
               <button onClick={() => openGraph(d.stable_id)} style={{ flex: "0 0 auto" }}>◴ View citation graph</button>
             </div>
             <p className="muted" style={{ marginTop: 8 }}>{d.ecli || d.stable_id} · {d.source}/{d.court} · {docTypeLabel(d.doc_type)}
               {" "}· added_by <b>{d.added_by}</b> · v{d.version} · {d.upstream_status}
               {d.landing_url && <> · <a href={d.landing_url} target="_blank" rel="noreferrer">open original ↗</a></>}</p>
-            {editing && <MetadataEditor d={d} onDone={() => { setEditing(false); reload(); }} />}
+            {editing && canWrite && <MetadataEditor d={d} onDone={() => { setEditing(false); reload(); }} />}
             <div>{(doc.tags || []).map((t: any, i: number) => (
               <span className="tag" key={i}>{t.tag} · {t.method}
-                {t.method === "manual" && <a title="remove tag" style={{ cursor: "pointer", marginLeft: 4 }}
+                {canWrite && t.method === "manual" && <a title="remove tag" style={{ cursor: "pointer", marginLeft: 4 }}
                   onClick={async () => { await api.untag(d.stable_id, t.tag); reload(); }}>✗</a>}
               </span>
             ))}</div>
@@ -2095,7 +2101,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
       {d.doc_type === "legislation" && <EffectsBanner id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <ChangesPanel id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <VersionPanel id={d.stable_id} open={open} />}
-      <AugmentPanel docId={d.stable_id} onDone={reload} pinAnchor={pinAnchor} clearPin={() => setPinAnchor("")} />
+      {canWrite && <AugmentPanel docId={d.stable_id} onDone={reload} pinAnchor={pinAnchor} clearPin={() => setPinAnchor("")} />}
       <div className="grid2">
         <div className="panel">
           <h3>Citations (outgoing) <span className="muted">— reclassify, re-point, or reject (✗) a wrong citation</span></h3>
@@ -2433,30 +2439,33 @@ function MetadataEditor({ d, onDone }: { d: any; onDone: () => void }) {
 // One citation edge with inline corrections: reclassify treatment, re-point to the
 // right document, or reject as a false positive (✗).
 function RelationRow({ r, open, onDone }: { r: any; open: (id: string) => void; onDone: () => void }) {
+  const { canWrite } = useAuth();  // readers see citations but cannot reclassify/re-point/reject
   const [repoint, setRepoint] = useState(false);
   const [dst, setDst] = useState("");
   async function correct(body: Record<string, unknown>) { await api.correctCitation({ relation_id: r.relation_id, ...body }); onDone(); }
   return (
     <tr>
       <td>
-        <select value={r.relationship_type} title="reclassify treatment"
-          onChange={(e) => correct({ treatment: e.target.value })}
-          style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer" }}>
-          {[...new Set([r.relationship_type, ...TREATMENTS])].map((t) => <option key={t}>{t}</option>)}
-        </select>
+        {canWrite ? (
+          <select value={r.relationship_type} title="reclassify treatment"
+            onChange={(e) => correct({ treatment: e.target.value })}
+            style={{ background: "transparent", border: "none", color: "inherit", cursor: "pointer" }}>
+            {[...new Set([r.relationship_type, ...TREATMENTS])].map((t) => <option key={t}>{t}</option>)}
+          </select>
+        ) : <span>{r.relationship_type}</span>}
         {r.extracted_via === "manual" && <span className="muted" title="human-corrected"> ✎</span>}
       </td>
       <td>{r.dst_id ? <a onClick={() => open(r.dst_id)}>{r.dst_id}</a> : <span className="muted">{r.raw_citation_string}</span>}
         {r.dst_anchor && <span className="muted"> ◆ {r.dst_anchor}</span>}</td>
       <td className="muted">{r.resolution_status}</td>
-      <td style={{ whiteSpace: "nowrap" }}>
+      {canWrite && <td style={{ whiteSpace: "nowrap" }}>
         <a title="re-point to the correct document" style={{ cursor: "pointer" }} onClick={() => setRepoint((v) => !v)}>⤳</a>{" "}
         <a title="reject as a false positive" style={{ cursor: "pointer" }} onClick={() => correct({ suppress: true })}>✗</a>
         {repoint && <div className="row" style={{ marginTop: 4 }}>
           <input value={dst} onChange={(e) => setDst(e.target.value)} placeholder="correct stable_id" style={{ minWidth: 180 }} />
           <button style={{ flex: "0 0 auto" }} onClick={() => dst && correct({ dst_id: dst })}>set</button>
         </div>}
-      </td>
+      </td>}
     </tr>
   );
 }

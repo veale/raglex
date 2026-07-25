@@ -102,3 +102,26 @@ def test_embed_strips_nul_bytes_that_would_otherwise_abort_the_job(facade):
     assert stats["documents"] == 1
     hits = facade.search("stray NUL byte", k=3)
     assert any(h["doc_id"] == "a/1" for h in hits)
+
+
+def test_embed_jurisdiction_scope_limits_the_queue(facade, tmp_path):
+    """RAGLEX_EMBED_JURISDICTIONS scopes both the embed pass and the backlog gauge to the
+    chosen jurisdictions' sources (indexing the whole corpus is infeasible on a small box)."""
+    with facade._open() as (cat, _rs, ts):
+        for sid, src in [("uk/1", "uk-caselaw"), ("us/1", "us-caselaw"), ("eu/1", "eu-cellar")]:
+            ph = sid.encode().hex()[:16]
+            cat.upsert_document(Record(
+                source=src, stable_id=sid, doc_type=DocType.JUDGMENT, title=sid,
+                raw_bytes=b"body text here", raw_ext="txt", payload_hash=ph, text="body text here",
+                extracted_via=ExtractedVia.SCRAPE, added_by=AddedBy.USER),
+                text_path=str(ts.put(ph, "body text here")))
+    # unset → whole corpus
+    assert facade.embed_source_scope() is None
+    assert facade.embedding_backlog()["pending"] == 3
+    # scope to the US → only the us-caselaw doc is queued
+    facade.update_settings({"RAGLEX_EMBED_JURISDICTIONS": "United States"})
+    scope = facade.embed_source_scope()
+    assert scope is not None and "us-caselaw" in scope and "uk-caselaw" not in scope
+    assert facade.embedding_backlog()["pending"] == 1
+    stats = facade.embed()
+    assert stats["documents"] == 1  # only the in-scope document was embedded

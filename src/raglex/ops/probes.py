@@ -186,7 +186,7 @@ def probe_resolved_dst_missing(cat) -> ProbeResult:
         "resolved_dst_missing",
         "edges marked resolved whose target document does not exist — a broken "
         "invariant (resolution must only ever point at real nodes)",
-        "critical", n, samples)
+        "critical", n, samples, repairable=True)
 
 
 def probe_pending_but_held(cat) -> ProbeResult:
@@ -441,7 +441,7 @@ def probe_duplicate_spans(cat) -> ProbeResult:
         "duplicate_spans",
         "multiple citation rows on the identical char span of one document — "
         "double extraction (each inflates counts once)",
-        "info", n, samples)
+        "info", n, samples, repairable=True)
 
 
 PROBES = (
@@ -538,6 +538,36 @@ def repair_self_citation(cat) -> dict:
     return {"self_edges_deleted": cur.rowcount}
 
 
+def repair_resolved_dst_missing(cat) -> dict:
+    """REOPEN (not delete) edges resolved to a document that no longer exists — set them back
+    to 'pending' and clear the dead dst_id so the next resolve pass re-points them (or they
+    surface as an honest hanging reference). Non-destructive: the citation edge is real; only
+    its stale target is dropped. Bounded to the probe's own predicate; re-runnable."""
+    with cat._atomic():
+        cur = cat.conn.execute(
+            "UPDATE relations SET resolution_status = 'pending', dst_id = NULL "
+            "WHERE resolution_status = 'resolved' AND dst_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM documents d WHERE d.stable_id = relations.dst_id)")
+    return {"edges_reopened": cur.rowcount}
+
+
+def repair_duplicate_spans(cat) -> dict:
+    """De-duplicate citation rows extracted twice on the IDENTICAL (src, char_start, char_end)
+    span — keep the lowest citation_id, drop the exact duplicates. Safe because the surviving
+    row carries the same candidate/pinpoint, so any inferred edge keyed on that triple stays
+    intact; only the count-inflating copies go. Bounded; re-runnable.
+
+    After repair, run rebuild-citation-counts (the roll-up still holds the duplicate
+    occurrences until rebuilt)."""
+    with cat._atomic():
+        cur = cat.conn.execute(
+            "DELETE FROM citations WHERE char_start IS NOT NULL AND citation_id > "
+            "(SELECT MIN(c2.citation_id) FROM citations c2 "
+            " WHERE c2.src_id = citations.src_id AND c2.char_start = citations.char_start "
+            " AND c2.char_end = citations.char_end)")
+    return {"duplicate_citations_deleted": cur.rowcount}
+
+
 REPAIRS = {
     "case_paragraph_carry_forward": repair_case_paragraph_carry_forward,
     "judgment_paragraph_carry_forward": repair_judgment_paragraph_carry_forward,
@@ -547,6 +577,10 @@ REPAIRS = {
     # deserves eyes before deletion — so no blind repair for it.
     "self_citation": repair_self_citation,
     "misdated_case": repair_misdated_case,
+    # non-destructive: reopen edges whose resolved target vanished
+    "resolved_dst_missing": repair_resolved_dst_missing,
+    # exact-span dedup of double-extracted citations
+    "duplicate_spans": repair_duplicate_spans,
 }
 
 

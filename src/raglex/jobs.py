@@ -48,6 +48,8 @@ SINGLETON_KINDS = frozenset({
     "canlii-enrich",
     # only ever one indexing pass: two would race over the same pending_embedding queue
     "embed",
+    # one Myriad relay at a time — two would ship/submit/import over the same shard dir
+    "hpc-embed",
 })
 MAX_CONCURRENT_JOBS = 6
 # Keyed jobs deduped by (kind, params): don't start an IDENTICAL one while it's in flight,
@@ -83,6 +85,56 @@ AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 # All three write the citations table; a re-anchor and a rescan of the SAME source must
 # not run at once (they'd race the same offsets), but disjoint sources may.
 _SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations"})
+
+
+# Kinds that GROW the corpus (new documents/edges) and therefore stale the derived layers —
+# the embedding index, the citation-count roll-up, and the authority/PageRank scores. After
+# one of these finishes, ``_chain_postprocess`` refreshes those layers. The follow-ups
+# themselves are excluded, so there is no rebuild→rebuild loop.
+CHAIN_TRIGGER_KINDS = frozenset({
+    "harvest-source", "harvest-all", "auto-drain", "expand-citing", "radiate", "seed-text",
+    "refresh-category", "pull-ag-opinions", "harvest-echr", "canlii-enrich",
+    "import-bailii-corpus", "import-bailii-zip", "import-bailii-dir", "import-bailii-parquet",
+    "import-indian-sci", "import-sg-seed", "import-westlaw-zip", "import-westlaw-dir",
+    "import-caselaw-zip", "import-caselaw-dir", "reparse-source", "finish-bulk-postprocess",
+})
+# (follow-up kind, min seconds since its last completion before re-running). embed is cheap
+# and incremental; the count roll-up is moderate; PageRank walks the whole graph, so it gets
+# the longest cool-down. Overridable via RAGLEX_POSTPROCESS_COOLDOWN_S (scales all three).
+_COOLDOWN_SCALE = float(os.environ.get("RAGLEX_POSTPROCESS_COOLDOWN_S") or 0) or None
+CHAIN_FOLLOWUPS = (
+    ("embed", _COOLDOWN_SCALE or 300.0),
+    ("rebuild-citation-counts", _COOLDOWN_SCALE or 1200.0),
+    ("rebuild-authority", _COOLDOWN_SCALE or 1800.0),
+)
+
+
+def _parse_iso(ts: str) -> float:
+    """Epoch seconds from a stored ISO timestamp; 0 (→ "long ago") if unparseable."""
+    if not ts:
+        return 0.0
+    try:
+        s = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _job_did_work(result: dict | None) -> bool:
+    """Whether a completed job produced net-new corpus work worth re-deriving layers for.
+    Conservative: unrecognised result shapes count as work (the cool-down still bounds churn);
+    only an explicit all-zero on the known counters is treated as a no-op."""
+    if not isinstance(result, dict):
+        return True
+    keys = ("stored", "imported", "new", "added", "documents", "fetched", "harvested",
+            "resolved", "count", "enriched", "reparsed", "updated")
+    seen = [result.get(k) for k in keys if isinstance(result.get(k), (int, float))]
+    if not seen:
+        return True
+    return any(v > 0 for v in seen)
 
 
 def scheduler_paused() -> bool:
@@ -121,6 +173,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _now_iso_offset(delta_s: float) -> str:
+    """ISO timestamp ``delta_s`` seconds from now (negative = in the past), for staleness
+    cutoffs compared against the stored ISO lease heartbeats."""
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) + timedelta(seconds=delta_s)).isoformat()
+
+
 def _age_seconds(iso: str | None) -> float:
     if not iso:
         return 0.0
@@ -153,6 +212,11 @@ def fmt_progress(p: dict) -> str:
 
 # kind → the facade call it names. Persisting (kind, params) instead of a closure is what
 # makes a job survive the process that started it.
+def _hpc_embed(facade, params, on_progress, cancel_check):
+    from .hpc_orchestrator import run_hpc_embed
+    return run_hpc_embed(facade, params, on_progress, cancel_check)
+
+
 RUNNERS: dict[str, Callable] = {
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
         source=p.get("source"), run_id=p.get("_resume_run_id"),
@@ -217,6 +281,9 @@ RUNNERS: dict[str, Callable] = {
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
+    # Drive the whole UCL-Myriad bulk-embed relay (export→ship→qsub→poll→fetch→import) as one
+    # resumable, queue-aware, deadline-guarded job. Dry-run unless params has go=True.
+    "hpc-embed": lambda f, p, cb, cancel: _hpc_embed(f, p, cb, cancel),
     # Decorate held Canadian decisions with CanLII metadata + citator edges —
     # budget-metered, resumable (each checked case is stamped, so a re-run walks on).
     "canlii-enrich": lambda f, p, cb, cancel: f.canlii_enrich(
@@ -257,6 +324,27 @@ class JobManager:
                 if row["kind"] in AUTO_RESUME_KINDS and not row["cancel"]:
                     self._resume_row(row)
         return n
+
+    def reap_stalled(self, *, auto_resume: bool = True) -> int:
+        """Reap jobs whose owning process stopped pulsing (a slept/woke or crashed container)
+        without waiting for that container to restart, and prune the finished-job backlog so
+        the table (and the Jobs panel / worklist that scan it) stays fast. Safe to call from
+        any process on a cadence."""
+        cutoff = _now_iso_offset(-max(STALL_SECONDS * 5, 600.0))
+        with self.facade._open() as (cat, _rs, _ts):
+            rows = [dict(r) for r in cat.reap_stalled_jobs(cutoff)]
+            cat.prune_jobs()
+        if rows:
+            log.info("reaped %d stalled job(s): %s", len(rows),
+                     ", ".join(sorted({r["kind"] for r in rows})))
+        if auto_resume:
+            for row in rows:
+                if row["kind"] in AUTO_RESUME_KINDS and not row.get("cancel"):
+                    try:
+                        self._resume_row(row)
+                    except Exception:  # noqa: BLE001
+                        log.exception("could not resume reaped job %s", row.get("job_id"))
+        return len(rows)
 
     def _max_concurrent(self) -> int:
         """How many jobs run at once — UI-configurable (RAGLEX_MAX_CONCURRENT_JOBS), so a
@@ -447,12 +535,44 @@ class JobManager:
             finished = None
         if finished and finished.get("restart_requested"):
             self._resume_row(finished)
+        # A corpus-growing job just finished → refresh the derived layers (embed index,
+        # citation-count roll-up, authority/PageRank) so search + ranking stay current
+        # without anyone remembering to click "rebuild". Debounced so a busy import doesn't
+        # rebuild PageRank on every batch.
+        if status == "done":
+            try:
+                self._chain_postprocess(kind, result)
+            except Exception:  # noqa: BLE001
+                log.exception("post-process chaining after job %s failed", job_id)
         # A slot just freed → promote the next queued job(s). Best-effort: the scheduler
         # tick also promotes, so a failure here self-heals within a tick.
         try:
             self.promote_queued()
         except Exception:  # noqa: BLE001
             log.exception("promote_queued after job %s failed", job_id)
+
+    def _chain_postprocess(self, kind: str, result: dict | None) -> None:
+        """After a corpus-growing job, enqueue the derived-layer refreshes it invalidates.
+
+        Each follow-up is a singleton (so duplicates coalesce) and time-debounced against its
+        own last completion, so continuous harvesting refreshes PageRank periodically rather
+        than back-to-back. Skipped when the trigger job did no net work."""
+        if kind not in CHAIN_TRIGGER_KINDS or not _job_did_work(result):
+            return
+        now = time.time()
+        for follow, cooldown in CHAIN_FOLLOWUPS:
+            try:
+                with self.facade._open() as (cat, _rs, _ts):
+                    if cat.running_jobs(follow) or any(
+                            q["kind"] == follow for q in cat.queued_jobs()):
+                        continue  # already pending → it'll pick up the new work
+                    recent = cat.recent_job_results(follow, limit=1)
+                    last = recent[0]["finished_at"] if recent else None
+                if last and (now - _parse_iso(last)) < cooldown:
+                    continue  # ran recently enough
+                self.start(follow, f"auto: {follow} after {kind}", {}, queue=True)
+            except Exception:  # noqa: BLE001 — one follow-up failing must not block others
+                log.exception("could not chain %s", follow)
 
     # -- reads -------------------------------------------------------------
     @staticmethod

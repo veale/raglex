@@ -1030,3 +1030,43 @@ table { width: 100%; }
 
 .msnip[role="button"] { cursor: pointer; }
 .msnip[role="button"]:hover { background: var(--inset); }
+
+/* -- Auth: login gate + header role badge (§8) ------------------------------ */
+.login-screen {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 20px; z-index: 1000;
+}
+.login-card {
+  width: 100%; max-width: 360px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 28px 26px; box-shadow: 0 8px 40px rgba(0,0,0,0.18);
+}
+.login-card h1 { margin: 0 0 2px; font-size: 26px; color: var(--accent); }
+.login-sub { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+.login-card form { display: flex; gap: 8px; }
+.login-card input {
+  flex: 1; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--inset); color: var(--text); font-size: 14px;
+}
+.login-card form button, .login-passkey {
+  padding: 9px 14px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+  background: var(--accent); color: var(--base, #fff); font-weight: 600; font-size: 14px;
+}
+.login-card form button:disabled { opacity: 0.5; cursor: default; }
+.login-passkey {
+  width: 100%; margin-top: 10px; background: transparent; color: var(--text);
+}
+.login-err { margin-top: 12px; color: var(--bad); font-size: 13px; }
+.login-note { margin: 16px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+
+.auth-badge { display: inline-flex; align-items: center; gap: 7px; margin-left: 10px; }
+.auth-role {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700;
+  padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line);
+}
+.auth-role-admin { color: var(--ctp-green); border-color: color-mix(in srgb, var(--ctp-green) 45%, transparent); }
+.auth-role-reader { color: var(--ctp-blue); border-color: color-mix(in srgb, var(--ctp-blue) 45%, transparent); }
+.auth-signout {
+  font-size: 11px; background: transparent; border: none; color: var(--muted);
+  cursor: pointer; text-decoration: underline;
+}
+.auth-signout:hover { color: var(--text); }

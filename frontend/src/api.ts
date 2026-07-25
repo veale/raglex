@@ -11,16 +11,35 @@ function apiToken(): string | null {
   try { return localStorage.getItem("raglex-api-token"); } catch { return null; }
 }
 
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+// The CSRF nonce the server bound to our session cookie, mirrored to a readable cookie at
+// login. Mutating requests must echo it; reads don't need it.
+function csrfToken(): string {
+  const m = document.cookie.match(/(?:^|;\s*)raglex_csrf=([^;]+)/);
+  if (m) return decodeURIComponent(m[1]);
+  return "1";  // IP-allow-listed sessions carry no nonce; header presence is the signal
+}
+
+function isWrite(method?: string): boolean {
+  const m = (method || "GET").toUpperCase();
+  return m !== "GET" && m !== "HEAD" && m !== "OPTIONS";
+}
+
+function authHeaders(extra: Record<string, string> = {}, method?: string): Record<string, string> {
   const token = apiToken();
-  return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra };
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(isWrite(method) ? { "X-Raglex-CSRF": csrfToken() } : {}),
+    ...extra,
+  };
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: authHeaders({ "Content-Type": "application/json", ...(init?.headers as Record<string, string> || {}) }),
+    credentials: "include",  // carry the session cookie (same-origin by default; explicit for CORS deploys)
+    headers: authHeaders({ "Content-Type": "application/json", ...(init?.headers as Record<string, string> || {}) }, init?.method),
   });
+  if (res.status === 401) { window.dispatchEvent(new CustomEvent("raglex-unauthenticated")); }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
 }
@@ -28,10 +47,34 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 // Multipart POST (file upload) — same auth, but let the browser set the multipart
 // Content-Type + boundary, so don't pass one.
 async function postForm(path: string, fd: FormData): Promise<any> {
-  const res = await fetch(`${BASE}${path}`, { method: "POST", body: fd, headers: authHeaders() });
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST", body: fd, credentials: "include", headers: authHeaders({}, "POST"),
+  });
+  if (res.status === 401) { window.dispatchEvent(new CustomEvent("raglex-unauthenticated")); }
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json();
 }
+
+// Auth surface (see src/raglex/web/auth.py). `me` tells the SPA whether enforcement is on
+// and at what role; login/logout manage the session cookie.
+export interface AuthMe {
+  authenticated: boolean; role: "anon" | "reader" | "admin"; method?: string;
+  enforced: boolean; csrf?: string | null; can_elevate?: boolean; passkey_supported?: boolean;
+}
+export const auth = {
+  me: () => req<AuthMe>("/auth/me"),
+  login: (password: string) =>
+    req<{ role: string; csrf?: string; error?: string }>("/auth/login",
+      { method: "POST", body: JSON.stringify({ password }) }),
+  logout: () => req<{ ok: boolean }>("/auth/logout", { method: "POST", body: "{}" }),
+  passkeyLoginOptions: () => req<any>("/auth/webauthn/login/options", { method: "POST", body: "{}" }),
+  passkeyLoginVerify: (cred: any) =>
+    req<{ role: string; csrf?: string }>("/auth/webauthn/login/verify",
+      { method: "POST", body: JSON.stringify(cred) }),
+  passkeyRegisterOptions: () => req<any>("/auth/webauthn/register/options", { method: "POST", body: "{}" }),
+  passkeyRegisterVerify: (cred: any) =>
+    req<any>("/auth/webauthn/register/verify", { method: "POST", body: JSON.stringify(cred) }),
+};
 
 export interface Hit {
   doc_id: string; ecli: string | null; title: string | null; court: string | null;

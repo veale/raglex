@@ -4,6 +4,20 @@ import { ExploreView } from "./explore";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
+import { useAuth } from "./auth";
+
+// A compact role badge + sign-out in the header, shown only when auth is enforced. Admins
+// see nothing to elevate; a reader can sign out and back in as admin.
+function AuthBadge() {
+  const { enforced, role, logout } = useAuth();
+  if (!enforced) return null;
+  return (
+    <span className="auth-badge" title={`Signed in as ${role}`}>
+      <span className={`auth-role auth-role-${role}`}>{role}</span>
+      <button className="auth-signout" onClick={() => logout()} title="Sign out">sign out</button>
+    </span>
+  );
+}
 
 // Tiny live connection indicator in the header — so a slow first query (cold DB after a
 // restart) reads as "connecting", never a frozen blank app.
@@ -165,9 +179,12 @@ export function App() {
     }
   }, [tab, docId, pinpoint]);
 
-  const tabs: [Tab, string][] = [
-    ["explore", "Explore"], ["search", "Search"], ["admin", "Admin"], ["settings", "Settings"],
-  ];
+  // A reader gets a read-only research interface: no admin/maintain, no settings. These are
+  // also enforced server-side (src/raglex/web/auth.py) — hiding them is only affordance.
+  const { isAdmin } = useAuth();
+  const tabs: [Tab, string][] = isAdmin
+    ? [["explore", "Explore"], ["search", "Search"], ["admin", "Admin"], ["settings", "Settings"]]
+    : [["explore", "Explore"], ["search", "Search"]];
   return (
     <PeekProvider>
     <TrayProvider>
@@ -190,6 +207,7 @@ export function App() {
             <button className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>Graph</button>}
         </nav>
         <ThemeSwitch />
+        <AuthBadge />
       </header>
       {/* Explore and Search stay MOUNTED once visited, merely hidden — their
           results and facet state are local, so unmounting them would mean "back"
@@ -204,15 +222,15 @@ export function App() {
           <SearchView open={open} initialFilter={corpusFilter} />
         </div>
       )}
-      {tab === "admin" && <AdminView open={open} navigate={navigateCorpus} />}
-      {tab === "settings" && <SettingsView />}
+      {tab === "admin" && isAdmin && <AdminView open={open} navigate={navigateCorpus} />}
+      {tab === "settings" && isAdmin && <SettingsView />}
       {tab === "document" && docId && <DocumentView id={docId} open={open} openGraph={openGraph} pinpoint={pinpoint} />}
       {tab === "graph" && graphId && <GraphView focusId={graphId} open={open} />}
     </div>
     <PeekPanel open={open} />
     <TrayStack open={open} />
     <EscapeCloser />
-    <JobsPanel />
+    {isAdmin && <JobsPanel />}
     <CommandPalette open={open} />
     <CiteHoverLayer />
     </TrayProvider>

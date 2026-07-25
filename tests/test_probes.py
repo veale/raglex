@@ -115,6 +115,49 @@ def test_self_citation_repair(catalogue):
     assert run_probes(catalogue, only=["self_citation"])[0].count == 0
 
 
+def test_resolved_dst_missing_repair_reopens_not_deletes(catalogue):
+    catalogue.conn.execute(
+        "INSERT INTO documents (stable_id, source, doc_type, title, version, is_latest, "
+        "has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+        "VALUES ('doc/a','t','judgment','A',1,1,1,0,'harvest','[]','live','2026-01-01')")
+    # one edge resolved to a vanished target, one to a real one
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, candidate_id, resolution_status, "
+        "relationship_type, extracted_via) VALUES ('doc/a','doc/ghost','doc/ghost','resolved','cites','regex')")
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, dst_id, candidate_id, resolution_status, "
+        "relationship_type, extracted_via) VALUES ('doc/a','doc/a','doc/a','resolved','cites','regex')")
+    catalogue.conn.commit()
+    assert run_probes(catalogue, only=["resolved_dst_missing"])[0].count == 1
+    assert run_repair(catalogue, "resolved_dst_missing") == {"edges_reopened": 1}
+    # the ghost edge is reopened (not deleted); the valid edge is untouched
+    ghost = catalogue.conn.execute(
+        "SELECT resolution_status, dst_id FROM relations WHERE candidate_id='doc/ghost'").fetchone()
+    assert ghost["resolution_status"] == "pending" and ghost["dst_id"] is None
+    assert catalogue.conn.execute(
+        "SELECT resolution_status FROM relations WHERE dst_id='doc/a'").fetchone()["resolution_status"] == "resolved"
+    assert run_probes(catalogue, only=["resolved_dst_missing"])[0].count == 0
+
+
+def test_duplicate_spans_repair_dedups_exact_spans(catalogue):
+    catalogue.conn.execute(
+        "INSERT INTO documents (stable_id, source, doc_type, title, version, is_latest, "
+        "has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+        "VALUES ('doc/a','t','judgment','A',1,1,1,0,'harvest','[]','live','2026-01-01')")
+    for _ in range(3):  # same span extracted three times
+        catalogue.conn.execute(
+            "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, char_start, char_end, "
+            "method, created_at) VALUES ('doc/a','X','case','doc/x',10,20,'grammar','2026-01-01')")
+    catalogue.conn.execute(  # a distinct span survives untouched
+        "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, char_start, char_end, "
+        "method, created_at) VALUES ('doc/a','Y','case','doc/y',30,40,'grammar','2026-01-01')")
+    catalogue.conn.commit()
+    assert run_probes(catalogue, only=["duplicate_spans"])[0].count == 1
+    assert run_repair(catalogue, "duplicate_spans") == {"duplicate_citations_deleted": 2}
+    assert catalogue.conn.execute("SELECT COUNT(*) AS n FROM citations").fetchone()["n"] == 2
+    assert run_probes(catalogue, only=["duplicate_spans"])[0].count == 0
+
+
 def test_anachronistic_eu_citation_probe_and_repair(catalogue):
     for sid, when in [("old/1902", "1902-10-07"), ("new/2020", "2020-01-01")]:
         catalogue.conn.execute(

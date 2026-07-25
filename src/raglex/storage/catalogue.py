@@ -1315,6 +1315,140 @@ class Catalogue:
             total, tables = int(row["n"] or 0), []
         return {"database_bytes": int(total), "tables": tables}
 
+    def db_health(self) -> dict:
+        """A read-only diagnostic for "the whole thing is sluggish": planner-stat freshness,
+        bloat (dead tuples), seq-scan-heavy tables (missing-index hints), unused indexes,
+        buffer-cache hit ratio, connection pressure, and the longest-running queries.
+
+        Postgres-only substance; SQLite returns a minimal stub. Everything here reads system
+        catalogs/stat views — no locks, no writes."""
+        if self.backend != "postgres":
+            return {"backend": self.backend, "note": "detailed health metrics are Postgres-only",
+                    **self.storage_size()}
+        c = self.conn
+
+        def rows(sql, params=()):
+            try:
+                return [dict(r) for r in c.execute(sql, params).fetchall()]
+            except Exception as exc:  # noqa: BLE001 — a missing view must not break the report
+                return [{"error": str(exc)}]
+
+        def one(sql, params=()):
+            r = rows(sql, params)
+            return r[0] if r else {}
+
+        cache = one(
+            "SELECT sum(heap_blks_hit) AS hit, sum(heap_blks_read) AS read "
+            "FROM pg_statio_user_tables")
+        hit, read = (cache.get("hit") or 0), (cache.get("read") or 0)
+        cache_hit_ratio = round(hit / (hit + read), 4) if (hit + read) else None
+
+        # tables ordered by how often the planner falls back to a full scan — the classic
+        # missing-index tell — but only where the table is big enough for it to matter.
+        seq_heavy = rows(
+            """
+            SELECT relname AS table, seq_scan, idx_scan, n_live_tup AS live_rows,
+                   n_dead_tup AS dead_rows,
+                   CASE WHEN n_live_tup > 0 THEN round(n_dead_tup::numeric / n_live_tup, 3) END AS dead_ratio,
+                   to_char(last_analyze, 'YYYY-MM-DD HH24:MI') AS last_analyze,
+                   to_char(last_autoanalyze, 'YYYY-MM-DD HH24:MI') AS last_autoanalyze,
+                   to_char(last_autovacuum, 'YYYY-MM-DD HH24:MI') AS last_autovacuum
+            FROM pg_stat_user_tables
+            WHERE n_live_tup > 10000 AND seq_scan > COALESCE(idx_scan, 0)
+            ORDER BY seq_scan DESC LIMIT 12
+            """)
+        bloated = rows(
+            """
+            SELECT relname AS table, n_dead_tup AS dead_rows, n_live_tup AS live_rows,
+                   round(n_dead_tup::numeric / NULLIF(n_live_tup, 0), 3) AS dead_ratio
+            FROM pg_stat_user_tables
+            WHERE n_dead_tup > 50000 AND n_dead_tup > n_live_tup * 0.2
+            ORDER BY n_dead_tup DESC LIMIT 12
+            """)
+        unused_indexes = rows(
+            """
+            SELECT relname AS table, indexrelname AS index, idx_scan AS scans,
+                   pg_size_pretty(pg_relation_size(indexrelid)) AS size
+            FROM pg_stat_user_indexes s
+            JOIN pg_index i ON i.indexrelid = s.indexrelid
+            WHERE idx_scan < 50 AND NOT i.indisunique AND NOT i.indisprimary
+              AND pg_relation_size(indexrelid) > 5 * 1024 * 1024
+            ORDER BY pg_relation_size(indexrelid) DESC LIMIT 12
+            """)
+        conns = one(
+            "SELECT count(*) AS total, "
+            "count(*) FILTER (WHERE state = 'active') AS active, "
+            "count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_txn "
+            "FROM pg_stat_activity WHERE datname = current_database()")
+        long_running = rows(
+            """
+            SELECT pid, state, round(extract(epoch FROM (now() - query_start))) AS seconds,
+                   left(regexp_replace(query, '\\s+', ' ', 'g'), 140) AS query
+            FROM pg_stat_activity
+            WHERE datname = current_database() AND state <> 'idle'
+              AND query_start < now() - interval '30 seconds'
+              AND pid <> pg_backend_pid()
+            ORDER BY query_start ASC LIMIT 8
+            """)
+        max_conns = one("SHOW max_connections").get("max_connections")
+
+        hints = []
+        if cache_hit_ratio is not None and cache_hit_ratio < 0.98:
+            hints.append(f"buffer-cache hit ratio is {cache_hit_ratio:.1%} (<98%) — "
+                         "shared_buffers may be undersized for the working set")
+        stale = [t["table"] for t in seq_heavy
+                 if not t.get("last_analyze") and not t.get("last_autoanalyze")]
+        if stale:
+            hints.append("never-analyzed large tables (stale planner stats → bad plans): "
+                         + ", ".join(stale[:6]) + " — run db_maintenance(analyze=true)")
+        if bloated:
+            hints.append("bloated tables (dead tuples > 20% of live): "
+                         + ", ".join(t["table"] for t in bloated[:6])
+                         + " — run db_maintenance(vacuum=true) or tune autovacuum")
+        if seq_heavy:
+            hints.append("sequential-scan-heavy large tables (possible missing index): "
+                         + ", ".join(t["table"] for t in seq_heavy[:6]))
+        if unused_indexes:
+            hints.append(f"{len(unused_indexes)} large rarely-used index(es) — dead weight on "
+                         "writes/VACUUM; review before dropping")
+
+        return {
+            "backend": "postgres",
+            "cache_hit_ratio": cache_hit_ratio,
+            "connections": {**conns, "max": int(max_conns) if max_conns else None},
+            "seq_scan_heavy_tables": seq_heavy,
+            "bloated_tables": bloated,
+            "unused_indexes": unused_indexes,
+            "long_running_queries": long_running,
+            "hints": hints or ["no obvious issues — planner stats fresh, low bloat, healthy cache"],
+            **self.storage_size(),
+        }
+
+    def db_analyze(self, *, vacuum: bool = False) -> dict:
+        """Refresh planner statistics (ANALYZE), optionally reclaiming bloat too
+        (VACUUM ANALYZE). ANALYZE is cheap and safe; the biggest single lever for a corpus
+        that grew a lot between the planner's last look. VACUUM is heavier but online (no
+        exclusive lock). No-op on SQLite beyond its own ANALYZE."""
+        if self.backend != "postgres":
+            self.conn.execute("ANALYZE")
+            self.conn.commit()
+            return {"backend": self.backend, "analyzed": True, "vacuumed": False}
+        # VACUUM/ANALYZE cannot run inside a transaction block; use autocommit on the raw conn.
+        raw = getattr(self.conn, "raw", None)
+        stmt = "VACUUM (ANALYZE)" if vacuum else "ANALYZE"
+        if raw is not None:
+            old = raw.autocommit
+            try:
+                raw.autocommit = True
+                with raw.cursor() as cur:
+                    cur.execute(stmt)
+            finally:
+                raw.autocommit = old
+        else:
+            self.conn.execute(stmt)
+            self.conn.commit()
+        return {"backend": "postgres", "analyzed": True, "vacuumed": bool(vacuum)}
+
     def refresh_source_stats(self) -> int:
         """Recompute the per-source resolved-outgoing roll-up (one heavy aggregate,
         on the citation-counts cadence — never inline in a page load)."""
@@ -3430,20 +3564,33 @@ class Catalogue:
         self.conn.commit()
 
     # -- embeddings + chunk index (§6b/§6c) --------------------------------
-    def pending_embedding(self, provider: str, model: str, model_version: str) -> list[sqlite3.Row]:
+    def pending_embedding(self, provider: str, model: str, model_version: str,
+                          *, sources: list[str] | None = None) -> list[sqlite3.Row]:
         """Documents with text but no vectors in this embedding family (§6). A
-        model swap is a new family, so it naturally re-queues the whole corpus."""
+        model swap is a new family, so it naturally re-queues the whole corpus.
+
+        ``sources`` scopes the queue to those source keys (the resolution of the
+        RAGLEX_EMBED_JURISDICTIONS setting) so an operator can index only the jurisdictions
+        that matter instead of the whole multi-million-doc corpus. ``None`` = no scope;
+        an empty list = scope to nothing (embed no documents)."""
+        src_clause, params = "", [provider, model, model_version]
+        if sources is not None:
+            if not sources:
+                src_clause = " AND 1 = 0"  # explicit empty scope → nothing to embed
+            else:
+                src_clause = f" AND d.source IN ({','.join('?' * len(sources))})"
+                params.extend(sources)
         return self.conn.execute(
-            """
+            f"""
             SELECT * FROM documents d
             WHERE d.has_text = 1 AND d.text_path IS NOT NULL
               AND NOT EXISTS (
                 SELECT 1 FROM embeddings e
                 WHERE e.doc_id = d.stable_id AND e.provider = ?
                   AND e.model = ? AND e.model_version = ?
-              )
+              ){src_clause}
             """,
-            (provider, model, model_version),
+            tuple(params),
         ).fetchall()
 
     def _insert_returning(self, sql: str, params, id_col: str) -> int:
@@ -4229,6 +4376,28 @@ class Catalogue:
             (keep,),
         )
         self.conn.commit()
+
+    def reap_stalled_jobs(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        """Mark 'running' jobs whose owning process has stopped pulsing (lease heartbeat older
+        than ``cutoff_iso``, or never leased) as interrupted, and return the affected rows.
+
+        Cross-process safe: the lease heartbeat is refreshed every ~30s by a live worker's
+        pulse thread, so a lease this stale means the process behind the job is gone/frozen —
+        regardless of which container owns it. This is what stops a slept-then-woke host from
+        leaving a ghost 'running' forever without waiting for that container to restart."""
+        rows = self.conn.execute(
+            "SELECT * FROM jobs WHERE status = 'running' "
+            "AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < ?)",
+            (cutoff_iso,),
+        ).fetchall()
+        if rows:
+            self.conn.execute(
+                "UPDATE jobs SET status = 'interrupted', finished_at = ? "
+                "WHERE status = 'running' AND (lease_heartbeat_at IS NULL OR lease_heartbeat_at < ?)",
+                (_now(), cutoff_iso),
+            )
+            self.conn.commit()
+        return rows
 
     def recent_job_results(self, kind: str, *, limit: int = 20) -> list[sqlite3.Row]:
         """The last N outcomes for one job kind — the substrate for "auto-drain has stored

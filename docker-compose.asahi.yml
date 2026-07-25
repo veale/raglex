@@ -20,14 +20,48 @@
 # Override the image tag / DB password without editing this file via a .env beside it:
 #   RAGLEX_IMAGE=ghcr.io/veale/raglex:latest
 #   POSTGRES_PASSWORD=raglex
-#   RAGLEX_API_TOKEN=…            # require a bearer token on the API + MCP
+#   RAGLEX_API_TOKEN=…            # admin bearer token for programmatic API/MCP clients
 #   RAGLEX_ALERT_WEBHOOK=…        # push alerts (ntfy/Discord/Slack)
+#
+# Web-app access control (§8 hardening) — all opt-in; unset = open (dev only):
+#   RAGLEX_ADMIN_PASSWORD=…       # full access (or RAGLEX_ADMIN_PASSWORD_HASH via `raglex hash-password`)
+#   RAGLEX_READER_PASSWORD=…      # read-only interface (or RAGLEX_READER_PASSWORD_HASH)
+#   RAGLEX_ADMIN_IPS=…            # comma/CIDR list → full access without a password
+#   RAGLEX_READER_IPS=…           # comma/CIDR list → read-only without a password
+#   RAGLEX_TRUST_FORWARDED=1      # honour X-Forwarded-For (set ONLY behind a trusted proxy)
+#   RAGLEX_RP_ID / RAGLEX_WEBAUTHN_ORIGIN   # passkey (WebAuthn) admin login, e.g. raglex.example.org
+# MCP OAuth (§8) — opt-in shared login for MCP clients:
+#   RAGLEX_MCP_PASSWORD=…         # shared consent password; enables OAuth on /mcp
+#   RAGLEX_PUBLIC_URL=https://…   # public https base URL (required by OAuth for issuer metadata)
 
 x-app-env: &app-env
   RAGLEX_DATA_DIR: /data
   RAGLEX_DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-raglex}@db:5432/raglex
   RAGLEX_API_TOKEN: ${RAGLEX_API_TOKEN:-}
   RAGLEX_ALERT_WEBHOOK: ${RAGLEX_ALERT_WEBHOOK:-}
+  # Web-app auth + read-only enforcement (see the header comment). Opt-in.
+  RAGLEX_ADMIN_PASSWORD: ${RAGLEX_ADMIN_PASSWORD:-}
+  RAGLEX_ADMIN_PASSWORD_HASH: ${RAGLEX_ADMIN_PASSWORD_HASH:-}
+  RAGLEX_READER_PASSWORD: ${RAGLEX_READER_PASSWORD:-}
+  RAGLEX_READER_PASSWORD_HASH: ${RAGLEX_READER_PASSWORD_HASH:-}
+  RAGLEX_ADMIN_IPS: ${RAGLEX_ADMIN_IPS:-}
+  RAGLEX_READER_IPS: ${RAGLEX_READER_IPS:-}
+  RAGLEX_TRUST_FORWARDED: ${RAGLEX_TRUST_FORWARDED:-}
+  RAGLEX_RP_ID: ${RAGLEX_RP_ID:-}
+  RAGLEX_WEBAUTHN_ORIGIN: ${RAGLEX_WEBAUTHN_ORIGIN:-}
+  # MCP OAuth (shared login for MCP clients). Needs RAGLEX_PUBLIC_URL (https).
+  RAGLEX_MCP_PASSWORD: ${RAGLEX_MCP_PASSWORD:-}
+  RAGLEX_PUBLIC_URL: ${RAGLEX_PUBLIC_URL:-}
+  # Embedding scope + HPC (Myriad) bulk-embed relay (`raglex hpc-embed`). Indexing the whole
+  # ~5M-doc corpus is infeasible on this box — scope embeddings by jurisdiction. The HPC
+  # relay drives export→qsub→import via `ssh $RAGLEX_HPC_HOST`; to run it from the container
+  # mount your SSH config+key read-only, e.g.  volumes: - ~/.ssh:/root/.ssh:ro
+  RAGLEX_EMBED_JURISDICTIONS: ${RAGLEX_EMBED_JURISDICTIONS:-}
+  RAGLEX_HPC_HOST: ${RAGLEX_HPC_HOST:-myriad}
+  RAGLEX_HPC_MODEL: ${RAGLEX_HPC_MODEL:-}
+  RAGLEX_HPC_DIMENSIONS: ${RAGLEX_HPC_DIMENSIONS:-}
+  RAGLEX_HPC_NTASKS: ${RAGLEX_HPC_NTASKS:-}
+  RAGLEX_HPC_DEADLINE_HOURS: ${RAGLEX_HPC_DEADLINE_HOURS:-}
   # Shared Scrapling/Camoufox stealth-fetch service (House of Lords scrape, bot-gated
   # portals). Blank = fall back to in-process Camoufox. The api + scheduler join the
   # scrapling network below so ``scrapling-mcp`` resolves.
