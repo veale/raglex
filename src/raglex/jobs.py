@@ -50,6 +50,8 @@ SINGLETON_KINDS = frozenset({
     "embed",
     # one Myriad relay at a time — two would ship/submit/import over the same shard dir
     "hpc-embed",
+    # the whole point is serial: one maintenance pass at a time, never competing with itself
+    "maintenance-run",
 })
 MAX_CONCURRENT_JOBS = 6
 # Keyed jobs deduped by (kind, params): don't start an IDENTICAL one while it's in flight,
@@ -217,6 +219,11 @@ def _hpc_embed(facade, params, on_progress, cancel_check):
     return run_hpc_embed(facade, params, on_progress, cancel_check)
 
 
+def _maintenance(facade, params, on_progress, cancel_check):
+    from .maintenance import run_maintenance
+    return run_maintenance(facade, params, on_progress, cancel_check)
+
+
 RUNNERS: dict[str, Callable] = {
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
         source=p.get("source"), run_id=p.get("_resume_run_id"),
@@ -284,6 +291,9 @@ RUNNERS: dict[str, Callable] = {
     # Drive the whole UCL-Myriad bulk-embed relay (export→ship→qsub→poll→fetch→import) as one
     # resumable, queue-aware, deadline-guarded job. Dry-run unless params has go=True.
     "hpc-embed": lambda f, p, cb, cancel: _hpc_embed(f, p, cb, cancel),
+    # Serial DB maintenance + safe repair pass — diagnoses and works a queue of repairs/
+    # rescans/roll-ups ONE at a time (never over-parallelises), no LLM. See maintenance.py.
+    "maintenance-run": lambda f, p, cb, cancel: _maintenance(f, p, cb, cancel),
     # Decorate held Canadian decisions with CanLII metadata + citator edges —
     # budget-metered, resumable (each checked case is stamped, so a re-run walks on).
     "canlii-enrich": lambda f, p, cb, cancel: f.canlii_enrich(

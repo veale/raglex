@@ -210,6 +210,54 @@ def cmd_hash_password(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_maintain(args: argparse.Namespace) -> int:
+    """Run (or preview) the serial DB-maintenance + repair pass."""
+    from .facade import Facade
+    from .maintenance import run_maintenance, build_plan
+
+    facade = Facade(Config.from_env())
+    params = {"no_repairs": args.no_repairs, "no_rescans": args.no_rescans,
+              "no_rollups": args.no_rollups}
+    if args.plan:
+        for s in build_plan(facade, params):
+            print(s)
+        return 0
+    result = run_maintenance(
+        facade, params,
+        on_progress=lambda **p: print(f"\r  {p.get('stage')} {p.get('step','')} "
+                                      f"{p.get('done','')}/{p.get('total','')}", end="", flush=True),
+        cancel_check=lambda: False)
+    print(f"\ndone: {result.get('total')} step(s)")
+    for r in result.get("results", []):
+        print(f"  {r['step']}: {r['result']}")
+    return 0
+
+
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """List or toggle recurring scheduler tasks."""
+    from .facade import Facade
+
+    facade = Facade(Config.from_env())
+    if args.action == "list" or not args.name:
+        data = facade.list_scheduled_tasks()
+        print(f"scheduler_paused={data['scheduler_paused']}")
+        for t in data["tasks"]:
+            flag = "on " if t["enabled"] else "OFF"
+            cad = f"{t['every_minutes']}m" if t["every_minutes"] else "every-tick"
+            print(f"  [{flag}] {t['name']:16} {cad:12} {t['description']}")
+        return 0
+    if args.action == "on":
+        facade.set_scheduled_task(args.name, enabled=True)
+    elif args.action == "off":
+        facade.set_scheduled_task(args.name, enabled=False)
+    elif args.action == "every":
+        facade.set_scheduled_task(args.name, every_minutes=args.minutes)
+    elif args.action == "reset":
+        facade.set_scheduled_task(args.name, remove=True)
+    print(f"{args.action} {args.name}: ok")
+    return 0
+
+
 def cmd_hpc_embed(args: argparse.Namespace) -> int:
     """Drive the Myriad bulk-embed relay end-to-end (dry-run unless --go)."""
     from .facade import Facade
@@ -310,8 +358,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
         # An auto-drain quietly storing zero documents for a fortnight was invisible before.
         jobs = JobManager(f, origin="scheduler")
         jobs.reap_orphans()
+        from .schedule import is_enabled as _sched_on, every_minutes as _sched_min
         last_hygiene = 0.0
         last_analyze = 0.0
+        last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
         last_backfill = 0.0
         last_effects = 0.0
         last_counts = 0.0
@@ -352,7 +402,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print(f"[watch] hygiene error: {exc}")
                 # Start a background job per due watch (so each shows in the Jobs panel
                 # with progress) instead of running them inline where nothing can see them.
-                due = f.due_watch_ids()
+                due = f.due_watch_ids() if _sched_on("watches") else []
                 for wid in due:
                     w = f.get_watch(wid)
                     started = jobs.start("run-watch", f"watch: {w.get('name', wid)}", {"watch_id": wid})
@@ -370,6 +420,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 now_local = time.localtime()
                 if (now_local.tm_hour == 1
                         and last_night_harvest_day != now_local.tm_yday
+                        and _sched_on("nightly-harvest")
                         and int(os.environ.get("RAGLEX_NIGHTLY_HARVEST", "1") or 0)):
                     busy = [j for j in jobs.list(limit=MAX_CONCURRENT_JOBS * 2)
                             if j["status"] == "running" and j["origin"] != "scheduler"]
@@ -392,7 +443,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # each tick (survives restarts; the scheduler service is persistent).
                 Config.from_env()  # refresh settings → env (RAGLEX_AUTOHARVEST)
                 batch = int(os.environ.get("RAGLEX_AUTOHARVEST") or 0)
-                if batch > 0:
+                if batch > 0 and _sched_on("auto-drain"):
                     started = jobs.start("auto-drain", f"auto-drain worklist ({batch}/tick)",
                                          {"limit": batch})
                     if started.get("already_running"):
@@ -404,7 +455,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # the worklist drain — bounded, resumable, and a singleton, so a long tick
                 # simply continues next time rather than stacking passes over one queue.
                 embed_batch = int(os.environ.get("RAGLEX_AUTOEMBED") or 0)
-                if embed_batch > 0:
+                if embed_batch > 0 and _sched_on("auto-embed"):
                     started = jobs.start("embed", f"auto-embed ({embed_batch}/tick)",
                                          {"limit": embed_batch})
                     if started.get("already_running"):
@@ -418,7 +469,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # ~15 min (RAGLEX_CANLII_ENRICH = batch size), metered by the budget — spent
                 # ticks return fast without real API calls, replenished ones make progress.
                 canlii_batch = int(os.environ.get("RAGLEX_CANLII_ENRICH") or 0)
-                if canlii_batch > 0 and time.time() - last_canlii >= 900:
+                if canlii_batch > 0 and _sched_on("canlii-enrich") and time.time() - last_canlii >= 900:
                     last_canlii = time.time()
                     started = jobs.start("canlii-enrich",
                                          f"CanLII enrich ({canlii_batch}/pass)",
@@ -447,7 +498,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # more, the backlog converges on its own with nobody remembering to run
                 # anything, and it costs nothing on the ticks where there's nothing to fix.
                 repair_batch = int(os.environ.get("RAGLEX_AUCTH_REPAIR") or 25)
-                if repair_batch > 0 and time.time() - last_au_repair >= 900:
+                if repair_batch > 0 and _sched_on("au-cth-repair") and time.time() - last_au_repair >= 900:
                     last_au_repair = time.time()
                     started = jobs.start("repair-au-cth",
                                          f"repair au-cth ({repair_batch}/tick)",
@@ -496,28 +547,36 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # they share the singleton lock with the post-harvest chain (jobs._chain_
                 # postprocess) — two PageRank walks racing the relations table is exactly the
                 # double-work that made the box sluggish — and show up in the Jobs panel.
-                if time.time() - last_counts >= _stats_secs:
+                if _sched_on("counts") and time.time() - last_counts >= min(
+                        _stats_secs, (_sched_min("counts") or 10080) * 60):
                     last_counts = time.time()
-                    jobs.start("rebuild-citation-counts", "weekly stats roll-up", {})
+                    jobs.start("rebuild-citation-counts", "stats roll-up", {})
                 # Daily: recompute the PageRank authority roll-up (design §3a) —
                 # search fusion, the citator, related docs, and 'most authoritative'
                 # sort all read it, and it must track the graph as rescans land.
-                if time.time() - last_authority >= 86400:
+                if _sched_on("authority") and time.time() - last_authority >= (_sched_min("authority") or 1440) * 60:
                     last_authority = time.time()
-                    jobs.start("rebuild-authority", "daily authority (PageRank) rebuild", {})
+                    jobs.start("rebuild-authority", "authority (PageRank) rebuild", {})
                 # Daily: refresh planner statistics so the query planner tracks the growing
                 # corpus. Cheap and online; stale stats are a classic cause of a box that
                 # "used to be fast" — the planner picks a seq scan it wouldn't on fresh stats.
-                if time.time() - last_analyze >= 86400:
+                if _sched_on("analyze") and time.time() - last_analyze >= (_sched_min("analyze") or 1440) * 60:
                     last_analyze = time.time()
                     try:
                         f.db_maintenance(analyze=True, vacuum=False)
                         print("[watch] db: planner statistics refreshed (ANALYZE)")
                     except Exception as exc:  # noqa: BLE001
                         print(f"[watch] db ANALYZE error: {exc}")
+                # Serial DB maintenance + safe repair pass — OFF by default; enable via the
+                # schedule toggles. One job, one task at a time (never over-parallelises).
+                if _sched_on("maintenance") and time.time() - last_maint >= (_sched_min("maintenance") or 1440) * 60:
+                    last_maint = time.time()
+                    started = jobs.start("maintenance-run", "scheduled DB maintenance + repair", {})
+                    if started.get("error"):
+                        print(f"[watch] maintenance: {started['error']}")
                 # Weekly: top up the statute gazetteer from legislation.gov.uk, so acts
                 # passed after the vendored lists were cut still confirm by name.
-                if time.time() - last_gazetteer >= 7 * 86400:
+                if _sched_on("gazetteer") and time.time() - last_gazetteer >= (_sched_min("gazetteer") or 10080) * 60:
                     last_gazetteer = time.time()
                     gz = f.refresh_statute_gazetteer()
                     if gz.get("added"):
@@ -989,6 +1048,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hash a web-auth password for RAGLEX_{ADMIN,READER}_PASSWORD_HASH")
     hp.add_argument("password", nargs="?", help="password (omit to be prompted, not echoed)")
     hp.set_defaults(func=cmd_hash_password)
+
+    mnt = sub.add_parser("maintain",
+                         help="serial DB maintenance + safe repair pass (one task at a time)")
+    mnt.add_argument("--no-repairs", action="store_true")
+    mnt.add_argument("--no-rescans", action="store_true")
+    mnt.add_argument("--no-rollups", action="store_true")
+    mnt.add_argument("--plan", action="store_true", help="print the step queue and exit")
+    mnt.set_defaults(func=cmd_maintain)
+
+    sch = sub.add_parser("schedule", help="list/toggle recurring scheduler tasks (on/off + cadence)")
+    sch.add_argument("action", nargs="?", default="list", choices=["list", "on", "off", "every", "reset"])
+    sch.add_argument("name", nargs="?", help="task name (for on/off/every/reset)")
+    sch.add_argument("minutes", nargs="?", type=int, help="cadence minutes (for 'every')")
+    sch.set_defaults(func=cmd_schedule)
 
     hpc = sub.add_parser("hpc-embed",
                          help="drive the whole Myriad bulk-embed relay in one resumable command")

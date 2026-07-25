@@ -715,6 +715,30 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.db_maintenance(analyze=bool(p.get("analyze", True)),
                                      vacuum=bool(p.get("vacuum", False)))
 
+    @app.get("/scheduled-tasks")
+    def scheduled_tasks_ep() -> dict:
+        """Recurring scheduler tasks with per-task enabled/cadence (for the on/off UI)."""
+        return facade.list_scheduled_tasks()
+
+    @app.post("/scheduled-tasks")
+    def set_scheduled_task_ep(payload: dict = Body(...)) -> dict:
+        """Toggle/adjust one scheduler task: {name, enabled?, every_minutes?, remove?}."""
+        p = payload or {}
+        return facade.set_scheduled_task(
+            p["name"], enabled=p.get("enabled"), every_minutes=p.get("every_minutes"),
+            remove=bool(p.get("remove")))
+
+    @app.post("/jobs/maintenance")
+    def job_maintenance_ep(payload: dict = Body(default={})) -> dict:
+        """Run the serial DB-maintenance + repair pass as one background job (one task at a
+        time). Body may scope it: {no_repairs, no_rescans, no_rollups, sources, steps}."""
+        return _start_job("maintenance-run", "DB maintenance + repair", dict(payload or {}))
+
+    @app.get("/maintenance/plan")
+    def maintenance_plan_ep() -> dict:
+        """Preview what a maintenance pass would do (the ordered step queue)."""
+        return facade.maintenance_plan()
+
     @app.post("/jobs/hpc-embed")
     def job_hpc_embed_ep(payload: dict = Body(default={})) -> dict:
         """Drive the Myriad bulk-embed relay as a background job. Dry-run unless

@@ -689,6 +689,37 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.db_maintenance(analyze=analyze, vacuum=vacuum)
 
     @admin
+    def maintenance_run(no_repairs: bool = False, no_rescans: bool = False,
+                        no_rollups: bool = False) -> dict:
+        """Run the serial DB-maintenance + repair pass as one background job: safe repairs →
+        re-extract never-extracted sources → ANALYZE → citation-count + PageRank roll-ups,
+        ONE task at a time (never over-parallelises). No LLM needed. Poll the job for
+        progress. Preview with maintenance_plan()."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "maintenance-run", "DB maintenance + repair",
+            {"no_repairs": no_repairs, "no_rescans": no_rescans, "no_rollups": no_rollups})
+
+    @admin
+    def maintenance_plan() -> dict:
+        """Preview the serial maintenance queue (ordered steps) without running it."""
+        return facade.maintenance_plan()
+
+    @admin
+    def scheduled_tasks() -> dict:
+        """List recurring scheduler tasks with their per-task enabled/cadence + the global
+        pause state."""
+        return facade.list_scheduled_tasks()
+
+    @admin
+    def set_scheduled_task(name: str, enabled: Optional[bool] = None,
+                           every_minutes: Optional[int] = None, remove: bool = False) -> dict:
+        """Enable/disable a scheduler task or set its cadence (e.g. turn off 'auto-embed').
+        ``remove`` reverts to default. Names: scheduled_tasks() lists them."""
+        return facade.set_scheduled_task(name, enabled=enabled,
+                                         every_minutes=every_minutes, remove=remove)
+
+    @admin
     def hpc_embed(go: bool = False, pilot: Optional[int] = None,
                   model: Optional[str] = None, dimensions: Optional[int] = None) -> dict:
         """Drive the UCL-Myriad bulk-embed relay (export→ship→qsub→poll→fetch→import) as one

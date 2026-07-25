@@ -175,6 +175,17 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
 )
 _SPEC_BY_KEY = {s.key: s for s in KNOWN_SETTINGS}
 
+# Internal/system keys the app persists through the same store but does NOT surface in the
+# settings UI (secrets it manages itself, and machine-written state). update() must accept
+# these too, else the auth session key, passkeys, OAuth clients, and schedule toggles would
+# be silently dropped.
+_SYSTEM_KEYS = frozenset({
+    "RAGLEX_SESSION_SECRET",    # web-auth cookie signing key (auto-generated, must persist)
+    "RAGLEX_ADMIN_PASSKEYS",    # registered WebAuthn credentials (JSON)
+    "RAGLEX_MCP_CLIENTS",       # MCP OAuth dynamic-client registrations (JSON)
+    "RAGLEX_SCHEDULE",          # per-task scheduler on/off + cadence overrides (JSON)
+})
+
 
 def _mask(value: str) -> str:
     if not value:
@@ -226,7 +237,7 @@ class SettingsStore:
         clears a key. Returns the masked view."""
         data = self._read_file()
         for key, value in patch.items():
-            if key not in _SPEC_BY_KEY:
+            if key not in _SPEC_BY_KEY and key not in _SYSTEM_KEYS:
                 continue  # ignore unknown keys
             if value is None or value == "":
                 data.pop(key, None)

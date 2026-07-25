@@ -2985,6 +2985,28 @@ class Facade:
             out = cat.db_analyze(vacuum=vacuum) if (analyze or vacuum) else {"skipped": True}
         return out
 
+    # -- scheduled-task toggles (per-task on/off + cadence) ----------------
+    def list_scheduled_tasks(self) -> dict:
+        """Every recurring scheduler task with its effective enabled/cadence — the on/off UI
+        payload. Also reports the global pause (which overrides all)."""
+        from .schedule import list_tasks
+        from .jobs import scheduler_paused
+        return {"tasks": list_tasks(), "scheduler_paused": scheduler_paused()}
+
+    def set_scheduled_task(self, name: str, *, enabled: bool | None = None,
+                           every_minutes: int | None = None, remove: bool = False) -> dict:
+        """Enable/disable a scheduler task or set its cadence (persisted); ``remove`` reverts
+        it to its default. The scheduler picks the change up on its next tick."""
+        from .schedule import set_task
+        return set_task(self.settings, name, enabled=enabled,
+                        every_minutes=every_minutes, remove=remove)
+
+    def maintenance_plan(self, **params) -> dict:
+        """Preview the serial maintenance queue without running it (what a maintenance-run
+        job would do, in order)."""
+        from .maintenance import build_plan
+        return {"steps": build_plan(self, params)}
+
     def backfill_edge_keys(self, *, on_progress=None, cancel_check=None) -> dict:
         """One-off: populate candidate_id/raw_fold on edges written before those columns
         existed, so the set-based resolver and the SQL worklist see the whole graph."""
