@@ -388,3 +388,32 @@ def test_a_malformed_celex_is_rejected_rather_than_queried(monkeypatch):
     monkeypatch.setattr(eu_cellar.EUCellarAdapter, "_sparql", boom)
     assert eu_cellar.resolve_case_celex("61994J334") is None      # 3-digit number
     assert eu_cellar.resolve_case_celex("nonsense") is None
+
+
+def test_formex_legislation_splits_articles_into_paragraphs():
+    """EU legislation in Formex → per-paragraph segments (so 'Article 5(1)' pincites land),
+    laid out with indentation, VISA legal-basis + recitals captured; judgments untouched."""
+    from raglex.adapters.eu_cellar import extract_formex
+    xml = b"""<ACT><PREAMBLE>
+      <GR.VISA><VISA>Having regard to Article 16 TFEU,</VISA>
+      <VISA>Having regard to the proposal from the Commission,</VISA></GR.VISA>
+      <GR.CONSID><CONSID><NO.P>(1)</NO.P><TXT>A recital.</TXT></CONSID></GR.CONSID></PREAMBLE>
+      <ENACTING.TERMS>
+        <ARTICLE><TI.ART>Article 5</TI.ART><STI.ART>Scope</STI.ART>
+          <PARAG><NO.PARAG>1.</NO.PARAG><ALINEA>First paragraph.</ALINEA></PARAG>
+          <PARAG><NO.PARAG>2.</NO.PARAG><ALINEA>Second paragraph.</ALINEA></PARAG></ARTICLE>
+      </ENACTING.TERMS></ACT>"""
+    text, segs = extract_formex(xml)
+    labels = [s.label for s in segs]
+    kinds = {s.label: s.kind for s in segs}
+    assert "Legal basis 1" in labels and kinds["Legal basis 1"] == "visa"
+    assert "Recital 1" in labels
+    assert "Article 5" in labels                       # whole-article heading resolves
+    assert "Article 5(1)" in labels and "Article 5(2)" in labels  # per-paragraph pincites
+    # every segment's offsets slice real text, in document order (drift-safe)
+    assert all(text[s.char_start:s.char_end].strip() for s in segs)
+    assert [s.char_start for s in segs] == sorted(s.char_start for s in segs)
+    # judgment Formex still parses as before
+    jxml = b"<JUDGMENT><NP.ECR><NO.P>1</NO.P><TXT>Claim.</TXT></NP.ECR><JURISDICTION>Held.</JURISDICTION></JUDGMENT>"
+    _jt, js = extract_formex(jxml)
+    assert [s.label for s in js] == ["1", "ruling"]

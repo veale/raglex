@@ -418,23 +418,143 @@ def _iter_text(elem: ET.Element) -> Iterator[str]:
             yield child.tail.strip()
 
 
-def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
-    """Text + structural segments from a Formex judgment (pure, §6b).
+# Formex block elements that deserve their own laid-out line(s); numbering/title elements
+# whose text is carried in the label or a line prefix instead of duplicated into the body.
+_FMX_BLOCK = {"PARAG", "ALINEA", "NP", "P", "ITEM", "SUBPARAG", "POINT", "LIST", "DLIST",
+              "DLIST.ITEM", "TBL", "TXT"}
+_FMX_SKIP = {"NO.P", "NO.PARAG", "TI.ART", "STI.ART", "TI", "STI"}
 
-    Native units: the reasoning's numbered paragraphs (`<NP.ECR>`, labelled by
-    their `<NO.P>` number — the citable unit) followed by the operative ruling
-    (`<JURISDICTION>`). Falls back to `<GR.SEQ>` sections, then to whole-document
-    text as one block, so a chunkable result always comes back."""
+
+def _fmx_render(elem, indent: int = 0) -> list[str]:
+    """Lay a Formex block element out as indented lines: each sub-block (`ALINEA`, `NP`,
+    list `ITEM`…) on its own line, nested lists indented, and a leading number (`NO.P` /
+    `NO.PARAG`) prefixed — so paragraphs and points read as laid out instead of bunching
+    into one run, and a pincite to a point resolves to *its* line, not the article end."""
+    pad = "    " * indent
+    no = next((c for c in elem if _localname(c.tag) in ("NO.P", "NO.PARAG")), None)
+    prefix = (element_text(no).strip() + " ") if no is not None else ""
+    inline: list[str] = []
+    child_lines: list[str] = []
+    if elem.text and elem.text.strip():
+        inline.append(elem.text.strip())
+    for c in elem:
+        cl = _localname(c.tag)
+        if cl in _FMX_SKIP:
+            pass  # its text is the label / line prefix, not body
+        elif cl in _FMX_BLOCK:
+            child_lines.extend(_fmx_render(c, indent + 1))
+        else:
+            t = element_text(c).strip()
+            if t:
+                inline.append(t)
+        if c.tail and c.tail.strip():
+            inline.append(c.tail.strip())
+    lines: list[str] = []
+    head = (prefix + " ".join(inline)).strip()
+    if head:
+        lines.append(pad + head)
+    lines.extend(child_lines)
+    return lines
+
+
+def _fmx_first_child_text(elem, name: str) -> str | None:
+    c = next((x for x in elem.iter() if _localname(x.tag) == name), None)
+    return element_text(c).strip() if c is not None else None
+
+
+def _article_number(ti_art: str | None, fallback: int) -> str:
+    m = re.search(r"[Aa]rticle\s+([0-9]+[a-z]?)", ti_art or "")
+    return m.group(1) if m else str(fallback)
+
+
+def _formex_legislation_blocks(root) -> list[tuple[str, str, str]]:
+    """(label, kind, text) blocks for an EU legislative act in Formex 4 (the L-series OJ
+    structure). Native units, per the Formex manual: the PREAMBLE's ``<VISA>`` legal-basis
+    citations and ``<CONSID>`` recitals, then the ENACTING.TERMS ``<ARTICLE>``s — split into
+    their numbered ``<PARAG>``s so a pincite to "Article 5(1)" lands on that paragraph, laid
+    out with indentation for sub-points — then ``<ANNEX>``es. VISA segments carry the kind
+    ``visa`` so a legal-basis pass can key off the structure rather than guessing from text
+    position (the basis is not reliably the first citation — procedural visas intersperse it)."""
+    blocks: list[tuple[str, str, str]] = []
+    seen: set[int] = set()  # de-dupe nested repeats (a CONSID inside GR.CONSID etc.)
+
+    # PREAMBLE — legal bases (VISA) then recitals (CONSID). Order preserved for readability.
+    for i, visa in enumerate((e for e in root.iter() if _localname(e.tag) == "VISA"), 1):
+        t = "\n".join(_fmx_render(visa)).strip()
+        if t and id(visa) not in seen:
+            seen.add(id(visa))
+            blocks.append((f"Legal basis {i}", "visa", t))
+    for i, cons in enumerate((e for e in root.iter() if _localname(e.tag) == "CONSID"), 1):
+        if id(cons) in seen:
+            continue
+        seen.add(id(cons))
+        t = "\n".join(_fmx_render(cons)).strip()
+        if t:
+            no = (_fmx_first_child_text(cons, "NO.P") or "").strip("().[] ")
+            blocks.append((f"Recital {no or i}", "recital", t))
+    # ENACTING.TERMS — per ARTICLE, and within it per numbered PARAG (Article 5(1), 5(2)…),
+    # so pincites resolve to the paragraph, not the whole article.
+    for i, art in enumerate((e for e in root.iter() if _localname(e.tag) == "ARTICLE"), 1):
+        if id(art) in seen:
+            continue
+        seen.add(id(art))
+        ti = _fmx_first_child_text(art, "TI.ART")
+        sti = _fmx_first_child_text(art, "STI.ART")
+        art_label = ti or f"Article {i}"
+        art_no = _article_number(ti, i)
+        parags = [c for c in art if _localname(c.tag) == "PARAG"]
+        if parags:
+            # a short heading segment so a whole-article pincite ("Article 5") still resolves
+            heading = art_label + (f" — {sti}" if sti else "")
+            blocks.append((art_label, "article", heading))
+            for k, p in enumerate(parags, 1):
+                pno = (_fmx_first_child_text(p, "NO.PARAG") or str(k)).strip("().[] ")
+                body = "\n".join(_fmx_render(p)).strip()
+                if body:
+                    blocks.append((f"Article {art_no}({pno})", "paragraph", body))
+        else:
+            body = "\n".join(_fmx_render(art)).strip()
+            if body:
+                blocks.append((art_label, "article", body))
+    # ANNEXes.
+    for i, anx in enumerate((e for e in root.iter() if _localname(e.tag) == "ANNEX"), 1):
+        if id(anx) in seen:
+            continue
+        seen.add(id(anx))
+        t = "\n".join(_fmx_render(anx)).strip()
+        if t:
+            label = _fmx_first_child_text(anx, "TITLE") or _fmx_first_child_text(anx, "TI") or f"Annex {i}"
+            blocks.append((label[:60], "section", t))
+    return blocks
+
+
+def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
+    """Text + structural segments from a Formex 4 instance (pure, §6b).
+
+    Dispatches on the document's own structure: an act with ``<ENACTING.TERMS>`` is
+    legislation → article / recital / legal-basis (VISA) segments (``_formex_legislation_
+    blocks``); otherwise it is a judgment → the reasoning's numbered paragraphs
+    (``<NP.ECR>``, labelled by ``<NO.P>``) plus the operative ``<JURISDICTION>`` ruling,
+    falling back to ``<GR.SEQ>`` grounds. Non-Formex EU law never reaches here — it keeps
+    its normal (grammar/HTML/AKN) path. A whole-document block is the last resort so a
+    chunkable result always comes back."""
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
         return None, []
 
-    # The reasoning's numbered paragraphs. Modern Formex uses <NP.ECR>; OLDER judgments
-    # (and some manifestations) put the grounds in <GR.SEQ> sections with plain <NP>/<PARAG>
-    # instead — finding none and appending only the <JURISDICTION> ruling would leave a
-    # ruling-only stub (the dispositif, ~tens of words). So when there are no NP.ECR
-    # paragraphs, fall back to the grounds sections to capture the FULL reasoning.
+    # Legislation: reliable article/recital/legal-basis structure from the act itself.
+    if any(_localname(e.tag) == "ENACTING.TERMS" for e in root.iter()):
+        blocks = _formex_legislation_blocks(root)
+        if blocks:
+            text, segments = assemble(blocks)
+            if text:
+                return text, segments
+        # structural parse yielded nothing usable → fall through to whole-document text
+
+    # Judgment: modern Formex uses <NP.ECR>; OLDER judgments put the grounds in <GR.SEQ>
+    # sections with plain <NP>/<PARAG> — finding none and appending only the <JURISDICTION>
+    # ruling would leave a ruling-only stub, so fall back to the grounds sections.
     paras = blocks_by_localname(
         root, {"NP.ECR"}, kind="paragraph", label_child="NO.P", counter_label="para"
     )
