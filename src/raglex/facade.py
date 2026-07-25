@@ -740,6 +740,114 @@ class Facade:
                 })
             return out
 
+    # legislative-change relationship types, split by what they say about an act's currency.
+    _LEG_INCOMING_REPEAL = ("repeals", "recasts")          # src did this TO this act → repealed
+    _LEG_OUTGOING_REPEAL = ("repealed_by",)                # this act repealed_by src
+    _LEG_INCOMING_AMEND = ("amends",)
+    _LEG_OUTGOING_AMEND = ("amended_by",)
+    _LEG_INCOMING_CORRECT = ("corrects",)
+    _LEG_OUTGOING_CORRECT = ("corrected_by",)
+    _LEG_CHANGE_TYPES = tuple({
+        "repeals", "recasts", "repealed_by", "amends", "amended_by", "corrects",
+        "corrected_by", "consolidates", "legal_basis", "supersedes", "point_in_time_of",
+    })
+
+    def enrich_eu_legislation(self, *, limit: int = 200, on_progress=None,
+                              cancel_check=None) -> dict:
+        """Harvest each held EU act's act-to-act CDM relationships from CELLAR (repeals /
+        amends / corrects / legal-basis, both directions) and store them — so an old
+        directive learns it was repealed/recast, and the legislative-status banner + MCP
+        lights up. Bounded + resumable (skips acts already carrying a change-edge); dangling
+        edges to unheld acts feed the worklist. Needs network to CELLAR."""
+        from .adapters.eu_cellar import harvest_act_relations
+        change_types = ("repeals", "amends", "corrects", "consolidates", "legal_basis",
+                        "repealed_by", "amended_by", "corrected_by")
+        qs = ",".join("?" * len(change_types))
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                f"SELECT stable_id FROM documents d WHERE d.source = 'eu-cellar' "
+                f"AND d.doc_type = 'legislation' AND NOT EXISTS ("
+                f"  SELECT 1 FROM relations r WHERE r.src_id = d.stable_id "
+                f"  AND r.relationship_type IN ({qs})) LIMIT ?",
+                (*change_types, limit)).fetchall()
+        ids = [r["stable_id"] for r in rows]
+        enriched = edges = 0
+        for i, sid in enumerate(ids, 1):
+            if cancel_check and cancel_check():
+                break
+            _progress(on_progress, stage="enriching EU legislation", done=i, total=len(ids), item=sid)
+            rels = harvest_act_relations(sid)  # stable_id is the CELEX for EU legislation
+            if rels:
+                with self._open() as (cat, _rs, _ts):
+                    cat.add_relations(sid, rels)
+                enriched += 1
+                edges += len(rels)
+        self._invalidate_caches()
+        return {"scanned": len(ids), "enriched": enriched, "edges": edges}
+
+    def legislative_status(self, stable_id: str) -> dict:
+        """Currency of a piece of legislation, from its change-edges (source-agnostic — UK
+        legislation.gov.uk amendments, CELLAR/CDM repeals/corrigenda, and consolidation
+        links all feed it). A user browsing an old act sees at a glance whether it is in
+        force, amended, repealed/recast, corrected, or a consolidated snapshot — with the
+        acts that did it. Dangling (not-yet-held) edges still count, so "repealed by
+        <CELEX>" shows before the repealing act is harvested."""
+        from .eu_law import is_consolidation, consolidation_base, consolidation_date
+        qs = ",".join("?" * len(self._LEG_CHANGE_TYPES))
+        with self._open() as (cat, _rs, _ts):
+            out = [dict(r) for r in cat.conn.execute(
+                f"SELECT relationship_type, dst_id, candidate_id, raw_citation_string, dst_anchor "
+                f"FROM relations WHERE src_id = ? AND relationship_type IN ({qs})",
+                (stable_id, *self._LEG_CHANGE_TYPES)).fetchall()]
+            inc = [dict(r) for r in cat.conn.execute(
+                f"SELECT relationship_type, src_id, raw_citation_string, dst_anchor "
+                f"FROM relations WHERE (dst_id = ? OR candidate_id = ?) "
+                f"AND relationship_type IN ({qs})",
+                (stable_id, stable_id, *self._LEG_CHANGE_TYPES)).fetchall()]
+
+        def _tgt(r):  # a display id for an outgoing edge's target
+            return r.get("dst_id") or r.get("candidate_id") or r.get("raw_citation_string")
+
+        repealed_by = ([r["src_id"] for r in inc if r["relationship_type"] in self._LEG_INCOMING_REPEAL]
+                       + [_tgt(r) for r in out if r["relationship_type"] in self._LEG_OUTGOING_REPEAL])
+        amended_by = ([r["src_id"] for r in inc if r["relationship_type"] in self._LEG_INCOMING_AMEND]
+                      + [_tgt(r) for r in out if r["relationship_type"] in self._LEG_OUTGOING_AMEND])
+        corrected_by = ([r["src_id"] for r in inc if r["relationship_type"] in self._LEG_INCOMING_CORRECT]
+                        + [_tgt(r) for r in out if r["relationship_type"] in self._LEG_OUTGOING_CORRECT])
+        # consolidations that snapshot this act (a consolidation CONSOLIDATES its base)
+        consolidations = [r["src_id"] for r in inc if r["relationship_type"] == "consolidates"]
+        legal_basis = [_tgt(r) for r in out if r["relationship_type"] == "legal_basis"]
+        repeals = [_tgt(r) for r in out if r["relationship_type"] in self._LEG_INCOMING_REPEAL]
+
+        status = ("repealed" if repealed_by else
+                  "amended" if amended_by else
+                  "corrected" if corrected_by else "in_force")
+        cons_base = consolidation_base(stable_id)
+        # per-article change markers: group edges that carry a pinpoint (dst_anchor) by that
+        # article → the change types touching it. Reliable only where the source pinpointed
+        # it (UK provision-level effects; recast correlation-table CORRESPONDS_TO).
+        by_article: dict[str, list[str]] = {}
+        for r in inc + out:
+            anchor = (r.get("dst_anchor") or "").strip()
+            if anchor:
+                by_article.setdefault(anchor, [])
+                if r["relationship_type"] not in by_article[anchor]:
+                    by_article[anchor].append(r["relationship_type"])
+        return {
+            "stable_id": stable_id, "status": status,
+            "repealed_by": sorted(set(filter(None, repealed_by))),
+            "amended_by": sorted(set(filter(None, amended_by))),
+            "corrected_by": sorted(set(filter(None, corrected_by))),
+            "consolidations": sorted(set(filter(None, consolidations))),
+            "legal_basis": sorted(set(filter(None, legal_basis))),
+            "repeals": sorted(set(filter(None, repeals))),
+            # this doc IS a dated consolidation snapshot → its base + as-at date
+            "is_consolidation": bool(is_consolidation(stable_id)),
+            "consolidation_of": cons_base,
+            "as_at": consolidation_date(stable_id),
+            "by_article": by_article,
+        }
+
     def get_document(self, stable_id: str) -> dict:
         with self._open() as (cat, _rs, _ts):
             doc = cat.get_document(stable_id)

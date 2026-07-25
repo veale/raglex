@@ -583,6 +583,53 @@ def extract_formex_text(xml_bytes: bytes) -> str | None:
     return extract_formex(xml_bytes)[0]
 
 
+def harvest_act_relations(celex: str, *, timeout: float = 60.0) -> list[TypedRelation]:
+    """Query CELLAR for a legislative act's act-to-act CDM relationships (property names
+    verified live — see eu_law.CDM_ACT_TO_ACT_LINKS) and return them as TypedRelations FROM
+    this act: outgoing props as-is (repeals / amends / consolidates / corrects / legal_basis),
+    incoming props as their reverse (repealed_by / amended_by / corrected_by) so the act
+    carries its own currency. Edges are dangling (the other act may be unheld), so they feed
+    the worklist and light up the legislative-status banner even before it is harvested."""
+    import httpx
+
+    from ..eu_law import CDM_ACT_TO_ACT_LINKS
+    props = " ".join(f"cdm:{p}" for p in CDM_ACT_TO_ACT_LINKS)
+    q = (f"PREFIX cdm: <{CDM}>\n"
+         "SELECT ?p ?other ?dir WHERE {\n"
+         f'  ?w cdm:resource_legal_id_celex ?c . FILTER(STR(?c)="{celex}")\n'
+         '  { ?w ?p ?o . ?o cdm:resource_legal_id_celex ?other . BIND("out" AS ?dir) }\n'
+         '  UNION\n'
+         '  { ?s ?p ?w . ?s cdm:resource_legal_id_celex ?other . BIND("in" AS ?dir) }\n'
+         f"  VALUES ?p {{ {props} }}\n}} LIMIT 500")
+    try:
+        resp = httpx.post(SPARQL_ENDPOINT, data={"query": q},
+                          headers={"Accept": "application/sparql-results+json"}, timeout=timeout)
+        rows = resp.json().get("results", {}).get("bindings", [])
+    except Exception:  # noqa: BLE001 — a CELLAR blip must not kill the enrich pass
+        return []
+    out: list[TypedRelation] = []
+    seen: set[tuple[str, str]] = set()
+    for b in rows:
+        prop = b.get("p", {}).get("value", "").rsplit("#", 1)[-1]
+        other = b.get("other", {}).get("value")
+        direction = b.get("dir", {}).get("value")
+        mapped = CDM_ACT_TO_ACT_LINKS.get(prop)
+        if not mapped or not other:
+            continue
+        rel_name = mapped[0] if direction == "out" else mapped[1]
+        if rel_name is None:
+            continue
+        key = (rel_name, other)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(TypedRelation(
+            relationship_type=RelationshipType[rel_name], raw_citation_string=other,
+            dst_id=other, extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.PENDING))
+    return out
+
+
 _PARTY_NOISE = re.compile(
     r",?\s*(?:represented\b|acting as|applicant|applicants|defendant|defendants|appellant|"
     r"appellants|respondent|respondents|supported by|intervening|the other part|"

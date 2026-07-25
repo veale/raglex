@@ -1070,3 +1070,21 @@ table { width: 100%; }
   cursor: pointer; text-decoration: underline;
 }
 .auth-signout:hover { color: var(--text); }
+
+/* -- Legislative status banner (§EU currency) ------------------------------ */
+.leg-status {
+  display: flex; gap: 10px; align-items: flex-start; margin: 10px 0;
+  padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--panel); font-size: 13.5px;
+}
+.leg-status-icon { font-size: 18px; line-height: 1.2; }
+.leg-status-body { flex: 1; }
+.leg-status-line { margin: 1px 0; }
+.leg-status-line a, .leg-status-articles a { cursor: pointer; }
+.leg-status-articles { margin-top: 5px; font-size: 12px; }
+.leg-repealed { border-color: color-mix(in srgb, var(--bad) 55%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel)); }
+.leg-amended { border-color: color-mix(in srgb, var(--ctp-peach, #fab387) 55%, transparent);
+  background: color-mix(in srgb, var(--ctp-peach, #fab387) 10%, var(--panel)); }
+.leg-corrected, .leg-info { border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }

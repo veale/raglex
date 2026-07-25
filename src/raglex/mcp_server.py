@@ -203,6 +203,16 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.related_documents(stable_id, limit=limit)
 
     @mcp.tool(annotations=_READ_ONLY)
+    def legislative_status(stable_id: str) -> dict:
+        """Is this legislation still good law? Its currency from the change-graph: in force /
+        amended / repealed / recast / corrected, plus whether it's a consolidated snapshot
+        (and as-at date), the acts that amended/repealed/corrected it, its legal basis, and
+        per-article change markers where pinpointed. Check this before relying on an EU/UK
+        act — an old directive may have been repealed and recast (e.g. Directive 95/46 →
+        GDPR)."""
+        return facade.legislative_status(stable_id)
+
+    @mcp.tool(annotations=_READ_ONLY)
     def citator(stable_id: str) -> dict:
         """How this authority currently stands: citation volume, how many citing
         documents are recent, its network-authority percentile (PageRank), and the
@@ -687,6 +697,16 @@ def build_server(config: Config | None = None) -> FastMCP:
         """Refresh planner statistics (ANALYZE — the cheap big lever after the corpus grows)
         and optionally reclaim bloat (VACUUM ANALYZE, online). Run db_health() first."""
         return facade.db_maintenance(analyze=analyze, vacuum=vacuum)
+
+    @admin
+    def enrich_eu_legislation(limit: int = 200) -> dict:
+        """Harvest EU acts' act-to-act CDM relationships from CELLAR (repeals / amends /
+        corrects / legal-basis, both directions) and store them, so an old directive learns
+        it was repealed/recast (e.g. Directive 95/46 → repealed_by GDPR) and legislative_
+        status() lights up. Bounded + resumable; needs network to CELLAR."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "enrich-eu-legislation", "enrich EU legislation (CELLAR)", {"limit": limit})
 
     @admin
     def maintenance_run(no_repairs: bool = False, no_rescans: bool = False,

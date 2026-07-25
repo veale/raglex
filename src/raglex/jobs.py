@@ -288,6 +288,10 @@ RUNNERS: dict[str, Callable] = {
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
     "gap-scan": lambda f, p, cb, cancel: f.gap_scan(**p, on_progress=cb, cancel_check=cancel),
+    # Harvest EU acts' act-to-act CDM relationships (repeals/amends/corrects/legal-basis) so
+    # old directives learn they were repealed/recast — the legislative-status graph.
+    "enrich-eu-legislation": lambda f, p, cb, cancel: f.enrich_eu_legislation(
+        **{k: v for k, v in p.items() if not k.startswith("_")}, on_progress=cb, cancel_check=cancel),
     # Drive the whole UCL-Myriad bulk-embed relay (export→ship→qsub→poll→fetch→import) as one
     # resumable, queue-aware, deadline-guarded job. Dry-run unless params has go=True.
     "hpc-embed": lambda f, p, cb, cancel: _hpc_embed(f, p, cb, cancel),

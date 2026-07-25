@@ -45,15 +45,19 @@ CELEX_SECTORS: dict[str, str] = {
 # NAMES (kept as strings so this module has no models import); the adapter maps them. A
 # future SPARQL harvest binds ``?work cdm:<prop> ?target`` for each key. See classify_change
 # for the recast/codification layer that sits on top of ``repeals`` + ``based_on``.
-CDM_ACT_TO_ACT_LINKS: dict[str, str] = {
-    "resource_legal_amends_resource_legal": "AMENDS",
-    "resource_legal_amended_by_resource_legal": "AMENDED_BY",
-    "resource_legal_repeals_resource_legal": "REPEALS",
-    "resource_legal_repealed_by_resource_legal": "REPEALED_BY",
-    "resource_legal_consolidates_resource_legal": "CONSOLIDATES",
-    "resource_legal_corrects_resource_legal": "CORRECTS",
-    "resource_legal_corrected_by_resource_legal": "CORRECTED_BY",
-    "resource_legal_based_on_resource_legal": "LEGAL_BASIS",
+# Property names verified against the live CELLAR endpoint (GDPR 32016R0679, 2026-07):
+# out repeals→31995L0046, based_on→12012E016 (Art 16 TFEU), implicitly_repeals; in corrects←
+# the R(01..03) corrigenda. CELLAR uses ACTIVE-voice properties and you infer meaning from
+# DIRECTION: the same ``corrects`` means "this corrects X" outgoing but "X corrects this"
+# (i.e. this is corrected_by X) incoming. So each property maps to (out_type, in_type);
+# ``None`` = that direction isn't a currency signal for this act.
+CDM_ACT_TO_ACT_LINKS: dict[str, tuple[str, str | None]] = {
+    "resource_legal_repeals_resource_legal": ("REPEALS", "REPEALED_BY"),
+    "resource_legal_implicitly_repeals_resource_legal": ("REPEALS", "REPEALED_BY"),
+    "resource_legal_amends_resource_legal": ("AMENDS", "AMENDED_BY"),
+    "resource_legal_corrects_resource_legal": ("CORRECTS", "CORRECTED_BY"),
+    "resource_legal_consolidates_resource_legal": ("CONSOLIDATES", None),  # in: 0-prefix handles it
+    "resource_legal_based_on_resource_legal": ("LEGAL_BASIS", None),       # in: acts based on this, not currency
 }
 
 _CONSOLIDATED_RE = re.compile(r"^0(\d{4}[A-Z]+\d+)-(\d{8})$")

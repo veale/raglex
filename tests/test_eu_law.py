@@ -58,3 +58,35 @@ def test_classify_celex_treats_legislation_sectors_as_legislation():
     assert classify_celex("32016R0679")[0] == DocType.LEGISLATION
     assert classify_celex("02016R0679-20160504")[0] == DocType.LEGISLATION
     assert classify_celex("62016CJ0001")[0] == DocType.JUDGMENT   # case law unchanged
+
+
+def _leg_facade(tmp_path):
+    from raglex.config import Config
+    from raglex.facade import Facade
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=tmp_path / "s.json", embed_provider="local-hashing", embed_model=None))
+    with f._open() as (cat, _r, _t):
+        c = cat.conn
+        for sid in ("31995L0046", "32016R0679"):
+            c.execute("INSERT INTO documents (stable_id,source,doc_type,title,added_by,topic_tags,"
+                      "upstream_status,fetched_at) VALUES (?,?,?,?, 'harvest','[]','live','2026-01-01')",
+                      (sid, "eu-cellar", "legislation", sid))
+        c.execute("INSERT INTO relations (src_id,dst_id,candidate_id,relationship_type,resolution_status,"
+                  "raw_citation_string) VALUES ('32016R0679','31995L0046','31995L0046','repeals','resolved','x')")
+        c.execute("INSERT INTO relations (src_id,dst_id,candidate_id,relationship_type,resolution_status,"
+                  "raw_citation_string,dst_anchor) VALUES ('32016R0679R(01)','32016R0679','32016R0679','corrects','pending','x','Article 17')")
+        cat.conn.commit()
+    return f
+
+
+def test_legislative_status_marks_repealed_from_incoming_edge(tmp_path):
+    f = _leg_facade(tmp_path)
+    dpd = f.legislative_status("31995L0046")
+    assert dpd["status"] == "repealed" and dpd["repealed_by"] == ["32016R0679"]
+    gdpr = f.legislative_status("32016R0679")
+    assert gdpr["status"] == "corrected" and gdpr["corrected_by"] == ["32016R0679R(01)"]
+    assert gdpr["repeals"] == ["31995L0046"]
+    assert gdpr["by_article"]["Article 17"] == ["corrects"]
+    cons = f.legislative_status("02016R0679-20180525")
+    assert cons["is_consolidation"] and cons["consolidation_of"] == "32016R0679" and cons["as_at"] == "2018-05-25"

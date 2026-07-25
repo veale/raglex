@@ -282,6 +282,7 @@ export const api = {
   legislationChanges: (id: string) => req<any[]>(`/legislation/changes?id=${encodeURIComponent(id)}`),
   propagateChanges: (id: string) =>
     req<any>("/legislation/changes/propagate", { method: "POST", body: JSON.stringify({ id }) }),
+  legislativeStatus: (id: string) => req<any>(`/legislation/status?id=${encodeURIComponent(id)}`),
   legislationVersions: (id: string) => req<any>(`/legislation/versions?id=${encodeURIComponent(id)}`),
   legislationVersionAt: (id: string, date: string) =>
     req<any>("/legislation/version", { method: "POST", body: JSON.stringify({ id, date }) }),

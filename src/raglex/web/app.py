@@ -211,6 +211,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.harvest_reference(**payload)
 
     # -- legislation point-in-time versions --------------------------------
+    @app.get("/legislation/status")
+    def legislation_status_ep(id: str) -> dict:
+        """Currency of an act from its change-edges: in force / amended / repealed / recast /
+        corrected + a consolidation snapshot, with the acts that did it (and per-article
+        markers where pinpointed). Source-agnostic (UK + EU)."""
+        return facade.legislative_status(id)
+
     @app.get("/legislation/versions")
     def legislation_versions_ep(id: str) -> dict:
         return facade.legislation_versions(stable_id=id)
@@ -733,6 +740,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Run the serial DB-maintenance + repair pass as one background job (one task at a
         time). Body may scope it: {no_repairs, no_rescans, no_rollups, sources, steps}."""
         return _start_job("maintenance-run", "DB maintenance + repair", dict(payload or {}))
+
+    @app.post("/jobs/enrich-eu-legislation")
+    def job_enrich_eu_leg_ep(payload: dict = Body(default={})) -> dict:
+        """Harvest EU acts' act-to-act CDM relationships (repeals/amends/corrects/legal-basis)
+        so old directives learn they were repealed/recast. Body: {limit}."""
+        p = payload or {}
+        return _start_job("enrich-eu-legislation", "enrich EU legislation (CELLAR relations)",
+                          {"limit": int(p.get("limit", 200))})
 
     @app.get("/maintenance/plan")
     def maintenance_plan_ep() -> dict:

@@ -2091,6 +2091,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           </div>
         )}
       </div>
+      {d.doc_type === "legislation" && <LegStatusBanner id={d.stable_id} open={open} />}
       <div className="panel">
         <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
@@ -5158,6 +5159,46 @@ export function RulesView({ open }: { open: (id: string) => void }) {
 }
 
 // --- Outstanding amendments (the legislation.gov.uk editorial lag) ----------
+// Prominent currency banner for a piece of legislation, read from its change-graph edges
+// (source-agnostic: UK amendments + EU repeals/corrigenda/consolidations). A user browsing
+// an old act sees at a glance whether it's still good law and what changed it.
+function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
+  const [s] = useAsync(() => api.legislativeStatus(id), [id]);
+  if (!s) return null;
+  const links = (ids: string[]) => ids.map((x, i) => (
+    <Fragment key={x}>{i > 0 && ", "}<a onClick={() => open(x)}>{x}</a></Fragment>));
+  const bits: any[] = [];
+  if (s.repealed_by?.length) bits.push(<span key="rep"><b>Repealed / recast</b> by {links(s.repealed_by)}</span>);
+  if (s.amended_by?.length) bits.push(<span key="am"><b>Amended</b> by {links(s.amended_by)}</span>);
+  if (s.corrected_by?.length) bits.push(<span key="corr">Corrected by {links(s.corrected_by)}</span>);
+  if (s.is_consolidation) bits.push(<span key="cons">Consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""} of {s.consolidation_of ? links([s.consolidation_of]) : "its base act"}</span>);
+  else if (s.consolidations?.length) bits.push(<span key="consav">Consolidated version(s): {links(s.consolidations)}</span>);
+  if (s.legal_basis?.length) bits.push(<span key="lb" className="muted">Legal basis: {links(s.legal_basis)}</span>);
+  const byArt = Object.entries(s.by_article || {});
+  // nothing worth flagging → stay quiet (don't shout "in force" on every act)
+  if (!bits.length) return null;
+  const tone = s.status === "repealed" ? "leg-repealed"
+    : s.status === "amended" ? "leg-amended"
+    : s.status === "corrected" ? "leg-corrected" : "leg-info";
+  const icon = s.status === "repealed" ? "⛔" : s.status === "amended" ? "✏️" : s.status === "corrected" ? "✎" : "ℹ️";
+  return (
+    <div className={`leg-status ${tone}`}>
+      <span className="leg-status-icon">{icon}</span>
+      <div className="leg-status-body">
+        {bits.map((b, i) => <div key={i} className="leg-status-line">{b}</div>)}
+        {byArt.length > 0 && (
+          <div className="leg-status-articles muted">
+            Article-level changes:{" "}
+            {byArt.slice(0, 12).map(([a, kinds]: any, i) => (
+              <Fragment key={a}>{i > 0 && " · "}<b>{a}</b> ({(kinds as string[]).join(", ")})</Fragment>))}
+            {byArt.length > 12 && ` +${byArt.length - 12} more`}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function EffectsBanner({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
   const [all, _e, reload] = useAsync(() => api.outstandingEffects(800), [id]);
   const [busy, setBusy] = useState(false);

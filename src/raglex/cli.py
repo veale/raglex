@@ -362,6 +362,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_hygiene = 0.0
         last_analyze = 0.0
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
+        last_eu_enrich = time.time()
         last_backfill = 0.0
         last_effects = 0.0
         last_counts = 0.0
@@ -574,6 +575,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     started = jobs.start("maintenance-run", "scheduled DB maintenance + repair", {})
                     if started.get("error"):
                         print(f"[watch] maintenance: {started['error']}")
+                # EU legislative-change enrichment — harvest act-to-act CDM relations so old
+                # directives learn they were repealed/recast. Off by default; enable via toggles.
+                if _sched_on("eu-legislation-enrich") and time.time() - last_eu_enrich >= (_sched_min("eu-legislation-enrich") or 1440) * 60:
+                    last_eu_enrich = time.time()
+                    started = jobs.start("enrich-eu-legislation", "EU legislation enrich (CELLAR)",
+                                         {"limit": int(os.environ.get("RAGLEX_EU_ENRICH_BATCH") or 300)})
+                    if started.get("error"):
+                        print(f"[watch] eu-enrich: {started['error']}")
                 # Weekly: top up the statute gazetteer from legislation.gov.uk, so acts
                 # passed after the vendored lists were cut still confirm by name.
                 if _sched_on("gazetteer") and time.time() - last_gazetteer >= (_sched_min("gazetteer") or 10080) * 60:
