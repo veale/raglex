@@ -257,6 +257,13 @@ def classify_celex(celex: str | None, resource_type: str | None = None) -> tuple
     """Map a CJEU CELEX (+ optional CDM resource-type) to (doc_type, court).
     Falls back sensibly so an unrecognised descriptor still catalogues as a CoJ
     judgment rather than crashing."""
+    # Sector is load-bearing: 3 = legislation, 0 = a consolidated version of legislation,
+    # 1/2 = treaties/international agreements, 5 = preparatory acts, 6 = case law. Only the
+    # last is a judgment; classify the legislative sectors as LEGISLATION so a consolidated
+    # or base act isn't mis-catalogued as a CoJ judgment.
+    _sector = (celex or "").strip()[:1]
+    if _sector in ("0", "1", "2", "3", "4"):
+        return DocType.LEGISLATION, "European Union"
     court = "Court of Justice"
     doc_type = DocType.JUDGMENT
     m = re.match(r"^6\d{4}([CTF])([A-Z])", celex or "")
@@ -811,6 +818,16 @@ LIMIT {self.per_page}
         title = formex_title or (None if generic else stub.title)
 
         relations: list[TypedRelation] = []
+        # 0) a consolidated version (sector-0 CELEX ``0…-YYYYMMDD``) → its authoritative base
+        # act. Deterministic from the identifier; consolidated text has no legal value, so
+        # the edge is what lets a pincite reach the base act the snapshot documents (§EU).
+        from ..eu_law import consolidation_base
+        _cons_base = consolidation_base(celex)
+        if _cons_base:
+            relations.append(TypedRelation(
+                relationship_type=RelationshipType.CONSOLIDATES, raw_citation_string=celex,
+                dst_id=_cons_base, extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING))
         # 1) the typed edge to the legislation that surfaced this case (§1A).
         link_prop = stub.hints.get("link", "")
         rel_type = _LEGISLATION_LINKS.get(link_prop, RelationshipType.MENTIONS)

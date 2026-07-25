@@ -87,6 +87,31 @@ class RelationshipType(StrEnum):
     # amending act is imported, so the change emanates FROM the new act to the (old,
     # maybe-never-repulled) instruments it affects — which then get flagged for re-pull.
     AMENDS = "amends"
+    # -- EU legislative-change graph (CELLAR/CDM act-to-act, §EU) -----------------
+    # A new act TERMINATES/replaces an old one. In EU law a recast/codification is a new
+    # Work that repeals its predecessors; the repeal is the clean, machine-exposed fact
+    # (recast-vs-codification is a classification on top — see eu_law.classify_change).
+    REPEALS = "repeals"
+    REPEALED_BY = "repealed_by"
+    # A corrigendum — which, unlike a citation, ALTERS the corrected act's text and must be
+    # folded into the authoritative text. Easy to miss; modelled explicitly.
+    CORRECTS = "corrects"
+    CORRECTED_BY = "corrected_by"
+    # A dated consolidation (sector-0 CELEX ``0…-YYYYMMDD``) → its base act. The EU analogue
+    # of POINT_IN_TIME_OF; kept distinct because it also carries the ``consolidates`` CDM
+    # link and amendment apparatus. Consolidated text has no legal value (display-only).
+    CONSOLIDATES = "consolidates"
+    # A recast/codification new act → the predecessor it re-enacts (derivation lineage,
+    # ``based_on``). Substantive-change (recast) vs none (codification) is a descriptor
+    # classification, not a separate edge.
+    RECASTS = "recasts"
+    # An act's legal basis: the ``<VISA>`` Treaty-article / enabling-provision citations in
+    # the preamble (identified by Formex structure, not text position).
+    LEGAL_BASIS = "legal_basis"
+    # Article-level old→new correspondence parsed from a recast's correlation table (the one
+    # part not machine-exposed — lives only in the annex ``<TBL>``). Lets a citation to a
+    # repealed provision be traced to the current one.
+    CORRESPONDS_TO = "corresponds_to"
 
 
 class ExtractedVia(StrEnum):
