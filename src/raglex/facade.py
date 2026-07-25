@@ -4367,37 +4367,72 @@ class Facade:
         # honour the requested limit — one click can drain everything now that the run
         # fails-fast on dead items, skips them, stays responsive, and is cancellable.
         rows = [r for r in candidates if r["candidate"] not in cooled][:limit]
+
+        # Group by source and drain the sources CONCURRENTLY. Each reference's source is a
+        # different server (CourtListener, legislation.gov.uk, CELLAR, HUDOC, CanLII…) that
+        # doesn't compete with the others, so serialising across them wasted almost all the
+        # wall-clock. Crucially it also fixes the old failure mode: one rate-limited source
+        # (US case law routinely caps out) used to `break` the WHOLE batch, starving every
+        # other source — now rate-limiting stops only ITS worker. Within a source the fetch
+        # stays serial (one connection, one worker) so per-source rate limits/budgets are
+        # never raced.
+        import threading
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor
+
+        by_source: dict[str, list] = defaultdict(list)
+        for r in rows:
+            by_source[r["suggested_adapter"]].append(r)
+        # Run every distinct API concurrently — they're different servers, so the ceiling is
+        # simply "how many distinct sources are in the queue" (rarely more than ~15-20), not a
+        # small fixed number. Network calls are cheap to parallelise; the cap only guards the
+        # DB connection pool (each worker holds one while its source drains) — set
+        # RAGLEX_HARVEST_SOURCE_WORKERS alongside RAGLEX_PG_POOL_MAX to go wider.
+        try:
+            cap = max(1, int(_os.environ.get("RAGLEX_HARVEST_SOURCE_WORKERS") or 16))
+        except (TypeError, ValueError):
+            cap = 16
+        n_workers = min(len(by_source), cap) or 1
+
         fetched, fetched_ids, failed = [], [], []
-        absent, transient, rate_limited = [], [], False
+        absent, transient, rate_limited_sources = [], [], []
+        lock = threading.Lock()
+        done_ctr = {"n": 0}
+        total = len(rows)
+
+        def _drain_source(src: str, src_rows: list) -> None:
+            with self._open() as (cat, rs, ts):
+                for r in src_rows:
+                    if cancel_check and cancel_check():
+                        return
+                    res = self._fetch_reference(cat, rs, ts, ref=r["ref"], candidate=r["candidate"])
+                    outcome = res.get("outcome")
+                    ok = outcome in ("stored", "present")
+                    with lock:
+                        done_ctr["n"] += 1
+                        if ok:
+                            fetched.append({"ref": r["ref"]})
+                            fetched_ids.append(res["candidate"])
+                        else:
+                            failed.append({"ref": r["ref"], "outcome": outcome,
+                                           **({} if "error" not in res else {"error": res["error"]})})
+                            (absent if outcome in ("absent", "no_adapter") else transient).append(r["candidate"])
+                        _progress(on_progress, stage="harvesting", done=done_ctr["n"], total=total,
+                                  item=res.get("candidate") or r["ref"], ok=ok,
+                                  msg=res.get("error") if not ok else None)
+                    if outcome == "rate_limited":
+                        # This source is throttling — stop draining IT (its remaining refs
+                        # would all "fail" for reasons that say nothing about them), but let
+                        # every other source keep going.
+                        with lock:
+                            rate_limited_sources.append(src)
+                        return
+
+        if by_source:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                list(pool.map(lambda kv: _drain_source(*kv), by_source.items()))
+
         with self._open() as (cat, rs, ts):
-            for i, r in enumerate(rows, 1):
-                if cancel_check and cancel_check():
-                    break
-                _progress(on_progress, stage="harvesting", done=i, total=len(rows), item=r["ref"])
-                res = self._fetch_reference(cat, rs, ts, ref=r["ref"], candidate=r["candidate"])
-                outcome = res.get("outcome")
-                ok = outcome in ("stored", "present")
-                if ok:
-                    fetched.append({"ref": r["ref"]})
-                    fetched_ids.append(res["candidate"])
-                else:
-                    failed.append({"ref": r["ref"], "outcome": outcome,
-                                   **({} if "error" not in res else {"error": res["error"]})})
-                    if outcome in ("absent", "no_adapter"):
-                        absent.append(r["candidate"])
-                    else:
-                        transient.append(r["candidate"])
-                _progress(on_progress, stage="harvesting", done=i, total=len(rows),
-                          item=res.get("candidate") or r["ref"], ok=ok,
-                          msg=res.get("error") if not ok else None)
-                if outcome == "rate_limited":
-                    # The source is pushing back. Every remaining reference would now
-                    # "fail" for reasons that say nothing about it, so stop the batch
-                    # rather than cooling off the rest of the worklist (§5a).
-                    rate_limited = True
-                    _progress(on_progress, stage="rate limited — pausing", done=i,
-                              total=len(rows), msg="source is throttling; stopping batch")
-                    break
             if absent:
                 cat.record_enrichment_misses("harvest-miss", absent)
             if transient:
@@ -4405,18 +4440,28 @@ class Facade:
             # extract just the newly-fetched docs, then resolve once — both AFTER the
             # fetch loop, so report them as their own stages (this is the phase that
             # looked "stuck" because the progress bar had finished the harvest loop).
+            # NB: extraction stays SERIAL on purpose. Fetching is I/O-bound (parallel is
+            # free), but citation extraction is CPU/GIL-bound — threading it wouldn't use
+            # more cores (the GIL serialises it anyway) and a burst of concurrent regex
+            # passes is exactly what has frozen the whole API before. One doc at a time,
+            # yielding the GIL between them (the job worker's yield_s), keeps the box
+            # responsive and within CPU.
             self._extract_ids(cat, ts, fetched_ids, on_progress=on_progress)
             _progress(on_progress, stage="resolving citations",
                       done=0, total=len(fetched_ids))
             # bounded: only the fetched docs' own edges + edges pointing at them can
             # newly resolve — the whole-graph pass here cost minutes per drain batch
             resolved = Resolver(cat).run_for_documents(fetched_ids)
+        rate_limited = bool(rate_limited_sources)
         self._invalidate_caches()  # refresh the worklist's per-source "remaining" counts
         remaining = len(candidates) - skipped - len(fetched)
         return {"attempted": len(rows), "harvested": len(fetched),
                 "resolved_edges": resolved.resolved, "failed": failed,
                 "absent": len(absent), "retry_later": len(transient),
                 "rate_limited": rate_limited,
+                # which sources threw in the towel (throttling) — the rest still drained
+                "rate_limited_sources": sorted(set(rate_limited_sources)),
+                "sources_drained": len(by_source), "source_workers": n_workers,
                 # The count the UI must show: a drain that "did nothing" is nearly always
                 # a drain whose whole candidate set was still cooling off.
                 "skipped_recent_fail": skipped, "remaining": max(remaining, 0)}
