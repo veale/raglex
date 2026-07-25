@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from raglex.core.structure import line_depths
+from raglex.core.structure import line_depths, line_structure
 
 
 def depths(text: str) -> list[int]:
     return [d for _s, _e, d in line_depths(text)]
+
+
+def paths(text: str) -> list[str]:
+    return [p for _s, _e, _d, p in line_structure(text)]
 
 
 def test_senior_courts_act_s24_nests_paragraphs_under_their_subsection():
@@ -176,3 +180,58 @@ def test_definition_head_pattern_does_not_fire_on_ordinary_prose():
             "(a) having regard to the parties, and\n"
             "(b) the wider public interest.")
     assert depths(text) == [0, 1, 1]
+
+
+# --- line_structure: the marker PATH each provision line carries -------------
+def test_line_structure_accumulates_the_marker_path():
+    # (a)/(b)/(c) hang off (2), so they carry the full sub-part path "(2)(a)" — the
+    # exact anchor a pincite ("s. 24(2)(a)") uses, so its badge lands on that line.
+    text = (
+        "(1) In sections 20 to 23…\n"
+        "(2) Nothing in sections 20 to 23 shall—\n"
+        "(a) be construed as limiting…\n"
+        "(b) affect the provisions…\n"
+        "(3) In this section—…"
+    )
+    assert paths(text) == ["(1)", "(2)", "(2)(a)", "(2)(b)", "(3)"]
+
+
+def test_line_structure_three_tiers_and_pop_back():
+    text = ("(1) first\n(a) alpha under one\n(i) roman under a\n(ii) still roman\n"
+            "(b) back out to alpha\n(2) back out")
+    assert paths(text) == ["(1)", "(1)(a)", "(1)(a)(i)", "(1)(a)(ii)", "(1)(b)", "(2)"]
+
+
+def test_line_structure_continuation_and_lead_in_carry_no_path():
+    # a continuation (wrapped) line is not a citable sub-provision → empty path, so no
+    # badge is misattached to it
+    text = "(1) opening words—\n(a) the first limb\ncontinued onto a second line\n(b) the second limb"
+    assert paths(text) == ["(1)", "(1)(a)", "", "(1)(b)"]
+
+
+def test_line_structure_inserted_provision_keeps_its_own_token():
+    text = "(4) four\n(4A) inserted\n(5) five"
+    assert paths(text) == ["(4)", "(4A)", "(5)"]
+
+
+def test_line_depths_still_matches_line_structure():
+    # the back-compat wrapper must stay in lock-step with the richer function
+    text = "(1) a\n(a) b\n(i) c\n(2) d"
+    assert [d for _s, _e, d in line_depths(text)] == [d for _s, _e, d, _p in line_structure(text)]
+
+
+def test_document_body_lines_carry_the_sub_part_anchor(tmp_path):
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                 embed_model=None)
+    f = Facade(cfg)
+    body = "<p>(1) The rule.\n(2) Subject to—\n(a) the first case;\n(b) the second case.</p>".encode()
+    act = f.import_bytes(data=body, filename="act.html",
+                         doc_type="legislation", title="An Act")["stable_id"]
+    got = f.document_body(act)
+    lines = [ln for s in got["segments"] for ln in s.get("lines", [])] or got["lines"]
+    assert [ln.get("anchor") for ln in lines] == ["(1)", "(2)", "(2)(a)", "(2)(b)"]

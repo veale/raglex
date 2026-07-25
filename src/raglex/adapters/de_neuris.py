@@ -235,6 +235,7 @@ class DeNeurisAdapter(BaseAdapter):
         at_id = stub.hints.get("at_id")
         eli = stub.hints.get("id") or stub.stable_id
         xml: bytes | None = None
+        expr: dict | None = None
         # the expression JSON carries the LDML.de XML manifestation's contentUrl
         if at_id:
             expr = self._get_json(at_id)
@@ -249,6 +250,16 @@ class DeNeurisAdapter(BaseAdapter):
         parsed = parse_ldml_de(xml)
         eli_id = parsed.metadata.get("eli") or eli
         jurabk = parsed.metadata.get("jurabk") or stub.hints.get("abbreviation")
+        # Unified legislative currency (§CUR): NeuRIS exposes legislationLegalForce
+        # (InForce/NotInForce/PartiallyInForce) + a temporalCoverage interval, and is ELI-native
+        # so it's point-in-time addressable. Read defensively from the expression JSON (beta).
+        from ..leg_currency import Currency
+        legal_force = _field(expr or {}, "legislationLegalForce", "legalForce")
+        tcov = str(_field(expr or {}, "temporalCoverage", "temporalCoverageFrom") or "")
+        cur = Currency(scheme="de-force", native_status=legal_force,
+                       point_in_time_capable=True,
+                       in_force_from=(tcov.split("/", 1)[0][:10] or None) if tcov else None).normalized()
+        cur_meta = cur.to_meta()
         return Record(
             source=self.source,
             stable_id=eli_id,
@@ -267,5 +278,6 @@ class DeNeurisAdapter(BaseAdapter):
             extra={k: v for k, v in {
                 "eli": eli_id, "jurabk": jurabk,
                 "aliases": [law_id(jurabk)] if jurabk else None,
+                "currency": cur_meta or None,
             }.items() if v},
         )

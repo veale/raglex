@@ -280,6 +280,14 @@ def classify_celex(celex: str | None, resource_type: str | None = None) -> tuple
                 break
     return doc_type, court
 
+
+def _eu_currency_meta(celex: str | None, meta: dict | None = None) -> dict:
+    """Unified legislative currency (§CUR) for an EU act: consolidation snapshot + point-in-time
+    capability, plus EUR-Lex's in-force descriptor when the SPARQL metadata carried one."""
+    from ..leg_currency import currency_for_eu
+    in_force = (meta or {}).get("in_force") or (meta or {}).get("in_force_status")
+    return currency_for_eu(celex, in_force=in_force).to_meta()
+
 # CELLAR legislation-link CDM properties → typed treatment (§1A). These are how a
 # judgment *engages* a legislative act; the property name is the relationship.
 _LEGISLATION_LINKS: dict[str, RelationshipType] = {
@@ -958,6 +966,7 @@ LIMIT {self.per_page}
             extracted_via=ExtractedVia.STRUCTURED,
             extra={
                 "celex": celex,
+                **({"currency": _eu_currency_meta(celex)} if doc_type == DocType.LEGISLATION else {}),
                 **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {}),
                 **({"origin_country": origin_country} if origin_country else {}),
                 **({"referring_courts": referring_courts} if referring_courts else {}),
@@ -1257,5 +1266,6 @@ class CJEUCaseAdapter(BaseAdapter):
             text=text, segments=segments, extracted_via=ExtractedVia.STRUCTURED,
             extra={"celex": celex,
                    **({"celex_aliases": list(self.celex_aliases)} if self.celex_aliases else {}),
+                   **({"currency": _eu_currency_meta(celex, meta)} if doc_type == DocType.LEGISLATION else {}),
                    **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {})},
         )

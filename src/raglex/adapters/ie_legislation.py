@@ -602,6 +602,17 @@ class IrishStatuteBookAdapter(BaseAdapter):
         }
         if isbc.updated_to:
             extra["isbc_updated_to"] = isbc.updated_to.isoformat()
+        # Unified legislative currency (§CUR). Ireland splits its layers across three bodies:
+        # eISB is as-enacted (this text), the LRC owns the amendment graph (eli:changes edges,
+        # already minted) and the point-in-time revised consolidations (ie/.../@date). So the
+        # force status is edge-derived; here we record the layer (scheme) + point-in-time
+        # capability + the "updated to" date the ISBC tables give, so provenance is per-layer.
+        from ..leg_currency import Currency
+        cur = Currency(scheme="ie-eisb", point_in_time_capable=True,
+                       as_at=(isbc.updated_to.isoformat() if isbc.updated_to else None))
+        cur_meta = cur.to_meta()
+        if cur_meta:
+            extra["currency"] = cur_meta
 
         return Record(
             source=self.source,

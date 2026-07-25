@@ -343,6 +343,19 @@ class NZLegislationAdapter(BaseAdapter):
             "amendment_notes": doc.metadata.get("amendment_notes"),
             "retrospective_amendments": doc.metadata.get("retrospective_amendments"),
         }
+        # Unified legislative currency (§CUR): NZ exposes the act/instrument force status enum
+        # (in_force/not_in_force/repealed/expired/revoked/…) and native point-in-time versions,
+        # so both map cleanly. NZ has **no** amends/repeals graph in v0, so the change edges stay
+        # empty — the banner degrades to force-status-only for NZ, which is honest.
+        from ..leg_currency import Currency
+        nz_status = (h.get("legislation_status") or h.get("act_status")
+                     or h.get("instrument_status"))
+        cur = Currency(scheme="nz-pco", native_status=nz_status,
+                       point_in_time_capable=True,
+                       as_at=(version.version_date if version else None)).normalized()
+        cur_meta = cur.to_meta()
+        if cur_meta:
+            extra["currency"] = cur_meta
 
         return Record(
             source=self.source,

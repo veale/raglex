@@ -79,6 +79,17 @@ class ArticleVersion:
     date_fin: date | None
 
 
+@dataclass(frozen=True, slots=True)
+class ArticleState:
+    """The *current* état of one article in a consolidated code — the per-provision currency
+    the unified legislative-status model (``leg_currency``) reads. ``article`` is the label the
+    citation resolver pinpoints to (``Article 6``)."""
+    article: str
+    etat: str | None
+    date_debut: date | None
+    date_fin: date | None
+
+
 @dataclass(slots=True)
 class LegifranceDoc:
     """Structured view of a legiPart / getArticle response, before it becomes a Record."""
@@ -91,6 +102,7 @@ class LegifranceDoc:
     text: str | None = None
     segments: list[Segment] = field(default_factory=list)
     versions: list[ArticleVersion] = field(default_factory=list)
+    article_states: list[ArticleState] = field(default_factory=list)  # per-article currency
     nature: str | None = None         # CODE | LOI | DECRET | DELIBERATION …
     num: str | None = None            # article number for a single-article fetch
 
@@ -100,17 +112,37 @@ def _article_label(art: dict) -> str:
     return f"Article {num}" if num else (_first(art, "id", "cid") or "article")
 
 
-def _collect_articles(node: dict, out: list[tuple[str, str, str]]) -> None:
-    """Walk a section tree in document order, emitting (label, kind, text) per article."""
+def _article_state(art: dict) -> ArticleState:
+    """The article's current état + validity window — read from the article-level fields, or the
+    newest ``articleVersions`` entry where the top level omits them."""
+    etat = _first(art, "etat", "etatJuridique")
+    dd = _epoch_ms_to_date(_first(art, "dateDebut", "debut"))
+    df = _epoch_ms_to_date(_first(art, "dateFin", "fin"))
+    if etat is None:
+        vs = _article_versions(art)
+        if vs:
+            v = max(vs, key=lambda x: (x.date_debut or date.min))
+            etat, dd, df = v.etat, v.date_debut, v.date_fin
+    return ArticleState(_article_label(art), etat, dd, df)
+
+
+def _collect_articles(node: dict, out: list[tuple[str, str, str]],
+                      states: list[ArticleState] | None = None) -> None:
+    """Walk a section tree in document order, emitting (label, kind, text) per article and, when
+    ``states`` is given, the per-article état alongside."""
     for art in node.get("articles") or []:
         body = strip_html(_first(art, "content", "texteHtml", "texte"))
         if body:
             out.append((_article_label(art), "article", body))
+        if states is not None:
+            st = _article_state(art)
+            if st.etat or st.date_debut:
+                states.append(st)
     for sub in node.get("sections") or []:
         title = _first(sub, "title", "intitule")
         if title:
             out.append((str(title), "section", str(title)))
-        _collect_articles(sub, out)
+        _collect_articles(sub, out, states)
 
 
 def _article_versions(art: dict) -> list[ArticleVersion]:
@@ -149,13 +181,18 @@ def parse_legifrance_obj(obj: dict) -> LegifranceDoc:
         body = strip_html(_first(art, "content", "texteHtml", "texte"))
         blocks = [(_article_label(art), "article", body)] if body else []
         doc.versions = _article_versions(art)
+        st = _article_state(art)
+        if st.etat or st.date_debut:
+            doc.article_states = [st]
     else:
         blocks: list[tuple[str, str, str]] = []
+        states: list[ArticleState] = []
         # a legiPart carries its articles inside a section tree; some responses put the
         # tree under "sections", others wrap it in a single root "section".
-        _collect_articles(root, blocks)
+        _collect_articles(root, blocks, states)
         if not blocks and isinstance(root.get("section"), dict):
-            _collect_articles(root["section"], blocks)
+            _collect_articles(root["section"], blocks, states)
+        doc.article_states = states
 
     text, segments = assemble(blocks)
     doc.text = text or None

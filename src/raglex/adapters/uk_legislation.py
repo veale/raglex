@@ -305,6 +305,34 @@ class UKLegislationAdapter(BaseAdapter):
                     extracted_via=ExtractedVia.STRUCTURED,
                     resolution_status=ResolutionStatus.PENDING,
                 ))
+        # Unified legislative currency (§CUR): the UK's editorial-lag + point-in-time model,
+        # mapped onto the canonical shape so the status banner treats it like every other
+        # jurisdiction. The force status itself is left to the change-edge graph (repeals/
+        # amendments); here we carry the point-in-time affordance, the unapplied backlog, and
+        # per-provision markers from the effects.
+        from ..leg_currency import Currency, Provision, CanonStatus
+        cur = Currency(scheme="uk-leg", point_in_time_capable=True)
+        if base_id:
+            cur.as_at = stub.hints.get("version_date")
+            cur.status = str(CanonStatus.CONSOLIDATED)   # a dated point-in-time snapshot
+        else:
+            outstanding = summary.get("outstanding", 0)
+            cur.unapplied_count = outstanding
+            cur.up_to_date = (outstanding == 0)
+            prov: dict[str, Provision] = {}
+            for e in effects:
+                ref = (e.affected_ref or "").strip()
+                if not ref:
+                    continue
+                p = prov.setdefault(ref, Provision(anchor=ref))
+                if e.type and e.type not in p.change_types:
+                    p.change_types.append(e.type)
+                if e.affecting_id and e.affecting_id not in p.changed_by:
+                    p.changed_by.append(e.affecting_id)
+            cur.provisions = list(prov.values())
+        cur_meta = cur.to_meta()
+        if cur_meta:
+            extra["currency"] = cur_meta
         if base_id:
             title = f"{title} (as at {stub.hints.get('version_date')})"
             relations.append(TypedRelation(

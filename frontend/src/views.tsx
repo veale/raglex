@@ -470,40 +470,56 @@ function subPart(anchor: string): string | null {
   return m ? m[1].replace(/\s+/g, "") : null;
 }
 
-// Sub-paragraph mention badges for one provision (segment): the specific
-// sub-provisions that are cited, each a subtle, clickable speech-bubble with its
-// citer count. ADDITIONAL to the provision-level "Mentioned by" line — clicking opens
-// the mentions tray filtered to exactly that sub-paragraph.
-function SubParaMentions({ byAnchorRaw, sectionLabel, target }:
-  { byAnchorRaw: Record<string, any[]>; sectionLabel: string; target: string }) {
-  const { push } = useTray();
+type SubPara = { anchor: string; part: string; count: number };
+
+// The cited sub-provisions of one section, keyed by their parenthetical part ("(1)",
+// "(2)(a)"), each with the citer count. Shared by the per-line placement (a badge at the
+// end of its own provision line) and the segment-level fallback (a badge row at the foot,
+// for sub-parts whose line the drafting-hierarchy pass couldn't pinpoint).
+function subPartMap(byAnchorRaw: Record<string, any[]>, sectionLabel: string): Map<string, SubPara> {
   const sk = anchorKey(sectionLabel);
-  if (!sk) return null;
-  // merge citer lists across anchor spellings of the same sub-paragraph
-  const byPart: Record<string, { anchor: string; part: string; srcs: Set<string> }> = {};
+  const byPart = new Map<string, { anchor: string; part: string; srcs: Set<string> }>();
+  if (!sk) return new Map();
   for (const [a, list] of Object.entries(byAnchorRaw || {})) {
     if (anchorKey(a) !== sk) continue;      // only this provision's family
     const part = subPart(a);
     if (!part) continue;                    // the bare provision → the MentionedBy line
-    const cur = byPart[part] || (byPart[part] = { anchor: a, part, srcs: new Set() });
+    const cur = byPart.get(part) || { anchor: a, part, srcs: new Set<string>() };
     for (const m of (list || [])) cur.srcs.add(m.src_id);
+    byPart.set(part, cur);
   }
-  const subs = Object.values(byPart)
-    .map((s) => ({ anchor: s.anchor, part: s.part, count: s.srcs.size }))
-    .filter((s) => s.count > 0)
+  const out = new Map<string, SubPara>();
+  for (const [part, v] of byPart) if (v.srcs.size > 0) out.set(part, { anchor: v.anchor, part, count: v.srcs.size });
+  return out;
+}
+
+// One clickable speech-bubble badge for a cited sub-provision; opens the mentions tray
+// filtered to exactly that sub-paragraph.
+function SubBadge({ sp, sectionLabel, target }: { sp: SubPara; sectionLabel: string; target: string }) {
+  const { push } = useTray();
+  return (
+    <button className="subpara-badge"
+      title={`${sp.count.toLocaleString()} document${sp.count === 1 ? "" : "s"} cite ${sp.part} specifically — see them`}
+      onClick={() => push({ kind: "mentions", target, anchor: sp.anchor, exact: true,
+        label: <>Mentions of {(sectionLabel.match(/^\s*(?:art(?:icle)?|s(?:ection)?|reg(?:ulation)?)\.?\s*\d+[a-z]?/i)?.[0] || sectionLabel).trim()}{sp.part}</> })}>
+      <span className="sp-part">{sp.part}</span>
+      <SpeechBubble n={sp.count} />
+    </button>
+  );
+}
+
+// Segment-level fallback badge row: the cited sub-parts of this provision that DIDN'T get
+// placed on their own line (``exclude`` = the parts already shown per-line). When the
+// drafting hierarchy resolved every cited sub-part to a line, this renders nothing.
+function SubParaMentions({ byAnchorRaw, sectionLabel, target, exclude }:
+  { byAnchorRaw: Record<string, any[]>; sectionLabel: string; target: string; exclude?: Set<string> }) {
+  const subs = [...subPartMap(byAnchorRaw, sectionLabel).values()]
+    .filter((s) => !(exclude && exclude.has(s.part)))
     .sort((a, b) => a.part.localeCompare(b.part, undefined, { numeric: true }));
   if (!subs.length) return null;
   return (
     <div className="subpara-mentions">
-      {subs.map((sp, i) => (
-        <button key={i} className="subpara-badge"
-          title={`${sp.count.toLocaleString()} document${sp.count === 1 ? "" : "s"} cite ${sp.part} specifically — see them`}
-          onClick={() => push({ kind: "mentions", target, anchor: sp.anchor, exact: true,
-            label: <>Mentions of {(sectionLabel.match(/^\s*(?:art(?:icle)?|s(?:ection)?|reg(?:ulation)?)\.?\s*\d+[a-z]?/i)?.[0] || sectionLabel).trim()}{sp.part}</> })}>
-          <span className="sp-part">{sp.part}</span>
-          <SpeechBubble n={sp.count} />
-        </button>
-      ))}
+      {subs.map((sp, i) => <SubBadge key={i} sp={sp} sectionLabel={sectionLabel} target={target} />)}
     </div>
   );
 }
@@ -1193,13 +1209,17 @@ function railCaption(s: { label: string; kind: string }): { prefix: string; num:
 // Each line becomes its own block so the indent applies to the WHOLE provision, wrapped
 // lines included — not just the first line, which a text-indent would give.
 function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
-                  paraSet?: Set<string>, onPara?: (n: string) => void, idPrefix?: string) {
+                  paraSet?: Set<string>, onPara?: (n: string) => void, idPrefix?: string,
+                  lineBadge?: (anchorPath: string) => any) {
   return (
     <>
       {s.lines.map((ln: any, i: number) => (
         <div className="stat-line" key={i}
           style={ln.depth ? { paddingLeft: `calc(var(--indent-step) * ${ln.depth})` } : undefined}>
           {renderCited(text, ln.start, ln.end, cites, onCite, paraSet, onPara, idPrefix)}
+          {/* the sub-provision's mention badge, at the END of its own line (not bunched
+              at the section foot) — only where the drafting hierarchy pinpointed the line */}
+          {ln.anchor && lineBadge ? lineBadge(ln.anchor) : null}
         </div>
       ))}
     </>
@@ -1208,10 +1228,10 @@ function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
 
 function segBody(text: string, s: { label: string; char_start: number; char_end: number; lines?: any[] },
                  cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void,
-                 idPrefix?: string) {
+                 idPrefix?: string, lineBadge?: (anchorPath: string) => any) {
   // drafted hierarchy (legislation): render provision-by-provision, indented
   if (s.lines && s.lines.length > 1) {
-    return { showLabel: true, body: segLines(text, s, cites, onCite, paraSet, onPara, idPrefix) };
+    return { showLabel: true, body: segLines(text, s, cites, onCite, paraSet, onPara, idPrefix, lineBadge) };
   }
   const num = labelNum(s.label);
   const raw = text.slice(s.char_start, s.char_end);
@@ -1622,7 +1642,19 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     : (
       <div className={`reader${isCase ? " has-rails" : ""}`}>
         {segs.map((s, i) => {
-          const sb = segBody(body.text, s, cites, onCite, paraSet, onPara);
+          // sub-provision mention badges: place each on its own provision line (via
+          // lineBadge) where the drafting hierarchy pinpointed it, and let the segment-level
+          // row below carry only the leftovers — so the comment numbers spread down the
+          // section instead of bunching at its foot.
+          const parts = subPartMap(mentions?.by_anchor || {}, s.label);
+          const placed = new Set<string>();
+          const lineBadge = (anchorPath: string) => {
+            const sp = parts.get(anchorPath);
+            if (!sp) return null;
+            placed.add(anchorPath);
+            return <SubBadge sp={sp} sectionLabel={s.label} target={id} />;
+          };
+          const sb = segBody(body.text, s, cites, onCite, paraSet, onPara, undefined, lineBadge);
           const rail = isCase ? railCaption(s) : null;
           const mb = mentionsFor(s.label);
           return (
@@ -1644,8 +1676,10 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
             {sb.showLabel && <span className="seg-label">{s.label}</span>}
             <span className="seg-body">{sb.body}</span>
             {/* subtle per-sub-paragraph mention badges (art 47(1), s 3(1)(a)…) — additional
-                to the provision-level "Mentioned by" line below */}
-            <SubParaMentions byAnchorRaw={mentions?.by_anchor || {}} sectionLabel={s.label} target={id} />
+                to the provision-level "Mentioned by" line below. Those the drafting hierarchy
+                placed on their own line above are excluded here so they aren't shown twice;
+                this row carries only sub-parts we couldn't pin to a line. */}
+            <SubParaMentions byAnchorRaw={mentions?.by_anchor || {}} sectionLabel={s.label} target={id} exclude={placed} />
             {pinned(s.label).map((r, j) => (
               <div className="pinned" key={j}>💬 {r.relationship_type}: <a onClick={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</a>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
@@ -5162,39 +5196,85 @@ export function RulesView({ open }: { open: (id: string) => void }) {
 // Prominent currency banner for a piece of legislation, read from its change-graph edges
 // (source-agnostic: UK amendments + EU repeals/corrigenda/consolidations). A user browsing
 // an old act sees at a glance whether it's still good law and what changed it.
+// Provision-level currency chip (article / section / § / artikel), with its in-force window
+// and the instruments that changed it. Degrades: shows whatever the source pinpointed.
+const PROV_TONE: Record<string, string> = {
+  in_force: "leg-info", amended: "leg-amended", corrected: "leg-corrected",
+  repealed: "leg-repealed", recast: "leg-repealed", expired: "leg-repealed",
+  prospective: "leg-info", partially_in_force: "leg-amended", consolidated: "leg-info",
+};
+function ProvisionRow({ p, open, actId }:
+  { p: any; open: (id: string, a?: string) => void; actId: string }) {
+  const tone = PROV_TONE[p.status] || "leg-info";
+  const window = [p.in_force_from, p.in_force_to].filter(Boolean).join(" → ");
+  return (
+    <div className="leg-prov">
+      <a className="leg-prov-anchor" onClick={() => open(actId, p.anchor)} title="jump to this provision">{p.anchor}</a>
+      {p.status && <span className={`leg-dot ${tone}`} title={p.native_status || p.status}>{(p.status as string).replace(/_/g, " ")}</span>}
+      {window && <span className="muted leg-prov-win">{window}</span>}
+      {(p.change_types || []).length > 0 && <span className="muted"> · {(p.change_types as string[]).join(", ")}</span>}
+      {(p.changed_by || []).map((c: string) => (
+        <a key={c} className="leg-prov-by" onClick={() => open(c)} title="the instrument that changed it">{c}</a>))}
+    </div>
+  );
+}
+
+// Unified legislative-currency card (§CUR). One shape across UK / EU / FR / DE / NL / AU / NZ:
+// a status chip (is this still good law?), the key dates, what amended/repealed/recast it, and
+// — where the source pinpoints it — per-provision markers. Quiet for a plainly-in-force act
+// with nothing to report; expands with detail when there's something a reader needs to know.
 function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
   const [s] = useAsync(() => api.legislativeStatus(id), [id]);
+  const [allProv, setAllProv] = useState(false);
   if (!s) return null;
   const links = (ids: string[]) => ids.map((x, i) => (
     <Fragment key={x}>{i > 0 && ", "}<a onClick={() => open(x)}>{x}</a></Fragment>));
-  const bits: any[] = [];
-  if (s.repealed_by?.length) bits.push(<span key="rep"><b>Repealed / recast</b> by {links(s.repealed_by)}</span>);
-  if (s.amended_by?.length) bits.push(<span key="am"><b>Amended</b> by {links(s.amended_by)}</span>);
-  if (s.corrected_by?.length) bits.push(<span key="corr">Corrected by {links(s.corrected_by)}</span>);
-  if (s.is_consolidation) bits.push(<span key="cons">Consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""} of {s.consolidation_of ? links([s.consolidation_of]) : "its base act"}</span>);
-  else if (s.consolidations?.length) bits.push(<span key="consav">Consolidated version(s): {links(s.consolidations)}</span>);
-  if (s.legal_basis?.length) bits.push(<span key="lb" className="muted">Legal basis: {links(s.legal_basis)}</span>);
-  const byArt = Object.entries(s.by_article || {});
-  // nothing worth flagging → stay quiet (don't shout "in force" on every act)
-  if (!bits.length) return null;
-  const tone = s.status === "repealed" ? "leg-repealed"
-    : s.status === "amended" ? "leg-amended"
-    : s.status === "corrected" ? "leg-corrected" : "leg-info";
-  const icon = s.status === "repealed" ? "⛔" : s.status === "amended" ? "✏️" : s.status === "corrected" ? "✎" : "ℹ️";
+  const lines: any[] = [];
+  if (s.repealed_by?.length) lines.push(<span key="rep"><b>Repealed / recast</b> by {links(s.repealed_by)}</span>);
+  if (s.amended_by?.length) lines.push(<span key="am"><b>Amended</b> by {links(s.amended_by)}</span>);
+  if (s.corrected_by?.length) lines.push(<span key="corr">Corrected by {links(s.corrected_by)}</span>);
+  if (s.is_consolidation) lines.push(<span key="cons">Consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""} of {s.consolidation_of ? links([s.consolidation_of]) : "its base act"}</span>);
+  else if (s.consolidations?.length) lines.push(<span key="consav">Consolidated version(s): {links(s.consolidations)}</span>);
+  if (s.repeals?.length) lines.push(<span key="rps" className="muted">Repeals / recasts {links(s.repeals)}</span>);
+  if (s.legal_basis?.length) lines.push(<span key="lb" className="muted">Legal basis: {links(s.legal_basis)}</span>);
+
+  const provisions = (s.provisions || []) as any[];
+  const dates = [
+    s.in_force_from && `in force from ${s.in_force_from}`,
+    s.in_force_to && `${s.status === "prospective" ? "until" : "ceased"} ${s.in_force_to}`,
+    s.as_at && !s.is_consolidation && `text as at ${s.as_at}`,
+  ].filter(Boolean).join(" · ");
+  const unapplied = s.up_to_date === false && (s.unapplied_count || 0) > 0;
+
+  // Stay quiet only when there is genuinely nothing to say: plainly in force, no dates, no
+  // amendments, no provisions, and a confirmed (non-degraded) status.
+  const nothingToReport = !lines.length && !provisions.length && !dates && !unapplied
+    && (s.status === "in_force") && !s.degraded && !s.point_in_time_capable;
+  if (nothingToReport) return null;
+
+  const tone = s.status_tone || "leg-info";
+  const icon = s.status_icon || "ℹ️";
+  const label = s.status_label || "Status";
+  const shown = allProv ? provisions : provisions.slice(0, 8);
   return (
     <div className={`leg-status ${tone}`}>
-      <span className="leg-status-icon">{icon}</span>
-      <div className="leg-status-body">
-        {bits.map((b, i) => <div key={i} className="leg-status-line">{b}</div>)}
-        {byArt.length > 0 && (
-          <div className="leg-status-articles muted">
-            Article-level changes:{" "}
-            {byArt.slice(0, 12).map(([a, kinds]: any, i) => (
-              <Fragment key={a}>{i > 0 && " · "}<b>{a}</b> ({(kinds as string[]).join(", ")})</Fragment>))}
-            {byArt.length > 12 && ` +${byArt.length - 12} more`}
-          </div>
-        )}
+      <div className="leg-status-head">
+        <span className={`leg-chip ${tone}`}>{icon} {label}</span>
+        {s.native_status && <span className="leg-native" title={`source status (${s.scheme || ""})`}>{s.native_status}</span>}
+        {unapplied && <span className="leg-chip leg-amended" title="changes known to the source but not yet written into this text">⚠ {s.unapplied_count} unapplied</span>}
+        {s.point_in_time_capable && <span className="muted leg-pit">point-in-time available</span>}
+        {s.degraded && <span className="muted" title="status inferred from absence of recorded changes; not confirmed by the source">· unconfirmed</span>}
       </div>
+      {dates && <div className="leg-status-line muted">{dates}</div>}
+      {lines.map((b, i) => <div key={i} className="leg-status-line">{b}</div>)}
+      {provisions.length > 0 && (
+        <div className="leg-provisions">
+          <div className="muted leg-prov-head">Provision-level status{provisions.length > 8 ? ` (${provisions.length})` : ""}</div>
+          {shown.map((p) => <ProvisionRow key={p.anchor} p={p} open={open} actId={id} />)}
+          {provisions.length > 8 && (
+            <a className="muted" onClick={() => setAllProv(!allProv)}>{allProv ? "show fewer" : `show all ${provisions.length}`}</a>)}
+        </div>
+      )}
     </div>
   );
 }
