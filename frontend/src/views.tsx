@@ -2692,9 +2692,12 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
             see the <b>Unresolved</b> tab for the full most-cited harvest worklist with one-click harvest.</p>
         </div>
       )}
-      {stats && (
+      {stats && stats.total == null && (
+        <div className="panel"><h3 className="loading-pulse muted">Corpus · computing totals…</h3></div>
+      )}
+      {stats && stats.total != null && (
         <div className="panel">
-          <h3>Corpus · {stats.total} documents · resolution {Math.round((stats.resolution?.coverage || 0) * 100)}%</h3>
+          <h3>Corpus · {stats.total.toLocaleString()} documents · resolution {Math.round((stats.resolution?.coverage || 0) * 100)}%</h3>
           <div>{Object.entries(stats.by_doc_type || {}).map(([k, v]: any) =>
             <span className="tag" key={k}>{navigate ? <a onClick={() => navigate({ doc_type: k })} title="browse in Search">{docTypeLabel(k)}: {v}</a> : <>{docTypeLabel(k)}: {v}</>}</span>)}</div>
           <div>{Object.entries(stats.by_source || {}).map(([k, v]: any) =>

@@ -2795,10 +2795,18 @@ class Facade:
         return out
 
     def stats(self) -> dict:
+        # Stale-while-revalidate + placeholder so the endpoint NEVER blocks the UI. The
+        # doc-count breakdowns are roll-up-derived (cheap), but resolution_stats/tag_counts
+        # still GROUP BY the (10M-row, post fr-dila) relations/tags tables — under write load
+        # (a reparse) that can run tens of seconds, and the old no-placeholder 30s cache
+        # re-blocked on every cold/stale hit, hanging the homepage. Now a cold call returns a
+        # {_warming} placeholder and computes in the background; a longer TTL stops it churning.
         def _compute():
             with self._open() as (cat, _rs, _ts):
                 return corpus_stats(cat).to_dict()
-        return self._cached("stats", 30, _compute)
+        return self._cached("stats", 600, _compute, sync_wait=2.5, placeholder={
+            "total": None, "by_doc_type": {}, "by_source": {}, "by_upstream_status": {},
+            "by_tag": {}, "resolution": {}})
 
     def sources(self) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
