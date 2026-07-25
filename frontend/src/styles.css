@@ -1107,3 +1107,72 @@ table { width: 100%; }
 .leg-corrected, .leg-info, .leg-dot.leg-corrected, .leg-dot.leg-info,
 .leg-chip.leg-corrected, .leg-chip.leg-info { border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+
+/* ===================================================================
+   Small-viewport / phone layer (§responsive)
+   Goals from field use on a phone: (1) dense free-text TABLES must not
+   freeze or collapse a column to a one-character ribbon — they scroll
+   horizontally under the finger instead; (2) BUTTON labels must stay
+   legible (wrap, don't clip or overflow the row); (3) header, control
+   rows and detail grids stack rather than overrun the viewport.
+   Desktop is unchanged; everything here is behind a max-width query.
+   =================================================================== */
+
+/* -- Table safety net: any dense/free-text table becomes its own
+      horizontally-scrollable block, so a long citation/title column
+      scrolls rather than squeezing the layout to a sliver. The reader's
+      own prose is <div>-based, not tabular, so it's unaffected. The
+      Explore shape-table is excluded (it has bespoke column handling and
+      expandable rows that display:block would break). ---------------- */
+@media (max-width: 760px) {
+  .panel table:not(.shape-table),
+  .tray table, .peek table, .drill table,
+  table.grid, table.lii-table {
+    display: block; width: 100%; max-width: 100%;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    white-space: nowrap; scrollbar-width: thin;
+  }
+  /* a scrolled table's own free-text sub-lines (a title under a citation)
+     may wrap; only the row layout is kept off the squeeze */
+  .panel table:not(.shape-table) td .muted { white-space: normal; }
+
+  /* Explore homepage: let the jurisdiction name wrap and the composition
+     bar shrink so the row fits a phone without a horizontal scrollbar */
+  .jname { white-space: normal; }
+  .jbar { min-width: 0; }
+  .kindwrap { min-width: 0; }
+  .shape-table th, .shape-table td { padding-left: 6px; padding-right: 6px; }
+}
+
+/* -- Phone layout: stacking + legible buttons ---------------------- */
+@media (max-width: 640px) {
+  .app { padding: var(--sp-4) var(--sp-4) var(--sp-8); }
+
+  /* header wraps onto two tidy lines (title row, then nav) instead of
+     overflowing; the toggles stay reachable */
+  .app > header { flex-wrap: wrap; row-gap: var(--sp-2);
+    padding-bottom: var(--sp-2); margin-bottom: var(--sp-5); }
+  header h1 { font-size: 1.35rem; }
+  nav { margin-left: auto; flex-wrap: wrap; }
+  nav button { padding: var(--sp-2) var(--sp-3); font-size: .9rem; }
+
+  /* dense control rows: wrap freely rather than sum past the viewport
+     (the 140px per-child minimum otherwise forced a horizontal scroll) */
+  .row { gap: var(--sp-3); }
+  .row > * { min-width: 0; }
+
+  /* ACTION buttons: long, sentence-y labels ("Show as at this date",
+     "↻ scan changes") wrap and shrink instead of being clipped or
+     pushing the row wide. Nav tabs and .mini keep their single line
+     (their labels are deliberately short). */
+  button { font-size: .85rem; padding: var(--sp-2) var(--sp-3); }
+  button:not(.mini):not(nav button) {
+    white-space: normal; overflow-wrap: anywhere; max-width: 100%; height: auto;
+  }
+
+  /* search result rows: citation + metadata stack cleanly */
+  .result-meta { flex-wrap: wrap; }
+
+  /* detail grids collapse to a single column earlier on a phone */
+  .grid2 { grid-template-columns: 1fr; }
+}

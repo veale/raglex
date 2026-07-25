@@ -667,13 +667,18 @@ class Facade:
             # which is most of a cold drill's cost (16s cold vs 0.3s warm).
             try:
                 self._cache["corpus-shape"] = (_t.time(), self._corpus_shape_uncached())
+                # Warm each jurisdiction's default drill slices — every kind toggle
+                # (all / cases / legislation / guidance / admin decisions) AND both of the
+                # sorts the explore panel lands on first (most authoritative, most cited) — so
+                # switching kind OR sort is instant, not a cold 16s scan. Sequential, so a
+                # restart doesn't stampede the pool; each also warms PG's buffers.
                 for row in self._cache["corpus-shape"][1].get("jurisdictions", []):
                     for kind in (None, "cases", "legislation", "guidance", "administrative"):
-                        key = self._drill_key(row["jurisdiction"], None, kind, None,
-                                              "authority", 25)
-                        if key not in self._cache:
-                            self._cache[key] = (_t.time(), self._drill_uncached(
-                                row["jurisdiction"], kind=kind))
+                        for sort in ("authority", "cited"):
+                            key = self._drill_key(row["jurisdiction"], None, kind, None, sort, 25)
+                            if key not in self._cache:
+                                self._cache[key] = (_t.time(), self._drill_uncached(
+                                    row["jurisdiction"], kind=kind, sort=sort))
             except Exception:  # noqa: BLE001 — warming is best-effort
                 pass
         threading.Thread(target=_warm, daemon=True).start()
@@ -3979,7 +3984,11 @@ class Facade:
         from concurrent.futures import ThreadPoolExecutor
 
         from .formats import parse as parse_format
-        hints = {"akn", "bwb", "formex-legislation", "rii-xml", "dila-xml"}
+        # trusted stored ``meta.format`` values → used directly (skips re-sniffing every doc).
+        # "akoma-ntoso" is the UK/IE/DE-AKN registry name (uk_legislation stows it); without it
+        # a UK reparse fell through to _sniff_format on all 103k acts — still correct (it detects
+        # akomaNtoso), just wasteful.
+        hints = {"akn", "akoma-ntoso", "bwb", "formex-legislation", "rii-xml", "dila-xml"}
 
         with self._open() as (cat, _rs, ts):
             # KEYSET pagination, not one fetchall: a source with millions of rows would

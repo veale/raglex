@@ -69,7 +69,9 @@ class CorpusStats:
 
 
 def corpus_stats(catalogue: Catalogue) -> CorpusStats:
-    counts = catalogue.corpus_counts()
+    # roll-up-derived (no 5M-row scans) so the §8 stats endpoint doesn't blow the
+    # statement timeout; falls back to live counts when the roll-up is empty.
+    counts = catalogue.corpus_counts_fast()
     return CorpusStats(
         total=counts["total"],
         by_doc_type=counts["by_doc_type"],

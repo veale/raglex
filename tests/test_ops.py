@@ -35,6 +35,22 @@ def test_corpus_stats_breakdowns(catalogue):
     assert st.by_source["uk-grc"] == 1 and st.by_source["eu-cellar"] == 1
 
 
+def test_corpus_counts_fast_derives_from_rollup(catalogue):
+    # The §8 stats endpoint reads the corpus_shape_stats roll-up (no 5M-row scans). Before a
+    # roll-up exists it falls back to the live counts; once built it sums the roll-up, and its
+    # by_upstream_status comes from the roll-up's own column.
+    _doc(catalogue, "a", dt=DocType.JUDGMENT)
+    _doc(catalogue, "b", dt=DocType.OPINION, source="eu-cellar")
+    live = catalogue.corpus_counts_fast()            # roll-up empty → live fallback
+    assert live["total"] == 2 and live["by_doc_type"] == {"judgment": 1, "opinion": 1}
+    catalogue.refresh_corpus_shape_stats()           # build the roll-up (now carries upstream_status)
+    fast = catalogue.corpus_counts_fast()
+    assert fast["total"] == 2
+    assert fast["by_doc_type"] == {"judgment": 1, "opinion": 1}
+    assert fast["by_source"]["eu-cellar"] == 1
+    assert fast["by_upstream_status"].get("live") == 2   # derived from the roll-up column
+
+
 def test_pipeline_queue_depths(catalogue):
     _doc(catalogue, "a", has_text=True)   # text, not embedded
     _doc(catalogue, "b", has_text=False)  # fetched, no text

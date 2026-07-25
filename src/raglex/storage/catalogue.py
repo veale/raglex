@@ -142,14 +142,15 @@ CREATE TABLE IF NOT EXISTS source_stats (
 -- text+embedding coverage. Two live full-table scans (46s + 32s cold at 4.9M docs)
 -- ran inside every cache warm; the courts facet derives from these same rows.
 CREATE TABLE IF NOT EXISTS corpus_shape_stats (
-    source     TEXT NOT NULL,
-    doc_type   TEXT NOT NULL,
-    court      TEXT,
-    yr         TEXT,
-    n          INTEGER NOT NULL DEFAULT 0,
-    with_text  INTEGER NOT NULL DEFAULT 0,
-    embedded   INTEGER NOT NULL DEFAULT 0,
-    rebuilt_at TEXT NOT NULL
+    source          TEXT NOT NULL,
+    doc_type        TEXT NOT NULL,
+    court           TEXT,
+    yr              TEXT,
+    upstream_status TEXT,
+    n               INTEGER NOT NULL DEFAULT 0,
+    with_text       INTEGER NOT NULL DEFAULT 0,
+    embedded        INTEGER NOT NULL DEFAULT 0,
+    rebuilt_at      TEXT NOT NULL
 );
 
 -- Legislation-type rail roll-up (the Explore drill's Primary/Secondary/... split).
@@ -665,6 +666,10 @@ class Catalogue:
             ("jobs", "checkpoint_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("jobs", "restart_requested", "INTEGER NOT NULL DEFAULT 0"),
             ("jobs", "lease_heartbeat_at", "TEXT"),
+            # upstream_status in the homepage roll-up → the §8 stats endpoint derives its
+            # by_upstream_status breakdown from the roll-up instead of a full documents scan
+            # (four such scans blew the statement timeout after the fr-dila 1.7M import).
+            ("corpus_shape_stats", "upstream_status", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -1476,10 +1481,10 @@ class Catalogue:
             self.conn.execute("DELETE FROM corpus_shape_stats")
             self.conn.execute(
                 "INSERT INTO corpus_shape_stats "
-                "(source, doc_type, court, yr, n, with_text, embedded, rebuilt_at) "
-                "SELECT source, doc_type, court, substr(decision_date, 1, 4), "
+                "(source, doc_type, court, yr, upstream_status, n, with_text, embedded, rebuilt_at) "
+                "SELECT source, doc_type, court, substr(decision_date, 1, 4), upstream_status, "
                 "COUNT(*), SUM(has_text), SUM(has_embedding), ? "
-                "FROM documents GROUP BY source, doc_type, court, substr(decision_date, 1, 4)",
+                "FROM documents GROUP BY source, doc_type, court, substr(decision_date, 1, 4), upstream_status",
                 (_now(),),
             )
         return self.conn.execute(
@@ -1487,7 +1492,7 @@ class Catalogue:
 
     def corpus_shape_stats(self) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT source, doc_type, court, yr, n, with_text, embedded "
+            "SELECT source, doc_type, court, yr, upstream_status, n, with_text, embedded "
             "FROM corpus_shape_stats").fetchall()
 
     def replace_leg_type_stats(self, rows: list[tuple]) -> int:
@@ -3868,6 +3873,42 @@ class Catalogue:
             "by_source": self._count_by("source"),
             "by_upstream_status": self._count_by("upstream_status"),
         }
+
+    def corpus_counts_fast(self) -> dict:
+        """Same breakdowns as :meth:`corpus_counts`, but summed from the hourly
+        ``corpus_shape_stats`` roll-up instead of four full scans over the (now ~5M-row)
+        documents table — those scans blew the statement timeout after the fr-dila import
+        and left the §8 stats endpoint permanently cold. Falls back to the live counts when
+        the roll-up hasn't been built yet (fresh install / tests). A pre-``upstream_status``
+        roll-up (old rows, column still NULL) is detected and the upstream breakdown filled
+        from a single low-cardinality live scan until the next roll-up rebuild."""
+        rows = self.corpus_shape_stats()
+        if not rows:
+            return self.corpus_counts()
+        total = 0
+        by_doc_type: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        by_upstream: dict[str, int] = {}
+        have_upstream = False
+        for r in rows:
+            n = r["n"] or 0
+            total += n
+            dt = r["doc_type"] or "?"
+            by_doc_type[dt] = by_doc_type.get(dt, 0) + n
+            src = r["source"] or "?"
+            by_source[src] = by_source.get(src, 0) + n
+            us = r["upstream_status"]
+            if us:
+                have_upstream = True
+                by_upstream[us] = by_upstream.get(us, 0) + n
+        if not have_upstream:   # roll-up predates the column → one small live GROUP BY
+            try:
+                by_upstream = self._count_by("upstream_status")
+            except Exception:   # noqa: BLE001 — never let a heavy scan fail the whole page
+                by_upstream = {}
+        _sort = lambda d: dict(sorted(d.items(), key=lambda kv: kv[1], reverse=True))
+        return {"total": total, "by_doc_type": _sort(by_doc_type),
+                "by_source": _sort(by_source), "by_upstream_status": _sort(by_upstream)}
 
     def queue_depths(self) -> dict:
         """Pipeline queue view (§8): where documents are stuck between stages."""
