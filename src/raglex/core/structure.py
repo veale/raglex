@@ -118,17 +118,37 @@ def line_depths(text: str) -> list[tuple[int, int, int]]:
     Returns ``(start, end, depth)`` per line, as offsets INTO ``text``, with
     ``depth`` counted from 0. A line with no enumerator inherits the depth of the
     line above it, so a wrapped or continuation line stays with its provision
-    rather than snapping back to the margin.
+    rather than snapping back to the margin. Thin wrapper over
+    :func:`line_structure` (which also carries each line's marker path)."""
+    return [(a, b, d) for a, b, d, _path in line_structure(text)]
+
+
+def line_structure(text: str) -> list[tuple[int, int, int, str]]:
+    """Like :func:`line_depths`, but also returns each enumerated line's **marker
+    path** — the accumulated parenthesised enumerators from the provision root down
+    to that line: ``"(2)"``, ``"(2)(a)"``, ``"(2)(a)(i)"``. This is the sub-part
+    anchor a pincite carries ("s. 5(2)(a)"), so the reader can place a sub-provision's
+    mention badge at the END of *its* line instead of bunching every sub-part badge at
+    the section's foot. Continuation/wrapped lines (and the section's own lead-in)
+    carry an empty path — they aren't a citable sub-provision of their own.
+
+    Returns ``(start, end, depth, path)`` per line, offsets INTO ``text``.
     """
-    out: list[tuple[int, int, int]] = []
+    out: list[tuple[int, int, int, str]] = []
     levels: list[dict] = []
     depth = 0
     pos = 0
+
+    def _path() -> str:
+        # the enumerator tokens down to the current depth, each parenthesised; empty
+        # tokens (the definition-head sentinel) are skipped so "(a)" doesn't become "()(a)"
+        return "".join(f"({lv['token']})" for lv in levels[:depth + 1] if lv.get("token"))
+
     for raw in text.split("\n"):
         start, end = pos, pos + len(raw)
         pos = end + 1                        # step over the newline
         if not raw.strip():
-            out.append((start, end, depth))
+            out.append((start, end, depth, ""))
             continue
         m = _MARKER_RE.match(raw)
         if not m:
@@ -144,14 +164,14 @@ def line_depths(text: str) -> list[tuple[int, int, int]]:
                 # sub-paragraphs must nest one tier IN — so seed the stack with a
                 # sentinel no real enumerator can continue, and the next "(a)" opens
                 # beneath it at depth 1
-                levels[:] = [{"kind": "_def", "value": 0, "suffix": ""}]
+                levels[:] = [{"kind": "_def", "value": 0, "suffix": "", "token": ""}]
                 depth = 0
-            out.append((start, end, depth))
+            out.append((start, end, depth, ""))  # a continuation line isn't its own sub-part
             continue
         tok = m.group("paren") or m.group("dot")
         cands = _candidates(tok)
         if not cands:
-            out.append((start, end, depth))
+            out.append((start, end, depth, ""))
             continue
 
         # 1) does this continue a sequence already running? deepest tier first, so
@@ -168,7 +188,7 @@ def line_depths(text: str) -> list[tuple[int, int, int]]:
 
         if hit >= 0:
             del levels[hit + 1:]             # closing a sub-run pops back out
-            levels[hit].update(kind=chosen[0], value=chosen[1], suffix=chosen[2])
+            levels[hit].update(kind=chosen[0], value=chosen[1], suffix=chosen[2], token=tok)
             depth = hit
         else:
             # 2) a new sequence: prefer a reading whose tier isn't already open,
@@ -178,7 +198,7 @@ def line_depths(text: str) -> list[tuple[int, int, int]]:
             chosen = fresh[0] if fresh else cands[0]
             if len(levels) >= MAX_DEPTH:
                 del levels[MAX_DEPTH - 1:]
-            levels.append({"kind": chosen[0], "value": chosen[1], "suffix": chosen[2]})
+            levels.append({"kind": chosen[0], "value": chosen[1], "suffix": chosen[2], "token": tok})
             depth = len(levels) - 1
-        out.append((start, end, depth))
+        out.append((start, end, depth, _path()))
     return out

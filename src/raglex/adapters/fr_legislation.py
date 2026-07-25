@@ -210,6 +210,17 @@ class FrLegislationAdapter(BaseAdapter):
             extra["eli"] = doc.eli
         if versions_meta:
             extra["article_versions"] = versions_meta
+        # Unified legislative currency (§CUR): map the French état vocabulary onto the canonical
+        # in-force/amended/repealed model so the status banner + MCP treat FR law like any other
+        # jurisdiction. Only for consolidated legislation (LEGI) — not CNIL/CONSTIT decisions.
+        if doc_type == DocType.LEGISLATION:
+            from ..leg_currency import currency_from_french_versions
+            cur = currency_from_french_versions(doc.etat, doc.article_states)
+            cur.in_force_from = doc.date_debut.isoformat() if doc.date_debut else None
+            cur.in_force_to = doc.date_fin.isoformat() if doc.date_fin else None
+            meta = cur.to_meta()
+            if meta:
+                extra["currency"] = meta
         if doc.text is None:
             # older JO has no HTML text before June 2004 — flag for the OCR/import worklist
             extra["has_text"] = False

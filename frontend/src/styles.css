@@ -429,6 +429,9 @@ tbody tr:hover { background: var(--surface-2); }
 .reader { --indent-step: 1.35em; }
 .reader .stat-line { margin: 0 0 .12em; }
 .reader .stat-line:last-child { margin-bottom: 0; }
+/* a sub-provision's mention badge sits at the END of its own line, riding just after the
+   text rather than bunched in a row at the section foot */
+.reader .stat-line > .subpara-badge { margin-left: .5em; vertical-align: baseline; position: relative; top: -1px; }
 /* the side panels are ~384px wide — a full-width indent would eat the text, so
    the tiers step in much more finely there while staying distinguishable */
 .peek .reader, .tray .reader { --indent-step: .6em; }
@@ -1073,18 +1076,34 @@ table { width: 100%; }
 
 /* -- Legislative status banner (§EU currency) ------------------------------ */
 .leg-status {
-  display: flex; gap: 10px; align-items: flex-start; margin: 10px 0;
-  padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line);
-  background: var(--panel); font-size: 13.5px;
+  display: block; margin: 10px 0;
+  padding: 11px 14px; border-radius: 10px; border: 1px solid var(--line);
+  border-left-width: 4px; background: var(--panel); font-size: 13.5px;
 }
 .leg-status-icon { font-size: 18px; line-height: 1.2; }
 .leg-status-body { flex: 1; }
-.leg-status-line { margin: 1px 0; }
+.leg-status-line { margin: 2px 0; }
 .leg-status-line a, .leg-status-articles a { cursor: pointer; }
 .leg-status-articles { margin-top: 5px; font-size: 12px; }
-.leg-repealed { border-color: color-mix(in srgb, var(--bad) 55%, transparent);
-  background: color-mix(in srgb, var(--bad) 10%, var(--panel)); }
-.leg-amended { border-color: color-mix(in srgb, var(--ctp-peach, #fab387) 55%, transparent);
-  background: color-mix(in srgb, var(--ctp-peach, #fab387) 10%, var(--panel)); }
-.leg-corrected, .leg-info { border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+/* header: status chip + native token + flags */
+.leg-status-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 2px; }
+.leg-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;
+  padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+.leg-native { font-size: 11px; font-family: var(--mono, monospace); text-transform: uppercase;
+  letter-spacing: .3px; color: var(--muted); border: 1px dashed var(--line); border-radius: 6px; padding: 1px 6px; }
+.leg-pit { font-size: 12px; }
+/* per-provision grid */
+.leg-provisions { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 7px; }
+.leg-prov-head { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }
+.leg-prov { display: flex; gap: 7px; align-items: baseline; flex-wrap: wrap; padding: 2px 0; font-size: 12.5px; }
+.leg-prov-anchor { cursor: pointer; font-weight: 600; min-width: 78px; }
+.leg-prov-win { font-size: 11.5px; }
+.leg-prov-by { cursor: pointer; font-size: 11.5px; }
+.leg-dot { font-size: 11px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line); }
+.leg-repealed, .leg-dot.leg-repealed, .leg-chip.leg-repealed { border-color: color-mix(in srgb, var(--bad) 55%, transparent);
+  background: color-mix(in srgb, var(--bad) 12%, var(--panel)); }
+.leg-amended, .leg-dot.leg-amended, .leg-chip.leg-amended { border-color: color-mix(in srgb, var(--ctp-peach, #fab387) 55%, transparent);
+  background: color-mix(in srgb, var(--ctp-peach, #fab387) 12%, var(--panel)); }
+.leg-corrected, .leg-info, .leg-dot.leg-corrected, .leg-dot.leg-info,
+.leg-chip.leg-corrected, .leg-chip.leg-info { border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }

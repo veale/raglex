@@ -317,6 +317,19 @@ class CommonwealthAdapter(BaseAdapter):
             })
         if text_doc and text_doc.metadata.get("endnotes"):
             extra["endnotes"] = text_doc.metadata["endnotes"]
+        # Unified legislative currency (§CUR): the FRL's OData Title.status enum + its native
+        # unincorporated-amendments flag map straight onto the canonical model. Australia is the
+        # second system (with the UK) to expose the applied/unapplied distinction natively, so
+        # ``up_to_date`` is a real signal here, not an inference. ``point_in_time`` is the
+        # compilation date we actually hold.
+        from ..leg_currency import Currency
+        cur = Currency(scheme="au-register", native_status=status,
+                       point_in_time_capable=True,
+                       up_to_date=(False if unincorporated else True),
+                       as_at=extra.get("point_in_time")).normalized()
+        cur_meta = cur.to_meta()
+        if cur_meta:
+            extra["currency"] = cur_meta
 
         return Record(
             source=self.source,

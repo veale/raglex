@@ -204,12 +204,18 @@ def build_server(config: Config | None = None) -> FastMCP:
 
     @mcp.tool(annotations=_READ_ONLY)
     def legislative_status(stable_id: str) -> dict:
-        """Is this legislation still good law? Its currency from the change-graph: in force /
-        amended / repealed / recast / corrected, plus whether it's a consolidated snapshot
-        (and as-at date), the acts that amended/repealed/corrected it, its legal basis, and
-        per-article change markers where pinpointed. Check this before relying on an EU/UK
-        act — an old directive may have been repealed and recast (e.g. Directive 95/46 →
-        GDPR)."""
+        """Is this legislation still good law? Unified currency across every jurisdiction RagLex
+        holds — UK, EU, France, Germany, Netherlands, Australia, New Zealand, Ireland — mapped
+        onto one vocabulary: ``status`` (in_force / amended / corrected / repealed / recast /
+        consolidated / prospective / partially_in_force / expired) with a ``status_label``, the
+        source's own ``native_status`` token + ``scheme``, in-force/repeal dates, the acts that
+        amended/repealed/corrected it and its legal basis, ``point_in_time_capable`` +
+        ``as_at``, an ``unapplied_count`` / ``up_to_date`` editorial-lag flag (native for UK &
+        AU, inferred elsewhere), and a ``provisions`` list giving per-article/section status +
+        validity windows + what changed each, where the source pinpoints it. ``degraded`` = the
+        "in force" is inferred from absence of recorded changes, not confirmed. Check this
+        before relying on an act — an old directive may have been repealed and recast (e.g.
+        Directive 95/46 → GDPR), or its text may predate unapplied amendments."""
         return facade.legislative_status(stable_id)
 
     @mcp.tool(annotations=_READ_ONLY)

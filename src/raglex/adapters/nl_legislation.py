@@ -335,6 +335,15 @@ class NLLegislationAdapter(BaseAdapter):
         parsed = parse("bwb", raw)
         if not parsed.text:
             return None
+        # Unified legislative currency (§CUR): BWB is native point-in-time (Juriconnect g/z
+        # dates); the toestand we hold is the in-force version as at ``date``. NL's amend/repeal
+        # graph lives in the separate LiDO service (a future enrichment), so force status here is
+        # the validity window; the change edges degrade to whatever the citation graph carries.
+        from ..leg_currency import Currency
+        nl_status = (parsed.metadata or {}).get("status")
+        cur = Currency(scheme="nl-wti", native_status=nl_status,
+                       point_in_time_capable=True, in_force_from=date).normalized()
+        cur_meta = cur.to_meta()
         return Record(
             source=self.source,
             stable_id=stub.stable_id,
@@ -357,6 +366,7 @@ class NLLegislationAdapter(BaseAdapter):
                 "aliases": ([f"jci1.3:c:{bwbid}&g={date}", f"{bwbid}@{date}"]
                             if "@" in stub.stable_id else
                             [f"jci1.3:c:{bwbid}", law_name_alias(parsed.title or bwbid)]),
+                "currency": cur_meta or None,
             }.items() if v},
         )
 

@@ -793,8 +793,15 @@ class Facade:
         acts that did it. Dangling (not-yet-held) edges still count, so "repealed by
         <CELEX>" shows before the repealing act is harvested."""
         from .eu_law import is_consolidation, consolidation_base, consolidation_date
+        from .leg_currency import Currency, Provision, more_severe, status_meta, CanonStatus
         qs = ",".join("?" * len(self._LEG_CHANGE_TYPES))
         with self._open() as (cat, _rs, _ts):
+            doc = cat.get_document(stable_id)
+            meta = _row_meta(doc) if doc is not None else {}
+            source = (doc["source"] if doc is not None else None)
+            # editorial-lag backlog (UK unapplied effects), if this act is on the re-check queue
+            eff = cat.conn.execute(
+                "SELECT outstanding FROM effects_refresh WHERE stable_id = ?", (stable_id,)).fetchone()
             out = [dict(r) for r in cat.conn.execute(
                 f"SELECT relationship_type, dst_id, candidate_id, raw_citation_string, dst_anchor "
                 f"FROM relations WHERE src_id = ? AND relationship_type IN ({qs})",
@@ -819,13 +826,27 @@ class Facade:
         legal_basis = [_tgt(r) for r in out if r["relationship_type"] == "legal_basis"]
         repeals = [_tgt(r) for r in out if r["relationship_type"] in self._LEG_INCOMING_REPEAL]
 
-        status = ("repealed" if repealed_by else
-                  "amended" if amended_by else
-                  "corrected" if corrected_by else "in_force")
+        edge_status = ("repealed" if repealed_by else
+                       "amended" if amended_by else
+                       "corrected" if corrected_by else None)
         cons_base = consolidation_base(stable_id)
-        # per-article change markers: group edges that carry a pinpoint (dst_anchor) by that
-        # article → the change types touching it. Reliable only where the source pinpointed
-        # it (UK provision-level effects; recast correlation-table CORRESPONDS_TO).
+        is_cons = bool(is_consolidation(stable_id))
+        # Native currency the adapter/format parser stowed (FR états, DE force, NL WTI, UK
+        # status). Merge it with the edge-derived picture: the more-severe of the two wins, so a
+        # source that says "repealed" is never hidden behind a mild edge signal, and vice-versa.
+        native = (Currency.from_meta(meta) or Currency()).normalized()
+        merged = more_severe(edge_status, native.status)
+        if merged is None:
+            merged = str(CanonStatus.CONSOLIDATED) if is_cons else str(CanonStatus.IN_FORCE)
+        # a dated consolidation is a *manifestation* fact; only let it be the headline when no
+        # force signal (repeal/amend/etc.) outranks it.
+        if is_cons:
+            merged = more_severe(merged, str(CanonStatus.CONSOLIDATED))
+        meta_info = status_meta(merged)
+
+        # per-article change markers: edges that carry a pinpoint (dst_anchor), grouped by
+        # article → the change kinds touching it (UK provision-level effects; recast
+        # correlation-table CORRESPONDS_TO). Reliable only where the source pinpointed it.
         by_article: dict[str, list[str]] = {}
         for r in inc + out:
             anchor = (r.get("dst_anchor") or "").strip()
@@ -833,8 +854,29 @@ class Facade:
                 by_article.setdefault(anchor, [])
                 if r["relationship_type"] not in by_article[anchor]:
                     by_article[anchor].append(r["relationship_type"])
+        # Unified provision view: native per-provision currency (FR états / DE / NL windows)
+        # merged with the edge-derived change markers, keyed on the anchor. Native carries dated
+        # in-force windows; edges carry which instruments touched it.
+        prov: dict[str, dict] = {}
+        for p in native.provisions:
+            prov[p.anchor] = {**p.to_dict(), "anchor": p.anchor}
+        for anchor, kinds in by_article.items():
+            row = prov.setdefault(anchor, {"anchor": anchor})
+            row["change_types"] = sorted(set(row.get("change_types", [])) | set(kinds))
+        provisions = sorted(prov.values(), key=lambda r: r["anchor"])
+
+        # up-to-date / editorial lag: a UK effects-refresh row means known-but-unapplied changes.
+        unapplied = int(eff["outstanding"]) if eff else (native.unapplied_count or 0)
+        up_to_date = (False if unapplied else native.up_to_date)
+        # Low confidence when we're calling it "in force" purely from absence of edges + no
+        # native confirmation — the banner uses this to hedge rather than over-claim currency.
+        degraded = (native.status is None and edge_status is None and not is_cons)
         return {
-            "stable_id": stable_id, "status": status,
+            "stable_id": stable_id, "status": merged,
+            "status_label": meta_info["label"], "status_icon": meta_info["icon"],
+            "status_tone": meta_info["tone"], "source": source,
+            "native_status": native.native_status, "scheme": native.scheme,
+            "in_force_from": native.in_force_from, "in_force_to": native.in_force_to,
             "repealed_by": sorted(set(filter(None, repealed_by))),
             "amended_by": sorted(set(filter(None, amended_by))),
             "corrected_by": sorted(set(filter(None, corrected_by))),
@@ -842,10 +884,13 @@ class Facade:
             "legal_basis": sorted(set(filter(None, legal_basis))),
             "repeals": sorted(set(filter(None, repeals))),
             # this doc IS a dated consolidation snapshot → its base + as-at date
-            "is_consolidation": bool(is_consolidation(stable_id)),
+            "is_consolidation": is_cons,
             "consolidation_of": cons_base,
-            "as_at": consolidation_date(stable_id),
-            "by_article": by_article,
+            "as_at": consolidation_date(stable_id) or native.as_at,
+            "point_in_time_capable": bool(native.point_in_time_capable),
+            "unapplied_count": unapplied, "up_to_date": up_to_date,
+            "by_article": by_article, "provisions": provisions,
+            "degraded": degraded,
         }
 
     def get_document(self, stable_id: str) -> dict:
@@ -1156,11 +1201,15 @@ class Facade:
             # boundary would read s.2(1) as a continuation of s.1's subsections.
             flat_lines = None
             if doc["doc_type"] == "legislation" and text:
-                from .core.structure import line_depths
+                from .core.structure import line_structure
 
                 def _spans(body: str, base: int) -> list[dict]:
-                    return [{"start": base + a, "end": base + b, "depth": d}
-                            for a, b, d in line_depths(body)]
+                    # ``anchor`` = the line's marker path ("(2)", "(2)(a)") so the reader can
+                    # place its sub-provision mention badge at the end of that line, not bunched
+                    # at the section foot. Empty for continuation/lead-in lines.
+                    return [{"start": base + a, "end": base + b, "depth": d,
+                             **({"anchor": path} if path else {})}
+                            for a, b, d, path in line_structure(body)]
 
                 for s in segs:
                     body = text[s["char_start"]:s["char_end"]]
