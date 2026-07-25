@@ -357,13 +357,17 @@ class CourtListenerAdapter(BaseAdapter):
                 params = None       # the `next` cursor already carries them
                 # v4 responses report the total matching clusters — pass it through so the
                 # Jobs panel can draw a real progress bar for the harvest phase (otherwise a
-                # feed crawl only knows how many it has SEEN, not how many exist).
+                # feed crawl only knows how many it has SEEN, not how many exist). ``count``
+                # is sometimes a *URL* (v4 defers an expensive COUNT), not an int — only use
+                # it when it's a plain integer.
                 feed_total = page.get("count")
+                if not isinstance(feed_total, int):
+                    feed_total = None
                 for cluster in page.get("results") or []:
                     stub = _stub_for_cluster(cluster)
                     if stub:
                         if feed_total:
-                            stub.hints["feed_total"] = int(feed_total)
+                            stub.hints["feed_total"] = feed_total
                         yield stub
                 pages += 1
                 if max_pages is not None and pages >= max_pages:
