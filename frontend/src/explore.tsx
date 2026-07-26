@@ -114,6 +114,24 @@ function KindBar({ r }: { r: ShapeRow }) {
   );
 }
 
+// Mobile composition: the horizontal bar has no room on a phone, so show the same
+// breakdown as a compact stacked list — one "type  count" per line, small text — which
+// stands a chance of fitting the narrow column. Hidden on desktop (CSS).
+function KindList({ r }: { r: ShapeRow }) {
+  const parts = KIND_COLOURS.filter(([k]) => ((r as any)[k] as number) > 0);
+  return (
+    <div className="kindlist" aria-hidden="true">
+      {parts.map(([k, colour, label]) => (
+        <div key={k} className="kindlist-row">
+          <i className="kind-dot" style={{ background: colour }} />
+          <span className="kindlist-label">{label}</span>
+          <span className="kindlist-n">{FMT((r as any)[k] as number)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // availability + provenance chips for one document row
 function Availability({ it }: { it: any }) {
   return (
@@ -432,8 +450,13 @@ export function ExploreView({ open, goSearch }:
                     <td className="jname"><FlagIcon jurisdiction={r.jurisdiction} opacity={0.85} /> {r.jurisdiction}
                       <div className="muted jsub">{FMT(r.with_text)} with text · {FMT(r.embedded)} embedded</div></td>
                     <td className="num jtotal">{r.total.toLocaleString()}</td>
-                    <td className="jbar"><KindBar r={r} /></td>
+                    <td className="jbar"><KindBar r={r} /><KindList r={r} /></td>
                     <td className="jspark"><Spark years={r.years} /></td>
+                  </tr>
+                  {/* mobile only: the timeline as a full-width row beneath the jurisdiction,
+                      as if the three trailing cells merged into one strip */}
+                  <tr className="jspark-row-mobile" onClick={() => setExpanded(on ? null : r.jurisdiction)}>
+                    <td colSpan={5}><Spark years={r.years} /></td>
                   </tr>
                   {on && <tr className="exp-row"><td colSpan={5}><Expanded r={r} open={open} /></td></tr>}
                 </Fragment>

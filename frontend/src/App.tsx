@@ -74,6 +74,7 @@ function AdminView({ open, navigate }:
     () => (localStorage.getItem("raglex-admin-section") as AdminSection) || "overview");
   const pick = (s: AdminSection) => {
     setSection(s);
+    window.scrollTo(0, 0);   // switching section starts a fresh page → top, not mid-scroll
     try { localStorage.setItem("raglex-admin-section", s); } catch { /* ignore */ }
   };
   const SECTIONS: [AdminSection, string, string][] = [
@@ -153,6 +154,10 @@ export function App() {
     setCorpusFilter({ ...f, _n: String(Date.now()) }); setTab("search");
   };
   const goSearch = (q?: string) => navigateCorpus(q ? { query: q } : {});
+  // A top-level nav click starts a fresh view → land at the TOP of the page. Without this,
+  // switching from a scrolled-down Explore into Admin kept the old scrollY and dropped you
+  // into the middle of the Admin page. (The back-arrow still restores its saved scroll.)
+  const goTab = (t: Tab) => { setTab(t); window.scrollTo(0, 0); };
 
   // which browse surfaces have been opened at least once (see the render below)
   const visited = useRef<Set<Tab>>(new Set(["explore"]));
@@ -199,7 +204,7 @@ export function App() {
         <ApiStatus />
         <nav>
           {tabs.map(([t, label]) => (
-            <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>{label}</button>
+            <button key={t} className={tab === t ? "active" : ""} onClick={() => goTab(t)}>{label}</button>
           ))}
           {docId && (tab === "document" || tab === "graph") &&
             <button className={tab === "document" ? "active" : ""} onClick={() => setTab("document")}>Document</button>}

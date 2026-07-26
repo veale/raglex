@@ -235,7 +235,7 @@ export const api = {
   worklist: (limit = 30) => req<any[]>(`/worklist?limit=${limit}`),
   snowball: (needsAdapter = false, limit = 50) =>
     req<any[]>(`/snowball?limit=${limit}&only_unharvestable=${needsAdapter}`),
-  unresolved: (limit = 100) => req<any[]>(`/unresolved?limit=${limit}`),
+  unresolved: (limit = 100) => req<any>(`/unresolved?limit=${limit}`),
   coverage: () => req<any>("/coverage"),
   corpusMap: () => req<any>("/corpus-map"),
   refreshCorpusMap: () => req<any>("/corpus-map/refresh", { method: "POST" }),

@@ -645,7 +645,7 @@ class Facade:
     # stale-while-revalidate keeps them fresh enough (top-authority lists barely move per
     # harvest), and they refresh in the background on next access rather than blocking a click.
     _VOLATILE_CACHE_PREFIXES = ("coverage", "stats", "corpus_map", "queues", "worklist",
-                                "snowball", "unfetchable")
+                                "snowball", "unfetchable", "unresolved")
 
     def _invalidate_caches(self) -> None:
         """Drop the cached dashboard aggregates after an op that changes the citation
@@ -663,7 +663,8 @@ class Facade:
         import time as _t
 
         def _warm():
-            for fn in (self.coverage, self.stats, self.corpus_map):
+            for fn in (self.coverage, self.stats, self.corpus_map,
+                       self.unresolved_references_cached):
                 try:
                     fn()
                 except Exception:  # noqa: BLE001
@@ -689,6 +690,41 @@ class Facade:
             except Exception:  # noqa: BLE001 — warming is best-effort
                 pass
         threading.Thread(target=_warm, daemon=True).start()
+
+    def start_daily_refresh(self, *, hour_uk: int = 1) -> None:
+        """Once a day at ~01:00 UK time (low traffic), fully recompute + re-warm every heavy
+        dashboard aggregate — the Explore per-jurisdiction slices, corpus shape, stats,
+        coverage AND the unresolved queue — so the first visitor of the day gets fresh,
+        already-warm caches instead of triggering a cold/stale recompute. Runs in the API
+        process (where the in-memory cache lives), on a daemon thread, independent of the
+        pausable job scheduler."""
+        import threading
+        import time as _t
+        from datetime import datetime, timedelta
+
+        def _sleep_secs() -> float:
+            try:
+                from zoneinfo import ZoneInfo
+                now = datetime.now(ZoneInfo("Europe/London"))
+            except Exception:  # noqa: BLE001 — tz db missing → fall back to server local
+                now = datetime.now()
+            target = now.replace(hour=hour_uk, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            return max(60.0, (target - now).total_seconds())
+
+        def _loop():
+            while True:
+                _t.sleep(_sleep_secs())
+                try:
+                    # drop EVERYTHING (incl. the non-volatile drill/shape) then re-warm from
+                    # scratch, so the day starts on freshly-computed figures
+                    self._cache.clear()
+                    self.warm_caches()
+                except Exception:  # noqa: BLE001
+                    log.warning("daily cache refresh failed", exc_info=True)
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     @contextmanager
     def _open(self) -> Iterator[tuple[Catalogue, RawStore, TextStore]]:
@@ -3368,6 +3404,18 @@ class Facade:
     # classified in Python and then thrown away. The export path overrides this
     # (it legitimately wants the long tail), which is why it's a parameter.
     _UNFETCHABLE_MIN_CITING = 2
+
+    def unresolved_references_cached(self, *, limit: int = 5000) -> dict:
+        """Stale-while-revalidate wrapper for the hanging-reference queue (the Unresolved
+        panel). That panel asks for up to 5000 rows WITH each one's citing-document list —
+        tens of seconds cold — so caching it (1h TTL) with a placeholder means the panel
+        never blocks: a cold load returns ``{rows: [], _warming: true}`` and computes in the
+        background, and the nightly 1am refresh + startup warm keep it hot. Dropped on any
+        harvest/resolve (it's in the volatile set) so a freshly-resolved reference leaves the
+        list on the next view. Returns ``{rows, _warming?}``."""
+        return self._cached(f"unresolved:{limit}", 3600,
+                            lambda: {"rows": self.unresolved_references(limit=limit, with_citing=True)},
+                            placeholder={"rows": []}, sync_wait=2.5)
 
     def unfetchable_references(self, *, limit: int = 200,
                                min_citing: int | None = None) -> dict:

@@ -834,7 +834,10 @@ table { width: 100%; }
 .hero-search .ac-list { top: 100%; }
 
 .shape { padding: 0; overflow: hidden; }
-.shape-table { border-collapse: collapse; }
+/* full panel width so a highlighted (expanded) jurisdiction row and its drop-down
+   detail align edge-to-edge and use the available horizontal space — the row was
+   content-width, so its highlight looked truncated beside the wider dropdown */
+.shape-table { border-collapse: collapse; width: 100%; }
 .shape-table th { font-size: .68rem; text-transform: none; letter-spacing: .01em;
   color: var(--faint); font-weight: 700; text-align: left; padding: var(--sp-4) var(--sp-4); }
 .shape-table th.num, .shape-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -928,9 +931,22 @@ table { width: 100%; }
 .admin-dense .admin-body button { padding: 4px 10px; font-size: .82rem; }
 .admin-dense .admin-body input, .admin-dense .admin-body select { padding: 4px 8px; font-size: .85rem; }
 @media (max-width: 860px) {
-  .admin { flex-direction: column; }
-  .admin-rail { position: static; flex-direction: row; flex-wrap: wrap; width: 100%; }
+  .admin { flex-direction: column; gap: var(--sp-4); }
+  /* section selector becomes a horizontal pill bar that scrolls if it overflows,
+     instead of a ragged wrap of left-aligned rows — clearer on a phone and it
+     sticks under the header so you can switch section without scrolling up */
+  .admin-rail { position: sticky; top: 54px; z-index: 5; flex-direction: row; flex-wrap: nowrap;
+    width: 100%; gap: 6px; overflow-x: auto; scrollbar-width: none;
+    padding: 6px 0; margin: 0 calc(-1 * var(--sp-4)); padding-left: var(--sp-4); padding-right: var(--sp-4);
+    background: color-mix(in srgb, var(--bg) 90%, transparent); backdrop-filter: blur(8px); }
+  .admin-rail::-webkit-scrollbar { display: none; }
+  .admin-rail button { flex: 0 0 auto; text-align: center; border-radius: 999px;
+    border: 1px solid var(--line); padding: 6px 15px; font-size: .85rem; }
+  .admin-rail button.on { background: var(--accent); color: var(--on-accent);
+    border-color: var(--accent); box-shadow: none; }
   .rail-hint { display: none; }
+  /* dense admin panels get a touch more breathing room on a phone */
+  .admin-dense .admin-body .panel { padding: var(--sp-4); }
 }
 
 /* --- polish pass ------------------------------------------------------------ */
@@ -1148,6 +1164,12 @@ table { width: 100%; }
 @media (max-width: 640px) {
   .app { padding: var(--sp-4) var(--sp-4) var(--sp-8); }
 
+  /* iOS Safari auto-ZOOMS the page when you focus a form control whose font is
+     under 16px (our inputs are .95rem ≈ 15px), then leaves you zoomed in. Pin all
+     text controls to 16px on small screens so focusing Search (or any field) never
+     triggers the zoom. Applies to every page's inputs/selects/textareas. */
+  input, select, textarea { font-size: 16px; }
+
   /* header wraps onto two tidy lines (title row, then nav) instead of
      overflowing; the toggles stay reachable */
   .app > header { flex-wrap: wrap; row-gap: var(--sp-2);
@@ -1175,4 +1197,84 @@ table { width: 100%; }
 
   /* detail grids collapse to a single column earlier on a phone */
   .grid2 { grid-template-columns: 1fr; }
+}
+
+/* --- Explore composition/timeline: mobile reframing ----------------------- */
+/* desktop default: the stacked list + full-width timeline row are hidden (the
+   horizontal bar + inline sparkline cell are used instead) */
+.kindlist { display: none; }
+.jspark-row-mobile { display: none; }
+.kindlist-row { display: flex; align-items: center; gap: 6px; font-size: .68rem;
+  line-height: 1.55; color: var(--subtext); }
+.kindlist-row .kind-dot { flex: 0 0 auto; }
+.kindlist-label { flex: 1 1 auto; min-width: 0; }
+.kindlist-n { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+
+@media (max-width: 640px) {
+  /* drop the cramped horizontal composition bar; show the same numbers as a tidy
+     stacked "type  count" list (small text, one per line) that fits the column */
+  .shape-table .jbar .kindwrap { display: none; }
+  .shape-table .jbar .kindlist { display: block; }
+  .shape-table .jbar { min-width: 0; }
+  /* the inline timeline cell has no room beside the numbers → move it to its own
+     full-width row beneath the jurisdiction (as if the trailing cells merged) */
+  .shape-table thead th:nth-child(4), .shape-table thead th:nth-child(5) { display: none; }
+  .shape-table .jspark { display: none; }
+  .jspark-row-mobile { display: table-row; cursor: pointer; }
+  .jspark-row-mobile > td { padding: 0 10px 10px; border: none; }
+  .jspark-row-mobile .sparkwrap { display: flex; width: 100%; align-items: flex-end; gap: 6px; }
+  .jspark-row-mobile .spark { flex: 1 1 auto; width: auto; height: 30px; }
+  /* keep the jurisdiction name + total roomy now the bar/timeline are gone */
+  .shape-table .jname { white-space: normal; }
+  .shape-table th, .shape-table td { padding-left: 7px; padding-right: 7px; }
+}
+
+/* --- Jobs dock: compact corner note on a phone --------------------------- */
+@media (max-width: 640px) {
+  /* not a full-width panel — a small pill in the bottom-right ("Jobs ● N") that
+     expands on tap; default-collapsed on phones (see JobsPanel) */
+  .jobs-dock { left: auto; right: var(--sp-4); bottom: var(--sp-4);
+    width: auto; max-width: 82vw; border-radius: 999px; }
+  .jobs-dock:not(.collapsed) { border-radius: var(--radius); }
+  .jobs-dock .jobs-head { padding: 7px 14px; }
+  .jobs-dock .jobs-body { max-width: 82vw; max-height: 44vh; }
+}
+
+/* --- Document reader: mobile navigation + rail removal -------------------- */
+.mjump { display: none; }   /* desktop uses the side index + minimap instead */
+@media (max-width: 780px) {
+  /* the paragraph rail (the vertical line + turned number left of each para) eats
+     horizontal space on a phone; drop it and reclaim the reader's left gutter */
+  .reader { padding-left: 0; padding-right: 0; }
+  .seg-rail { display: none !important; }
+  .reader.has-rails .seg, .seg.has-rail { padding-left: 0; }
+  /* the top nav keeps its title + "find in document"; the section skeleton moves to
+     the bottom jump-sheet so it isn't a tall block pushing the text down */
+  .doc-nav-index { display: none; }
+  .doc-nav { max-height: none; }
+
+  .mjump { display: block; }
+  .mjump-btn { position: fixed; left: var(--sp-4); bottom: var(--sp-4); z-index: 32;
+    border-radius: 999px; padding: 9px 16px; font-size: .85rem; font-weight: 600;
+    background: var(--surface); border: 1px solid var(--line);
+    box-shadow: 0 4px 16px -6px rgba(0,0,0,.45);
+    opacity: 0; transform: translateY(10px); pointer-events: none;
+    transition: opacity .2s ease, transform .2s ease; }
+  .mjump.show .mjump-btn { opacity: 1; transform: none; pointer-events: auto; }
+  .mjump-scrim { position: fixed; inset: 0; z-index: 32; background: rgba(0,0,0,.28); }
+  .mjump-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 33;
+    max-height: 64vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    background: var(--surface); border-top: 1px solid var(--line);
+    border-radius: 16px 16px 0 0; box-shadow: 0 -10px 34px -14px rgba(0,0,0,.5);
+    padding: 4px var(--sp-5) calc(var(--sp-6) + env(safe-area-inset-bottom, 0px)); }
+  .mjump-sheet-head { display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0 8px; position: sticky; top: 0; background: var(--surface);
+    border-bottom: 1px solid var(--line-faint); }
+  .mjump-sheet-head a { cursor: pointer; color: var(--subtext); font-size: 1.05rem; padding: 0 4px; }
+  .mjump-list { list-style: none; margin: 0; padding: 0; }
+  .mjump-list li a { display: block; padding: 11px 4px; cursor: pointer; color: var(--text);
+    border-bottom: 1px solid var(--line-faint); overflow-wrap: anywhere; line-height: 1.35; }
+  .mjump-list li a:active { color: var(--accent); }
+  .mjump-list .nav-lvl1 a { padding-left: 16px; font-size: .92em; }
+  .mjump-list .nav-lvl2 a { padding-left: 30px; font-size: .88em; color: var(--subtext); }
 }

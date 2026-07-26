@@ -37,6 +37,7 @@ def _cors_origins() -> list[str]:
 def create_app(config: Config | None = None) -> FastAPI:
     facade = Facade(config or Config.from_env())
     facade.warm_caches()  # pre-compute heavy dashboard aggregates so first load is instant
+    facade.start_daily_refresh()  # nightly 01:00 UK full recompute + re-warm of those caches
     jobs = JobManager(facade, origin="api")
     # A deploy kills in-process workers. Durable/checkpointed API jobs resume under a
     # new attempt automatically; conservative job kinds remain visibly interrupted.
@@ -121,9 +122,10 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
 
     @app.get("/unresolved")
-    def unresolved(limit: int = 100) -> list[dict]:
-        """Hanging references the corpus can't satisfy — the manual-resolution queue."""
-        return facade.unresolved_references(limit=limit, with_citing=True)
+    def unresolved(limit: int = 100) -> dict:
+        """Hanging references the corpus can't satisfy — the manual-resolution queue.
+        Cached stale-while-revalidate: returns {rows, _warming?} so the panel never blocks."""
+        return facade.unresolved_references_cached(limit=limit)
 
     @app.get("/unresolved/unfetchable")
     def unfetchable(limit: int = 200, min_citing: int | None = None) -> dict:

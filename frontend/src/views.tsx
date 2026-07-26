@@ -1540,6 +1540,50 @@ function DocNav({ segs, text, oscola, title, landingUrl, id }:
   );
 }
 
+// Mobile document navigation: the desktop side index doesn't fit a phone, and iOS won't
+// let you grab the scrollbar — so for long statutes/judgments a subtle "Sections" button
+// rides the bottom-left once you've scrolled in, opening a bottom-sheet skeleton of the
+// document (headings / sections / schedules / paragraphs) you can tap to jump to. Labels
+// wrap rather than overflow, however long a section name is. Desktop hides it (CSS).
+const _JUMP_KINDS = new Set(["section", "article", "schedule", "part", "chapter", "ruling", "recital"]);
+function MobileJumpNav({ segs }: { segs: any[] }) {
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setShown(window.scrollY > 500);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  if (!segs || segs.length < 2) return null;
+  const structural = segs.map((s, i) => ({ s, i }))
+    .filter(({ s }) => isHeading(s) || _JUMP_KINDS.has(s.kind));
+  const items = structural.length >= 3 ? structural : segs.map((s, i) => ({ s, i }));
+  const jump = (i: number) => { scrollToSeg(segId(segs[i].label)); setOpen(false); };
+  return (
+    <div className={`mjump${shown || open ? " show" : ""}`}>
+      {open && (
+        <>
+          <div className="mjump-scrim" onClick={() => setOpen(false)} />
+          <div className="mjump-sheet" role="dialog" aria-label="Jump to section">
+            <div className="mjump-sheet-head"><b>Jump to</b>
+              <a onClick={() => setOpen(false)} aria-label="Close">✕</a></div>
+            <ol className="mjump-list">
+              {items.map(({ s, i }) => (
+                <li key={i} className={`nav-lvl${Math.min(s.level, 2)}`}>
+                  <a onClick={() => jump(i)}>{s.label || "—"}</a></li>
+              ))}
+            </ol>
+          </div>
+        </>
+      )}
+      <button className="mjump-btn" onClick={() => setOpen((o) => !o)} aria-label="Jump to section">
+        ☰ Sections
+      </button>
+    </div>
+  );
+}
+
 // --- Structured reader (legislation hierarchy / judgment paragraphs) -------
 // Where to read a case the corpus can't show. The AustLII-family institutes name their
 // files deterministically, so the URL is constructed locally from the citation rather
@@ -1722,6 +1766,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     <SelectionShorthand docId={id} onLinked={reloadBody}>
       <div className="doc-layout">
         <DocNav segs={segs || []} text={body.text || ""} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
+        <MobileJumpNav segs={segs || []} />
         <div className="doc-main" ref={readerRef}>{chips}{pdfBanner}{tabs}{main}</div>
         {view === "text" && body.text && (
           <Minimap containerRef={readerRef} segs={segs || []} cites={cites}
@@ -3992,7 +4037,10 @@ export function JobsPanel() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  // default collapsed on a phone so it's just a small "Jobs ●" note in the corner,
+  // not a panel eating the width; expanded by default on desktop
+  const [collapsed, setCollapsed] = useState(() =>
+    typeof window !== "undefined" && window.innerWidth <= 640);
   const anyRunning = jobs.some((j) => j.status === "running");
   useEffect(() => {
     let live = true;
@@ -4099,8 +4147,16 @@ function summariseRun(r: any): string {
 // by supplying the missing identifier, linking to an existing item, scraping a
 // URL, or uploading the source file (§5b).
 export function UnresolvedView({ open, navigate }: { open: (id: string) => void; navigate?: (f: Record<string, string>) => void }) {
-  const [rows, err, reload] = useAsync(() => api.unresolved(5000), []);
+  // the queue is cached server-side (stale-while-revalidate); a cold load returns
+  // {rows:[], _warming:true} and computes in the background — poll until it's ready
+  const [data, err, reload] = useAsync<any>(() => api.unresolved(5000), []);
+  const rows: any[] | null = data?.rows ?? null;
   const [cov, , reloadCov] = useAsync(() => api.coverage(), []);
+  useEffect(() => {
+    if (!data?._warming) return;
+    const iv = setInterval(() => reload(), 2500);
+    return () => clearInterval(iv);
+  }, [data?._warming]);
   // after any harvest/resolve, refresh BOTH the list and the per-source "remaining"
   // counts (which come from coverage — the server invalidates its cache on harvest)
   const reloadAll = () => { reload(); reloadCov(); };
