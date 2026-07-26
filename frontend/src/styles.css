@@ -1278,3 +1278,55 @@ table { width: 100%; }
   .mjump-list .nav-lvl1 a { padding-left: 16px; font-size: .92em; }
   .mjump-list .nav-lvl2 a { padding-left: 30px; font-size: .88em; color: var(--subtext); }
 }
+
+/* =================================================================
+   Mobile bug-fix pass 2 (from on-device screenshots)
+   ================================================================= */
+@media (max-width: 860px) {
+  /* Admin section selector: proper 40px pills, not giant stretched ovals (the
+     buttons were stretching to the flex row's height) */
+  .admin-rail { align-items: center !important; }
+  .admin-rail button { height: 40px !important; min-height: 0 !important;
+    padding: 0 16px !important; display: inline-flex; align-items: center; white-space: nowrap; }
+}
+
+@media (max-width: 640px) {
+  /* Buttons in control rows keep their whole-word width: a file-picker button was
+     being shrunk to ~1 char and its label broke vertically ("C/h/o/o/s/e"). Wrap at
+     spaces only, never mid-word, and never below the longest word. */
+  .panel button:not(.mini), .drill button:not(.mini) { overflow-wrap: break-word; }
+  .panel .row > button, .drill .row > button, .admin-body .row > button {
+    flex: 0 1 auto; min-width: min-content; white-space: nowrap; }
+  /* Inline text labels/descriptions in a control row (flex:1 via inline style) were
+     crushed to one word per line beside fixed-width buttons — give them their own
+     full-width line instead. */
+  .panel .row > b, .panel .row > span,
+  .admin-body .row > b, .admin-body .row > span {
+    flex-basis: 100% !important; min-width: 0; text-align: left !important; }
+  .panel .row > input[type="file"] { flex-basis: 100%; min-width: 0; }
+
+  /* Explore: turn each jurisdiction row into a CARD so the total number and the
+     type/count list get full width and stop wrapping mid-number / mid-word. */
+  .shape-table thead { display: none; }
+  .shape-table, .shape-table tbody { display: block; width: 100%; }
+  .shape-row { display: block; position: relative; padding: 12px 40px 6px 12px;
+    border-top: 1px solid var(--line-faint); }
+  .shape-row > td { display: block; padding: 1px 0; border: none; }
+  .shape-row .chev { position: absolute; right: 12px; top: 15px; width: auto; }
+  .shape-row .jname { white-space: normal; font-size: 1.05rem; }
+  .shape-row .jsub { font-size: .7rem; }
+  .shape-row .jtotal { font-size: 1.5rem; white-space: nowrap; text-align: left; }
+  .shape-row .jbar { min-width: 0; }
+  .shape-row .jbar .kindwrap { display: none; }
+  .shape-row .jbar .kindlist { display: block; margin-top: 3px; }
+  .kindlist-row { font-size: .72rem; }
+  .kindlist-label { white-space: nowrap; }
+  .shape-row .jspark { display: none; }
+  .jspark-row-mobile { display: block; }
+  .jspark-row-mobile > td { display: block; padding: 0 12px 12px; border: none; }
+  .exp-row, .exp-row > td { display: block; padding: 0; }
+
+  /* keep the corner docks clear of the iOS Safari bottom toolbar */
+  .jobs-dock { bottom: calc(var(--sp-4) + env(safe-area-inset-bottom, 0px)); }
+  .mjump-btn { bottom: calc(var(--sp-4) + env(safe-area-inset-bottom, 0px)); }
+}

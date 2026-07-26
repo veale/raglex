@@ -663,8 +663,10 @@ class Facade:
         import time as _t
 
         def _warm():
-            for fn in (self.coverage, self.stats, self.corpus_map,
-                       self.unresolved_references_cached):
+            # NOTE: unresolved is deliberately NOT warmed here — at limit=5000 it runs ~5000
+            # citing sub-queries, and forcing that on every startup stampedes an IO-bound DB.
+            # It warms on first access (non-blocking placeholder) and in the nightly refresh.
+            for fn in (self.coverage, self.stats, self.corpus_map):
                 try:
                     fn()
                 except Exception:  # noqa: BLE001
@@ -718,9 +720,15 @@ class Facade:
                 _t.sleep(_sleep_secs())
                 try:
                     # drop EVERYTHING (incl. the non-volatile drill/shape) then re-warm from
-                    # scratch, so the day starts on freshly-computed figures
+                    # scratch, so the day starts on freshly-computed figures. This is the one
+                    # place the heavy unresolved queue is pre-warmed (1am is quiet enough to
+                    # absorb its ~5000 citing sub-queries).
                     self._cache.clear()
                     self.warm_caches()
+                    try:
+                        self.unresolved_references_cached()
+                    except Exception:  # noqa: BLE001
+                        pass
                 except Exception:  # noqa: BLE001
                     log.warning("daily cache refresh failed", exc_info=True)
 
