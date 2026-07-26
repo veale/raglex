@@ -441,6 +441,13 @@ def install_web_auth(app: FastAPI, facade) -> None:
     @app.middleware("http")
     async def _enforce(request: Request, call_next):  # noqa: ANN001
         path = request.url.path
+        # The API is mounted at /api in serve_app, so request.url.path here carries the
+        # mount prefix ("/api/auth/login"), while PUBLIC_PATHS + the authorize() rules are
+        # written mount-relative ("/auth/login"). Strip the prefix so public paths (login,
+        # /auth/me, health) aren't blocked — otherwise nobody can even reach the login route.
+        # (Unit tests hit the un-mounted create_app, so they never exercised this.)
+        if path.startswith("/api/"):
+            path = path[len("/api"):]
         if request.method == "OPTIONS" or path in PUBLIC_PATHS:
             return await call_next(request)
 
