@@ -102,6 +102,7 @@ class Pipeline:
         record_health: bool = True,
         watermark_key: str | None = None,
         overlap_days: int | None = None,
+        force_full: bool = False,
         on_progress=None,
         cancel_check=None,
     ) -> RunStats:
@@ -141,6 +142,21 @@ class Pipeline:
             overlap = _overlap_days(overlap_days)
             if overlap > 0:
                 discover_since = _apply_overlap(watermark, overlap)
+        # Backfill frontier — the fix for a repeat "backfill everything" re-walking the whole
+        # upstream catalogue and deduping every item (observed: uk-caselaw re-discovered
+        # 76,400 held docs, stored 0). A backfill's job is to reach what we DON'T hold by
+        # walking the feed to its end; once one has completed cleanly there are no gaps below
+        # the point it reached, so the only thing a later backfill can add is the newer tail.
+        # Resume from the recorded frontier instead of re-walking — unless the caller forces a
+        # full re-walk (force_full) or wants held docs refetched.
+        backfill_frontier_key = f"backfill:{wm_key}"
+        if (backfill and not since and not force_full and not refetch_held
+                and not ignore_watermark):
+            frontier = self.catalogue.get_watermark(backfill_frontier_key)
+            if frontier:
+                discover_since = frontier
+                highest = _max_watermark(highest, frontier)
+        cancelled = False  # set when a cooperative cancel breaks the crawl early
         wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
         last_emit = 0.0
 
@@ -163,6 +179,7 @@ class Pipeline:
             for stub, held_id, held_extracted in annotated:
                 if cancel_check and cancel_check():
                     stats.notes.append("cancelled")
+                    cancelled = True
                     break
                 stats.discovered += 1
                 # Heartbeat so a long crawl (the EDPB backfill fetches hundreds of PDFs
@@ -360,6 +377,15 @@ class Pipeline:
             highest = _clamp_future(highest)
             self.catalogue.set_watermark(wm_key, highest)
             stats.watermark = highest
+
+        # Record the backfill frontier only when a FULL backfill completed cleanly — reached
+        # the end of the feed (not cancelled, not rate-limited, not capped by max_pages) with
+        # no item left frozen for retry. Then the next backfill resumes from here (above)
+        # instead of re-walking the whole catalogue. A frontier-resumed run that finds nothing
+        # new carries the frontier forward unchanged (highest was seeded from it).
+        if (backfill and highest and not cancelled and not stats.rate_limited
+                and not wm_frozen and max_pages is None):
+            self.catalogue.set_watermark(backfill_frontier_key, _clamp_future(highest))
 
         log.info(stats.summary())
         return stats

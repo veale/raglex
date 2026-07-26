@@ -587,6 +587,19 @@ class Facade:
         # no user request ever blocks on the scan (only the very first, cold call does).
         self._cache: dict[str, tuple[float, dict]] = {}
         self._refreshing: set[str] = set()
+        # Per-document view cache (the citator panel: cited-by counts + PageRank-ranked
+        # incoming edges). Assembling it for a mega-authority (Data Protection Act 2018 has
+        # ~10k resolved citers) touches tens of thousands of buffer pages, which on a
+        # RAM-starved box is ~1s warm and tens of seconds when a background job is evicting
+        # the cache. Reads dominate writes and a citer count seconds-stale is harmless, so
+        # cache the assembled view: instant re-opens, and only the first open per document
+        # pays the cost. Cleared wholesale on any local graph mutation (see
+        # _invalidate_caches); a short TTL bounds staleness from harvests in the OTHER
+        # (scheduler) process, which can't reach this process's cache. Bounded LRU so the
+        # cache can't itself grow into the memory pressure it exists to relieve.
+        import threading as _threading
+        self._doc_cache: dict[str, tuple[float, dict]] = {}
+        self._doc_cache_lock = _threading.Lock()
 
     def _cached(self, key: str, ttl: float, fn, *, placeholder: dict | None = None,
                 sync_wait: float = 0.0):
@@ -655,6 +668,11 @@ class Facade:
                     if k.startswith(self._VOLATILE_CACHE_PREFIXES)]:
             self._cache.pop(key, None)
             self._refreshing.discard(key)
+        # A graph change (new citers, re-resolution, an edit) invalidates every cached
+        # document view — the cited-by counts and incoming-edge lists it holds may all have
+        # moved. Cheap to refill on next access; correctness beats keeping a stale panel.
+        with self._doc_cache_lock:
+            self._doc_cache.clear()
 
     def warm_caches(self) -> None:
         """Pre-compute the heavy dashboard aggregates in the background (called on app
@@ -972,6 +990,33 @@ class Facade:
         }
 
     def get_document(self, stable_id: str) -> dict:
+        """The reader/citator payload for one document. Cached (see _doc_cache): assembling
+        a mega-authority's cited-by panel is expensive, and it's re-opened far more often
+        than the graph changes under it."""
+        import os as _os
+        import time as _time
+        try:
+            ttl = max(0.0, float(_os.environ.get("RAGLEX_DOC_CACHE_TTL_S") or 120.0))
+        except (TypeError, ValueError):
+            ttl = 120.0
+        if ttl > 0.0:
+            now = _time.time()
+            with self._doc_cache_lock:
+                hit = self._doc_cache.get(stable_id)
+                if hit is not None and now - hit[0] < ttl:
+                    # LRU touch: move to newest so the bound evicts genuinely-cold entries.
+                    self._doc_cache[stable_id] = self._doc_cache.pop(stable_id)
+                    return {**hit[1], "_cached": True}
+        view = self._get_document_uncached(stable_id)
+        if ttl > 0.0 and "error" not in view:  # never pin a transient not-found
+            with self._doc_cache_lock:
+                self._doc_cache[stable_id] = (_time.time(), view)
+                self._doc_cache[stable_id] = self._doc_cache.pop(stable_id)
+                while len(self._doc_cache) > 256:
+                    self._doc_cache.pop(next(iter(self._doc_cache)))
+        return view
+
+    def _get_document_uncached(self, stable_id: str) -> dict:
         with self._open() as (cat, _rs, _ts):
             doc = cat.get_document(stable_id)
             if doc is None:
@@ -2687,27 +2732,46 @@ class Facade:
         Non-destructive and re-runnable: a stub that still yields nothing is left
         exactly as it was.
         """
+        from datetime import datetime, timedelta, timezone
+
         from .adapters.eu_legislation import CELEX_BASE, EULegislationAdapter
         from .core.models import Stub
         from .pipeline import Pipeline
         from .pipeline.runner import RunStats
 
+        # Skip stubs we already tried and found still-absent upstream within this window, so
+        # successive runs make FORWARD progress into never-checked stubs instead of
+        # re-hammering the same permanently-absent (but most-cited, so first-in-order)
+        # instruments every pass — the harvest-miss poisoning failure mode, here draining
+        # 18k EU stubs 500 at a time. A miss expires (default 30d) so a transient upstream
+        # gap is retried later, never written off forever.
+        try:
+            miss_ttl = max(0.0, float(os.environ.get("RAGLEX_EU_STUB_MISS_DAYS") or 30.0))
+        except (TypeError, ValueError):
+            miss_ttl = 30.0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=miss_ttl)).isoformat()
+
         checked = upgraded = 0
+        still_absent: list[str] = []
         with self._open() as (cat, rs, ts):
             # Select on has_text = 0, NOT on the meta_json marker: an older
             # generation of stubs (bare CELEX title, meta_json NULL — 31970L0156
             # among them) carried no marker at all, so the marker-LIKE selection
             # could never see the very rows most in need of repair. Textless IS the
             # condition being repaired; most-cited first so the pass spends itself
-            # on the instruments the corpus actually leans on.
+            # on the instruments the corpus actually leans on. Recently-checked-absent
+            # stubs are excluded IN SQL so a bounded run always advances into new ones.
             rows = cat.conn.execute(
                 "SELECT d.stable_id, d.landing_url FROM documents d "
                 "LEFT JOIN citation_counts cc ON cc.candidate_id = d.stable_id "
                 "WHERE d.source = 'eu-legislation' AND d.has_text = 0 "
+                "  AND NOT EXISTS (SELECT 1 FROM enrichment_misses m "
+                "      WHERE m.kind = 'eu-stub-miss' AND m.key = d.stable_id "
+                "        AND m.attempted_at >= ?) "
                 "ORDER BY COALESCE(cc.occurrences, 0) DESC, d.stable_id LIMIT ?",
-                (limit,)).fetchall()
+                (cutoff, limit)).fetchall()
             if not rows:
-                return {"checked": 0, "upgraded": 0}
+                return {"checked": 0, "upgraded": 0, "still_absent": 0}
             adapter = EULegislationAdapter()
             pipe = Pipeline(cat, rs, textstore=ts)
             for r in rows:
@@ -2726,14 +2790,19 @@ class Facade:
                 try:
                     rec = adapter.fetch(stub)
                 except Exception:  # noqa: BLE001 — one bad instrument must not stop the pass
+                    still_absent.append(celex)
                     continue
-                # still a stub upstream: leave the existing record untouched
+                # still a stub upstream: leave the existing record untouched, but remember we
+                # tried it so the next run moves on to stubs we haven't checked yet.
                 if rec is None or not rec.text or (rec.extra or {}).get("metadata_only"):
+                    still_absent.append(celex)
                     continue
                 if pipe._ingest(rec, RunStats(source=adapter.source)):
                     upgraded += 1
+            if still_absent:
+                cat.record_enrichment_misses("eu-stub-miss", still_absent)
         self._invalidate_caches()
-        return {"checked": checked, "upgraded": upgraded}
+        return {"checked": checked, "upgraded": upgraded, "still_absent": len(still_absent)}
 
     def backfill_eu_titles(self, *, limit: int = 2000, on_progress=None) -> dict:
         """Construct titles for EU instruments that have none (or a bare CELEX
@@ -7417,7 +7486,8 @@ class Facade:
     def tag(self, *, doc_id: str, tag: str) -> dict:
         with self._open() as (cat, _rs, _ts):
             written = tag_document(cat, doc_id, tag)
-            return {"doc_id": doc_id, "tag": tag, "written": written}
+        self._invalidate_caches()  # a cached document view holds this doc's tag list
+        return {"doc_id": doc_id, "tag": tag, "written": written}
 
     # -- named aliases / shorthand rules (e.g. "UK GDPR" → a document) ------
     def create_named_alias(self, *, phrase: str, target_id: str, apply: bool = False) -> dict:
@@ -7436,6 +7506,8 @@ class Facade:
                 extract_corpus(cat, ts)
                 Resolver(cat).run()
                 result["applied"] = True
+        if apply:
+            self._invalidate_caches()  # edges changed corpus-wide
         return result
 
     def list_named_aliases(self) -> list[dict]:
@@ -7478,21 +7550,25 @@ class Facade:
                 return {"documents": docs, "citations": cites, "cancelled": True, "resolved_edges": 0}
             _progress(on_progress, stage="resolving citations", done=0, total=0)
             resolved = Resolver(cat).run()
-            return {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
+            stats = {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
+        self._invalidate_caches()  # re-scan changed edges → dashboards + doc views are stale
+        return stats
 
     def untag(self, *, doc_id: str, tag: str) -> dict:
         """Remove a manual tag (a mis-tag correction). Rule tags are re-derived, so
         they're corrected by editing the rule, not here."""
         with self._open() as (cat, _rs, _ts):
             removed = cat.remove_document_tag(doc_id, tag, method="manual")
-            return {"doc_id": doc_id, "tag": tag, "removed": removed}
+        self._invalidate_caches()  # a cached document view holds this doc's tag list
+        return {"doc_id": doc_id, "tag": tag, "removed": removed}
 
     def tag_many(self, *, doc_ids: list[str], tag: str) -> dict:
         """Bulk-tag a selection — the academic's "drop these into a collection" gesture
         (a collection is just a shared manual tag)."""
         with self._open() as (cat, _rs, _ts):
             n = sum(1 for d in doc_ids if tag_document(cat, d, tag))
-            return {"tag": tag, "documents": len(doc_ids), "written": n}
+        self._invalidate_caches()  # cached document views hold these docs' tag lists
+        return {"tag": tag, "documents": len(doc_ids), "written": n}
 
     # -- corrections (fix misclassification; human curation wins) -----------
     def update_document(self, *, stable_id: str, doc_type: str | None = None,
@@ -7527,19 +7603,24 @@ class Facade:
                 return {"error": f"no relation {relation_id}"}
             if suppress:
                 cat.suppress_relation(relation_id)
-                return {"relation_id": relation_id, "action": "suppressed"}
-            if dst_id is not None:
+                out = {"relation_id": relation_id, "action": "suppressed"}
+            elif dst_id is not None:
                 if cat.get_document(dst_id) is None:
                     return {"error": f"no document {dst_id!r} in corpus", "relation_id": relation_id}
                 cat.resolve_relation(relation_id, dst_id)
                 cat.set_relationship_type(relation_id, rel["relationship_type"], extracted_via="manual")
-                return {"relation_id": relation_id, "action": "repointed", "dst_id": dst_id}
-            if treatment is not None:
+                out = {"relation_id": relation_id, "action": "repointed", "dst_id": dst_id}
+            elif treatment is not None:
                 rel_type = _rel_type(treatment, RelationshipType.MENTIONS)
                 cat.set_relationship_type(relation_id, rel_type.value, extracted_via="manual")
-                return {"relation_id": relation_id, "action": "reclassified",
-                        "relationship_type": rel_type.value}
-            return {"error": "nothing to do — pass treatment, dst_id, or suppress"}
+                out = {"relation_id": relation_id, "action": "reclassified",
+                       "relationship_type": rel_type.value}
+            else:
+                return {"error": "nothing to do — pass treatment, dst_id, or suppress"}
+        # The edge changed — drop the cached document views (and dashboard aggregates) so the
+        # citator panel reflects the correction immediately instead of serving a pre-edit copy.
+        self._invalidate_caches()
+        return out
 
     def embed_source_scope(self) -> list[str] | None:
         """Resolve the RAGLEX_EMBED_JURISDICTIONS setting to a source-key list, or ``None``
@@ -8971,7 +9052,7 @@ class Facade:
         max_pages: int | None = 1, options: dict | None = None, resolve: bool = True,
         ignore_watermark: bool = False, watermark_key: str | None = None,
         refetch_held: bool = False, use_llm: bool | None = None,
-        overlap_days: int | None = None,
+        overlap_days: int | None = None, force_full: bool = False,
         postprocess_after_relation_id: int = 0,
         on_progress=None, cancel_check=None,
     ) -> dict:
@@ -9033,7 +9114,7 @@ class Facade:
             stats = pipe.run(adapter, backfill=backfill, since=since, max_pages=max_pages,
                              refetch_held=refetch_held,
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,
-                             overlap_days=overlap_days,
+                             overlap_days=overlap_days, force_full=force_full,
                              on_progress=_phase_progress, cancel_check=cancel_check)
             # Log the run for the Maintain keep-current diagnosis view (bounded history).
             # Only feed-style harvests are worth logging; a targeted single-item fetch sets

@@ -3570,14 +3570,21 @@ class Catalogue:
 
     # -- embeddings + chunk index (§6b/§6c) --------------------------------
     def pending_embedding(self, provider: str, model: str, model_version: str,
-                          *, sources: list[str] | None = None) -> list[sqlite3.Row]:
+                          *, sources: list[str] | None = None,
+                          limit: int | None = None) -> list[sqlite3.Row]:
         """Documents with text but no vectors in this embedding family (§6). A
         model swap is a new family, so it naturally re-queues the whole corpus.
 
         ``sources`` scopes the queue to those source keys (the resolution of the
         RAGLEX_EMBED_JURISDICTIONS setting) so an operator can index only the jurisdictions
         that matter instead of the whole multi-million-doc corpus. ``None`` = no scope;
-        an empty list = scope to nothing (embed no documents)."""
+        an empty list = scope to nothing (embed no documents).
+
+        ``limit`` caps the returned queue IN SQL. This is load-bearing, not cosmetic: the
+        embedding queue over a 5M-document corpus is millions of rows, and an unbounded
+        ``fetchall`` here (with the caller slicing afterwards) grew the worker to ~9GB and
+        the kernel OOM-killed it in a restart loop. A bounded batch keeps memory flat and
+        the pass resumable — the next run picks up where this one left off."""
         src_clause, params = "", [provider, model, model_version]
         if sources is not None:
             if not sources:
@@ -3585,6 +3592,10 @@ class Catalogue:
             else:
                 src_clause = f" AND d.source IN ({','.join('?' * len(sources))})"
                 params.extend(sources)
+        limit_clause = ""
+        if limit is not None and limit > 0:
+            limit_clause = " LIMIT ?"
+            params.append(int(limit))
         return self.conn.execute(
             f"""
             SELECT * FROM documents d
@@ -3593,7 +3604,7 @@ class Catalogue:
                 SELECT 1 FROM embeddings e
                 WHERE e.doc_id = d.stable_id AND e.provider = ?
                   AND e.model = ? AND e.model_version = ?
-              ){src_clause}
+              ){src_clause}{limit_clause}
             """,
             tuple(params),
         ).fetchall()

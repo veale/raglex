@@ -505,7 +505,7 @@ def test_backfill_eu_stubs_upgrades_recoverable_instruments(tmp_path, monkeypatc
 
     monkeypatch.setattr(eul.EULegislationAdapter, "fetch", fake_fetch)
     res = f.backfill_eu_stubs(limit=10)
-    assert res == {"checked": 2, "upgraded": 1}
+    assert res == {"checked": 2, "upgraded": 1, "still_absent": 1}
 
     got = f.get_document("31987D0373")["document"]
     assert got["title"].startswith("87/373/EEC: Council Decision")
@@ -522,7 +522,7 @@ def test_backfill_eu_stubs_is_a_noop_without_stubs(tmp_path):
                  raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
                  settings_path=tmp_path / "s.json", embed_provider="local-hashing",
                  embed_model=None)
-    assert Facade(cfg).backfill_eu_stubs() == {"checked": 0, "upgraded": 0}
+    assert Facade(cfg).backfill_eu_stubs() == {"checked": 0, "upgraded": 0, "still_absent": 0}
 def test_eu_primary_law_celexes_use_formal_names_eli_and_aliases():
     ad = EULegislationAdapter(celex="12012P/TXT")
     stub = next(ad.discover(None))

@@ -1501,6 +1501,24 @@ def serve_app(config: Config | None = None) -> FastAPI:
     app.mount("/api", api)
     app.mount("/mcp", mcp_app)
 
+    # Interactive-priority: stamp genuine user-facing reads (the UI's data calls + MCP
+    # requests) so background job workers yield the box's scarce IO to them while a user is
+    # active (see raglex.interactive — the fix for document opens hanging behind a graph
+    # rebuild). The high-frequency pollers are EXCLUDED: the Jobs panel's /api/jobs and
+    # /api/health tick ~1/s, and stamping them would hold the quiet window open forever and
+    # starve every job. Static assets and the SPA shell aren't DB reads, so they don't stamp.
+    from .. import interactive as _interactive
+
+    _POLL_PREFIXES = ("/api/jobs", "/api/health")
+
+    @app.middleware("http")
+    async def _mark_interactive(request, call_next):
+        path = request.url.path
+        if ((path.startswith("/mcp") or path.startswith("/api/"))
+                and not path.startswith(_POLL_PREFIXES)):
+            _interactive.note_interactive()
+        return await call_next(request)
+
     # MCP OAuth (opt-in): the consent page + the root-level well-known metadata that the
     # mounted sub-app can't serve at the origin root. No-op when OAuth is disabled.
     _provider = getattr(mcp, "_raglex_oauth_provider", None)
