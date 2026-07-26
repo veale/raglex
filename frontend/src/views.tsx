@@ -438,8 +438,12 @@ function MentionedBy({ list, target, anchor }: { list: any[]; target: string; an
       <span className="mb-label">Mentioned by </span>
       {top.map((m, i) => (
         <Fragment key={i}>{i > 0 && ", "}
-          <a title="Open this citing document, with the citing passages highlighted"
-            onClick={() => push({ kind: "doc", id: m.src_id, highlightTarget: target, label: <Oscola c={m.src_oscola} fallback={m.src_id} /> })}>
+          <a title="Open this citing document, at the passage that cites this provision"
+            onClick={() => push({ kind: "doc", id: m.src_id, highlightTarget: target,
+              // carry the provision anchor so the reader scrolls to the mention of THIS
+              // section, not merely the first mention of the instrument (a general "the
+              // Privacy Act 1988" reference earlier in the citing document).
+              highlightAnchor: anchor, label: <Oscola c={m.src_oscola} fallback={m.src_id} /> })}>
             <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
         </Fragment>
       ))}
@@ -460,6 +464,24 @@ function SpeechBubble({ n }: { n: number }) {
       </svg>
       <span className="mbubble-n">{n.toLocaleString()}</span>
     </span>
+  );
+}
+
+// A compact prev / "11–20 of N" / next pager, so a long list shows one short page at a
+// time instead of running the whole admin page to thousands of rows. Renders nothing when
+// everything already fits on one page.
+function Pager({ page, pageSize, total, onPage, noun = "items" }:
+  { page: number; pageSize: number; total: number; onPage: (p: number) => void; noun?: string }) {
+  const pages = Math.ceil(total / pageSize);
+  if (pages <= 1) return null;
+  const from = page * pageSize + 1;
+  const to = Math.min(total, page * pageSize + pageSize);
+  return (
+    <div className="pager">
+      <button className="mini" disabled={page <= 0} onClick={() => onPage(page - 1)}>← prev</button>
+      <span className="muted">{from.toLocaleString()}–{to.toLocaleString()} of {total.toLocaleString()} {noun}</span>
+      <button className="mini" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>next →</button>
+    </div>
   );
 }
 
@@ -3302,11 +3324,23 @@ export function SettingsView() {
               <div key={s.key}>
                 <label>{s.label} <span className="kbd">{s.key}</span>
                   {s.source === "env" && <span className="muted"> · set via environment (overrides file)</span>}
-                  {s.source === "file" && s.set && <span className="ok"> · {s.secret ? s.display : "saved"}</span>}
+                  {s.source === "file" && s.set && s.kind !== "bool" && <span className="ok"> · {s.secret ? s.display : "saved"}</span>}
                 </label>
-                <input type={s.secret ? "password" : "text"} placeholder={s.placeholder || (s.set ? s.display : "")}
-                  disabled={s.source === "env"}
-                  value={edits[s.key] ?? ""} onChange={(e) => setEdits({ ...edits, [s.key]: e.target.value })} />
+                {s.kind === "bool" ? (
+                  <label className="toggle-row">
+                    <input type="checkbox" disabled={s.source === "env"}
+                      checked={(() => {
+                        const raw = String(edits[s.key] ?? (s.set ? s.display : "")).toLowerCase();
+                        return raw === "" ? true : !["0", "off", "false", "no"].includes(raw);
+                      })()}
+                      onChange={(e) => setEdits({ ...edits, [s.key]: e.target.checked ? "1" : "0" })} />
+                    <span className="muted">{s.placeholder}</span>
+                  </label>
+                ) : (
+                  <input type={s.secret ? "password" : "text"} placeholder={s.placeholder || (s.set ? s.display : "")}
+                    disabled={s.source === "env"}
+                    value={edits[s.key] ?? ""} onChange={(e) => setEdits({ ...edits, [s.key]: e.target.value })} />
+                )}
               </div>
             ))}
           </div>
@@ -4183,6 +4217,9 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
   const [legFilter, setLegFilter] = useState("");    // primary|secondary|assimilated, or ""
   const [bucketFilter, setBucketFilter] = useState<"" | "pending" | "cooling" | "name_only">("");
   const [categoryFilter, setCategoryFilter] = useState("");
+  const [wlPage, setWlPage] = useState(0);   // worklist pager (10 rows/page — keep the page short)
+  // any filter change resets to the first page (else you land past the end of a shorter list)
+  useEffect(() => { setWlPage(0); }, [srcFilter, bucketFilter, legFilter, categoryFilter]);
   const showWorklist = (bucket: "pending" | "cooling" | "name_only", category = "", subtype = "") => {
     setBucketFilter(bucket); setCategoryFilter(category);
     setSrcFilter(category && category !== "other" ? category : "");
@@ -4294,13 +4331,14 @@ export function UnresolvedView({ open, navigate }: { open: (id: string) => void;
       <table className="grid">
         <thead><tr><th>cites</th><th>reference</th><th>looks like</th><th>route</th><th></th></tr></thead>
         <tbody>
-          {list.map((r) => (
+          {list.slice(wlPage * 10, wlPage * 10 + 10).map((r) => (
             <ResolveRow key={r.ref} r={r} open={open}
               active={active === r.ref} toggle={() => setActive(active === r.ref ? null : r.ref)}
               onDone={reloadAll} />
           ))}
         </tbody>
       </table>
+      <Pager page={wlPage} pageSize={10} total={list.length} onPage={setWlPage} noun="references" />
     </div>
     <UnfetchablePanel />
     <RetrievalExportPanel />
@@ -4471,6 +4509,8 @@ function UnfetchablePanel() {
   const [upRef, setUpRef] = useState<string | null>(null);
   const [linkRef, setLinkRef] = useState<string | null>(null);
   const [jur, setJur] = useState<string | null>(null);
+  const [ufPage, setUfPage] = useState(0);   // 10 rows/page — keep the panel short
+  useEffect(() => { setUfPage(0); }, [minCiting, jur]);
   const all: any[] = data?.references || [];
   // Facet over the WHOLE set so the token counts stay honest while one is selected.
   // A reference with no jurisdiction of its own is bucketed by where it is cited FROM.
@@ -4519,7 +4559,7 @@ function UnfetchablePanel() {
         <table className="grid">
           <thead><tr><th>cites</th><th>reference</th><th>looks like</th><th>jurisdiction</th><th>source</th><th></th></tr></thead>
           <tbody>
-            {refs.map((r) => (
+            {refs.slice(ufPage * 10, ufPage * 10 + 10).map((r) => (
               <Fragment key={r.ref}>
                 <tr>
                   <td className="num" style={{ whiteSpace: "nowrap" }}>{r.citing_count}</td>
@@ -4569,6 +4609,7 @@ function UnfetchablePanel() {
           </tbody>
         </table>
       )}
+      {refs.length > 0 && <Pager page={ufPage} pageSize={10} total={refs.length} onPage={setUfPage} noun="authorities" />}
     </div>
   );
 }

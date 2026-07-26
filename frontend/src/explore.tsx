@@ -424,8 +424,11 @@ export function ExploreView({ open, goSearch }:
               {sugg.map((o, i) => (
                 <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
                   onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); open(o.stable_id); }}>
-                  <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
-                  <span className="muted"> · {o.doc_type}{o.court ? ` · ${o.court}` : ""}</span>
+                  <FlagIcon jurisdiction={o.jurisdiction} opacity={0.85} />
+                  <span className="ac-opt-text">
+                    <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
+                    <span className="muted"> · {o.doc_type}{o.court ? ` · ${o.court}` : ""}</span>
+                  </span>
                 </div>
               ))}
             </div>

@@ -511,7 +511,15 @@ tbody tr:hover { background: var(--surface-2); }
 .ac input { width: 100%; }
 .ac-list { position: absolute; left: 0; right: 0; top: 100%; z-index: 70; max-height: 264px; overflow-y: auto;
   background: var(--surface); border: 1px solid var(--line); margin-top: 2px; box-shadow: var(--shadow-lg); }
-.ac-opt { padding: var(--sp-3) var(--sp-4); cursor: pointer; border-bottom: 1px solid var(--line-faint); }
+.ac-opt { padding: var(--sp-3) var(--sp-4); cursor: pointer; border-bottom: 1px solid var(--line-faint);
+  display: flex; align-items: baseline; gap: var(--sp-2); text-align: left; }
+.ac-opt .flag-icon { align-self: center; flex: 0 0 auto; }
+.ac-opt-text { min-width: 0; flex: 1; }
+.pager { display: flex; align-items: center; justify-content: center; gap: var(--sp-3);
+  padding: var(--sp-3) 0; font-size: 13px; }
+.toggle-row { display: flex; align-items: center; gap: var(--sp-2); font-size: 13px;
+  cursor: pointer; }
+.toggle-row input[type="checkbox"] { width: auto; flex: 0 0 auto; cursor: pointer; }
 .ac-opt:last-child { border-bottom: 0; }
 .ac-opt.hi { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .ac-jur { margin-right: var(--sp-2); font-size: 10px; vertical-align: middle; }

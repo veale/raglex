@@ -119,3 +119,35 @@ def test_admin_ip_whitelist_elevates(build):
     assert c.post("/link", json={}, headers=hdr).status_code != 403
     # IP write without the CSRF header is refused
     assert c.post("/link", json={}, headers={"X-Forwarded-For": "9.9.9.9"}).status_code == 403
+
+
+# -- enable/disable toggles + long session cookie (Security panel) -------------
+def test_password_gating_toggle(monkeypatch):
+    monkeypatch.delenv("RAGLEX_AUTH_PASSWORDS_ENABLED", raising=False)
+    monkeypatch.setenv("RAGLEX_ADMIN_PASSWORD", "hunter2")
+    assert authmod.passwords_enabled() is True
+    assert authmod.role_for_password("hunter2") == authmod.ADMIN
+    # toggled off: the stored password is kept but login is ignored
+    monkeypatch.setenv("RAGLEX_AUTH_PASSWORDS_ENABLED", "0")
+    assert authmod.passwords_enabled() is False
+    assert authmod.role_for_password("hunter2") is None
+
+
+def test_ip_gating_toggle(monkeypatch):
+    monkeypatch.delenv("RAGLEX_AUTH_IPS_ENABLED", raising=False)
+    monkeypatch.setenv("RAGLEX_ADMIN_IPS", "10.0.0.0/8")
+    assert authmod.ip_gating_enabled() is True
+    assert authmod.role_for_ip("10.1.2.3") == authmod.ADMIN
+    # toggled off: the stored list is kept but not enforced
+    monkeypatch.setenv("RAGLEX_AUTH_IPS_ENABLED", "off")
+    assert authmod.ip_gating_enabled() is False
+    assert authmod.role_for_ip("10.1.2.3") == authmod.ANON
+
+
+def test_session_ttl_defaults_to_thirty_days(monkeypatch):
+    monkeypatch.delenv("RAGLEX_SESSION_TTL", raising=False)
+    assert authmod._session_ttl() == 30 * 24 * 3600
+    monkeypatch.setenv("RAGLEX_SESSION_TTL", "3600")
+    assert authmod._session_ttl() == 3600
+    monkeypatch.setenv("RAGLEX_SESSION_TTL", "garbage")
+    assert authmod._session_ttl() == 30 * 24 * 3600

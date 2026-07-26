@@ -1669,6 +1669,9 @@ class Facade:
             for r in rows:
                 d = dict(r)
                 d["oscola"] = _oscola_cite(r, _row_meta(r))
+                # the retrieval-jurisdiction bucket, so result rows (and the hero
+                # autocomplete) can show the same circular flag the explorer uses
+                d["jurisdiction"] = self._doc_bucket(r["source"], r["court"])
                 items.append(d)
             # Cap the exact total (a common-word match set is millions of rows; counting all
             # is the only slow part of an otherwise sub-second search). Beyond the cap the UI
@@ -3528,7 +3531,7 @@ class Facade:
                             placeholder={"total": None, "references": []})
 
     def _unfetchable_uncached(self, limit: int, *, min_citing: int | None = None,
-                              scan_limit: int | None = None) -> dict:
+                              scan_limit: int | None = None, enrich: bool = True) -> dict:
         from .citations.frontier import classify as _frontier_classify
         from .citations.snowball import _classify
         from .adapters.bailii import external_link
@@ -3586,6 +3589,16 @@ class Facade:
                 })
             rows.sort(key=lambda r: r["citing_count"], reverse=True)
             out = rows[:limit]
+            # The Westlaw/Lexis export only needs the citation string + rank, and asks for a
+            # huge `limit` (the long tail). Skip the per-item citing-documents / suggestions /
+            # cited-from enrichment for it — those are three more queries over up-to-20k refs
+            # that the export discards, and were part of why it never returned.
+            if not enrich:
+                for r in out:
+                    r["citing_documents"] = []
+                    r["suggestions"] = []
+                    r["cited_from"] = []
+                return {"total": len(rows), "references": out, "min_citing": floor}
             refs = [r["ref"] for r in out]
             citing = cat.citing_documents_for(refs) if refs else {}
             sugg = cat.suggestions_for(refs) if refs else {}
@@ -3640,10 +3653,19 @@ class Facade:
         cite_shape = _re.compile(r"[\[(](?:1[6-9]|20)\d{2}[\])]")
         seen: set[str] = set()
         items: list[dict] = []
-        # reuse the frontier computation (uncapped), then filter to pasteable cites
-        # min_citing is applied per-item below, so push the caller's own floor into SQL
-        # rather than the panel's default — the export legitimately wants the long tail.
-        frontier = self._unfetchable_uncached(scan_limit, min_citing=max(1, min_citing))
+        # Reuse the frontier computation, then filter to pasteable cites. min_citing is
+        # applied per-item below, so push the caller's floor into SQL. CRUCIAL: bound BOTH
+        # the returned rows AND the initial scan to scan_limit — the pending-reference
+        # roll-up is ~950k rows ordered by citation count, and scanning+Python-classifying
+        # all of them (the old call left scan_limit=None) never returned, so the export
+        # "never finished". The roll-up is citation-ranked, so the top scan_limit rows ARE
+        # the most-cited authorities the export wants. Served stale-while-revalidate so a
+        # repeat export (or a second format) is instant instead of recomputing the scan.
+        floor = max(1, min_citing)
+        frontier = self._cached(
+            f"unfetchable:export:{scan_limit}:{floor}", 300,
+            lambda: self._unfetchable_uncached(scan_limit, scan_limit=scan_limit,
+                                               min_citing=floor, enrich=False))
         for r in frontier["references"]:
             if r["citing_count"] < min_citing:
                 continue

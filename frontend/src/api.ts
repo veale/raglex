@@ -143,7 +143,7 @@ export interface LIITarget extends LIILink {
 }
 export interface Setting {
   key: string; label: string; secret: boolean; group: string; placeholder: string;
-  set: boolean; source: string; display: string;
+  set: boolean; source: string; display: string; kind?: string;
 }
 
 export const api = {
