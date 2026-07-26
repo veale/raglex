@@ -637,8 +637,15 @@ class Facade:
         self._cache[key] = (_t.time(), val)
         return val
 
+    # Aggregates dropped the instant the citation graph changes (harvest/resolve/edit), so
+    # their "remaining" counts don't serve a pre-op snapshot. Explore's per-slice drill lists
+    # and the shape table are DELIBERATELY excluded: they're expensive to recompute (a cold
+    # slice is a ~16s scan) and only warmed at startup, so wiping them on every op left the
+    # homepage recomputing a slice on each click after any background job. Their 1h TTL +
+    # stale-while-revalidate keeps them fresh enough (top-authority lists barely move per
+    # harvest), and they refresh in the background on next access rather than blocking a click.
     _VOLATILE_CACHE_PREFIXES = ("coverage", "stats", "corpus_map", "queues", "worklist",
-                                "snowball", "unfetchable", "drill")
+                                "snowball", "unfetchable")
 
     def _invalidate_caches(self) -> None:
         """Drop the cached dashboard aggregates after an op that changes the citation
@@ -769,8 +776,13 @@ class Facade:
                         "repealed_by", "amended_by", "corrected_by")
         qs = ",".join("?" * len(change_types))
         with self._open() as (cat, _rs, _ts):
+            # EU legislation is held under source 'eu-legislation' (the CELEX is the
+            # stable_id); 'eu-cellar' is the case-law surface. The old filter named only
+            # 'eu-cellar' AND doc_type='legislation' — a combination that matches ZERO rows,
+            # so every run was a silent no-op (scanned 0). Cover both sources.
             rows = cat.conn.execute(
-                f"SELECT stable_id FROM documents d WHERE d.source = 'eu-cellar' "
+                f"SELECT stable_id FROM documents d "
+                f"WHERE d.source IN ('eu-legislation', 'eu-cellar') "
                 f"AND d.doc_type = 'legislation' AND NOT EXISTS ("
                 f"  SELECT 1 FROM relations r WHERE r.src_id = d.stable_id "
                 f"  AND r.relationship_type IN ({qs})) LIMIT ?",
