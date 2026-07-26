@@ -192,6 +192,12 @@ def _sniff_format(raw: bytes) -> str | None:
     low = head.lower()
     if b"akomantoso" in low:
         return "akoma-ntoso"
+    # CLML (legislation.gov.uk data.xml). Its root is <Legislation> in the
+    # …/namespaces/legislation NS — checked after AKN (whose files also carry that NS
+    # as xmlns:ukl). Needed for assimilated EU regs, whose AKN body is empty while the
+    # CLML carries the articles (see formats.clml_xml).
+    if b"<legislation" in low and b"namespaces/legislation" in low:
+        return "clml"
     if b"<act" in low or b"formex" in low or b"enacting.terms" in low:
         return "formex-legislation"
     if b"toestand" in low or b"<wetgeving" in low:

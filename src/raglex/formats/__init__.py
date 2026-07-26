@@ -7,6 +7,7 @@ calls ``register(name, parser)``.
 from . import (  # noqa: F401  (register on import)
     akoma_ntoso,
     bwb,
+    clml_xml,
     eisb_html,
     eisb_xml,
     eurlex_html,

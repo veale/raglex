@@ -253,24 +253,51 @@ class UKLegislationAdapter(BaseAdapter):
                 f"{self.source}: {url} still generating (HTTP 202) after 4 attempts",
                 transient=True,
             )
+        # Assimilated EU regs: the AKN body is empty (only TOC + recitals) — the operative
+        # articles live only in the CLML data.xml, and only under the CANONICAL eur/… path
+        # (the /european/… alias serves an empty CLML too). The AKN's FRBRWork carries that
+        # canonical id, so pull the CLML body from it and let record_from_akn use it for
+        # text+segments while the AKN still supplies effects/currency/title.
+        clml_body = None
+        if is_assim:
+            from ..formats.akoma_ntoso import _frbr_work_id
+            eur_id = _frbr_work_id(raw)
+            if eur_id:
+                try:
+                    r = self._client.get(f"{BASE_URL}/{eur_id}/data.xml")
+                    if r.content and b"<P1group" in r.content:
+                        clml_body = r.content
+                except Exception:  # noqa: BLE001 — fall back to AKN-only on any CLML hiccup
+                    clml_body = None
         return self.record_from_akn(
-            stub.stable_id, raw,
+            stub.stable_id, raw, clml_body=clml_body,
             landing_url=stub.landing_url,
             base_id=stub.hints.get("base_id"),
             version_date=stub.hints.get("version_date"))
 
     def record_from_akn(self, stable_id: str, raw: bytes, *,
+                        clml_body: bytes | None = None,
                         landing_url: str | None = None,
                         base_id: str | None = None,
                         version_date: str | None = None) -> Record:
         """Build a legislation Record from Akoma Ntoso bytes. Shared by the live
         harvest (``fetch``) and manual uploads, so a hand-supplied AKN file for an
         instrument legislation.gov.uk won't serve gets exactly the same structural
-        parse, unapplied-effects edges and schedule pinpoints as a harvested one."""
+        parse, unapplied-effects edges and schedule pinpoints as a harvested one.
+
+        ``clml_body`` (assimilated EU regs): the AKN body is empty, so its CLML
+        data.xml is supplied separately — its text+segments replace the AKN's while
+        the AKN still drives effects/currency/title (both are namespace-agnostic)."""
         parsed = parse("akoma-ntoso", raw)
+        extra: dict = {"format": "akoma-ntoso"}
+        if clml_body:
+            clml_pd = parse("clml", clml_body)
+            if clml_pd.segments:
+                parsed.text = clml_pd.text
+                parsed.segments = clml_pd.segments
+                extra["format"] = "clml-body+akn-meta"
         title = parsed.title or stable_id
         relations = list(parsed.relations)
-        extra: dict = {"format": "akoma-ntoso"}
         stub = _Ns(stable_id=stable_id,
                    landing_url=landing_url or f"{BASE_URL}/{stable_id}",
                    hints={"base_id": base_id, "version_date": version_date})
