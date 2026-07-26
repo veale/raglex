@@ -36,20 +36,27 @@ _FETCHING = ToolAnnotations(readOnlyHint=False, openWorldHint=True, idempotentHi
 
 _INSTRUCTIONS = (
     "RagLex is a legal-research corpus — case law, legislation and regulatory guidance "
-    "across many jurisdictions. Orient yourself first with overview() (the dense balance of "
-    "holdings, and what can be fetched on demand) and jurisdictions() (the selectable "
-    "jurisdiction filter).\n\n"
-    "The workhorse is lookup(citation): give it a citation (or a stable_id) and it resolves "
-    "the authority and returns its text — or, with a pincite, just that passage plus a scale "
-    "of surrounding context — together with the ways it is cited (parallel citations and "
-    "shorthands), who cites it, and cocitation 'similar cases'. If the authority is new to "
-    "the corpus it is fetched SILENTLY from its source (CourtListener, Find Case Law, "
-    "legislation.gov.uk, CELLAR, HUDOC…); if it cannot be fetched, an external legal-"
-    "information-institute URL is returned so you can read it yourself.\n\n"
-    "Prefer search / lookup / related_documents / citator for research. Everything that "
-    "CHANGES the corpus — harvesting, imports, watches, aliases, settings, repairs — is "
-    "behind the single maintenance(op, args) tool, to keep this surface small. Call "
-    "maintenance('help') only when you actually need to modify the corpus."
+    "across many jurisdictions. Orient with overview() (the main jurisdictions held + their "
+    "density of case-law / legislation / guidance).\n\n"
+    "The workhorse is lookup(citation). Give it a citation, a statute-by-name, or a "
+    "stable_id and it resolves the authority and returns its text (a token-cheap preview by "
+    "default). Two things make it the front door:\n"
+    "• PINPOINT + CITERS IN ONE STEP. lookup('Article 15 GDPR') resolves the GDPR, quotes "
+    "Article 15, AND returns the documents that cite THAT article (not the whole "
+    "regulation), with jurisdiction/kind facets. You can also pass pincite='Article 15' "
+    "explicitly. To browse/filter/sort that citer list, call citing_documents(target, "
+    "anchor='Article 15', sort=…, jurisdiction=…) — it is stateless and re-callable, so it "
+    "IS your results list to return to.\n"
+    "• SILENT FETCH. An authority merely new to the corpus is fetched from its source "
+    "(CourtListener, Find Case Law, legislation.gov.uk, CELLAR, HUDOC…); if unfetchable you "
+    "get an external URL to read yourself.\n\n"
+    "FINDING things: use find(query) / lookup(citation) — they match CITATIONS and TITLES "
+    "(and party/act names). There is NO working concept/semantic search (embeddings are "
+    "incomplete); a natural-language legal question returns nothing, so don't search that "
+    "way — search by the NAME of a case or act, or by a citation.\n\n"
+    "Everything that CHANGES the corpus — harvesting, imports, watches, aliases, settings, "
+    "repairs — is behind the single maintenance(op, args) tool. Call maintenance('help') "
+    "only when you actually need to modify the corpus."
 )
 
 
@@ -82,32 +89,23 @@ def build_server(config: Config | None = None) -> FastMCP:
 
     # -- read / research --------------------------------------------------
     @mcp.tool(annotations=_READ_ONLY)
-    def search(query: str, k: int = 8, jurisdiction: Optional[str] = None,
+    def search(query: str, k: int = 10, jurisdiction: Optional[str] = None,
                kind: Optional[str] = None, source: Optional[str] = None,
                doc_type: Optional[str] = None, tag: Optional[str] = None,
-               year_from: Optional[str] = None) -> list[dict]:
-        """Hybrid (keyword+semantic) search with GraphRAG neighbours. Scope it by
-        ``jurisdiction`` (a natural-language name from jurisdictions(), e.g. "United States",
-        expanded to that jurisdiction's sources), ``kind`` ("cases" | "legislation" |
-        "guidance"), or the finer source/doc_type/tag/year filters."""
-        filters: dict = {}
-        if jurisdiction:
-            srcs = facade.sources_for_jurisdiction(jurisdiction)
-            if srcs:
-                filters["source"] = srcs
-        if kind:
-            _KIND = {"cases": ["judgment", "decision", "opinion"],
-                     "legislation": ["legislation"], "guidance": ["guidance"]}
-            filters["doc_type"] = _KIND.get(kind.lower(), [kind])
-        if source:
-            filters["source"] = [source]
-        if doc_type:
-            filters["doc_type"] = [doc_type]
-        if tag:
-            filters["tag"] = tag
-        if year_from:
-            filters["year_from"] = year_from
-        return facade.search(query, k=k, filters=filters or None)
+               year_from: Optional[str] = None) -> dict:
+        """Find documents by CITATION or by TITLE / party / act name — the reliable way in.
+        It reads the query as a citation first (and hands you to lookup() if it resolves),
+        then matches your words against document TITLES and ids.
+
+        NOT a concept/semantic search: a natural-language legal question ("cases on the
+        right of access") returns nothing here, because it matches titles, not meaning
+        (the embedding index is incomplete). Search by the NAME of a case or act, or by a
+        citation. For a specific provision and who cites it, use lookup(citation,
+        pincite=…) → citing_documents(). Scope with ``jurisdiction`` (ISO code like "fr"
+        or a name), ``kind`` ("cases" | "administrative" | "legislation" | "guidance"),
+        or source/doc_type/tag/year_from."""
+        return facade.find(query, k=k, jurisdiction=jurisdiction, kind=kind, source=source,
+                           doc_type=doc_type, tag=tag, year_from=year_from)
 
     @mcp.tool(annotations=_READ_ONLY)
     def overview() -> dict:
@@ -126,23 +124,53 @@ def build_server(config: Config | None = None) -> FastMCP:
     def lookup(citation: str, pincite: Optional[str] = None, context: int = 1,
                full: bool = False, cited_by: bool = True, similar: bool = True,
                autofetch: bool = True) -> dict:
-        """Resolve a CITATION (or a stable_id) and return one self-contained answer.
+        """Resolve a CITATION, a statute-by-name, or a stable_id and return one
+        self-contained answer. This is the front door — start here.
 
-        By default you get metadata + a short text PREVIEW + the document's structural
-        outline (token-cheap) — then either ``pincite`` ("Article 17", "s. 45", "[42]",
-        "at 644") for just that passage plus ``context`` neighbouring segments (0 = the
-        pinpoint alone / 1 = some / 2 = lots), or ``full=true`` for the whole (capped) text.
-        Prefer a pincite: it is exact and cheap. Also returned: the ways it is cited
-        (``also_cited_as``), who cites it (``cited_by`` — each queryable in turn), and
-        cocitation neighbours (``similar``).
+        PINPOINT A PROVISION + WHO CITES IT. If the citation names a provision
+        ("Article 15 GDPR", "Article 17 of Regulation 2016/679", "s. 45 of the DPA 2018"),
+        lookup quotes exactly that provision AND returns the documents that cite THAT
+        provision — under ``citing`` (total + jurisdiction/kind facets + top rows), with a
+        ready-made ``citing.browse`` handle. You can also pass ``pincite`` explicitly
+        ("Article 15", "[42]", "at 644"); ``context`` sets how many neighbouring segments
+        come with the quote (0 = the pinpoint alone / 1 = some / 2 = lots). To browse /
+        filter / sort every citer of that provision, call citing_documents(target, anchor)
+        — see ``citing.browse``.
 
-        Fetching is a silent fallback: an authority that is merely NEW to the corpus but
-        routable (a US case via CourtListener, a UK case/act, an EU/ECHR item) is fetched
-        for you and returned. Only when it cannot be fetched at all do you get an external
-        LII/BAILII URL to read or scrape yourself. This is the front door — you rarely need
-        to harvest anything by hand."""
+        NO PINPOINT → metadata + a short text PREVIEW + the structural outline (so you can
+        pick a provision to pincite), plus document-level ``cited_by``. ``full=true`` returns
+        the whole (capped) text — prefer a pincite, it is exact and cheap. Also returned: the
+        ways it is cited (``also_cited_as``) and cocitation neighbours (``similar``).
+
+        SILENT FETCH: an authority merely NEW to the corpus but routable (US case via
+        CourtListener, a UK case/act, an EU/ECHR item) is fetched and returned. Only when it
+        can't be fetched do you get an external LII/BAILII URL to read yourself. You rarely
+        need to harvest by hand."""
         return facade.lookup(citation=citation, pincite=pincite, context=context, full=full,
                              cited_by=cited_by, similar=similar, autofetch=autofetch)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    def citing_documents(target: str, anchor: Optional[str] = None, sort: str = "pagerank",
+                         jurisdiction: Optional[str] = None, kind: Optional[str] = None,
+                         offset: int = 0, limit: int = 20) -> dict:
+        """The browsable list of documents that CITE ``target`` — the results list you page,
+        filter and sort, and return to. ``target`` is a citation or a stable_id.
+
+        Pin it to ONE provision with ``anchor`` ("Article 15", "s. 45", "[42]") to get
+        exactly the documents that cite THAT article, not the whole instrument — this is the
+        answer to "which cases cite Article 15 of the GDPR". Then:
+        • ``sort``: pagerank (most authoritative, default) | cited | newest | oldest | passages
+        • ``jurisdiction``: an ISO code ("fr", "gb", "eu") or a name — narrow to one place
+        • ``kind``: "cases" | "administrative" (DPA/regulator decisions) | "legislation" | "guidance"
+        • ``offset`` / ``limit``: page through (the reply's ``how_to_browse`` gives the next offset)
+
+        Each row carries an inline snippet of where it cites, its OSCOLA cite, court,
+        jurisdiction, kind and date; ``facets`` shows the whole citer set so you know what you
+        can narrow to. Stateless — call again with the same args to come back to these
+        results, or open any row with lookup(its stable_id)."""
+        return facade.citing_documents(target, anchor=anchor, sort=sort,
+                                       jurisdiction=jurisdiction, kind=kind,
+                                       offset=offset, limit=limit)
 
     @mcp.tool(annotations=_READ_ONLY)
     def list_documents(source: Optional[str] = None, doc_type: Optional[str] = None,

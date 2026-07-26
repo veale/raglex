@@ -113,10 +113,106 @@ def test_core_tools_are_first_class_and_maintenance_is_gated():
     names = _tool_names(build_server(Config.from_env()))
     # the research surface is small and workflow-shaped
     assert {"search", "lookup", "overview", "jurisdictions", "citator",
-            "related_documents", "get_provision"} <= names
+            "related_documents", "get_provision", "citing_documents"} <= names
     assert "maintenance" in names
     # ~60 mutation ops must NOT each be a top-level tool
     for gated in ("harvest", "import_pdf_url", "create_watch", "set_settings",
                   "resolve_reference", "harvest_all_references"):
         assert gated not in names, f"{gated} leaked as a top-level tool"
     assert len(names) < 20, f"core surface too large: {sorted(names)}"
+
+
+# -- provision-scoped citers: the "who cites Article 15" workflow -------------
+
+def _legislation(f: Facade, stable_id: str, text: str, title: str, source: str) -> None:
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source=source, stable_id=stable_id, doc_type=DocType.LEGISLATION,
+                     title=title, decision_date=date(2016, 1, 1), text=text,
+                     raw_bytes=text.encode(), extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, text)))
+
+
+def _citer(f: Facade, stable_id: str, title: str, *, source: str, court, dd: date,
+           dst: str, anchor: str) -> None:
+    from raglex.core.models import (RelationshipType, ResolutionStatus, TypedRelation)
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source=source, stable_id=stable_id, doc_type=DocType.JUDGMENT,
+                     title=title, decision_date=dd, text=f"This cites {anchor}.",
+                     raw_bytes=b"x", extracted_via=ExtractedVia.STRUCTURED, court=court)
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        cat.add_relations(stable_id, [TypedRelation(
+            relationship_type=RelationshipType.INTERPRETS, raw_citation_string=anchor,
+            dst_id=dst, resolution_status=ResolutionStatus.RESOLVED,
+            extracted_via=ExtractedVia.STRUCTURED, dst_anchor=anchor,
+            context_start=10, context_end=10 + len(anchor))])
+        cat.conn.commit()
+
+
+def _gdpr_corpus() -> Facade:
+    f = _facade()
+    _legislation(f, "32016R0679",
+                 "Article 15\nRight of access.\n\nArticle 17\nRight to erasure.",
+                 "General Data Protection Regulation", source="eu-legislation")
+    _citer(f, "caseUK", "Case A", source="uk-caselaw", court=None,
+           dd=date(2019, 1, 1), dst="32016R0679", anchor="Article 15")
+    _citer(f, "decFR", "DPA decision", source="edpb-oss", court="dpa-fr",
+           dd=date(2022, 1, 1), dst="32016R0679", anchor="Article 15")
+    _citer(f, "caseErasure", "Case C", source="uk-caselaw", court=None,
+           dd=date(2021, 1, 1), dst="32016R0679", anchor="Article 17")
+    return f
+
+
+def test_lookup_infers_pincite_from_the_citation_and_scopes_citers_to_that_article():
+    f = _gdpr_corpus()
+    r = f.lookup(citation="Article 15 GDPR", autofetch=False)
+    assert r["held"] is True and r["stable_id"] == "32016R0679"
+    # the pinpoint is taken from the citation string itself
+    assert r["pincite"] == "Article 15" and r.get("pincite_inferred") is True
+    citing = r["citing"]
+    # ONLY the Article 15 citers, never the Article 17 one
+    ids = {row["stable_id"] for row in citing["top"]}
+    assert ids == {"caseUK", "decFR"}
+    assert citing["total"] == 2
+    # facets tell the agent what it can narrow to
+    juris = {row["jurisdiction"] for row in citing["facets"]["jurisdiction"]}
+    assert {"United Kingdom", "France"} <= juris
+    assert citing["browse"]["args"] == {"target": "32016R0679", "anchor": "Article 15"}
+
+
+def test_citing_documents_filters_by_iso_jurisdiction_and_sorts():
+    f = _gdpr_corpus()
+    # ISO code narrows to the French DPA decision only
+    fr = f.citing_documents("32016R0679", anchor="Article 15", jurisdiction="fr")
+    assert [x["stable_id"] for x in fr["results"]] == ["decFR"]
+    assert fr["results"][0]["kind"] == "administrative"
+    # kind filter: only the UK court case
+    cases = f.citing_documents("32016R0679", anchor="Article 15", kind="cases")
+    assert [x["stable_id"] for x in cases["results"]] == ["caseUK"]
+    # newest-first ordering across both Article 15 citers
+    newest = f.citing_documents("32016R0679", anchor="Article 15", sort="newest")
+    assert [x["stable_id"] for x in newest["results"]] == ["decFR", "caseUK"]
+    # a browsable, re-callable list with concrete navigation hints
+    assert newest["how_to_browse"] and any("sort=" in h for h in newest["how_to_browse"])
+
+
+def test_citing_documents_on_unheld_target_guides_to_lookup():
+    f = _facade()
+    r = f.citing_documents("[2099] UKSC 1")
+    assert r["held"] is False and "lookup" in r["note"]
+
+
+def test_find_is_citation_first_then_title_and_is_honest_about_semantic():
+    f = _gdpr_corpus()
+    # a citation query resolves straight to the authority
+    byc = f.find("Article 15 GDPR")
+    assert byc["citation_match"]["stable_id"] == "32016R0679"
+    # a title query matches on the title, not on meaning
+    byt = f.find("General Data Protection")
+    assert any(x["stable_id"] == "32016R0679" for x in byt["results"])
+    # honest about what search does: titles/citations, not a concept search
+    assert "not by a legal question" in byt["how_search_works"].lower()
+    # a natural-language legal question finds nothing (no concept search)
+    q = f.find("what are the rules on the right of access")
+    assert q["results"] == [] and "nothing_found" in q

@@ -1382,7 +1382,8 @@ class Facade:
     def document_mentions(self, stable_id: str, *, anchor: str | None = None,
                           exact: bool = False, offset: int = 0, limit: int = 40,
                           snippet_docs: int = 40, max_groups: int = 120,
-                          sort: str = "pagerank") -> dict:
+                          sort: str = "pagerank", jurisdiction: str | None = None,
+                          kind: str | None = None) -> dict:
         """Who mentions this document (and, optionally, one paragraph of it), grouped by the
         citing document and ranked by ``sort`` (default: the citer's own PageRank).
 
@@ -1390,6 +1391,11 @@ class Facade:
         "See all mentions" tray (``groups`` — each citing document with the passages, drawn
         from the citation's context span, where it cites this one, and its OSCOLA citation).
         Heuristic carry-forward (inferred) edges are excluded — they aren't citations.
+
+        ``jurisdiction`` (ISO code or name) and ``kind`` ("cases" | "administrative" |
+        "legislation" | "guidance") narrow the citing set; ``facets`` in the reply always
+        report the WHOLE (unfiltered) anchor-scoped set so the caller can see what else it
+        could narrow to.
         """
         with self._open() as (cat, _rs, ts):
             rels = [r for r in cat.relations_to(stable_id) if r["extracted_via"] != "inferred"]
@@ -1492,6 +1498,29 @@ class Facade:
             preparatory_groups = [g for g in groups if g["src_kind"] == "preparatory"]
             groups = [g for g in groups if g["src_kind"] != "preparatory"]
 
+            # facet counts over the WHOLE anchor-scoped set (before any jurisdiction/kind
+            # filter) so the caller sees exactly what it could narrow to — this is what
+            # makes the citing list browsable instead of a wall of rows.
+            juris_facets: dict[str, int] = {}
+            kind_facets: dict[str, int] = {}
+            for g in groups:
+                juris_facets[g["src_jurisdiction"]] = juris_facets.get(g["src_jurisdiction"], 0) + 1
+                kind_facets[g["src_kind"]] = kind_facets.get(g["src_kind"], 0) + 1
+            facets = {
+                "jurisdiction": [{"jurisdiction": j, "documents": n}
+                                 for j, n in sorted(juris_facets.items(), key=lambda kv: -kv[1])],
+                "kind": [{"kind": k, "documents": n}
+                         for k, n in sorted(kind_facets.items(), key=lambda kv: -kv[1])],
+            }
+            # apply the narrowing filters (jurisdiction accepts an ISO code OR a name)
+            want_j = self._norm_jurisdiction(jurisdiction)
+            if want_j:
+                wl = want_j.lower()
+                groups = [g for g in groups if (g["src_jurisdiction"] or "").lower() == wl]
+            if kind:
+                kl = kind.strip().lower()
+                groups = [g for g in groups if (g["src_kind"] or "").lower() == kl]
+
             # snippets (the passages where the top citers cite this) — from the citation's
             # stored context span, so we read each citer's text at most once. Computed for
             # the requested PAGE (offset:offset+limit) so the reader's "all mentions" tray
@@ -1558,6 +1587,8 @@ class Facade:
                          for lab, v in by_anchor.items()}
             end = (offset + limit) if limit else total_groups
             return {"target": stable_id, "anchor": anchor,
+                    "jurisdiction": want_j, "kind": kind,
+                    "facets": facets,
                     "total": total_groups, "groups": page,
                     "offset": offset, "limit": limit,
                     "has_more": end < total_groups,
@@ -1570,6 +1601,119 @@ class Facade:
                                          if preparatory_groups and offset == 0 else None),
                     "sort": sort, "sorts": dict(self.MENTION_SORTS),
                     "by_anchor": by_anchor if offset == 0 else {}}
+
+    def _resolve_held_id(self, raw: str) -> tuple[str | None, str | None]:
+        """Resolve a citation string / stable_id to (held_id, candidate_id). Shared by
+        lookup() and citing_documents() so both accept the same identifiers: a neutral
+        citation, an ECLI/CELEX, a statute-by-name, or a stable_id passed straight through."""
+        from .citations import extract_citations
+        from .resolve.matchers import first_candidate
+
+        raw = (raw or "").strip()
+        if not raw:
+            return None, None
+        cand: str | None = None
+        hits = extract_citations(raw)
+        if hits and hits[0].candidate_id:
+            cand = hits[0].candidate_id
+        if not cand:
+            fc = first_candidate(raw)
+            cand = fc.value if fc else None
+        with self._open() as (cat, _rs, _ts):
+            held = cat.find_document_id(cand) if cand else None
+            if held is None and cand is None and ("/" in raw or ":" in raw):
+                if cat.get_document(raw) is not None:
+                    held, cand = raw, raw
+            return held, cand
+
+    # How many citing rows a browsable page carries, and how much snippet text each — kept
+    # small so a page of citers is token-cheap; the agent pages/narrows to see more.
+    _CITING_PAGE = 20
+
+    def citing_documents(self, target: str, *, anchor: str | None = None,
+                         sort: str = "pagerank", jurisdiction: str | None = None,
+                         kind: str | None = None, offset: int = 0,
+                         limit: int | None = None, snippets: bool = True) -> dict:
+        """The browsable list of who cites ``target`` — optionally pinned to ONE provision
+        (``anchor`` = "Article 15", "s. 45", "[42]") so you get exactly the documents that
+        cite THAT article, not the whole instrument. Sortable, filterable by jurisdiction
+        (ISO code or name) and kind, paginated, with an inline snippet per row and facet
+        counts telling you what you can narrow to. Re-callable with the same arguments — this
+        IS the results list to come back to; there is no hidden state."""
+        limit = limit or self._CITING_PAGE
+        held, cand = self._resolve_held_id(target)
+        if held is None:
+            return {"target": target, "held": False,
+                    "note": ("Not held, so there is nothing in the corpus citing it. "
+                             "lookup() it first (it will fetch the authority if it can), "
+                             "then browse its citers here.")}
+        # Cache per full arg tuple: loading a mega-authority's incoming edges costs seconds
+        # (see cited_by_breakdown), and the whole point of this tool is to be re-called as
+        # the agent pages / re-sorts / returns to the list — so the repeats must be instant.
+        key = f"citing:{held}:{anchor}:{sort}:{jurisdiction}:{kind}:{offset}:{limit}:{int(snippets)}"
+        return self._cached(key, 180,
+                            lambda: self._citing_documents(held, anchor, sort, jurisdiction,
+                                                           kind, offset, limit, snippets))
+
+    def _citing_documents(self, held, anchor, sort, jurisdiction, kind, offset, limit,
+                          snippets) -> dict:
+        m = self.document_mentions(held, anchor=anchor, sort=sort, offset=offset,
+                                   limit=limit, jurisdiction=jurisdiction, kind=kind,
+                                   snippet_docs=limit if snippets else 0)
+        doc = self.get_document(held).get("document", {}) or {}
+        rows = []
+        for g in m.get("groups", []):
+            snip = None
+            if snippets and g.get("snippets"):
+                s0 = g["snippets"][0]
+                snip = {"where": s0.get("anchor"), "text": (s0.get("text") or "")[:320]}
+            rows.append({
+                "stable_id": g["src_id"], "cite": g.get("src_oscola"),
+                "court": g.get("src_court_label"), "jurisdiction": g.get("src_jurisdiction"),
+                "kind": g.get("src_kind"), "date": str(g.get("src_date") or "")[:10] or None,
+                "authority": g.get("authority"), "passages": g.get("count"),
+                "cites_provisions": g.get("anchors"), "snippet": snip,
+            })
+        total = m.get("total", 0)
+        shown_to = offset + len(rows)
+        # concrete, copy-pasteable next steps — the nudge that keeps an agent from getting
+        # lost: how to page, how to narrow, how to re-sort, how to open a case, how to widen.
+        nav: list[str] = []
+        if m.get("has_more"):
+            nav.append(f"More: call again with offset={shown_to} (showing {offset+1}-{shown_to} "
+                       f"of {total}).")
+        narrowable = [f["jurisdiction"] for f in m.get("facets", {}).get("jurisdiction", [])
+                      if not jurisdiction][:6]
+        if narrowable and total > limit:
+            nav.append("Narrow by jurisdiction=" + " / ".join(repr(j) for j in narrowable[:5])
+                       + " (ISO codes work too), or kind='cases'|'administrative'|'legislation'.")
+        if not rows:
+            if anchor and offset == 0:
+                # nothing pins to THIS provision — the document may still have citers that
+                # cite it as a whole, so say so rather than implying it is uncited
+                nav.append(f"No citer pins specifically to {anchor!r}. Drop `anchor` to see "
+                           "every document citing this instrument, or check the provision "
+                           "label with lookup() / get_document_body().")
+            elif (jurisdiction or kind) and m.get("facets"):
+                have = ", ".join(f"{x['jurisdiction']} ({x['documents']})"
+                                 for x in m["facets"].get("jurisdiction", [])[:6])
+                nav.append(f"No citer matches that filter. Available: {have or '—'}. "
+                           "Widen by dropping jurisdiction/kind.")
+            else:
+                nav.append("No documents in the corpus cite this yet.")
+        nav.append("Re-sort with sort=" + "|".join(self.MENTION_SORTS))
+        nav.append("Open any row with lookup(citation=<its stable_id>) or get_document(<stable_id>).")
+        return {
+            "target": held, "title": doc.get("title"), "oscola": self.get_document(held).get("oscola"),
+            "provision": anchor,
+            "sort": sort, "sorts": dict(self.MENTION_SORTS),
+            "jurisdiction": m.get("jurisdiction"), "kind": kind,
+            "total": total, "offset": offset, "showing": [offset + 1 if rows else 0, shown_to],
+            "has_more": m.get("has_more", False),
+            "facets": m.get("facets"),
+            "results": rows,
+            "how_to_browse": nav,
+        }
 
     _STATUTE_KINDS = {"act", "regulation", "directive", "treaty", "eu_instrument"}
 
@@ -1608,6 +1752,83 @@ class Facade:
             # held authorities first, then by how often this document cites them
             items.sort(key=lambda e: (e["resolved_id"] is None, -e["occurrences"]))
             return {"family": family, "total": len(items), "items": items}
+
+    # kind → the doc_type set _doc_kind() maps back to (for post-filtering title hits)
+    _KIND_ALIASES = {"cases": "cases", "case": "cases", "caselaw": "cases",
+                     "legislation": "legislation", "statute": "legislation",
+                     "law": "legislation", "act": "legislation",
+                     "guidance": "guidance", "administrative": "administrative",
+                     "decision": "administrative", "dpa": "administrative"}
+
+    def find(self, query: str, *, k: int = 10, jurisdiction: str | None = None,
+             kind: str | None = None, source: str | None = None,
+             doc_type: str | None = None, tag: str | None = None,
+             year_from: str | None = None) -> dict:
+        """Locate documents by CITATION or TITLE — the reliable, embedding-independent way
+        in. Two passes: (1) read the query AS A CITATION with the grammar and, if it
+        resolves, hand you straight to that authority (call lookup() on it); (2) match your
+        words against document TITLES / ids, filtered by jurisdiction (ISO code or name),
+        kind ("cases" | "administrative" | "legislation" | "guidance"), court, year.
+
+        It does NOT do concept/semantic search — that needs the embedding pass, which is
+        incomplete on this corpus — so search by the NAME of a case or an act, or by a
+        citation, NOT by a legal question. For a specific provision and who cites it, use
+        lookup(citation, pincite=…) → citing_documents()."""
+        q = (query or "").strip()
+        if not q:
+            return {"query": q, "error": "empty query",
+                    "hint": "give a case name, an act title, or a citation"}
+        out: dict = {"query": q}
+        # 1. citation pass — is this actually a citation? then resolution beats title match.
+        held, cand = self._resolve_held_id(q)
+        if cand:
+            hit = {"candidate": cand, "held": held is not None}
+            if held:
+                d = self.get_document(held)
+                hit.update({"stable_id": held, "title": (d.get("document") or {}).get("title"),
+                            "oscola": d.get("oscola")})
+                hit["next"] = f"lookup(citation={q!r}) — add pincite='<Article/section>' for a provision + its citers"
+            else:
+                hit["next"] = f"lookup(citation={q!r}) — it will fetch the authority if it can"
+            out["citation_match"] = hit
+        # 2. title pass — tokenised title/id match, jurisdiction/kind applied to the pool
+        want_j = self._norm_jurisdiction(jurisdiction)
+        want_kind = self._KIND_ALIASES.get((kind or "").strip().lower()) if kind else None
+        pool = max(k * 6, 60)
+        rows = self.list_documents(query=q, source=source, doc_type=doc_type, tag=tag,
+                                   year_from=year_from, limit=pool)
+        results = []
+        for r in rows:
+            j = r.get("jurisdiction")
+            kd = self._doc_kind(r.get("source", ""), r.get("doc_type", ""), r.get("court"))
+            if want_j and (j or "").lower() != want_j.lower():
+                continue
+            if want_kind and kd != want_kind:
+                continue
+            results.append({
+                "stable_id": r["stable_id"], "title": r.get("title"),
+                "jurisdiction": j, "kind": kd, "court": r.get("court_label"),
+                "date": str(r.get("decision_date") or "")[:10] or None,
+                "doc_type": r.get("doc_type"), "source": r.get("source"),
+            })
+            if len(results) >= k:
+                break
+        out["results"] = results
+        out["total_shown"] = len(results)
+        # honest note about what search can and can't do here
+        with self._open() as (cat, _rs, _ts):
+            semantic_on = cat.has_vector_index(self._provider().dimensions)
+        out["how_search_works"] = (
+            "Matches CITATIONS and document TITLES/ids only" +
+            ("" if semantic_on else " — semantic/concept search is OFF (embeddings incomplete)") +
+            ". Search by a case/act NAME or a citation, not by a legal question. "
+            "For a provision and who cites it: lookup(citation, pincite=…) then citing_documents().")
+        if not results and "citation_match" not in out:
+            out["nothing_found"] = (
+                "No title/citation match. Try fewer/among-title words, a party name, or a "
+                "citation; or overview() to see what jurisdictions are held, then "
+                "list_documents(source=…) to browse.")
+        return out
 
     def list_documents(self, **filters) -> list[dict]:
         with self._open() as (cat, _rs, _ts):
@@ -1840,6 +2061,14 @@ class Facade:
         # 1. resolve to a candidate id — the citation as written, an ECLI/CELEX, or a slug
         cand: str | None = None
         hits = extract_citations(raw)
+        # the grammar often recovers a PINPOINT from the citation itself
+        # ("Article 15 GDPR", "s. 45 of the DPA 2018"). Adopt it as the pincite when the
+        # caller didn't pass one (and isn't asking for the full text) — so "who cites
+        # Article 15" Just Works from one string, the thing agents kept failing to do.
+        inferred_pin = hits[0].pinpoint if hits else None
+        pincite_inferred = False
+        if not pincite and not full and inferred_pin:
+            pincite, pincite_inferred = inferred_pin, True
         if hits and hits[0].candidate_id:
             cand = hits[0].candidate_id
         if not cand:
@@ -1867,7 +2096,7 @@ class Facade:
         if held_id:
             return self._lookup_held(held_id, raw=raw, pincite=pincite, context=context,
                                      cited_by=cited_by, similar=similar, fetched=fetched,
-                                     full=full)
+                                     full=full, pincite_inferred=pincite_inferred)
         # 3b. not held → external links (the agent reads / scrapes it itself)
         links = self.reference_links(ref=cand or raw, raw=raw)
         bucket = _candidate_jurisdiction(cand) if cand else None
@@ -1892,7 +2121,8 @@ class Facade:
     _LOOKUP_FULL_CHARS = 48_000
 
     def _lookup_held(self, held_id: str, *, raw: str, pincite: str | None, context: int,
-                     cited_by: bool, similar: bool, fetched: bool, full: bool = False) -> dict:
+                     cited_by: bool, similar: bool, fetched: bool, full: bool = False,
+                     pincite_inferred: bool = False) -> dict:
         """Assemble the held-document answer for :meth:`lookup`."""
         doc = self.get_document(held_id)
         d = doc.get("document", {}) or {}
@@ -1912,6 +2142,11 @@ class Facade:
         # to pull rather than paying for the whole document up front.
         if pincite:
             out["pincite"] = pincite
+            if pincite_inferred:
+                out["pincite_inferred"] = True  # taken from the citation string itself
+                out["note"] = (f"Pinpointed to {pincite!r} (read from your citation). For the "
+                               "whole instrument instead, pass full=true or omit the "
+                               "article/section from the citation.")
             out["passage"] = self.get_provision(held_id, label=pincite, context=context)
         else:
             body = self.document_body(held_id)
@@ -1935,9 +2170,37 @@ class Facade:
                                       "provision (with context 0/1/2), or full=true for the "
                                       "whole text")
         if cited_by:
-            cit = self.citator(held_id)
-            out["cited_by"] = {"stats": cit.get("cited_by"),
-                               "significant": cit.get("most_significant_citors", [])[:8]}
+            if pincite:
+                # PROVISION-SCOPED: who cites exactly this article/section — the thing an
+                # agent researching "cases on Article 15" actually wants, and a browse
+                # handle so it can page/filter/sort the rest without losing its place.
+                cd = self.citing_documents(held_id, anchor=pincite, sort="pagerank",
+                                           limit=6, snippets=True)
+                out["citing"] = {
+                    "provision": pincite,
+                    "total": cd.get("total", 0),
+                    "facets": cd.get("facets"),
+                    "top": cd.get("results", []),
+                    "browse": {"tool": "citing_documents",
+                               "args": {"target": held_id, "anchor": pincite}},
+                    "hint": (f"{cd.get('total', 0)} document(s) in the corpus cite {pincite}. "
+                             f"Browse / filter / sort them with "
+                             f"citing_documents(target='{held_id}', anchor='{pincite}', "
+                             f"sort='newest'|'cited'|…, jurisdiction='fr'|…) — re-call it "
+                             f"anytime to return to this list."),
+                }
+            else:
+                cit = self.citator(held_id)
+                out["cited_by"] = {"stats": cit.get("cited_by"),
+                                   "significant": cit.get("most_significant_citors", [])[:8]}
+                out["citing"] = {
+                    "browse": {"tool": "citing_documents", "args": {"target": held_id}},
+                    "hint": ("For who cites a SPECIFIC provision, pincite it — e.g. "
+                             f"lookup(citation='{raw}', pincite='Article 15') — or call "
+                             f"citing_documents(target='{held_id}', anchor='Article 15'). "
+                             "Browse all citers with citing_documents(target='"
+                             f"{held_id}')."),
+                }
         if similar:
             out["similar"] = self.related_documents(held_id, limit=8).get("co_cited", [])
         return out
@@ -1970,11 +2233,28 @@ class Facade:
                 "fetch_on_demand": sorted(fetch.get(j["jurisdiction"], [])),
             })
         rows.sort(key=lambda r: -r["total"])
-        return {"jurisdictions": rows, "total_documents": shape.get("total", 0),
-                "warming": bool(shape.get("_warming")),
-                "note": "fetch_on_demand lists adapters that can pull MORE for that "
-                        "jurisdiction on demand; an empty list means upload-only. Give a "
-                        "citation to lookup() and it will fetch silently where it can."}
+        # Head of the distribution only: an agent orienting itself wants the jurisdictions
+        # the corpus is actually deep in, not a long tail of one-offs. Keep those carrying a
+        # meaningful share (≥1% of the corpus, or ≥250 docs), but never fewer than the top 6
+        # nor more than 15; fold the rest into one summary line so nothing is hidden.
+        total_docs = shape.get("total", 0) or sum(r["total"] for r in rows)
+        cutoff = max(250, int(total_docs * 0.01))
+        head = [r for r in rows if r["total"] >= cutoff]
+        head = rows[:6] if len(head) < 6 else head[:15]
+        tail = rows[len(head):]
+        out: dict = {"jurisdictions": head, "total_documents": total_docs,
+                     "warming": bool(shape.get("_warming")),
+                     "note": "Main jurisdictional coverage, deepest first, with held density "
+                             "(cases / legislation / guidance). fetch_on_demand lists adapters "
+                             "that can pull MORE on demand; lookup() fetches silently where it "
+                             "can. Search is by citation/title (find/lookup), not concept."}
+        if tail:
+            out["other_jurisdictions"] = {
+                "count": len(tail), "documents": sum(r["total"] for r in tail),
+                "names": [r["jurisdiction"] for r in tail],
+                "note": "smaller holdings — query them directly by name/citation via find()/lookup()",
+            }
+        return out
 
     def _shape_ready(self) -> dict:
         """The corpus shape, computed synchronously if the warmed cache is still cold — so
@@ -2343,6 +2623,42 @@ class Facade:
         if doc_type == "legislation":
             return "legislation"
         return "other"
+
+    # ISO 3166 alpha-2 (and a few common aliases) → the natural-language jurisdiction
+    # bucket _doc_bucket() emits, so an agent can filter by "fr"/"gb"/"eu" instead of
+    # having to know the exact display string. The DPA countries come for free from
+    # _DPA_COUNTRY (already code→name); the majors + Council-of-Europe alias are added.
+    @classmethod
+    def _iso_jurisdiction(cls) -> dict[str, str]:
+        m = {
+            "gb": "United Kingdom", "uk": "United Kingdom",
+            "eu": "European Union", "eec": "European Union",
+            "coe": "Council of Europe", "echr": "Council of Europe",
+            "fr": "France", "de": "Germany", "nl": "Netherlands", "ie": "Ireland",
+            "au": "Australia", "ca": "Canada", "nz": "New Zealand", "sg": "Singapore",
+            "hk": "Hong Kong", "in": "India", "us": "United States", "usa": "United States",
+        }
+        m.update({code: name for code, name in cls._DPA_COUNTRY.items()})
+        return m
+
+    def _norm_jurisdiction(self, arg: str | None) -> str | None:
+        """Accept an ISO country code ("fr", "gb", "eu"), a known alias, or the natural-
+        language jurisdiction name itself (any case) and return the canonical bucket name
+        used across the citing/facet machinery. Returns None when it can't be mapped — the
+        caller then reports the available facet names rather than silently filtering to
+        nothing."""
+        if not arg:
+            return None
+        a = arg.strip()
+        if not a:
+            return None
+        iso = self._iso_jurisdiction()
+        if a.lower() in iso:
+            return iso[a.lower()]
+        # exact (case-insensitive) match against a known display name
+        names = {name.lower(): name for name in {*iso.values(),
+                 *(lb for _pref, lb in self._JURISDICTIONS)}}
+        return names.get(a.lower(), a)  # unknown → pass the raw string through for a later match
 
     def corpus_shape(self) -> dict:
         """The Explore homepage's data: the whole corpus's shape in one payload —
