@@ -365,10 +365,20 @@ def test_backfill_skips_already_held_documents(catalogue, rawstore):
     ad = FakeAdapter([rec])
     Pipeline(catalogue, rawstore).run(ad, backfill=True)
     assert ad._fetched == 1
+    # a clean full backfill records a frontier so the NEXT backfill needn't re-walk
+    assert catalogue.get_watermark("backfill:fake")
 
+    # Repeat backfill: resume from the frontier — the whole catalogue is NOT re-discovered
+    # (the efficiency fix for "backfill everything" re-walking 76,400 held docs every run).
     ad2 = FakeAdapter([rec])
     stats = Pipeline(catalogue, rawstore).run(ad2, backfill=True)
-    assert stats.deduped == 1 and ad2._fetched == 0   # held → skipped before fetch
+    assert stats.discovered == 0 and ad2._fetched == 0   # nothing re-walked
+
+    # force_full overrides the frontier: re-walk the whole feed, and held items are still
+    # skipped before any fetch (dedup-before-fetch) rather than re-downloaded.
+    ad3 = FakeAdapter([rec])
+    stats = Pipeline(catalogue, rawstore).run(ad3, backfill=True, force_full=True)
+    assert stats.deduped == 1 and ad3._fetched == 0   # held → skipped before fetch
 
 
 def test_backfill_dedups_provisional_id_stub_by_landing_url(catalogue, rawstore):

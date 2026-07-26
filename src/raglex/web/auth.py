@@ -118,7 +118,18 @@ PUBLIC_PATHS = frozenset({
 
 _SESSION_COOKIE = "raglex_session"
 _CSRF_COOKIE = "raglex_csrf"
-_DEFAULT_TTL = int(os.environ.get("RAGLEX_SESSION_TTL") or 7 * 24 * 3600)
+# A "good long" login by default — 30 days — so users aren't re-authing constantly on a
+# private research instance. Read LIVE (not once at import) so the RAGLEX_SESSION_TTL
+# setting takes effect in-process the moment it's saved, and the cookie's Max-Age matches
+# the signed token's own expiry.
+_DEFAULT_TTL_FALLBACK = 30 * 24 * 3600
+
+
+def _session_ttl() -> int:
+    try:
+        return max(300, int(os.environ.get("RAGLEX_SESSION_TTL") or _DEFAULT_TTL_FALLBACK))
+    except (TypeError, ValueError):
+        return _DEFAULT_TTL_FALLBACK
 
 
 # ---------------------------------------------------------------------------
@@ -132,13 +143,34 @@ def _env(*names: str) -> Optional[str]:
     return None
 
 
+def _flag_on(name: str, default: bool = True) -> bool:
+    """A boolean setting that defaults ON: only an explicit 0/off/false/no turns it off.
+    Lets an operator keep a password/IP list stored but toggle its ENFORCEMENT without
+    deleting the value (the Security-panel toggles)."""
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return default
+    return v.strip().lower() not in ("0", "off", "false", "no")
+
+
+def passwords_enabled() -> bool:
+    """Password login is active iff a password is configured AND the toggle isn't off."""
+    return _flag_on("RAGLEX_AUTH_PASSWORDS_ENABLED") and bool(
+        _env("RAGLEX_ADMIN_PASSWORD", "RAGLEX_ADMIN_PASSWORD_HASH")
+        or _env("RAGLEX_READER_PASSWORD", "RAGLEX_READER_PASSWORD_HASH"))
+
+
+def ip_gating_enabled() -> bool:
+    """IP allow-listing is active iff a list is configured AND the toggle isn't off."""
+    return _flag_on("RAGLEX_AUTH_IPS_ENABLED") and bool(
+        _env("RAGLEX_ADMIN_IPS") or _env("RAGLEX_READER_IPS"))
+
+
 def auth_enabled() -> bool:
-    """Enforcement is on iff any credential/whitelist is configured."""
+    """Enforcement is on iff any credential/whitelist is configured AND enabled."""
     return any((
-        _env("RAGLEX_ADMIN_PASSWORD", "RAGLEX_ADMIN_PASSWORD_HASH"),
-        _env("RAGLEX_READER_PASSWORD", "RAGLEX_READER_PASSWORD_HASH"),
-        _env("RAGLEX_ADMIN_IPS"),
-        _env("RAGLEX_READER_IPS"),
+        passwords_enabled(),
+        ip_gating_enabled(),
         _env("RAGLEX_API_TOKEN"),
     ))
 
@@ -182,6 +214,8 @@ def _password_matches(password: str, plain_env: str, hash_env: str) -> bool:
 
 def role_for_password(password: str) -> Optional[str]:
     """Admin beats reader when a password satisfies both (or they are equal)."""
+    if not _flag_on("RAGLEX_AUTH_PASSWORDS_ENABLED"):
+        return None  # password gating toggled off — keep the stored value, ignore it
     if _password_matches(password, "RAGLEX_ADMIN_PASSWORD", "RAGLEX_ADMIN_PASSWORD_HASH"):
         return ADMIN
     if _password_matches(password, "RAGLEX_READER_PASSWORD", "RAGLEX_READER_PASSWORD_HASH"):
@@ -230,8 +264,8 @@ def client_ip(request: Request) -> Optional[str]:
 
 
 def role_for_ip(ip: Optional[str]) -> str:
-    if not ip:
-        return ANON
+    if not ip or not _flag_on("RAGLEX_AUTH_IPS_ENABLED"):
+        return ANON  # IP gating toggled off — keep the stored list, ignore it
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
@@ -292,10 +326,11 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def issue_session(role: str, secret: bytes, *, sub: str = "", ttl: int = _DEFAULT_TTL,
+def issue_session(role: str, secret: bytes, *, sub: str = "", ttl: Optional[int] = None,
                   csrf: Optional[str] = None) -> tuple[str, str]:
     """Return ``(session_token, csrf_token)``. The CSRF nonce is embedded in the signed
     payload and mirrored to a readable cookie for the double-submit check."""
+    ttl = ttl or _session_ttl()
     csrf = csrf or secrets.token_urlsafe(24)
     now = int(time.time())
     payload = {"r": role, "s": sub, "iat": now, "exp": now + ttl, "c": csrf}
@@ -440,8 +475,9 @@ def install_web_auth(app: FastAPI, facade) -> None:
 
 def _set_session_cookies(resp: JSONResponse, request: Request, token: str, csrf: str) -> None:
     ck = _cookie_kwargs(request)
-    resp.set_cookie(_SESSION_COOKIE, token, max_age=_DEFAULT_TTL, **ck)
-    resp.set_cookie(_CSRF_COOKIE, csrf, max_age=_DEFAULT_TTL, **{**ck, "httponly": False})
+    ttl = _session_ttl()
+    resp.set_cookie(_SESSION_COOKIE, token, max_age=ttl, **ck)
+    resp.set_cookie(_CSRF_COOKIE, csrf, max_age=ttl, **{**ck, "httponly": False})
 
 
 def _install_login_routes(app: FastAPI, facade, *, enforce: bool) -> None:

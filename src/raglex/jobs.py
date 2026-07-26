@@ -109,6 +109,14 @@ CHAIN_FOLLOWUPS = (
     ("rebuild-citation-counts", _COOLDOWN_SCALE or 1200.0),
     ("rebuild-authority", _COOLDOWN_SCALE or 1800.0),
 )
+# Cap on the chained (auto) embed batch so one post-harvest follow-up can never pull the
+# whole multi-million-row embedding queue into memory (it drains across harvests instead).
+_AUTOEMBED_CHAIN_BATCH = int(os.environ.get("RAGLEX_AUTOEMBED_CHAIN_BATCH") or 2000)
+# A job that keeps dying gets auto-resumed under attempt+1 forever. If the death is
+# deterministic (an OOM on this box, a poison document), that is an infinite crash-restart
+# loop that thrashes the whole host. Stop auto-resuming past this many attempts; a human can
+# still restart it explicitly. 0 disables the cap.
+MAX_RESUME_ATTEMPTS = int(os.environ.get("RAGLEX_MAX_RESUME_ATTEMPTS") or 8)
 
 
 def _parse_iso(ts: str) -> float:
@@ -123,6 +131,24 @@ def _parse_iso(ts: str) -> float:
         return dt.timestamp()
     except (ValueError, TypeError):
         return 0.0
+
+
+def _resume_exhausted(row: dict) -> bool:
+    """True when a job has already been auto-resumed too many times — the guard against an
+    infinite crash→resume loop (a deterministic OOM/poison-doc) hammering the host. The
+    attempt counter increments on each resume (see _resume_row)."""
+    if MAX_RESUME_ATTEMPTS <= 0:
+        return False
+    try:
+        attempt = int(row.get("attempt") or 1)
+    except (TypeError, ValueError):
+        attempt = 1
+    if attempt >= MAX_RESUME_ATTEMPTS:
+        log.warning("job %s (%s) hit resume cap (attempt %d ≥ %d) — not auto-resuming; "
+                    "restart it manually once the cause is fixed",
+                    row.get("job_id"), row.get("kind"), attempt, MAX_RESUME_ATTEMPTS)
+        return True
+    return False
 
 
 def _job_did_work(result: dict | None) -> bool:
@@ -335,7 +361,8 @@ class JobManager:
             log.info("marked %d orphaned %s job(s) as interrupted", n, self.origin)
         if auto_resume:
             for row in rows:
-                if row["kind"] in AUTO_RESUME_KINDS and not row["cancel"]:
+                if (row["kind"] in AUTO_RESUME_KINDS and not row["cancel"]
+                        and not _resume_exhausted(row)):
                     self._resume_row(row)
         return n
 
@@ -353,7 +380,8 @@ class JobManager:
                      ", ".join(sorted({r["kind"] for r in rows})))
         if auto_resume:
             for row in rows:
-                if row["kind"] in AUTO_RESUME_KINDS and not row.get("cancel"):
+                if (row["kind"] in AUTO_RESUME_KINDS and not row.get("cancel")
+                        and not _resume_exhausted(row)):
                     try:
                         self._resume_row(row)
                     except Exception:  # noqa: BLE001
@@ -509,8 +537,15 @@ class JobManager:
                         cat.heartbeat_job(job_id, p, state["log"], checkpoint=state["checkpoint"])
                 except Exception:  # noqa: BLE001
                     pass
-            if self.yield_s:
-                time.sleep(self.yield_s)  # yield the GIL so the API never starves
+            # Yield the GIL so the API never starves. When interactive-priority is on
+            # (default), this yield point also PARKS the worker while a user is actively
+            # reading (UI/MCP): a heavy job's disk IO otherwise evicts the buffer-cache
+            # pages an interactive citator view needs, turning a sub-second document open
+            # into tens of seconds. Bounded, so backlog work still drains under sustained
+            # use; falls back to the plain tiny GIL-yield when nobody is active.
+            from . import interactive
+            if not interactive.throttle_for_interactive(cancel_check) and self.yield_s:
+                time.sleep(self.yield_s)
 
         def pulse() -> None:
             """Keep a truthful liveness heartbeat during one long document/SQL phase."""
@@ -573,9 +608,16 @@ class JobManager:
         than back-to-back. Skipped when the trigger job did no net work."""
         if kind not in CHAIN_TRIGGER_KINDS or not _job_did_work(result):
             return
+        from . import schedule as _schedule
         now = time.time()
         for follow, cooldown in CHAIN_FOLLOWUPS:
             try:
+                # The post-harvest embed follow-up is the ONE unbounded, unscheduled path
+                # that could re-embed the whole corpus. Gate it on the same 'auto-embed'
+                # toggle the scheduler tick honours, so turning auto-embed off is a real,
+                # total off switch (it wasn't — this chain ignored it and OOM-looped).
+                if follow == "embed" and not _schedule.is_enabled("auto-embed"):
+                    continue
                 with self.facade._open() as (cat, _rs, _ts):
                     if cat.running_jobs(follow) or any(
                             q["kind"] == follow for q in cat.queued_jobs()):
@@ -584,7 +626,11 @@ class JobManager:
                     last = recent[0]["finished_at"] if recent else None
                 if last and (now - _parse_iso(last)) < cooldown:
                     continue  # ran recently enough
-                self.start(follow, f"auto: {follow} after {kind}", {}, queue=True)
+                # Bound the chained embed so a single follow-up can never materialise the
+                # whole multi-million-row queue in memory; it drains incrementally across
+                # successive harvests. Other follow-ups take no params.
+                params = {"limit": _AUTOEMBED_CHAIN_BATCH} if follow == "embed" else {}
+                self.start(follow, f"auto: {follow} after {kind}", params, queue=True)
             except Exception:  # noqa: BLE001 — one follow-up failing must not block others
                 log.exception("could not chain %s", follow)
 

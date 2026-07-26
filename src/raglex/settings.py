@@ -27,6 +27,7 @@ class SettingSpec:
     secret: bool
     group: str
     placeholder: str = ""
+    kind: str = "text"  # "text" | "bool" — bool renders as an on/off toggle ("1"/"" stored)
 
 
 # The known settings the UI renders. Adding a credentialed source = one row here.
@@ -158,10 +159,39 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
                 "90 — days to skip a reference the source said does not exist (404). Only genuine absences land here"),
     SettingSpec("RAGLEX_RETRY_TTL_HOURS", "Unreachable-reference cooldown (hours)", False, "Network",
                 "6 — hours to skip a reference we merely couldn't fetch (timeout, 5xx). Short: the document probably exists"),
-    SettingSpec("RAGLEX_API_TOKEN", "API bearer token", True, "Network",
-                "blank = open. Set it and the REST API + MCP endpoint both require it"),
     SettingSpec("RAGLEX_ALERT_WEBHOOK", "Alert webhook URL", True, "Network",
                 "ntfy.sh/your-topic — pushes source-failure and drain-stalled alerts"),
+    # -- Security / access control (§auth). All opt-in: with nothing set here the instance
+    # stays open (dev/single-user). Setting an admin password turns on login; a reader
+    # password + read-only enforcement gives view-only accounts; IP allow-lists gate by
+    # network; the API token authenticates programmatic REST/MCP clients. Env vars still
+    # override the file, so a deployment can inject any of these instead.
+    SettingSpec("RAGLEX_AUTH_PASSWORDS_ENABLED", "Enable password login", False, "Security",
+                "master switch for the admin/reader passwords below — turn off to disable "
+                "password login without deleting the stored passwords. On by default when a "
+                "password is set", kind="bool"),
+    SettingSpec("RAGLEX_AUTH_IPS_ENABLED", "Enable IP allow-listing", False, "Security",
+                "master switch for the admin/reader IP allow-lists below — turn off to ignore "
+                "them without deleting them. On by default when a list is set", kind="bool"),
+    SettingSpec("RAGLEX_ADMIN_PASSWORD", "Admin password", True, "Security",
+                "set this to require login for full (write) access. Blank = no admin login. "
+                "Stored 0600 and masked; env RAGLEX_ADMIN_PASSWORD_HASH takes a bcrypt hash instead"),
+    SettingSpec("RAGLEX_READER_PASSWORD", "Reader password", True, "Security",
+                "optional second credential for view-only (read-only) access; blank = no reader login"),
+    SettingSpec("RAGLEX_API_TOKEN", "API bearer token", True, "Security",
+                "blank = open. Set it and the REST API + MCP endpoint both require it "
+                "(Authorization: Bearer …); also works as an admin token for scripts"),
+    SettingSpec("RAGLEX_ADMIN_IPS", "Admin IP allow-list", False, "Security",
+                "comma-separated IPs/CIDRs granted admin without a password (e.g. 100.64.0.0/10 "
+                "for your Tailnet, 192.168.1.0/24); blank = none"),
+    SettingSpec("RAGLEX_READER_IPS", "Reader IP allow-list", False, "Security",
+                "comma-separated IPs/CIDRs granted read-only access without a password; blank = none"),
+    SettingSpec("RAGLEX_SESSION_TTL", "Login session lifetime (s)", False, "Security",
+                "how long a browser stays logged in (cookie Max-Age + token expiry); "
+                "default 2592000 (30 days). Raise for a long-lived private instance"),
+    SettingSpec("RAGLEX_WEBAUTHN_ORIGIN", "Passkey origin", False, "Security",
+                "the https origin passkeys are bound to, e.g. https://raglex.example.com "
+                "(needed for WebAuthn/passkey admin login behind a proxy)"),
     SettingSpec("RAGLEX_MAX_CONCURRENT_JOBS", "Max concurrent jobs", False, "Jobs",
                 "how many jobs run at once; extras queue and start as slots free (default 6). "
                 "Lower it on a busy box so heavy imports don't starve interactive queries"),
@@ -271,6 +301,7 @@ class SettingsStore:
                 "secret": spec.secret,
                 "group": spec.group,
                 "placeholder": spec.placeholder,
+                "kind": spec.kind,
                 "set": value is not None,
                 "source": source,  # 'env' values can't be edited away in the file
                 "display": display,

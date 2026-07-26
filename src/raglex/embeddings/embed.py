@@ -87,10 +87,12 @@ class EmbedStage:
         ``done``/``total`` for the jobs panel; ``cancel_check`` lets a job stop cleanly."""
         p = self.provider
         stats = EmbedStats(provider=p.name, model=p.model)
+        # Bound the queue IN SQL, never with a post-fetch slice: the pending set over a
+        # multi-million-document corpus is enormous, and materialising it whole to slice
+        # afterwards OOM-killed the worker (see pending_embedding). Unbounded runs still
+        # pass limit=None and drain fully, one committed document at a time.
         pending = self.catalogue.pending_embedding(p.name, p.model, p.model_version,
-                                                   sources=self.sources)
-        if limit is not None:
-            pending = pending[:limit]
+                                                   sources=self.sources, limit=limit)
         total = len(pending)
         for i, row in enumerate(pending, 1):
             if cancel_check and cancel_check():
