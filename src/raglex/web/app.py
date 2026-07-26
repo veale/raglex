@@ -1490,6 +1490,24 @@ def serve_app(config: Config | None = None) -> FastAPI:
     # mounted, so we thread it into the parent app's lifespan.
     mcp = build_server(config)
     mcp.settings.streamable_http_path = "/"
+    # The MCP SDK's DNS-rebinding guard trusts only localhost by default, so a request
+    # arriving with the public Host header (behind the reverse proxy) is rejected 421 —
+    # even after OAuth succeeds. Trust the RAGLEX_PUBLIC_URL host (+ localhost) so remote
+    # MCP clients (e.g. the Claude app via the public domain) can actually connect.
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from .mcp_oauth import public_base_url as _pub_base
+    _hosts = ["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]:*"]
+    _origins = ["http://localhost:*", "http://127.0.0.1:*"]
+    _pub = _pub_base()
+    if _pub:
+        from urllib.parse import urlparse
+        _host = urlparse(_pub).netloc
+        if _host:
+            _hosts += [_host, f"{_host}:*"]
+            _origins += [_pub, f"{_pub}:*"]
+    mcp.settings.transport_security = TransportSecuritySettings(
+        allowed_hosts=_hosts, allowed_origins=_origins)
     mcp_app = mcp.streamable_http_app()
 
     @asynccontextmanager
