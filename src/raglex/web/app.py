@@ -746,10 +746,13 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/jobs/enrich-eu-legislation")
     def job_enrich_eu_leg_ep(payload: dict = Body(default={})) -> dict:
         """Harvest EU acts' act-to-act CDM relationships (repeals/amends/corrects/legal-basis)
-        so old directives learn they were repealed/recast. Body: {limit}."""
+        so old directives learn they were repealed/recast. Body: {limit, workers, queue}.
+        ``limit`` defaults high enough to drain the whole backlog; the SPARQL lookups run
+        across ``workers`` threads (network-bound)."""
         p = payload or {}
+        params = {"limit": int(p.get("limit", 100000)), "workers": int(p.get("workers", 8))}
         return _start_job("enrich-eu-legislation", "enrich EU legislation (CELLAR relations)",
-                          {"limit": int(p.get("limit", 200))})
+                          params, queue=bool(p.get("queue")))
 
     @app.get("/maintenance/plan")
     def maintenance_plan_ep() -> dict:

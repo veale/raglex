@@ -808,13 +808,18 @@ class Facade:
         "corrected_by", "consolidates", "legal_basis", "supersedes", "point_in_time_of",
     })
 
-    def enrich_eu_legislation(self, *, limit: int = 200, on_progress=None,
-                              cancel_check=None) -> dict:
+    def enrich_eu_legislation(self, *, limit: int = 100000, workers: int = 8,
+                              on_progress=None, cancel_check=None) -> dict:
         """Harvest each held EU act's act-to-act CDM relationships from CELLAR (repeals /
         amends / corrects / legal-basis, both directions) and store them — so an old
         directive learns it was repealed/recast, and the legislative-status banner + MCP
-        lights up. Bounded + resumable (skips acts already carrying a change-edge); dangling
-        edges to unheld acts feed the worklist. Needs network to CELLAR."""
+        lights up. Resumable (skips acts already carrying a change-edge), so a re-run picks up
+        wherever an interrupted run left off; dangling edges to unheld acts feed the worklist.
+
+        The work is per-act CELLAR SPARQL — network-bound — so the lookups run across a small
+        thread pool (``workers``); the DB writes are serialised in the main thread. ``limit``
+        defaults high enough to drain the whole backlog in one run. Needs network to CELLAR."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from .adapters.eu_cellar import harvest_act_relations
         change_types = ("repeals", "amends", "corrects", "consolidates", "legal_basis",
                         "repealed_by", "amended_by", "corrected_by")
@@ -832,19 +837,31 @@ class Facade:
                 f"  AND r.relationship_type IN ({qs})) LIMIT ?",
                 (*change_types, limit)).fetchall()
         ids = [r["stable_id"] for r in rows]
-        enriched = edges = 0
-        for i, sid in enumerate(ids, 1):
-            if cancel_check and cancel_check():
-                break
-            _progress(on_progress, stage="enriching EU legislation", done=i, total=len(ids), item=sid)
-            rels = harvest_act_relations(sid)  # stable_id is the CELEX for EU legislation
-            if rels:
-                with self._open() as (cat, _rs, _ts):
-                    cat.add_relations(sid, rels)
-                enriched += 1
-                edges += len(rels)
+        total = len(ids)
+        enriched = edges = done = 0
+        # one connection held for the write side; the harvest (network) is what's parallel
+        with self._open() as (cat, _rs, _ts):
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+                futures = {ex.submit(harvest_act_relations, sid): sid for sid in ids}
+                for fut in as_completed(futures):
+                    if cancel_check and cancel_check():
+                        for f in futures:
+                            f.cancel()
+                        break
+                    sid = futures[fut]
+                    done += 1
+                    _progress(on_progress, stage="enriching EU legislation",
+                              done=done, total=total, item=sid)
+                    try:
+                        rels = fut.result()
+                    except Exception:  # noqa: BLE001 — one act's CELLAR failure must not stop the sweep
+                        rels = None
+                    if rels:
+                        cat.add_relations(sid, rels)  # stable_id is the CELEX for EU legislation
+                        enriched += 1
+                        edges += len(rels)
         self._invalidate_caches()
-        return {"scanned": len(ids), "enriched": enriched, "edges": edges}
+        return {"scanned": total, "enriched": enriched, "edges": edges}
 
     def legislative_status(self, stable_id: str) -> dict:
         """Currency of a piece of legislation, from its change-edges (source-agnostic — UK
