@@ -3274,14 +3274,25 @@ export function SettingsView() {
   const [path, setPath] = useState("");
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
+  const [loadErr, setLoadErr] = useState("");
+  const [loading, setLoading] = useState(true);
   const [health] = useAsync(() => api.embeddingHealth(), [msg]);
-  const load = () => api.getSettings().then((r) => { setSettings(r.settings); setPath(r.path); });
+  // Load with explicit error/loading state — a silent .then meant a failed/timed-out
+  // fetch (e.g. under DB load) left the page blank with no hint and no way to retry.
+  const load = () => {
+    setLoading(true); setLoadErr("");
+    api.getSettings().then((r) => { setSettings(r.settings); setPath(r.path); })
+      .catch((e) => setLoadErr(String(e?.message || e))).finally(() => setLoading(false));
+  };
   useEffect(() => { load(); }, []);
   const groups = [...new Set(settings.map((s) => s.group))];
   return (
     <div>
       <div className="panel">
         {health && <p className={health.healthy ? "ok" : "err"}>Embedding provider: {health.provider}/{health.model} ({health.dimensions}d) — {health.healthy ? "ready ✓" : "needs an API key ✗"}</p>}
+        {loading && !settings.length && <p className="muted loading-pulse">Loading settings…</p>}
+        {loadErr && !settings.length && <p className="err">Couldn't load settings: {loadErr}{" "}
+          <button className="mini" onClick={load}>retry</button></p>}
         <p className="muted">Stored in <span className="kbd">{path}</span> (bind-mount the data dir to persist).
           An environment variable, if set, overrides the file value.</p>
         {groups.map((g) => (

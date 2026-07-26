@@ -1330,3 +1330,22 @@ table { width: 100%; }
   .jobs-dock { bottom: calc(var(--sp-4) + env(safe-area-inset-bottom, 0px)); }
   .mjump-btn { bottom: calc(var(--sp-4) + env(safe-area-inset-bottom, 0px)); }
 }
+
+/* =================================================================
+   Mobile bug-fix pass 3
+   ================================================================= */
+@media (max-width: 900px) {
+  /* Nothing may widen the page past the viewport. A single overflowing child (a wide
+     control row, a table) was making iOS zoom the whole layout out to a "desktop" look
+     and horizontal-scroll the page. Wide tables keep their OWN inner scroll (they set
+     overflow-x:auto), so content is still reachable — the PAGE just never scrolls
+     sideways. body (not a sticky ancestor) so the sticky header is unaffected. */
+  body { overflow-x: clip; }
+}
+@media (max-width: 600px) {
+  /* Dense admin control rows — the Westlaw/Lexis export bar most of all — stack
+     vertically instead of overflowing: each control/button on its own full-width line. */
+  .admin-body .row { flex-direction: column; align-items: stretch; }
+  .admin-body .row > * { width: 100% !important; flex-basis: auto !important; min-width: 0 !important; }
+  .admin-body .row > button { text-align: center; }
+}
