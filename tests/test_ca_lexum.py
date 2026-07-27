@@ -68,3 +68,30 @@ def test_canadian_lexum_http_accepts_injected_chrome_session():
         "ca-test", min_interval=0, session=_Session()
     ).get("https://norma.lexum.com/feed")
     assert response.content == b"<rss/>"
+
+
+class _BlockedResponse:
+    status_code = 403
+    content = b"blocked"
+
+
+class _BlockedSession:
+    def get(self, url, **kwargs):
+        return _BlockedResponse()
+
+
+class _StealthPage:
+    status = 200
+    html = "<html>decision</html>"
+
+
+class _Stealth:
+    def fetch(self, url, **kwargs):
+        return _StealthPage()
+
+
+def test_canadian_lexum_http_escalates_blocked_html_to_scrapling():
+    response = CanadianLexumHTTP(
+        "ca-test", min_interval=0, session=_BlockedSession(), fetcher=_Stealth()
+    ).get("https://norma.lexum.com/decision")
+    assert response.content == b"<html>decision</html>"

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 from datetime import date
 from typing import Iterator
 from urllib.parse import urljoin
@@ -42,13 +43,14 @@ class CanadianLexumHTTP:
     """Chrome-TLS client for Norma/Decisia's burst-sensitive WAF."""
 
     def __init__(
-        self, source: str, *, min_interval: float = 1.0, session=None
+        self, source: str, *, min_interval: float = 1.0, session=None, fetcher=None
     ) -> None:
         self.source = source
         self.min_interval = min_interval
         self._last = 0.0
         self._session = session
         self._fallback = None
+        self._fetcher = fetcher
 
     def get(self, url: str, **kwargs):
         wait = self.min_interval - (time.monotonic() - self._last)
@@ -66,6 +68,22 @@ class CanadianLexumHTTP:
                 return self._fallback.get(url, **kwargs)
             self._session = creq.Session(impersonate="chrome124", timeout=90)
         response = self._session.get(url, **kwargs)
+        if response.status_code in {403, 429, 503}:
+            if self._fetcher is None:
+                from ..scraping.fetcher import get_fetcher
+
+                self._fetcher = get_fetcher(
+                    "stealth", source=self.source, min_interval=self.min_interval,
+                    requires_js=True,
+                )
+            page = self._fetcher.fetch(url, headers=kwargs.get("headers"))
+            if page.status < 400 and page.html:
+                @dataclass(slots=True)
+                class _Response:
+                    content: bytes
+                    status_code: int = 200
+
+                return _Response(page.html.encode())
         if response.status_code >= 400:
             raise FetchError(
                 f"{self.source}: HTTP {response.status_code} for {url}",
