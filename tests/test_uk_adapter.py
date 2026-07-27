@@ -135,3 +135,15 @@ def test_discover_incremental_sorts_by_transformation_and_stops_on_timestamp():
     client.calls.clear()
     list(ad.discover(None, max_pages=1))
     assert client.calls[0][1]["order"] == "-date"
+
+
+def test_filtered_court_can_have_an_independent_cursor_source():
+    from raglex.adapters.uk_caselaw import UKCaseLawAdapter
+
+    adapter = UKCaseLawAdapter(
+        court="ukut/iac",
+        source_key="uk-iac",
+        client=_FeedClient(ATOM_TNA),
+    )
+    assert adapter.source == "uk-iac"
+    assert adapter.court == "ukut/iac"

@@ -213,17 +213,18 @@ class UKCaseLawAdapter(BaseAdapter):
         court: str | None = None,
         query: str | None = None,
         per_page: int = 50,
+        source_key: str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.court = court
+        self.source = source_key or (
+            "uk-grc" if court == "ukftt/grc" else type(self).source
+        )
         # Find Case Law supports full-text search on the Atom feed (?query=…), so a
         # keyword watch can limit the harvest at the source (not just post-filter).
         self.query = query
         self.per_page = per_page
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
-        if court == "ukftt/grc":
-            # FTT(GRC) — the General Regulatory Chamber; keyed under its own source.
-            self.source = "uk-grc"
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         # Incremental crawls sort by -transformation ("body last modified", which is what

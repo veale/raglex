@@ -70,9 +70,12 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-caselaw": UKCaseLawAdapter,
     # UK FTT — General Regulatory Chamber (information rights, environment, charity…).
     "uk-grc": lambda **kw: UKCaseLawAdapter(court="ukftt/grc", **kw),
-    "uk-ftt-tax": lambda **kw: UKCaseLawAdapter(court="ukftt/tc", **kw),
-    "uk-utaac": lambda **kw: UKCaseLawAdapter(court="ukut/aac", **kw),
-    "uk-iac": lambda **kw: UKCaseLawAdapter(court="ukut/iac", **kw),
+    "uk-ftt-tax": lambda **kw: UKCaseLawAdapter(
+        court="ukftt/tc", source_key="uk-ftt-tax", **kw),
+    "uk-utaac": lambda **kw: UKCaseLawAdapter(
+        court="ukut/aac", source_key="uk-utaac", **kw),
+    "uk-iac": lambda **kw: UKCaseLawAdapter(
+        court="ukut/iac", source_key="uk-iac", **kw),
     "uk-cat": CompetitionAppealTribunalAdapter,
     # Employment Tribunal — the GOV.UK register's Search + Content Store APIs.  Its
     # decision-year/case-number identity deliberately matches the BAILII metadata seed,
