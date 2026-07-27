@@ -24,6 +24,9 @@ from ..extraction import extract_bytes
 
 BASE = "https://www.edps.europa.eu"
 OPINIONS = BASE + "/data-protection/our-work/our-work-by-type/opinions_en"
+INVESTIGATIONS = (
+    BASE + "/data-protection/our-work/our-work-by-type/investigations_en"
+)
 EUDPR = "32018R1725"
 
 
@@ -73,7 +76,9 @@ def _date(value: str | None) -> date | None:
             return None
 
 
-def parse_edps_page(raw: bytes | str) -> list[dict]:
+def parse_edps_page(
+    raw: bytes | str, *, publication_type: str = "opinion"
+) -> list[dict]:
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(raw, "html.parser")
@@ -92,7 +97,7 @@ def parse_edps_page(raw: bytes | str) -> list[dict]:
         if not slug:
             continue
         out.append({
-            "stable_id": f"eu/edps/opinion/{slug}",
+            "stable_id": f"eu/edps/{publication_type}/{slug}",
             "title": title,
             "landing_url": landing,
             "pdf_url": pdf_url,
@@ -103,6 +108,10 @@ def parse_edps_page(raw: bytes | str) -> list[dict]:
 
 class EDPSOpinionsAdapter(BaseAdapter):
     source = "eu-edps-opinions"
+    listing_url = OPINIONS
+    publication_type = "opinion"
+    topic = "opinions"
+    mandate_relation = True
     min_interval = 1.0
 
     def __init__(self, *, client: RateLimitedClient | None = None, fetcher=None) -> None:
@@ -121,9 +130,11 @@ class EDPSOpinionsAdapter(BaseAdapter):
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         page = 0
         while True:
-            url = OPINIONS + (f"?page={page}" if page else "")
+            url = self.listing_url + (f"?page={page}" if page else "")
             fetched = self._fetcher.fetch(url)
-            rows = parse_edps_page(fetched.html)
+            rows = parse_edps_page(
+                fetched.html, publication_type=self.publication_type
+            )
             if not rows:
                 return
             stop = False
@@ -177,15 +188,32 @@ class EDPSOpinionsAdapter(BaseAdapter):
                 dst_anchor="Article 42",
                 extracted_via=ExtractedVia.STRUCTURED,
                 resolution_status=ResolutionStatus.RESOLVED,
-            )],
-            topic_tags=["eu", "edps", "opinions", "regulatory"],
+            )] if self.mandate_relation else [],
+            topic_tags=["eu", "edps", self.topic, "regulatory"],
             extra={
                 "jurisdiction": "eu",
                 "opinion_number": number.group(1) if number else None,
-                "regime": EUDPR,
-                "mandate_anchor": "Article 42",
+                "regime": EUDPR if self.mandate_relation else None,
+                "mandate_anchor": "Article 42" if self.mandate_relation else None,
                 "download_url": stub.raw_url,
                 "contenthash": stub.hints.get("contenthash"),
                 "require_recognized_legal_citation": True,
             },
         )
+
+
+class EDPSInvestigationsAdapter(EDPSOpinionsAdapter):
+    """EDPS investigation and audit outcomes.
+
+    Unlike legislative opinions, this register spans several supervisory regimes
+    (EUDPR, Europol, Eurojust, EPPO and others), so it deliberately does not anchor
+    bare article references to one default instrument. The shared legal-citation
+    gate keeps non-operative publicity out of retrieval while retaining its
+    processed identity.
+    """
+
+    source = "eu-edps-investigations"
+    listing_url = INVESTIGATIONS
+    publication_type = "investigation"
+    topic = "investigations"
+    mandate_relation = False

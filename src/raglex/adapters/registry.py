@@ -20,6 +20,7 @@ from .au_fca_caselaw import FCACaselawAdapter
 from .au_hca_caselaw import HCACaselawAdapter
 from .au_vic_legislation import VictoriaLegislationAdapter
 from .au_sa_legislation import SouthAustraliaLegislationAdapter
+from .au_wa_legislation import WesternAustraliaLegislationAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_lexum import CanadianLexumAdapter
 from .ca_legislation import CanadaFederalAdapter
@@ -47,11 +48,14 @@ from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
 from .eu_preparatory import EUPreparatoryAdapter
 from .eu_ombudsman import EUOmbudsmanAdapter
-from .eu_edps import EDPSOpinionsAdapter
+from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
+from .eu_dgcomp import DGCompAntitrustAdapter
 from .hol import HouseOfLordsAdapter
 from .ie_caselaw import IrishCaseLawAdapter
 from .ie_dpc import IrishDPCAdapter
 from .ie_tax_appeals import IrishTaxAppealsAdapter
+from .ie_revenue_tdm import IrishRevenueTDMAdapter
+from .ie_ccpc_mergers import IrishCCPCMergerAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
@@ -140,6 +144,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "eu-preparatory": EUPreparatoryAdapter,
     "eu-ombudsman": EUOmbudsmanAdapter,
     "eu-edps-opinions": EDPSOpinionsAdapter,
+    "eu-edps-investigations": EDPSInvestigationsAdapter,
+    "eu-dgcomp-antitrust": DGCompAntitrustAdapter,
     # Ireland — the eISB (Acts + SIs as enacted/made, the OFFICIAL text) and the LRC
     # Revised Acts (administrative consolidations, point-in-time). Both speak ELI, so
     # Ireland is another ELI source beside legislation.gov.uk and EUR-Lex.
@@ -154,6 +160,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "au-tas": lambda **kw: LawMakerAdapter(jurisdiction="tas", **kw),
     "au-vic": VictoriaLegislationAdapter,
     "au-sa": SouthAustraliaLegislationAdapter,
+    "au-wa": WesternAustraliaLegislationAdapter,
     # Singapore — Singapore Statutes Online (SSO). Keyless server-rendered HTML, no ELI;
     # keyed by SSO's own act code (sg/act/coa1967). `subsidiary=true` browses the SL listing.
     "sg-legislation": SGLegislationAdapter,
@@ -173,6 +180,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "ca-tcc-live": lambda **kw: CanadianLexumAdapter(court="tcc", **kw),
     "ca-fc-live": lambda **kw: CanadianLexumAdapter(court="fc", **kw),
     "ca-fca-live": lambda **kw: CanadianLexumAdapter(court="fca", **kw),
+    "ca-sst-live": lambda **kw: CanadianLexumAdapter(court="sst", **kw),
     # CanLII API — Canadian case METADATA + the citator, never full text (their API is
     # metadata-only by design). Resolves pending Canadian citations into metadata-stub
     # documents with a verified "view on CanLII" link, and enriches held decisions
@@ -214,6 +222,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "ie-caselaw": IrishCaseLawAdapter,
     "ie-dpc": IrishDPCAdapter,
     "ie-tax-appeals": IrishTaxAppealsAdapter,
+    "ie-revenue-tdm": IrishRevenueTDMAdapter,
+    "ie-ccpc-mergers": IrishCCPCMergerAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -515,6 +525,23 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "legislative-consultation mandate; citations in the PDF add specific laws.",
         (), ("EDPS Opinion number",),
     ),
+    "eu-edps-investigations": SourceInfo(
+        "eu-edps-investigations", "EDPS investigations and audits",
+        "guidance", "EU", False,
+        "Official EDPS investigation and audit publications and operative PDFs. "
+        "Because the register spans multiple legal regimes, bare articles are not "
+        "assigned to a default law; citation-free items are retained as processed "
+        "but excluded from retrieval.",
+        (), ("EDPS investigation title or reference",),
+    ),
+    "eu-dgcomp-antitrust": SourceInfo(
+        "eu-dgcomp-antitrust", "European Commission antitrust decisions",
+        "guidance", "EU", False,
+        "English operative decision attachments from DG COMP's official AT open-data "
+        "export. Press releases and unattached case publicity are excluded. The "
+        "structured case legal basis links Articles 101/102 to the TFEU.",
+        (), ("AT.40861", "DG COMP decision attachment"),
+    ),
     "ie-legislation": SourceInfo(
         "ie-legislation", "Irish legislation — as enacted (eISB)", "legislation", "IE", False,
         "Acts and Statutory Instruments from the electronic Irish Statute Book, as "
@@ -557,6 +584,24 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "service. Compact citations such as 79TACD2026 resolve to the harvested case.",
         (), ("79TACD2026", "tacd/2026/79"),
     ),
+    "ie-revenue-tdm": SourceInfo(
+        "ie-revenue-tdm", "Irish Revenue Tax and Duty Manuals",
+        "guidance", "IE", False,
+        "The official current Revenue manual register and PDFs. Timestamped prior "
+        "versions provide a cheap per-manual refresh signal. The manuals span many "
+        "tax statutes, so only recognised citations are linked and citation-free "
+        "items remain processed but outside retrieval.",
+        (), ("Revenue manual code", "Part 01-00-02"),
+    ),
+    "ie-ccpc-mergers": SourceInfo(
+        "ie-ccpc-mergers", "Irish CCPC merger determinations",
+        "guidance", "IE", False,
+        "Operative determination PDFs from the official live merger register. This "
+        "is a single-regime feed under the Competition Act 2002, so genuinely bare "
+        "section references are anchored to that Act; explicitly named other laws "
+        "remain with the normal grammar resolver.",
+        (), ("M/26/044", "M.26.044"),
+    ),
     "au-cth": SourceInfo(
         "au-cth", "Australian Commonwealth legislation (Federal Register, OData API)",
         "legislation", "AU", True,
@@ -584,6 +629,14 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "walk seeds every consolidation; routine runs fetch only CKAN releases newer "
         "than the cursor, turning the former bulk-only source into a live overlay.",
         (), ("au/sa/act/year/number", "au/sa/regulation/year/number"),
+    ),
+    "au-wa": SourceInfo(
+        "au-wa", "Western Australia current consolidated legislation",
+        "legislation", "AU", False,
+        "Official Parliamentary Counsel in-force Acts and subsidiary legislation. "
+        "The alphabetical register is a live manifest: a changed mrdoc rendition "
+        "causes only that consolidation to be refetched.",
+        (), ("au/wa/act/year/number", "au/wa/regulation/year/number"),
     ),
     "au-qld": SourceInfo(
         "au-qld", "Queensland legislation (LawMaker)", "legislation", "AU", False,
@@ -698,6 +751,14 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "The Court's official Recent Additions channel and complete Norma judgments, "
         "including English and French decisions and native paragraph anchors.",
         (), ("FCA or CAF neutral citation",),
+    ),
+    "ca-sst-live": SourceInfo(
+        "ca-sst-live", "Social Security Tribunal of Canada — official live decisions",
+        "caselaw", "CA", False,
+        "The Tribunal's official Recent Additions channel and complete Decisia "
+        "decisions. Neutral-citation identity enriches the SST decisions already "
+        "present in the Canadian bulk seed, while supplying new and corrected cases.",
+        (), ("SST or TSS neutral citation",),
     ),
     "ca-canlii": SourceInfo(
         "ca-canlii", "Canadian case law metadata (CanLII API)", "caselaw", "CA", False,
@@ -1005,17 +1066,23 @@ INCREMENTAL_MODE: dict[str, str] = {
     "au-nsw-caselaw": "early-stop", "au-fca": "early-stop", "au-hca": "early-stop",
     "ca-scc-live": "early-stop", "ca-tcc-live": "early-stop",
     "ca-fc-live": "early-stop", "ca-fca-live": "early-stop",
+    "ca-sst-live": "early-stop",
     "ie-caselaw": "early-stop", "ie-revised": "early-stop",
     "ie-tax-appeals": "early-stop", "nz-caselaw": "early-stop",
+    "ie-revenue-tdm": "full-walk",
+    "ie-ccpc-mergers": "full-walk",
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
     "eu-ombudsman": "full-walk",
     "eu-edps-opinions": "early-stop",
+    "eu-edps-investigations": "early-stop",
+    "eu-dgcomp-antitrust": "early-stop",
     "sg-legislation": "full-walk", "sg-sl": "full-walk", "ca-federal": "full-walk",
     "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
     "au-tas": "full-walk", "au-vic": "full-walk", "au-sa": "server",
+    "au-wa": "full-walk",
     "ie-legislation": "full-walk",
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
     "uk-cpr": "full-walk",

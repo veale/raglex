@@ -7,6 +7,11 @@ from raglex.adapters.ca_lexum import (
 )
 
 
+def test_sst_neutral_slug():
+    assert neutral_slug("AB v Commission - 2026 SST 31") == "sst/2026/31"
+    assert neutral_slug("AB c Commission - 2026 TSS 31") == "sst/2026/31"
+
+
 def test_parse_lexum_rss_tracks_corrections_not_only_decision_date():
     raw = b"""<rss xmlns:decision="http://lexum.com/decision/"><channel><item>
       <title>Old Case - 2022 SCC 48 - 2022-11-25</title>

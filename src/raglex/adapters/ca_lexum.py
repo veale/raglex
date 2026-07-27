@@ -1,7 +1,8 @@
 """Official live Canadian decisions from the Lexum/Decisia court portals.
 
 The A2AJ import is the historical seed.  These feeds are the current, authoritative
-overlay for the Supreme Court, Tax Court, Federal Court and Federal Court of Appeal.
+overlay for the Supreme Court, Tax Court, Federal Court, Federal Court of Appeal and
+Social Security Tribunal.
 The first three publish RSS channels; the Court of Appeal exposes the same bounded
 "Recent Additions" data as server-rendered HTML.  Both channels include translated,
 amended and corrected decisions, and the linked HTML contains the complete judgment
@@ -25,13 +26,15 @@ from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
 
 _ITEM_ID = re.compile(r"/item/(\d+)/")
 _NEUTRAL = re.compile(
-    r"\b((?:19|20)\d{2})\s+(SCC|CSC|TCC|CCI|FCA|CAF|FC|CF)\s+(\d+)\b", re.I
+    r"\b((?:19|20)\d{2})\s+(SCC|CSC|TCC|CCI|FCA|CAF|FC|CF|SST|TSS)\s+(\d+)\b",
+    re.I,
 )
 _COURT_ALIASES = {
     "scc": "scc", "csc": "scc",
     "tcc": "tcc", "cci": "tcc",
     "fc": "fc", "cf": "fc",
     "fca": "fca", "caf": "fca",
+    "sst": "sst", "tss": "sst",
 }
 _CHANGE_DATE = re.compile(
     r"(?:published|updated|translated|amended|corrected)\s+on\s+((?:19|20)\d{2}-\d{2}-\d{2})",
@@ -221,8 +224,8 @@ class CanadianLexumAdapter(BaseAdapter):
         court: str = "scc",
         client: RateLimitedClient | None = None,
     ) -> None:
-        if court not in {"scc", "tcc", "fc", "fca"}:
-            raise ValueError("court must be scc, tcc, fc or fca")
+        if court not in {"scc", "tcc", "fc", "fca", "sst"}:
+            raise ValueError("court must be scc, tcc, fc, fca or sst")
         self.court = court
         self.source = f"ca-{court}-live"
         self.rss_url = {
@@ -230,10 +233,10 @@ class CanadianLexumAdapter(BaseAdapter):
             "tcc": "https://decision.tcc-cci.gc.ca/tcc-cci/decisions/en/rss.do",
             "fc": "https://decisions.fct-cf.gc.ca/fc-cf/decisions/en/rss.do",
         }.get(court)
-        self.recent_url = (
-            "https://decisia.lexum.com/fca-caf/en/ann.do?iframe=true"
-            if court == "fca" else None
-        )
+        self.recent_url = {
+            "fca": "https://decisia.lexum.com/fca-caf/en/ann.do?iframe=true",
+            "sst": "https://decisions.sst-tss.gc.ca/sst-tss/en/ann.do?iframe=true",
+        }.get(court)
         self._client = client or CanadianLexumHTTP(
             self.source, min_interval=self.min_interval
         )

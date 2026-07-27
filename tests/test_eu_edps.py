@@ -21,6 +21,11 @@ def test_parse_edps_opinion_card():
     assert EUDPR == "32018R1725"
 
 
+def test_parse_edps_investigation_card_has_distinct_identity():
+    row = parse_edps_page(PAGE, publication_type="investigation")[0]
+    assert row["stable_id"] == "eu/edps/investigation/example"
+
+
 class _Response:
     status_code = 200
     content = b"%PDF-test"
