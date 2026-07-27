@@ -51,6 +51,11 @@ from .eu_preparatory import EUPreparatoryAdapter
 from .eu_ombudsman import EUOmbudsmanAdapter
 from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
 from .eu_dgcomp import DGCompAntitrustAdapter
+from .eu_regulator_registers import (
+    ESMASanctionsAdapter,
+    ESAsBoardOfAppealAdapter,
+    SRBAppealPanelAdapter,
+)
 from .hol import HouseOfLordsAdapter
 from .ie_caselaw import IrishCaseLawAdapter
 from .ie_dpc import IrishDPCAdapter
@@ -151,6 +156,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "eu-edps-opinions": EDPSOpinionsAdapter,
     "eu-edps-investigations": EDPSInvestigationsAdapter,
     "eu-dgcomp-antitrust": DGCompAntitrustAdapter,
+    "eu-esma-sanctions": ESMASanctionsAdapter,
+    "eu-esas-boa": ESAsBoardOfAppealAdapter,
+    "eu-srb-appeals": SRBAppealPanelAdapter,
     # Ireland — the eISB (Acts + SIs as enacted/made, the OFFICIAL text) and the LRC
     # Revised Acts (administrative consolidations, point-in-time). Both speak ELI, so
     # Ireland is another ELI source beside legislation.gov.uk and EUR-Lex.
@@ -569,6 +577,33 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "export. Press releases and unattached case publicity are excluded. The "
         "structured case legal basis links Articles 101/102 to the TFEU.",
         (), ("AT.40861", "DG COMP decision attachment"),
+    ),
+    "eu-esma-sanctions": SourceInfo(
+        "eu-esma-sanctions", "ESMA sanctions register",
+        "guidance", "EU", False,
+        "The official ESMA Solr register of sanctions imposed by ESMA and national "
+        "competent authorities. Uses server-side modification-date filtering. Mixed "
+        "national and EU legal frameworks are never assigned a guessed default law; "
+        "citation-free entries remain processed but are excluded from retrieval.",
+        (), ("ESMA sanction id", "sanctioned entity", "national authority"),
+    ),
+    "eu-esas-boa": SourceInfo(
+        "eu-esas-boa", "ESAs Joint Board of Appeal decisions",
+        "guidance", "EU", False,
+        "Full-text decisions of the independent Joint Board of Appeal for EBA, EIOPA "
+        "and ESMA. The official EIOPA register is polled newest-first. Because appeals "
+        "span different sectoral laws, only recognised legal citations admit a decision "
+        "to retrieval.",
+        (), ("Board of Appeal decision title", "document UUID"),
+    ),
+    "eu-srb-appeals": SourceInfo(
+        "eu-srb-appeals", "Single Resolution Board Appeal Panel decisions",
+        "guidance", "EU", False,
+        "The SRB Appeal Panel's official thematic decisions register, including case "
+        "number, publication and decision dates, description and full PDF. Its banking, "
+        "access-to-documents and procedure regimes are mixed, so citation-free records "
+        "are held but excluded from retrieval.",
+        (), ("SRB Appeal Panel case number", "decision PDF"),
     ),
     "ie-legislation": SourceInfo(
         "ie-legislation", "Irish legislation — as enacted (eISB)", "legislation", "IE", False,
@@ -1117,6 +1152,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "eu-edps-opinions": "early-stop",
     "eu-edps-investigations": "early-stop",
     "eu-dgcomp-antitrust": "early-stop",
+    "eu-esma-sanctions": "server",
+    "eu-esas-boa": "early-stop",
+    "eu-srb-appeals": "early-stop",
     "sg-legislation": "full-walk", "sg-sl": "full-walk", "ca-federal": "full-walk",
     "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
