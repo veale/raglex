@@ -1,4 +1,5 @@
 from raglex.adapters.ca_lexum import (
+    CanadianLexumHTTP,
     neutral_slug,
     parse_decision_html,
     parse_recent_additions,
@@ -50,3 +51,20 @@ def test_parse_fca_recent_additions():
     assert row["item_id"] == "521881"
     assert row["language"] == "fr"
     assert neutral_slug(row["title"]) == "fca/2026/129"
+
+
+class _Response:
+    status_code = 200
+    content = b"<rss/>"
+
+
+class _Session:
+    def get(self, url, **kwargs):
+        return _Response()
+
+
+def test_canadian_lexum_http_accepts_injected_chrome_session():
+    response = CanadianLexumHTTP(
+        "ca-test", min_interval=0, session=_Session()
+    ).get("https://norma.lexum.com/feed")
+    assert response.content == b"<rss/>"

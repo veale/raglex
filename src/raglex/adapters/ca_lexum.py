@@ -11,12 +11,14 @@ plus native paragraph anchors.
 from __future__ import annotations
 
 import re
+import time
 from datetime import date
 from typing import Iterator
 from urllib.parse import urljoin
 from xml.etree import ElementTree as ET
 
 from ..core.adapter import BaseAdapter
+from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
 
@@ -34,6 +36,42 @@ _CHANGE_DATE = re.compile(
     r"(?:published|updated|translated|amended|corrected)\s+on\s+((?:19|20)\d{2}-\d{2}-\d{2})",
     re.I,
 )
+
+
+class CanadianLexumHTTP:
+    """Chrome-TLS client for Norma/Decisia's burst-sensitive WAF."""
+
+    def __init__(
+        self, source: str, *, min_interval: float = 1.0, session=None
+    ) -> None:
+        self.source = source
+        self.min_interval = min_interval
+        self._last = 0.0
+        self._session = session
+        self._fallback = None
+
+    def get(self, url: str, **kwargs):
+        wait = self.min_interval - (time.monotonic() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last = time.monotonic()
+        if self._session is None:
+            try:
+                from curl_cffi import requests as creq
+            except ImportError:
+                if self._fallback is None:
+                    self._fallback = RateLimitedClient(
+                        self.source, min_interval=self.min_interval, timeout=60
+                    )
+                return self._fallback.get(url, **kwargs)
+            self._session = creq.Session(impersonate="chrome124", timeout=90)
+        response = self._session.get(url, **kwargs)
+        if response.status_code >= 400:
+            raise FetchError(
+                f"{self.source}: HTTP {response.status_code} for {url}",
+                transient=response.status_code >= 500,
+            )
+        return response
 
 
 def neutral_slug(value: str | None) -> str | None:
@@ -178,8 +216,8 @@ class CanadianLexumAdapter(BaseAdapter):
             "https://decisia.lexum.com/fca-caf/en/ann.do?iframe=true"
             if court == "fca" else None
         )
-        self._client = client or RateLimitedClient(
-            self.source, min_interval=self.min_interval, timeout=60
+        self._client = client or CanadianLexumHTTP(
+            self.source, min_interval=self.min_interval
         )
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
