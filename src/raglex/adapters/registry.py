@@ -1096,6 +1096,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server",
     "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
     "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
+    "eu-cellar": "server", "eu-legislation": "server",
     # client-side early-stop on a newest-first feed
     "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-ftt-tax": "early-stop",
     "uk-utaac": "early-stop", "uk-iac": "early-stop", "uk-legislation": "early-stop",
@@ -1128,8 +1129,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "uk-cat": "full-walk",
     "ie-dpc": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
-    "echr": "targeted", "eu-cellar": "targeted", "eu-legislation": "targeted",
-    "au-nsw": "targeted",
+    "echr": "targeted", "au-nsw": "targeted",
     # bulk / local-file seeds (no live path)
     "au-caselaw": "bulk", "ca-caselaw": "bulk", "us-caselaw-bulk": "bulk",
     "in-caselaw": "bulk", "fr-dila": "bulk", "fr-dila-legi": "bulk",

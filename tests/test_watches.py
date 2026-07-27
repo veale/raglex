@@ -38,8 +38,9 @@ def test_source_catalog_exposes_capability_flags():
     assert cat["uk-caselaw"]["can_gap_scan"] is True
     assert cat["uk-caselaw"]["can_discover_citing"] is True
     assert cat["uk-caselaw"]["can_incremental"] is True
-    assert cat["eu-legislation"]["can_gap_scan"] is False      # by-id, not sequential
-    assert cat["eu-legislation"]["can_incremental"] is False   # no moving feed
+    assert cat["eu-legislation"]["can_gap_scan"] is False
+    assert cat["eu-legislation"]["can_incremental"] is True    # CELLAR date-filtered feed
+    assert cat["eu-cellar"]["can_incremental"] is True         # all CJEU decisions by date
 
 
 def test_watch_crud_roundtrip():

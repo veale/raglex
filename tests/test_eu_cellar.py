@@ -126,6 +126,39 @@ def test_discover_yields_ecli_stub_with_celex_hint():
     assert "interpretes" in s.hints["link"]
 
 
+class PagingClient(FakeClient):
+    def request(self, method, url, *, data=None, headers=None):
+        query = data["query"]
+        if "OFFSET 0" in query:
+            rows = [{
+                "celex": "62026CJ0123",
+                "ecli": "ECLI:EU:C:2026:700",
+                "date": "2026-07-24",
+                "rtype": "JUDG",
+                "title": "Example v Commission",
+            }]
+        else:
+            rows = []
+        return _JsonResp({"results": {"bindings": [
+            {key: {"value": value} for key, value in row.items()}
+            for row in rows
+        ]}})
+
+
+def test_default_discovery_is_incremental_all_case_law():
+    ad = EUCellarAdapter(per_page=1, client=PagingClient())
+    stubs = list(ad.discover("2026-07-20", max_pages=2))
+    assert [stub.stable_id for stub in stubs] == ["ECLI:EU:C:2026:700"]
+    assert stubs[0].hints["watermark"] == "2026-07-24"
+    rec = ad.fetch(stubs[0])
+    # The general currency feed must not manufacture the old targeted-mode edge
+    # with a blank legislation destination.
+    assert all(relation.dst_id for relation in rec.relations)
+    query = ad._enumerate_query("2026-07-20", 100)
+    assert 'FILTER(STR(?date) > "2026-07-20")' in query
+    assert "OFFSET 100" in query
+
+
 def test_fetch_builds_legislation_and_citation_edges():
     ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
     stub = list(ad.discover(None))[0]

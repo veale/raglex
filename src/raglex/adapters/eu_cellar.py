@@ -13,12 +13,12 @@ Two endpoints, no auth:
   ruling lives in `<JURISDICTION>` (NOT `<DISPOSITIF>`, which is a *legislative*
   element); reasoning is in `<CONTENTS.JUDGMENT>`; paragraphs are `<NP.ECR>`.
 
-This adapter discovers CJEU case law **relative to a named instrument or case**: set
-`legislation_celex` to follow the case law on a piece of legislation, or
-`cited_by_celex` to find judgments citing a given case. One of the two is required —
-there is no default instrument. Each case yields a typed edge to that legislation
-(`interprets`/`applies`/`overrules`) plus `mentions` edges to the cases it cites,
-all with ECLI destinations so they resolve directly (§5b).
+The default discovery path is now a date-filtered, newest-first enumeration of all CJEU
+case-law instruments, making CELLAR the live currency layer over the held case corpus.
+Set `legislation_celex` to follow the case law on one piece of legislation, or
+`cited_by_celex` to find judgments citing a given case. In the targeted legislation mode,
+each case yields a typed edge to that legislation (`interprets`/`applies`/`overrules`);
+all modes add `mentions` edges to cited cases, with ECLI destinations where available.
 
 SPARQL query forms adapted from the working caselaw-mcp server (CDM ontology).
 Parsing is split from HTTP (`unzip_formex` / `extract_formex_text` are pure).
@@ -767,6 +767,27 @@ ORDER BY DESC(?date)
 LIMIT {self.per_page}
 """
 
+    def _enumerate_query(self, since: str | None, offset: int) -> str:
+        """All CJEU decisions/opinions, newest first, with a server-side date cursor."""
+        date_filter = f'FILTER(STR(?date) > "{since[:10]}")' if since else ""
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex ?ecli ?date ?rtype ?title WHERE {{
+  ?work cdm:resource_legal_id_celex ?celex .
+  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVCA][0-9]{{4}}$"))
+  ?work cdm:work_date_document ?date .
+  {date_filter}
+  OPTIONAL {{ ?work cdm:case-law_ecli ?ecli }}
+  OPTIONAL {{ ?work cdm:work_has_resource-type ?rt .
+             BIND(REPLACE(STR(?rt), "^.*resource-type/", "") AS ?rtype) }}
+  OPTIONAL {{ ?work cdm:work_has_expression ?exp .
+             ?exp cdm:expression_uses_language ?lg . FILTER(STRENDS(STR(?lg), "/ENG"))
+             ?exp cdm:expression_title ?title }}
+}}
+ORDER BY DESC(?date) ?celex
+LIMIT {self.per_page} OFFSET {offset}
+"""
+
     def _national_query(self, celex: str) -> str:
         """The referring national court/case (preliminary references) + country."""
         return f"""
@@ -822,29 +843,54 @@ LIMIT {self.per_page}
 
     # -- adapter contract --------------------------------------------------
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        # Either cases CITING a target case (cited_by_celex) or cases linked to a piece
-        # of legislation. One of the two must be set — this adapter discovers case law
-        # *relative to a named instrument or case*, so with neither there is nothing to
-        # crawl. (max_pages reserved for OFFSET paging in a later pass.)
-        if not self.cited_by_celex and not self.legislation_celex:
-            return
-        query = self._citing_query(self.cited_by_celex) if self.cited_by_celex else self._discover_query(since)
-        for row in self._sparql(query):
-            celex = row["celex"]
-            ecli = row.get("ecli")
-            _doc_type, court = classify_celex(celex, row.get("rtype"))
-            yield Stub(
-                stable_id=ecli or celex,  # ECLI is the primary key where present (§1.1)
-                landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
-                raw_url=f"{CELEX_BASE}/{celex}",
-                hint_date=_parse_iso(row.get("date")),
-                # ECLI/CELEX identify the document; they are not case names.  Keeping
-                # either in ``title`` prevents fetch() from deriving the parties from
-                # Formex and later makes OSCOLA italicise the identifier as a name.
-                title=row.get("title"),
-                court=court,
-                hints={"celex": celex, "link": row.get("link", ""), "rtype": row.get("rtype", "")},
-            )
+        targeted = bool(self.cited_by_celex or self.legislation_celex)
+        offset = 0
+        pages = 0
+        seen: set[str] = set()
+        while True:
+            if self.cited_by_celex:
+                query = self._citing_query(self.cited_by_celex)
+            elif self.legislation_celex:
+                query = self._discover_query(since)
+            else:
+                query = self._enumerate_query(since, offset)
+            rows = self._sparql(query)
+            if not rows:
+                return
+            yielded = 0
+            for row in rows:
+                celex = row.get("celex")
+                if not celex or celex in seen:
+                    continue
+                seen.add(celex)
+                yielded += 1
+                ecli = row.get("ecli")
+                _doc_type, court = classify_celex(celex, row.get("rtype"))
+                yield Stub(
+                    stable_id=ecli or celex,  # ECLI is the primary key where present (§1.1)
+                    landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
+                    raw_url=f"{CELEX_BASE}/{celex}",
+                    hint_date=_parse_iso(row.get("date")),
+                    # ECLI/CELEX identify the document; they are not case names. Keeping
+                    # either in ``title`` prevents fetch() from deriving the parties.
+                    title=row.get("title"),
+                    court=court,
+                    hints={
+                        "celex": celex,
+                        "link": row.get("link", ""),
+                        "rtype": row.get("rtype", ""),
+                        **({"watermark": row["date"]} if row.get("date") else {}),
+                    },
+                )
+            pages += 1
+            if (
+                targeted
+                or len(rows) < self.per_page
+                or yielded == 0
+                or (max_pages is not None and pages >= max_pages)
+            ):
+                return
+            offset += len(rows)
 
     def fetch(self, stub: Stub) -> Record | None:
         celex = stub.hints.get("celex") or stub.stable_id
@@ -884,17 +930,18 @@ LIMIT {self.per_page}
                 dst_id=_cons_base, extracted_via=ExtractedVia.STRUCTURED,
                 resolution_status=ResolutionStatus.PENDING))
         # 1) the typed edge to the legislation that surfaced this case (§1A).
-        link_prop = stub.hints.get("link", "")
-        rel_type = _LEGISLATION_LINKS.get(link_prop, RelationshipType.MENTIONS)
-        relations.append(
-            TypedRelation(
-                relationship_type=rel_type,
-                raw_citation_string=f"{link_prop} {self.legislation_celex}".strip(),
-                dst_id=self.legislation_celex,  # legislation keyed by CELEX
-                extracted_via=ExtractedVia.STRUCTURED,
-                resolution_status=ResolutionStatus.PENDING,
+        if self.legislation_celex:
+            link_prop = stub.hints.get("link", "")
+            rel_type = _LEGISLATION_LINKS.get(link_prop, RelationshipType.MENTIONS)
+            relations.append(
+                TypedRelation(
+                    relationship_type=rel_type,
+                    raw_citation_string=f"{link_prop} {self.legislation_celex}".strip(),
+                    dst_id=self.legislation_celex,  # legislation keyed by CELEX
+                    extracted_via=ExtractedVia.STRUCTURED,
+                    resolution_status=ResolutionStatus.PENDING,
+                )
             )
-        )
         # 2) mentions edges to the cases this case cites (the CELLAR citation graph).
         if self.with_citations:
             for cited in self._sparql(self._cited_query(celex)):
