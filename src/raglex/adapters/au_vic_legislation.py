@@ -115,8 +115,8 @@ class VictoriaLegislationAdapter(BaseAdapter):
         )
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        pages = 0
         for kind in ("act_in_force", "sr_in_force"):
+            pages = 0
             url = f"{API}/node/{kind}"
             # Without JSON:API sparse fieldsets Drupal expands large metatag and
             # relationship payloads for every included entity (tens of MB per page).
@@ -125,6 +125,8 @@ class VictoriaLegislationAdapter(BaseAdapter):
             params = {
                 "site": 6,
                 "page[limit]": 10,
+                # A bounded watch must see the changed end of both registers.
+                "sort": "-changed",
                 "include": INCLUDE,
                 **SPARSE_FIELDS,
             }
@@ -148,7 +150,7 @@ class VictoriaLegislationAdapter(BaseAdapter):
                     )
                 pages += 1
                 if max_pages is not None and pages >= max_pages:
-                    return
+                    break
 
     def fetch(self, stub: Stub) -> Record | None:
         files = stub.hints.get("files") or []

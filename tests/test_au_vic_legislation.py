@@ -1,4 +1,4 @@
-from raglex.adapters.au_vic_legislation import parse_vic_page
+from raglex.adapters.au_vic_legislation import VictoriaLegislationAdapter, parse_vic_page
 
 
 def test_victoria_jsonapi_identity_and_file_chain():
@@ -27,3 +27,44 @@ def test_victoria_jsonapi_identity_and_file_chain():
     assert rows[0]["stable_id"] == "au/vic/act/2020/12"
     assert rows[0]["changed"] == "2026-02-01"
     assert rows[0]["files"][0]["url"].endswith("/sites/default/files/example.pdf")
+
+
+def test_bounded_victoria_watch_reads_acts_and_rules():
+    class Response:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def json(self):
+            is_act = self.kind == "act_in_force"
+            return {
+                "data": [{
+                    "id": self.kind,
+                    "attributes": {
+                        "title": "Current Act" if is_act else "Current Rules",
+                        "field_act_sr_year": "2026",
+                        "field_act_sr_number": "1" if is_act else "2",
+                        "changed": "2026-07-01",
+                        "path": {"alias": "/current"},
+                    },
+                    "relationships": {"field_in_force_version": {"data": []}},
+                }],
+                # A next page exists, but max_pages=1 must bound each register.
+                "links": {"next": {"href": "https://example.test/next"}},
+            }
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None):
+            kind = "sr_in_force" if "sr_in_force" in url else "act_in_force"
+            self.calls.append((kind, params))
+            return Response(kind)
+
+    client = Client()
+    rows = list(VictoriaLegislationAdapter(client=client).discover(None, max_pages=1))
+    assert [row.stable_id for row in rows] == [
+        "au/vic/act/2026/1", "au/vic/regulation/2026/2",
+    ]
+    assert [call[0] for call in client.calls] == ["act_in_force", "sr_in_force"]
+    assert all(call[1]["sort"] == "-changed" for call in client.calls)
