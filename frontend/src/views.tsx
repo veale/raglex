@@ -3220,38 +3220,44 @@ function CaseLawImportPanel() {
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState<{ done: number; total: number } | null>(null);
   const folderRef = useRef<HTMLInputElement>(null);
-  const CASE_RE = /\.(html?|rtf|doc)$/i;
+  const CASE_RE = /\.(html?|rtf|doc|zip)$/i;
 
-  // Folder / multi-file upload — no zip needed. The browser hands us every file in the
-  // picked folder; we keep the .html/.rtf, stage them server-side in batches (so no single
-  // request is huge), then start one background import job that routes each by extension.
+  // Folder / multi-file / multi-zip upload. The browser hands us every picked file; we keep
+  // the .html/.rtf/.doc (and .zip — unpacked server-side), stage them in batches (so no
+  // single request is huge), then start ONE background import job that routes each by
+  // extension. Uploading 11 Westlaw zips is thus a single job with a single post-import
+  // roll-up, not 11 jobs each triggering a corpus-wide rebuild.
   async function uploadFiles(fileList: FileList) {
     const files = Array.from(fileList).filter((f) => CASE_RE.test(f.name));
-    if (!files.length) { setMsg("no .html, .rtf or .doc files in that selection"); return; }
+    if (!files.length) { setMsg("no .html, .rtf, .doc or .zip files in that selection"); return; }
+    const zips = files.filter((f) => /\.zip$/i.test(f.name)).length;
     const html = files.filter((f) => /\.html?$/i.test(f.name)).length;
-    const rtf = files.length - html;
+    const rtf = files.length - html - zips;
     setBusy(true); setProg({ done: 0, total: files.length });
     const uploadId = (crypto.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, "").slice(0, 24);
-    const BATCH = 200;
+    // zips are large → few per request; loose files are small → many per request
+    const BATCH = zips ? 3 : 200;
     try {
       for (let i = 0; i < files.length; i += BATCH) {
         const r = await api.importCaselawFilesBatch(uploadId, files.slice(i, i + BATCH));
         if (r.error) throw new Error(r.error);
         setProg({ done: Math.min(i + BATCH, files.length), total: files.length });
       }
-      const kinds = [html && `${html} BAILII`, rtf && `${rtf} Westlaw`].filter(Boolean).join(" + ");
-      setMsg(`staged ${files.length} files (${kinds}) — starting import…`);
+      const kinds = [zips && `${zips} zip${zips > 1 ? "s" : ""}`, html && `${html} BAILII`,
+        rtf && `${rtf} Westlaw`].filter(Boolean).join(" + ");
+      setMsg(`staged ${files.length} item${files.length > 1 ? "s" : ""} (${kinds}) — starting one import job…`);
       const j = await api.importCaselawFilesStart(uploadId);
-      setMsg(j.error ? "error: " + j.error : `✓ queued as job ${j.job_id} (${files.length} files) — watch the Jobs panel`);
+      setMsg(j.error ? "error: " + j.error : `✓ queued as ONE job ${j.job_id} (${files.length} item${files.length > 1 ? "s" : ""}) — watch the Jobs panel`);
     } catch (err: any) { setMsg("error: " + (err.message || err)); }
     finally { setBusy(false); setProg(null); }
   }
 
   return (
     <div className="panel">
-      <h3>Case law &amp; legislation (folder or zip of BAILII .html + Westlaw .rtf/.doc)</h3>
+      <h3>Case law &amp; legislation (folder, files, or one-or-many zips of BAILII .html + Westlaw .rtf/.doc)</h3>
       <p className="muted" style={{ fontSize: 13 }}>
-        Pick a whole folder — no zipping needed — or drop a zip. Saved BAILII case pages
+        Pick a whole folder — no zipping needed — or select several zips at once (they import
+        as a single job). Saved BAILII case pages
         (<code>.html</code>) and Westlaw exports (<code>.rtf</code>/<code>.doc</code>) can be mixed freely; each
         file is routed to its own parser. BAILII pages key by neutral citation and the “Cite as:” list;
         Westlaw <i>judgments</i> key by neutral citation → ECLI → Westlaw id (parties, court, judges, counsel
@@ -3272,17 +3278,10 @@ function CaseLawImportPanel() {
         <span className="muted" style={{ fontSize: 12 }}>or select files:</span>
         <input type="file" multiple accept=".html,.htm,.rtf,.doc" disabled={busy}
           onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
-        <span className="muted" style={{ fontSize: 12 }}>or a zip:</span>
-        <input type="file" accept=".zip" disabled={busy} onChange={async (e) => {
-          const f = e.target.files?.[0];
-          if (!f) return;
-          setBusy(true); setMsg("uploading zip…");
-          try {
-            const r = await api.importCaselawZip(f);
-            setMsg(r.error ? "error: " + r.error : `✓ queued as job ${r.job_id} — watch the Jobs panel`);
-          } catch (err: any) { setMsg("error: " + (err.message || err)); }
-          finally { setBusy(false); e.target.value = ""; }
-        }} />
+        <span className="muted" style={{ fontSize: 12 }}>or zip(s):</span>
+        {/* multiple: select many Westlaw/BAILII zips at once → staged + imported as ONE job */}
+        <input type="file" accept=".zip" multiple disabled={busy}
+          onChange={(e) => { if (e.target.files?.length) uploadFiles(e.target.files); e.currentTarget.value = ""; }} />
       </div>
       {prog && <p className="muted" style={{ fontSize: 12 }}>uploading {prog.done}/{prog.total} files…</p>}
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}

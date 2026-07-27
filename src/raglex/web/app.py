@@ -425,6 +425,24 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.resolve_refinement_flag(
             flag_id=flag_id, status=(payload or {}).get("status", "resolved"))
 
+    @app.post("/feedback")
+    def submit_feedback_ep(payload: dict = Body(...)) -> dict:
+        """Record a Bug / Feature request from the app's feedback box, with the page context
+        (route, doc id, query, role, user-agent) the client captured as ``metadata``."""
+        return facade.submit_feedback(
+            kind=payload.get("kind", "bug"), message=payload.get("message", ""),
+            page=payload.get("page"), url=payload.get("url"),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None)
+
+    @app.get("/feedback")
+    def list_feedback_ep(status: str | None = "open", limit: int = 500) -> list[dict]:
+        return facade.list_feedback(status=status or None, limit=limit)
+
+    @app.post("/feedback/{feedback_id}/status")
+    def set_feedback_ep(feedback_id: int, payload: dict = Body(default={})) -> dict:
+        return facade.resolve_feedback(
+            feedback_id=feedback_id, status=(payload or {}).get("status", "resolved"))
+
     @app.post("/unresolved/retry-failed")
     def retry_failed_ep() -> dict:
         """Clear the harvest cool-down lists so the next drain re-attempts every reference."""
@@ -1318,7 +1336,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     # BAILII .html pages and Westlaw .rtf exports, routing each file to its own parser by
     # extension. This is what the Import UI drives; the source-specific endpoints above
     # stay for CLI/API parity.
-    _CASELAW_EXTS = (".html", ".htm", ".rtf", ".doc")
+    # .zip is accepted here too so a batch of Westlaw/BAILII zips can be staged into ONE
+    # folder and imported as a SINGLE job (import_caselaw_dir unpacks each staged zip),
+    # instead of one job — and one corpus-wide roll-up — per zip.
+    _CASELAW_EXTS = (".html", ".htm", ".rtf", ".doc", ".zip")
 
     @app.post("/import/caselaw-zip")
     async def import_caselaw_zip_ep(file: UploadFile = File(...)) -> dict:

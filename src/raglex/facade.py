@@ -3534,18 +3534,36 @@ class Facade:
         n = refresh_from_feeds(self.config.data_dir / "statutes_extra.lst")
         return {"added": n}
 
-    def rebuild_citation_counts(self) -> dict:
-        """Refresh the snowball's frequency roll-up (scheduler; ~13s over 10M citations)."""
+    def rebuild_citation_counts(self, *, on_progress=None) -> dict:
+        """Refresh the snowball's frequency roll-up + the Explore-homepage roll-ups it shares a
+        cadence with. Five serial full-table aggregates (counts, source stats, corpus shape,
+        legislation-type rail, the ~96s hanging-reference worklist), so it emits a stage line
+        before each — otherwise the progress heartbeat never ticks and the Jobs panel wrongly
+        flags a working job as 'frozen' after 150s of silence."""
+        # 5 phases; a coarse (phase-level) progress so the heartbeat ticks and the operator
+        # can see WHICH roll-up is running rather than a silent multi-minute block.
+        def _step(i: int, label: str) -> None:
+            if on_progress:
+                try:
+                    on_progress(stage=label, done=i, total=5)
+                except Exception:  # noqa: BLE001 — progress must never break the work
+                    pass
         with self._open() as (cat, _rs, _ts):
+            _step(0, "citation counts")
             n = cat.rebuild_citation_counts()
             # same cadence, same shape of work: every roll-up the Explore homepage
             # reads instead of live full-table scans and aggregates
+            _step(1, "source stats")
             srcs = cat.refresh_source_stats()
+            _step(2, "corpus shape")
             shape = cat.refresh_corpus_shape_stats()
+            _step(3, "legislation types")
             leg = self._refresh_leg_type_stats(cat)
             # the hanging-reference worklist (Unresolved page + auto-drain) — a ~96s live
             # aggregate, rolled up here so those reads are instant.
+            _step(4, "pending references")
             pend = cat.rebuild_pending_reference_stats()
+            _step(5, "done")
         self._invalidate_caches()
         return {"candidates": n, "sources": srcs, "shape_rows": shape, "leg_types": leg,
                 "pending_refs": pend}
@@ -7461,8 +7479,41 @@ class Facade:
                            on_progress=None, cancel_check=None) -> dict:
         """Import a folder that may mix BAILII ``.html`` pages and Westlaw ``.rtf`` exports
         — the no-zip counterpart of :meth:`import_caselaw_zip`. Each importer walks the
-        same directory and picks up only its own extension."""
+        same directory and picks up only its own extension.
+
+        Any ``.zip`` staged in the folder is unpacked first (its ``.html``/``.rtf``/``.doc``
+        entries extracted into a sibling subfolder), so uploading a batch of Westlaw zips
+        runs as ONE import job with ONE post-import roll-up, not one per zip."""
         import os
+        import uuid
+        import zipfile
+
+        # unpack staged zips in place, so the folder walk below sees their case files
+        for nm in sorted(os.listdir(dir_path)):
+            if not nm.lower().endswith(".zip"):
+                continue
+            if cancel_check and cancel_check():
+                break
+            zpath = os.path.join(dir_path, nm)
+            dest = os.path.join(dir_path, f"_unzipped_{nm[:-4]}")
+            try:
+                os.makedirs(dest, exist_ok=True)
+                with zipfile.ZipFile(zpath) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        low = info.filename.lower()
+                        if not low.endswith((".html", ".htm", ".rtf", ".doc")):
+                            continue
+                        # flatten to a safe basename (no path traversal / nested dirs)
+                        base = os.path.basename(info.filename) or "entry"
+                        out = os.path.join(dest, base)
+                        if os.path.exists(out):
+                            out = os.path.join(dest, f"{uuid.uuid4().hex[:8]}_{base}")
+                        with zf.open(info) as src, open(out, "wb") as fh:
+                            fh.write(src.read())
+            except (zipfile.BadZipFile, OSError) as exc:
+                log.warning("skipping unreadable staged zip %s: %s", nm, exc)
 
         has_html = has_rtf = False
         for _root, _dirs, nms in os.walk(dir_path):
@@ -8551,8 +8602,16 @@ class Facade:
                     aliased += 1
                 if on_progress and i % 500 == 0:
                     _progress(on_progress, stage="matching named legislation", done=i, total=len(refs))
-            cat.commit()
-            resolved = Resolver(cat).run()
+            # The final resolve is a corpus-wide set-based pass; on a large single-source
+            # corpus (the 117k-doc German de-rii relink) it outgrows the pool's 3-minute
+            # request timeout and died with 'canceling statement due to statement timeout'.
+            # Give it the same raised timeout the roll-ups get, and a heartbeat so the stall
+            # detector doesn't flag the (legitimately long) resolve as frozen.
+            _progress(on_progress, stage="resolving matched legislation", done=len(refs),
+                      total=len(refs))
+            with cat._maintenance_timeout():
+                cat.commit()
+                resolved = Resolver(cat).run()
 
         self._invalidate_caches()
         return {"held_titles": len(index), "candidates": len(refs),
@@ -9108,6 +9167,39 @@ class Facade:
     def resolve_refinement_flag(self, *, flag_id: int, status: str = "resolved") -> dict:
         with self._open() as (cat, _rs, _ts):
             return {"updated": cat.set_refinement_flag(flag_id, status)}
+
+    # -- feedback (Bugs / Feature requests from the app's feedback box) --------
+    def submit_feedback(self, *, kind: str, message: str, page: str | None = None,
+                        url: str | None = None, metadata: dict | None = None) -> dict:
+        """Record a Bug / Feature-request from the feedback box, with whatever page context
+        the client captured (route, doc id, query, role, user-agent) as JSON metadata."""
+        import json as _json
+        k = (kind or "bug").strip().lower()
+        if k not in ("bug", "feature"):
+            k = "bug"
+        msg = (message or "").strip()
+        if not msg:
+            return {"error": "empty message"}
+        meta = _json.dumps(metadata) if metadata else None
+        with self._open() as (cat, _rs, _ts):
+            fid = cat.add_feedback(kind=k, message=msg[:8000], page=page, url=url, metadata=meta)
+        return {"submitted": True, "feedback_id": fid, "kind": k}
+
+    def list_feedback(self, *, status: str | None = "open", limit: int = 500) -> list[dict]:
+        import json as _json
+        with self._open() as (cat, _rs, _ts):
+            rows = [dict(r) for r in cat.feedback(status=status, limit=limit)]
+        for r in rows:
+            if r.get("metadata"):
+                try:
+                    r["metadata"] = _json.loads(r["metadata"])
+                except (ValueError, TypeError):
+                    pass
+        return rows
+
+    def resolve_feedback(self, *, feedback_id: int, status: str = "resolved") -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return {"updated": cat.set_feedback_status(feedback_id, status)}
 
     def mine_parallel_citations(self, *, limit_docs: int | None = None, coref: bool = True,
                                 on_progress=None, cancel_check=None) -> dict:

@@ -77,6 +77,7 @@ READER_WRITE_ALLOW = frozenset({
     "/citations/scan",       # read-only grammar recognition (PDF text-layer linkify)
     "/detect-citations",     # read-only preview, no fetching
     "/refinement-flags",     # a reader flags a passage for an admin to action
+    "/feedback",             # a reader submits a bug / feature request
     "/unresolved/harvest",   # trigger ONE on-demand fetch+process of a missing authority
 })
 
@@ -102,6 +103,7 @@ ADMIN_ONLY_READ_PREFIXES = (
     "/export",
     "/reference-context",
     "/refinement-flags",   # the review queue is admin; a reader may only POST a new flag
+    "/feedback",           # the feedback review queue is admin; a reader may only POST
 )
 
 # Paths reachable with no authentication at all (the login flow + liveness).

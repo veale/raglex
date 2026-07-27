@@ -552,4 +552,17 @@ CREATE TABLE IF NOT EXISTS refinement_flags (
     status         TEXT NOT NULL DEFAULT 'open',
     created_at     TEXT NOT NULL
 );
+
+-- General user feedback (Bugs / Feature requests) captured from the app's feedback box,
+-- alongside refinement_flags. metadata carries whatever page context the client sent.
+CREATE TABLE IF NOT EXISTS feedback (
+    feedback_id  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'bug',    -- bug | feature
+    message      TEXT NOT NULL,
+    page         TEXT,                           -- the view/route label the user was on
+    url          TEXT,                           -- full in-app (hash) URL
+    metadata     TEXT,                           -- JSON: doc_id, query, role, user-agent, …
+    status       TEXT NOT NULL DEFAULT 'open',   -- open | resolved
+    created_at   TEXT NOT NULL
+);
 """

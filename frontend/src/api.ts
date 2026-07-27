@@ -264,6 +264,11 @@ export const api = {
   refinementFlags: (status = "open") => req<any[]>(`/refinement-flags?status=${encodeURIComponent(status)}`),
   setRefinementFlag: (id: number, status = "resolved") =>
     req<any>(`/refinement-flags/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
+  submitFeedback: (body: { kind: string; message: string; page?: string; url?: string; metadata?: Record<string, unknown> }) =>
+    req<{ submitted?: boolean; feedback_id?: number; error?: string }>("/feedback", { method: "POST", body: JSON.stringify(body) }),
+  feedback: (status = "open") => req<any[]>(`/feedback?status=${encodeURIComponent(status)}`),
+  setFeedback: (id: number, status = "resolved") =>
+    req<any>(`/feedback/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
   unfetchable: (limit = 200, min_citing?: number) =>
     req<any>(`/unresolved/unfetchable?limit=${limit}${min_citing ? `&min_citing=${min_citing}` : ""}`),
   radiate: (body: Record<string, unknown>) =>

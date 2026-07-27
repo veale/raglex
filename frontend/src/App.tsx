@@ -37,6 +37,59 @@ function ApiStatus() {
   return <span className={cls} title="API connection">● {label}</span>;
 }
 
+// Feedback widget — a top-right button that expands to submit a Bug / Feature request.
+// Records the current page's context (route, open document, pinpoint, URL, viewport,
+// user-agent) so an admin reviewing the feedback table knows exactly where it came from.
+// Available to every role (readers included); the review queue itself is admin-only.
+function FeedbackBox({ context }: { context: () => Record<string, unknown> }) {
+  const [open, setOpen] = useReactState(false);
+  const [kind, setKind] = useReactState<"bug" | "feature">("bug");
+  const [msg, setMsg] = useReactState("");
+  const [status, setStatus] = useReactState("");
+  const [busy, setBusy] = useReactState(false);
+  async function submit() {
+    if (!msg.trim()) { setStatus("write something first"); return; }
+    setBusy(true); setStatus("");
+    try {
+      const meta = context();
+      const r = await api.submitFeedback({
+        kind, message: msg.trim(),
+        page: String(meta.page ?? ""),
+        url: String(meta.url ?? (location.hash || location.pathname)),
+        metadata: meta,
+      });
+      if (r.error) setStatus("error: " + r.error);
+      else { setStatus("✓ thanks — recorded"); setMsg(""); setTimeout(() => { setOpen(false); setStatus(""); }, 1400); }
+    } catch (e: any) { setStatus("error: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="feedback-box">
+      <button className="feedback-toggle" onClick={() => setOpen((o) => !o)}
+        title="Report a bug or request a feature" aria-expanded={open}>
+        {open ? "×" : "Feedback"}
+      </button>
+      {open && (
+        <div className="feedback-panel" role="dialog" aria-label="Send feedback">
+          <div className="feedback-kind">
+            <button className={kind === "bug" ? "active" : ""} onClick={() => setKind("bug")}>🐛 Bug</button>
+            <button className={kind === "feature" ? "active" : ""} onClick={() => setKind("feature")}>✨ Feature</button>
+          </div>
+          <textarea value={msg} onChange={(e) => setMsg(e.target.value)} rows={5} autoFocus
+            placeholder={kind === "bug"
+              ? "What went wrong, and what did you expect? (e.g. a citation linked to the wrong case)"
+              : "What would help your research?"} />
+          <div className="feedback-meta">on <code>{String(context().page ?? "")}</code> — page context is attached automatically</div>
+          <div className="feedback-actions">
+            <button className="primary" disabled={busy} onClick={submit}>{busy ? "Sending…" : "Send"}</button>
+            {status && <span className={status.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{status}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const THEMES: [string, string][] = [
   ["latte", "Catppuccin Latte"], ["frappe", "Catppuccin Frappé"],
   ["macchiato", "Catppuccin Macchiato"], ["mocha", "Catppuccin Mocha"],
@@ -186,7 +239,17 @@ export function App() {
 
   // A reader gets a read-only research interface: no admin/maintain, no settings. These are
   // also enforced server-side (src/raglex/web/auth.py) — hiding them is only affordance.
-  const { isAdmin } = useAuth();
+  const { isAdmin, role } = useAuth();
+  // page metadata attached to any feedback submitted from the current view
+  const feedbackContext = () => ({
+    page: tab === "document" && docId ? `document:${docId}` : tab,
+    tab, docId, pinpoint,
+    url: location.hash || location.pathname,
+    role,
+    viewport: `${window.innerWidth}x${window.innerHeight}`,
+    userAgent: navigator.userAgent,
+    ts: new Date().toISOString(),
+  });
   const tabs: [Tab, string][] = isAdmin
     ? [["explore", "Explore"], ["search", "Search"], ["admin", "Admin"], ["settings", "Settings"]]
     : [["explore", "Explore"], ["search", "Search"]];
@@ -213,6 +276,7 @@ export function App() {
         </nav>
         <ThemeSwitch />
         <AuthBadge />
+        <FeedbackBox context={feedbackContext} />
       </header>
       {/* Explore and Search stay MOUNTED once visited, merely hidden — their
           results and facet state are local, so unmounting them would mean "back"

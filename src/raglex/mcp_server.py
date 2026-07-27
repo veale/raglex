@@ -305,6 +305,18 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.resolve_refinement_flag(flag_id=flag_id, status=status)
 
     @admin
+    def feedback(status: str = "open", limit: int = 200) -> list[dict]:
+        """User-submitted Bugs / Feature requests from the app's feedback box — each with the
+        message, kind, the page/route it came from, and the captured page metadata (doc id,
+        query, role, user-agent). The review queue; pair with resolve_feedback."""
+        return facade.list_feedback(status=status or None, limit=limit)
+
+    @admin
+    def resolve_feedback(feedback_id: int, status: str = "resolved") -> dict:
+        """Mark a feedback item handled (status: resolved | open)."""
+        return facade.resolve_feedback(feedback_id=feedback_id, status=status)
+
+    @admin
     def decide_match_suggestion(ref: str, suggested_id: str, accept: bool = True) -> dict:
         """Accept (alias + resolve, fetching the target if not held) or reject a
         'Possibly: …?' match suggestion attached to a hanging reference."""

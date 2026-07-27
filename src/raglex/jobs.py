@@ -260,7 +260,7 @@ RUNNERS: dict[str, Callable] = {
     # failure left ~7,400 heavily-cited acts as dead ends)
     "backfill-eu-stubs": lambda f, p, cb, cancel: f.backfill_eu_stubs(
         limit=int(p.get("limit") or 500), on_progress=cb, cancel_check=cancel),
-    "rebuild-citation-counts": lambda f, p, cb, cancel: f.rebuild_citation_counts(),
+    "rebuild-citation-counts": lambda f, p, cb, cancel: f.rebuild_citation_counts(on_progress=cb),
     "rebuild-authority": lambda f, p, cb, cancel: f.rebuild_authority(on_progress=cb, cancel_check=cancel),
     "pull-ag-opinions": lambda f, p, cb, cancel: f.pull_ag_opinions(on_progress=cb, cancel_check=cancel),
     "harvest-all": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),
@@ -609,6 +609,22 @@ class JobManager:
         if kind not in CHAIN_TRIGGER_KINDS or not _job_did_work(result):
             return
         from . import schedule as _schedule
+        # Defer the (expensive) roll-ups while a BATCH of corpus-growing work is still in
+        # flight — importing 11 Westlaw zips must rebuild the citation counts + PageRank ONCE
+        # at the end, not after every zip (each rebuild is invalidated by the next import and
+        # the walk is corpus-wide). If any other trigger-kind job is still running or queued,
+        # skip: whichever one finishes last sees an empty pipeline and fires the chain then.
+        # (The follow-up singleton guard below still coalesces a rare simultaneous-finish.)
+        try:
+            with self.facade._open() as (cat, _rs, _ts):
+                pending = [j for j in (list(cat.running_jobs()) + list(cat.queued_jobs()))
+                           if j["kind"] in CHAIN_TRIGGER_KINDS]
+            if pending:
+                log.info("post-process chain deferred: %d trigger job(s) still pending "
+                         "(rollups run once the batch drains)", len(pending))
+                return
+        except Exception:  # noqa: BLE001 — if the check fails, fall through and chain anyway
+            log.exception("could not check pending trigger jobs; chaining regardless")
         now = time.time()
         for follow, cooldown in CHAIN_FOLLOWUPS:
             try:

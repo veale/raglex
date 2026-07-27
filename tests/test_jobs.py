@@ -161,6 +161,35 @@ def test_startup_auto_resumes_only_declared_safe_kinds(monkeypatch):
     assert resumed == ["scan"]
 
 
+def test_rollup_chain_deferred_until_the_import_batch_drains():
+    """Importing 11 zips must rebuild the citation counts + PageRank ONCE at the end, not
+    after each zip. While any other trigger-kind job is still queued/running, a finished
+    import defers the rollups; only the last one (empty pipeline) fires them."""
+    f = _facade()
+    mgr = JobManager(f, origin="api")
+    # one more import still queued → finishing this one must NOT enqueue the rollups yet
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("imp2", "import-caselaw-zip", "zip 2", {"zip_path": "/b.zip"},
+                       origin="api", status="queued")
+    mgr._chain_postprocess("import-caselaw-zip", {"imported": 5})
+    with f._open() as (cat, _rs, _ts):
+        assert "rebuild-citation-counts" not in {j["kind"] for j in cat.queued_jobs()}
+    # the batch drains → the rollup chain now fires (once)
+    with f._open() as (cat, _rs, _ts):
+        cat.cancel_queued_job("imp2")
+    mgr._chain_postprocess("import-caselaw-zip", {"imported": 5})
+    with f._open() as (cat, _rs, _ts):
+        assert "rebuild-citation-counts" in {j["kind"] for j in cat.queued_jobs()}
+
+
+def test_no_net_work_skips_the_rollup_chain():
+    f = _facade()
+    mgr = JobManager(f, origin="api")
+    mgr._chain_postprocess("import-caselaw-zip", {"imported": 0, "stored": 0})
+    with f._open() as (cat, _rs, _ts):
+        assert not [j for j in cat.queued_jobs() if j["kind"] == "rebuild-citation-counts"]
+
+
 def test_job_status_exposes_resume_lineage_and_liveness():
     f = _facade()
     with f._open() as (cat, _rs, _ts):

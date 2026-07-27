@@ -455,6 +455,19 @@ CREATE TABLE IF NOT EXISTS refinement_flags (
     created_at     TEXT NOT NULL
 );
 
+-- General user feedback (Bugs / Feature requests) from the app's feedback box, kept
+-- alongside refinement_flags. metadata carries whatever page context the client sent.
+CREATE TABLE IF NOT EXISTS feedback (
+    feedback_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL DEFAULT 'bug',    -- bug | feature
+    message      TEXT NOT NULL,
+    page         TEXT,                           -- the view/route label the user was on
+    url          TEXT,                           -- full in-app (hash) URL
+    metadata     TEXT,                           -- JSON: doc_id, query, role, user-agent, …
+    status       TEXT NOT NULL DEFAULT 'open',   -- open | resolved
+    created_at   TEXT NOT NULL
+);
+
 -- FTS5 keyword index over chunk text — the lexical half of hybrid search (§6c).
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     chunk_text, doc_id UNINDEXED, chunk_id UNINDEXED, family UNINDEXED
@@ -3170,6 +3183,31 @@ class Catalogue:
     def set_refinement_flag(self, flag_id: int, status: str) -> int:
         cur = self.conn.execute(
             "UPDATE refinement_flags SET status = ? WHERE flag_id = ?", (status, flag_id))
+        self.conn.commit()
+        return cur.rowcount
+
+    # -- feedback (Bugs / Feature requests from the app's feedback box) --------
+    def add_feedback(self, *, kind: str, message: str, page: str | None = None,
+                     url: str | None = None, metadata: str | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO feedback (kind, message, page, url, metadata, status, created_at) "
+            "VALUES (?,?,?,?,?,'open',?)",
+            (kind, message, page, url, metadata, _now()))
+        self.conn.commit()
+        # lastrowid is SQLite-only; on Postgres the caller doesn't need the id back
+        return int(cur.lastrowid) if getattr(cur, "lastrowid", None) is not None else 0
+
+    def feedback(self, *, status: str | None = "open", limit: int = 500) -> list[sqlite3.Row]:
+        if status:
+            return self.conn.execute(
+                "SELECT * FROM feedback WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (status, limit)).fetchall()
+        return self.conn.execute(
+            "SELECT * FROM feedback ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+
+    def set_feedback_status(self, feedback_id: int, status: str) -> int:
+        cur = self.conn.execute(
+            "UPDATE feedback SET status = ? WHERE feedback_id = ?", (status, feedback_id))
         self.conn.commit()
         return cur.rowcount
 
