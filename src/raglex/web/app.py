@@ -116,11 +116,6 @@ def create_app(config: Config | None = None) -> FastAPI:
     def worklist(limit: int = 50) -> list[dict]:
         return facade.worklist(limit=limit)
 
-    @app.get("/snowball")
-    def snowball(limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
-        """Citation frontier (§5a): cited-but-not-held forms, ranked by frequency."""
-        return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
-
     @app.get("/unresolved")
     def unresolved(limit: int = 100) -> dict:
         """Hanging references the corpus can't satisfy — the manual-resolution queue.
@@ -349,7 +344,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/jobs/rebuild-citation-counts")
     def job_rebuild_counts_ep() -> dict:
-        """Refresh the snowball's citation-frequency roll-up."""
+        """Refresh the citation-frequency roll-up the worklist ranking reads."""
         return _start_job("rebuild-citation-counts", "rebuild citation frequency roll-up")
 
     @app.get("/probes")
@@ -453,11 +448,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Drain every routable, high-confidence hanging reference, then resolve once."""
         return facade.harvest_all_references(**(payload or {}))
 
-    @app.post("/radiate")
-    def radiate_ep(payload: dict = Body(...)) -> dict:
-        """Snowball-sample the citation network from a seed (or seed rule) N degrees."""
-        return facade.radiate(**payload)
-
     @app.post("/discover-citing")
     def discover_citing_ep(payload: dict = Body(...)) -> dict:
         """Find NEW cases citing a target via the live source (FCL search / CELLAR)."""
@@ -519,12 +509,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Pull the AG Opinion for every held CJEU judgment that lacks one. Background job."""
         return _start_job("pull-ag-opinions", "pull AG opinions for held CJEU cases")
 
-    @app.post("/jobs/seed-text")
-    def job_seed_text_ep(payload: dict = Body(...)) -> dict:
-        """Paste text → detect citations → harvest + radiate (forwards) and pull citing
-        cases (backwards), as a background job."""
-        return _start_job("seed-text", "seed from pasted text", dict(payload or {}))
-
     @app.post("/backfill-titles")
     def backfill_titles_ep(payload: dict = Body(default={})) -> dict:
         """Fill missing CJEU case names from CELLAR."""
@@ -537,11 +521,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         return _start_job("backfill-metadata", "repair court/title/ruling-only metadata")
 
     # -- background jobs (so long ops report progress instead of blocking) --
-    @app.post("/jobs/radiate")
-    def job_radiate_ep(payload: dict = Body(...)) -> dict:
-        label = "snowball " + ", ".join(payload.get("seeds") or [str(payload.get("seed_rule"))])
-        return _start_job("radiate", label[:80], dict(payload or {}))
-
     @app.post("/jobs/harvest-all")
     def job_harvest_all_ep(payload: dict = Body(default={})) -> dict:
         return _start_job("harvest-all", "harvest all routable references", dict(payload or {}))
@@ -599,7 +578,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/watches/{watch_id}/run")
     def run_watch_ep(watch_id: int) -> dict:
         """Run a watch as a background job so it shows up in the Jobs panel with
-        per-stage progress (harvest → discover → snowball → tag)."""
+        per-stage progress (harvest → discover → fetch cited authorities → tag)."""
         w = facade.get_watch(watch_id)
         label = f"watch: {w.get('name', watch_id)}" if w else f"watch {watch_id}"
         return _start_job("run-watch", label, {"watch_id": watch_id})

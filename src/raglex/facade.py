@@ -3511,18 +3511,18 @@ class Facade:
                 return {"rows": resolution_worklist(cat, limit=limit)}
         return self._cached(f"worklist:{limit}", 60, _compute)["rows"]
 
-    def snowball(self, *, limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
-        """The citation frontier (§5a): forms the corpus cites but doesn't yet
-        hold, grouped by (form, jurisdiction, adapter) and ranked by frequency.
-        ``only_unharvestable=True`` narrows to forms with no adapter — the
-        build-an-adapter list."""
-        from .citations import snowball
+    def _citation_frontier(self, *, limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
+        """The citation frontier (§5a): forms the corpus cites but doesn't yet hold,
+        grouped by (form, jurisdiction, adapter) and ranked by frequency. Feeds the
+        coverage dashboard. ``only_unharvestable=True`` narrows to forms with no adapter."""
+        from .citations import citation_frontier
 
         def _compute():
             with self._open() as (cat, _rs, _ts):
-                return {"rows": snowball(cat, limit=limit, only_unharvestable=only_unharvestable)}
-        # The frontier is a corpus-wide roll-up; it doesn't move between page loads.
-        return self._cached(f"snowball:{limit}:{only_unharvestable}", 300, _compute)["rows"]
+                return {"rows": citation_frontier(cat, limit=limit,
+                                                  only_unharvestable=only_unharvestable)}
+        # A corpus-wide roll-up; it doesn't move between page loads.
+        return self._cached(f"frontier:{limit}:{only_unharvestable}", 300, _compute)["rows"]
 
     def refresh_statute_gazetteer(self) -> dict:
         """Top up the statute gazetteer from the legislation.gov.uk feeds (current +
@@ -3698,7 +3698,7 @@ class Facade:
             base = corpus_stats(cat).to_dict()
             sources = [dict(r) for r in cat.source_date_ranges()]
         # snowball + unresolved open their own connections (separate methods)
-        frontier = self.snowball(limit=10)
+        frontier = self._citation_frontier(limit=10)
         # uncapped: count EVERY distinct hanging reference (the grouping is built in full
         # regardless of limit, so this is no extra cost) — the headline number must not
         # plateau at an arbitrary cap.
@@ -4693,111 +4693,37 @@ class Facade:
         return {"source": source, "total": total, "docs_reanchored": docs_changed,
                 "offsets_fixed": fixed, "unlocatable": unlocatable}
 
-    def _resolve_seeds(self, cat, seeds: list[str] | None, seed_rule: dict | None) -> set[str]:
-        """Turn a seed spec into a concrete set of document/candidate ids. Seeds can
-        be given explicitly, or *by rule* — the building blocks for "find cases related
-        to X" research:
-        - ``{"cites": "32016R0679"}`` → every corpus doc that cites the GDPR
-          (add ``"hops": 2`` for "… that cites any case which cites the GDPR");
-        - ``{"tag": "data_protection"}`` → a tagged category/collection;
-        - ``{"query": "right to erasure"}`` → corpus keyword hits.
-        """
-        from .resolve.matchers import first_candidate
-
-        out: set[str] = set()
-        for s in (seeds or []):
-            c = first_candidate(s)
-            out.add(c.value if c else s)
-        if seed_rule:
-            cites = seed_rule.get("cites")
-            if cites:
-                tgt = cat.find_document_id(cites) or cites
-                layer = {tgt}
-                for _ in range(int(seed_rule.get("hops", 1))):
-                    nxt = set()
-                    for t in layer:
-                        for r in cat.relations_to(t):  # resolved incoming = who cites t
-                            out.add(r["src_id"])
-                            nxt.add(r["src_id"])
-                    layer = nxt
-            if seed_rule.get("tag"):
-                for d in cat.list_documents(tag=seed_rule["tag"], limit=10000):
-                    out.add(d["stable_id"])
-            if seed_rule.get("query"):
-                for d in cat.list_documents(query=seed_rule["query"], limit=500):
-                    out.add(d["stable_id"])
-        return out
-
-    def radiate(self, *, seeds: list[str] | None = None, seed_rule: dict | None = None,
-                degrees: int = 2, max_per_degree: int = 40, dry_run: bool = False,
-                on_progress=None, cancel_check=None) -> dict:
-        """Snowball-sample the citation network from a seed set, ``degrees`` hops out.
-
-        Each hop: take the current frontier's outbound citations, **targeted-harvest**
-        the routable ones (fetching exactly those cases/instruments), extract + resolve,
-        and make the newly-fetched documents the next frontier. This is the engine
-        behind "seed with a case/piece of legislation and radiate three degrees" and
-        autosnowball. ``dry_run`` returns the seed set without harvesting."""
-        from .citations import extract_corpus
-
-        summary: dict = {"seed_count": 0, "degrees": [], "harvested": []}
-        with self._open() as (cat, rs, ts):
-            seedset = self._resolve_seeds(cat, seeds, seed_rule)
-            summary["seed_count"] = len(seedset)
-            if dry_run:
-                return {**summary, "seeds": sorted(seedset)[:200]}
-
-            # degree 0 — make sure the seeds themselves are in the corpus
-            frontier: set[str] = set()
-            for i, s in enumerate(seedset, 1):
-                _progress(on_progress, stage="seeding", done=i, total=len(seedset), item=s)
-                res = self._fetch_reference(cat, rs, ts, ref=s, candidate=None)
-                if "error" not in res:
-                    frontier.add(res["candidate"])
-            self._extract_ids(cat, ts, frontier)  # only the seeds, not the whole corpus
-            Resolver(cat).run_for_documents(frontier)
-            seen = set(frontier)
-
-            for deg in range(1, max(1, degrees) + 1):
-                # candidates this hop = outbound citations of the current frontier
-                cands: set[str] = set()
-                for sid in frontier:
-                    real = cat.find_document_id(sid) or sid
-                    for rel in cat.relations_for(real):
-                        c = rel["dst_id"]
-                        if c and c not in seen and cat.find_document_id(c) is None:
-                            cands.add(c)
-                # Fetch until we have max_per_degree *successes* (don't let
-                # un-routable / 404 candidates burn the budget); cap total attempts.
-                newly: list[str] = []
-                attempts = 0
-                target = min(max_per_degree, len(cands))
-                for c in list(cands):
-                    if len(newly) >= max_per_degree or attempts >= max_per_degree * 3:
-                        break
-                    if cancel_check and cancel_check():
-                        summary["cancelled"] = True
-                        self._extract_ids(cat, ts, newly)
-                        Resolver(cat).run_for_documents(newly)
-                        return summary
-                    attempts += 1
-                    seen.add(c)
-                    _progress(on_progress, stage=f"degree {deg}", done=len(newly), total=target, item=c)
-                    res = self._fetch_reference(cat, rs, ts, ref=c, candidate=c)
-                    ok = bool(res.get("stored") or res.get("present"))
-                    if ok:
-                        newly.append(res["candidate"])
-                    _progress(on_progress, stage=f"degree {deg}", done=len(newly), total=target,
-                              item=res.get("candidate") or c, ok=ok)
-                self._extract_ids(cat, ts, newly)  # only the newly fetched docs
-                Resolver(cat).run_for_documents(newly)
-                summary["degrees"].append({"degree": deg, "candidates": len(cands),
-                                           "harvested": len(newly)})
-                summary["harvested"] += newly
-                frontier = set(newly)
-                if not frontier:
-                    break
-        return summary
+    def _enrich_cited(self, cat, rs, ts, doc_ids, *, limit: int = 100,
+                      on_progress=None, cancel_check=None) -> dict:
+        """One hop only: fetch the routable authorities that ``doc_ids`` cite but the corpus
+        doesn't hold, then extract + resolve the new documents. This is the enrichment a
+        watch runs over each newly harvested case — pull the cases and instruments it relies
+        on, once — with no further outward crawl."""
+        cands: list[str] = []
+        seen: set[str] = set()
+        for sid in doc_ids:
+            for c in cat.citations_for(sid):
+                cand = c["candidate_id"]
+                if cand and cand not in seen and cat.find_document_id(cand) is None:
+                    seen.add(cand)
+                    cands.append(cand)
+        newly: list[str] = []
+        attempts = 0
+        target = min(limit, len(cands))
+        for cand in cands:
+            if len(newly) >= limit or attempts >= limit * 3:
+                break
+            if cancel_check and cancel_check():
+                break
+            attempts += 1
+            _progress(on_progress, stage="fetching cited authorities", done=len(newly),
+                      total=target, item=cand)
+            res = self._fetch_reference(cat, rs, ts, ref=cand, candidate=cand)
+            if res.get("stored") or res.get("present"):
+                newly.append(res["candidate"])
+        self._extract_ids(cat, ts, newly)
+        Resolver(cat).run_for_documents(newly)
+        return {"cited_candidates": len(cands), "fetched": len(newly)}
 
     # The Convention's article marginal-headings (factual labels) — enough structure for
     # "Article 10 of the Convention" to resolve and pinpoint, without the treaty's text.
@@ -4993,53 +4919,6 @@ class Facade:
             for d in seen.values():
                 d["in_corpus"] = cat.find_document_id(d["candidate"]) is not None
         return {"detected": len(seen), "citations": list(seen.values())}
-
-    def seed_from_text(self, *, text: str, degrees: int = 1, max_per_degree: int = 40,
-                       include_citing: bool = True, citing_limit: int = 25, citing_pages: int = 1,
-                       on_progress=None, cancel_check=None) -> dict:
-        """Paste a block of text → detect every citation in it, harvest those items, then
-        radiate ``degrees`` hops over what they cite/link to AND (``include_citing``) pull
-        what *cites* them from the live source. The one-shot "seed a set of cases and go
-        forwards and backwards from them" — ECLIs, neutral citations, CELEX, legislation
-        are all detected and pulled to whatever degree the data sources allow."""
-        det = self.detect_citations(text=text)
-        cands = [c["candidate"] for c in det["citations"]]
-        if not cands:
-            return {"detected": 0, "note": "no citations recognised in the text"}
-
-        # 1) seed those candidates + radiate outward (things they cite / link to)
-        rad = self.radiate(seeds=cands, degrees=degrees, max_per_degree=max_per_degree,
-                           on_progress=on_progress, cancel_check=cancel_check)
-        result = {"detected": len(cands), "detected_citations": det["citations"], "radiate": rad}
-
-        # 2) inbound — who cites the seeds (live FCL / CELLAR), one layer, bounded.
-        # Backward-discovery is precise for CASES (search by citation) and EU CELEX
-        # (CELLAR's "cases interpreting this legislation"), but a UK *statute* title search
-        # returns a flood of mostly off-topic judgments — slow and noisy — so we skip
-        # UK-legislation seeds here (their relationships come through the forward radiate).
-        if include_citing and not (cancel_check and cancel_check()):
-            discovered: list[str] = []
-            seeds = [c["candidate"] for c in det["citations"]
-                     if c["adapter"] != "uk-legislation"][:citing_limit]
-            for i, cand in enumerate(seeds, 1):
-                if cancel_check and cancel_check():
-                    break
-                _progress(on_progress, stage="finding citing cases", done=i, total=len(seeds), item=cand)
-                try:
-                    # resolve=False: don't re-resolve the whole graph after each seed —
-                    # do it ONCE at the end (below), so 25 seeds cost one resolve, not 25
-                    d = self.discover_citing(target=cand, max_pages=citing_pages, resolve=False)
-                    discovered += d.get("discovered", [])
-                    _progress(on_progress, stage="finding citing cases", done=i, total=len(seeds),
-                              item=cand, ok=True, msg=f"+{d.get('count', 0)} citing")
-                except Exception:  # noqa: BLE001 — one bad lookup mustn't stop the run
-                    pass
-            _progress(on_progress, stage="resolving citations", done=0, total=0)
-            with self._open() as (cat, _rs, _ts):
-                Resolver(cat).run()
-            result["citing_discovered"] = sorted(set(discovered))
-            result["citing_count"] = len(result["citing_discovered"])
-        return result
 
     def harvest_all_references(self, *, limit: int = 25, min_citing: int = 1,
                                adapter: str | None = None, leg_kind: str | None = None,
@@ -5478,11 +5357,19 @@ class Facade:
         asks legislation.gov.uk about a CELEX (``/changes/affecting/31964R0038``) and gets
         a guaranteed 404, burning the whole per-tick budget on documents that can never
         yield an effect."""
+        from .citations.snowball import UK_LEG_TYPES
+
         with self._open() as (cat, _rs, _ts):
             done = cat.enrichment_misses("changes-feed", max_age_days=max_age_days)
             rows = cat.list_documents(source="uk-legislation", doc_type="legislation", limit=2000)
             todo = [r["stable_id"] for r in rows
-                    if r["stable_id"] not in done and "@" not in r["stable_id"]][:limit]
+                    if r["stable_id"] not in done
+                    and "@" not in r["stable_id"]
+                    # legislation.gov.uk also serves assimilated EU instruments under
+                    # eur/eudr/eudn/european ids, but its Changes-to-Legislation service
+                    # has no affecting feed for them.  Letting those into this bounded
+                    # queue spent every tick on guaranteed 404s.
+                    and r["stable_id"].split("/", 1)[0].lower() in UK_LEG_TYPES][:limit]
         results = []
         for sid in todo:
             try:
@@ -8150,6 +8037,38 @@ class Facade:
 
         return source_catalog()
 
+    @staticmethod
+    def _watch_summary(w: dict, now) -> dict:
+        """One watch, flattened for the keep-current panel: its plan (keywords / discover /
+        enrich / tag), cadence, last run, and next-due."""
+        import datetime as _dt
+        spec = w.get("spec") or {}
+        cadence = w.get("cadence_minutes") or 1440
+        last = w.get("last_run_at")
+        next_due = None
+        if w.get("enabled") and last:
+            try:
+                prev = _dt.datetime.fromisoformat(last)
+                if prev.tzinfo is None:
+                    prev = prev.replace(tzinfo=_dt.timezone.utc)
+                next_due = (prev + _dt.timedelta(minutes=cadence)).isoformat()
+            except (ValueError, TypeError):
+                next_due = None
+        return {
+            "watch_id": w["watch_id"], "name": w.get("name"),
+            "enabled": bool(w.get("enabled")), "cadence_minutes": cadence,
+            "last_run_at": last, "next_due": next_due,
+            "is_due": watch_is_due(w["watch_id"], cadence, last, now) if w.get("enabled") else False,
+            "keywords": spec.get("keywords") or [],
+            "discover": (spec.get("discover") or {}).get("citing"),
+            "enrich": spec.get("enrich", True),
+            "tag": spec.get("tag"),
+            "backfill": bool(spec.get("backfill")),
+            "overlap_days": spec.get("overlap_days"),
+            "max_pages": spec.get("max_pages"),
+            "last_result": w.get("last_result"),
+        }
+
     def keep_current_overview(self) -> dict:
         """The Maintain "keep-current diagnosis" payload: every harvestable source with its
         incremental mode, whether a watch is wired (+ cadence / last-run / next-due), its
@@ -8221,6 +8140,11 @@ class Facade:
                     "overlap_days": (watch.get("spec") or {}).get("overlap_days"),
                     "backfill": bool((watch.get("spec") or {}).get("backfill")),
                 },
+                # every watch on this source (the unified panel expands a source to these),
+                # not just the representative one above
+                "watches": [self._watch_summary(w, now) for w in
+                            sorted(src_watches, key=lambda w: (not w.get("enabled"),
+                                                               w.get("name") or ""))],
                 "watch_count": len(src_watches),
                 "recent_runs": runs.get(key, []),
             })
@@ -8229,10 +8153,12 @@ class Facade:
 
     def create_watch(self, *, name: str, spec: dict, cadence_minutes: int = 1440,
                      enabled: bool = True) -> dict:
-        """Save a harvest plan. ``spec`` keys: ``source`` (+ ``source_options``),
-        ``keywords`` (list), ``seed_rule`` (e.g. {"cites": "32016R0679"}),
-        ``degrees`` (autosnowball hops), ``max_pages``, ``max_per_degree``,
-        ``tag`` (label everything brought in), ``backfill``."""
+        """Save a harvest plan run on a cadence. ``spec`` keys: ``source``
+        (+ ``source_options`` and ``keywords`` — searched at the source API where
+        supported, else post-filtered), ``discover`` ({"citing": id} — find NEW cases
+        citing a target), ``enrich`` (default true: fetch what each new case cites, one
+        hop), ``max_pages``, ``tag`` (label everything brought in), ``backfill`` (first
+        run walks deep)."""
         with self._open() as (cat, _rs, _ts):
             wid = cat.add_watch(name, json.dumps(spec), cadence_minutes, enabled=enabled)
             return self._watch_dict(cat.get_watch(wid))
@@ -9420,10 +9346,10 @@ class Facade:
                 "discovered": discovered, "count": len(discovered)}
 
     def run_watch(self, *, watch_id: int, on_progress=None, cancel_check=None) -> dict:
-        """Execute one watch: (1) harvest its source (keywords searched at the API
-        where supported, else used to limit the seeds); (2) gather seeds (the keyword-
-        matching source docs + any ``seed_rule`` set); (3) autosnowball ``degrees``
-        hops; (4) tag everything brought in. Records the result + last-run time.
+        """Execute one watch: harvest its source's delta (keywords searched at the API
+        where supported), and/or discover NEW cases citing a target; fetch what each new
+        case cites, one hop (unless ``enrich`` is false); tag everything brought in.
+        Records the result + last-run time.
 
         Runnable as a background job (``on_progress``/``cancel_check``) so it appears in
         the Jobs panel with per-stage progress instead of blocking a request."""
@@ -9470,8 +9396,9 @@ class Facade:
             h = self.harvest(source, backfill=bool(spec.get("backfill")) and not has_cursor,
                              max_pages=max_pages, options=opts, watermark_key=wm_key,
                              use_llm=spec.get("use_llm"), overlap_days=spec.get("overlap_days"),
-                             on_progress=on_progress)
-            result["harvest"] = h
+                             return_ids=True, on_progress=on_progress)
+            result["harvest"] = {k: v for k, v in h.items() if k != "new_ids"}
+            seed_ids = list({*seed_ids, *h.get("new_ids", [])})
 
         # Forward-citation discovery: NEW cases citing a target (the renewing seed).
         disc = spec.get("discover")
@@ -9482,19 +9409,19 @@ class Facade:
             result["discover"] = {k: d.get(k) for k in ("via", "query", "count")}
             seed_ids = list({*seed_ids, *d.get("discovered", [])})
 
-        # NO snowballing. A watch is the systematic path now: harvest the register's
-        # delta, extract, resolve — done. The old radiate stage re-fetched every
-        # keyword-matched "seed" one at a time (the mysterious "seeding 1/23" a watch
-        # froze on at WAF pace) and then chased citations ``degrees`` hops, even when
-        # degrees was 0. Full-register backfills + set-based resolution made that
-        # expansion obsolete; ``radiate`` survives only as an explicit one-off job.
-        if spec.get("tag"):
-            brought = list({*seed_ids,
-                            *self._keyword_seed_docs(source, keywords,
-                                                     limit=spec.get("max_seeds", 60))})
-            if brought:
-                self.tag_many(doc_ids=brought, tag=spec["tag"])
-                result["tagged"] = len(brought)
+        # One-hop enrichment (opt-out with enrich:false): pull the routable authorities each
+        # newly harvested case cites, once. No further crawl — the old degree-N radiate is
+        # gone. The register delta plus this single hop is the whole of a watch's work.
+        if spec.get("enrich", True) and seed_ids and not (cancel_check and cancel_check()):
+            _emit("fetching cited authorities")
+            with self._open() as (cat, rs, ts):
+                result["enrich"] = self._enrich_cited(
+                    cat, rs, ts, seed_ids, limit=int(spec.get("enrich_limit", 100)),
+                    on_progress=on_progress, cancel_check=cancel_check)
+
+        if spec.get("tag") and seed_ids:
+            self.tag_many(doc_ids=seed_ids, tag=spec["tag"])
+            result["tagged"] = len(seed_ids)
 
         with self._open() as (cat, _rs, _ts):
             cat.update_watch(watch_id, {"last_run_at": _now_iso(),
@@ -9528,7 +9455,7 @@ class Facade:
         ignore_watermark: bool = False, watermark_key: str | None = None,
         refetch_held: bool = False, use_llm: bool | None = None,
         overlap_days: int | None = None, force_full: bool = False,
-        postprocess_after_relation_id: int = 0,
+        postprocess_after_relation_id: int = 0, return_ids: bool = False,
         on_progress=None, cancel_check=None,
     ) -> dict:
         """Run one source through the pipeline, then resolve + tag — the §8
@@ -9719,7 +9646,10 @@ class Facade:
             result = asdict(stats)
             result.pop("stored_ids", None)  # internal and potentially hundreds of thousands
             return {**result, "resolved_edges": resolved_n,
-                    "new_documents": len(new_ids)}
+                    "new_documents": len(new_ids),
+                    # a watch asks for the ids so it can enrich just the new docs (capped —
+                    # an incremental watch delta is small; a backfill is not, hence the cap)
+                    **({"new_ids": new_ids[:1000]} if return_ids else {})}
 
     def finish_bulk_postprocess(self, *, source: str | None = None, resolve: bool = True,
                                 tag: bool = True, batch_size: int = 50000,

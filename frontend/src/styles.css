@@ -1386,3 +1386,34 @@ table { width: 100%; }
 .feedback-meta { font-size: 11px; color: var(--subtext); }
 .feedback-meta code { font-size: 11px; }
 .feedback-actions { display: flex; align-items: center; gap: var(--sp-3); }
+
+/* -- Keep-current dashboard (unified sources + watches) --------------------- */
+.keep-current .kc-juris {
+  font-weight: 600; font-size: 13px; margin: 10px 0 3px;
+  padding-bottom: 2px; border-bottom: 1px solid var(--line);
+}
+.keep-current .kc-juris .muted { font-weight: 400; }
+.kc-table { font-size: 12px; }
+.kc-table th { font-weight: 600; }
+.kc-caret {
+  background: transparent; border: none; cursor: pointer; color: var(--subtext);
+  padding: 0 6px 0 0; font-size: 12px; line-height: 1;
+}
+.kc-caret:hover { color: var(--accent); background: transparent; }
+.kc-row.open > td { border-bottom: none; }
+.kc-row.open > td:first-child { font-weight: 600; }
+.kc-add { cursor: pointer; color: var(--accent); font-size: 11px; }
+.kc-del { cursor: pointer; color: var(--subtext); }
+.kc-del:hover { color: var(--bad); }
+.kc-detail > td {
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  padding: 10px 12px 12px 26px;
+}
+.kc-watches { width: 100%; font-size: 12px; margin: 0; background: transparent; }
+.kc-watches td { border-bottom: 1px solid var(--line); vertical-align: top; padding: 5px 8px; }
+.kc-watches tr:last-child td { border-bottom: none; }
+.add-watch {
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
+}
+.add-watch input[type="text"], .add-watch input:not([type]) { font-size: 12px; }
+button.mini { font-size: 11px; padding: 1px 7px; }

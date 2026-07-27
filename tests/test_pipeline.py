@@ -80,6 +80,31 @@ def test_pipeline_content_hash_dedup(catalogue, rawstore):
     assert stats.stored == 0
 
 
+def test_pipeline_full_text_supersedes_held_metadata_stub(catalogue, rawstore):
+    """A primary-key hit with no text is not complete: a later official adapter may
+    provide the body under the same citation-compatible id."""
+    stub = Record(
+        source="bulk-metadata", stable_id="uket/2023/3314122_2020",
+        doc_type=DocType.JUDGMENT, title="P Kallay v CGI", raw_bytes=b"<stub/>",
+        raw_ext="html", text=None, extracted_via=ExtractedVia.STRUCTURED,
+    )
+    stub.ensure_payload_hash()
+    catalogue.upsert_document(stub)
+
+    full = _rec(
+        "uket/2023/3314122_2020",
+        "EMPLOYMENT TRIBUNAL full judgment with reasons and findings.",
+        court="uket",
+        raw=b'{"official":"full text"}',
+    )
+    stats = Pipeline(catalogue, rawstore).run(FakeAdapter([full]))
+
+    assert stats.stored == 1
+    doc = catalogue.get_document(full.stable_id)
+    assert doc["has_text"] == 1
+    assert doc["source"] == "fake"
+
+
 def test_pipeline_mints_celex_to_ecli_alias(catalogue, rawstore):
     """Every harvest of an ECLI-keyed doc carrying a CELEX mints the CELEX→ECLI
     alias, so EU case-number citations resolve systematically (rec 3, §5b)."""
@@ -119,6 +144,22 @@ def test_meta_json_migration_is_idempotent(catalogue):
     catalogue._migrate()
     cols = {r["name"] for r in catalogue.conn.execute("PRAGMA table_info(documents)")}
     assert "meta_json" in cols
+
+
+def test_alias_backfill_mints_canadian_french_neutral_codes(catalogue):
+    rec = _rec("fca/2016/93", "Canadian Federal Court of Appeal judgment", court="fca")
+    rec.source = "ca-caselaw"
+    catalogue.upsert_document(rec)
+    rec2 = _rec("scc/2008/9", "Supreme Court of Canada judgment", court="scc")
+    rec2.source = "ca-caselaw"
+    catalogue.upsert_document(rec2)
+
+    first = catalogue.backfill_alias_from_meta()
+    assert first["ca_french_neutral"] == 2
+    assert catalogue.get_alias("caf/2016/93") == "fca/2016/93"
+    assert catalogue.get_alias("csc/2008/9") == "scc/2008/9"
+    # Idempotent: conflicts are not reported as newly minted.
+    assert catalogue.backfill_alias_from_meta()["ca_french_neutral"] == 0
 
 
 def test_pipeline_records_outstanding_effects_queue(catalogue, rawstore):

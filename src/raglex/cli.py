@@ -305,7 +305,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    """Saved harvest plans (§5a): keyword-limited harvest + autosnowball, scheduled."""
+    """Saved harvest plans (§5a): keep a source current / discover citing cases, scheduled."""
     import time
 
     from .facade import Facade
@@ -319,18 +319,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
             return 0
         for w in rows:
             sp = w["spec"]
+            plan = sp.get("source") or (f"citing {sp['discover']['citing']}" if sp.get("discover") else "?")
             print(f"#{w['watch_id']} {'·' if w['enabled'] else '✗'} {w['name']}  "
-                  f"source={sp.get('source') or sp.get('seed_rule')} kw={sp.get('keywords') or []} "
-                  f"degrees={sp.get('degrees', 1)} every {w['cadence_minutes']}m  last={w['last_run_at'] or 'never'}")
+                  f"{plan} kw={sp.get('keywords') or []} "
+                  f"enrich={sp.get('enrich', True)} every {w['cadence_minutes']}m  last={w['last_run_at'] or 'never'}")
         return 0
     if sub == "add":
-        spec: dict = {"degrees": args.degrees, "max_pages": args.max_pages}
+        spec: dict = {"max_pages": args.max_pages, "enrich": not args.no_enrich}
         if args.source:
             spec["source"] = args.source
         if args.keywords:
             spec["keywords"] = [k.strip() for k in args.keywords.split(",") if k.strip()]
-        if args.cites:
-            spec["seed_rule"] = {"cites": args.cites, "hops": args.hops}
         if args.citing:
             spec["discover"] = {"citing": args.citing, "via": args.via}
         if args.tag:
@@ -536,7 +535,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     if pc.get("flagged") or pc.get("edges"):
                         print(f"[watch] changes propagate: scanned {pc['scanned']}, "
                               f"flagged {pc['flagged']} for re-pull, {pc['edges']} amends edge(s)")
-                # Weekly: refresh the roll-ups the front page + snowball + Unresolved
+                # Weekly: refresh the roll-ups the front page + worklist + Unresolved
                 # worklist read (citation frequencies, source/shape/leg-type stats, and the
                 # ~96s pending-reference worklist). These are corpus-wide aggregates that
                 # barely move between page loads but cost a lot to recompute, so an hourly
@@ -601,12 +600,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_snowball(args: argparse.Namespace) -> int:
+def cmd_frontier(args: argparse.Namespace) -> int:
     """The citation frontier (§5a): forms the corpus cites but doesn't yet hold,
     grouped by (form, jurisdiction, adapter) and ranked by frequency."""
     from .facade import Facade
 
-    rows = Facade(Config.from_env()).snowball(limit=args.limit, only_unharvestable=args.needs_adapter)
+    rows = Facade(Config.from_env())._citation_frontier(limit=args.limit, only_unharvestable=args.needs_adapter)
     if not rows:
         print("no unresolved citation frontier — corpus holds everything it cites")
         return 0
@@ -774,6 +773,7 @@ def cmd_migrate(_: argparse.Namespace) -> int:
     with f._open() as (cat, _rs, _ts):
         am = cat.backfill_alias_from_meta()
     print(f"  minted {am.get('echr_appno', 0)} ECHR application-number aliases")
+    print(f"  minted {am.get('ca_french_neutral', 0)} Canadian French-neutral aliases")
     print("resolving now-linkable edges…")
     res = f.resolve()
     print(f"  resolved {res.get('resolved', 0)} edge(s)")
@@ -1199,25 +1199,24 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--no-llm", action="store_true", help="force grammars/heuristics only")
     ex.set_defaults(func=cmd_extract)
 
-    sn = sub.add_parser("snowball", help="citation frontier: what's cited but not yet harvested (§5a)")
+    sn = sub.add_parser("frontier", help="citation frontier: what's cited but not yet harvested (§5a)")
     sn.add_argument("--limit", type=int, default=50)
     sn.add_argument("--needs-adapter", action="store_true", dest="needs_adapter",
                     help="only forms with no adapter yet (the build-an-adapter list)")
-    sn.set_defaults(func=cmd_snowball)
+    sn.set_defaults(func=cmd_frontier)
 
-    wt = sub.add_parser("watch", help="saved harvest plans: keyword harvest + autosnowball, scheduled (§5a)")
+    wt = sub.add_parser("watch", help="saved harvest plans: keep a source current / discover citing cases (§5a)")
     wt_sub = wt.add_subparsers(dest="watch_command", required=True)
     wt_sub.add_parser("list", help="list saved watches")
     w_add = wt_sub.add_parser("add", help="create a watch")
     w_add.add_argument("--name", required=True)
-    w_add.add_argument("--source", help="source key (e.g. uk-grc); omit for a pure seed-rule watch")
+    w_add.add_argument("--source", help="source key (e.g. uk-grc)")
     w_add.add_argument("--keywords", help="comma-separated keyword limiters")
-    w_add.add_argument("--cites", help="seed rule: corpus docs that cite this id (e.g. 32016R0679)")
-    w_add.add_argument("--hops", type=int, default=1, help="hops for --cites (2 = cases citing cases that cite it)")
     w_add.add_argument("--citing", help="discover NEW cases citing this target via the live source (FCL/CELLAR)")
     w_add.add_argument("--via", default="auto", choices=["auto", "uk-caselaw", "eu-cellar"],
                        help="discovery source for --citing")
-    w_add.add_argument("--degrees", type=int, default=2, help="autosnowball degrees")
+    w_add.add_argument("--no-enrich", action="store_true", dest="no_enrich",
+                       help="don't fetch what each new case cites (default: fetch one hop)")
     w_add.add_argument("--max-pages", type=int, default=1, dest="max_pages")
     w_add.add_argument("--tag", help="tag everything this watch brings in")
     w_add.add_argument("--cadence", type=int, default=1440, help="minutes between runs")

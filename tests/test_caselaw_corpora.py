@@ -206,6 +206,14 @@ def test_ca_row_becomes_a_judgment_keyed_on_its_neutral_citation():
     assert record.extra["is_authoritative"] is False   # A2AJ is a secondary source
 
 
+def test_ca_french_neutral_citation_keys_the_same_case():
+    from raglex.adapters.ca_caselaw import ca_neutral_slug
+
+    assert ca_neutral_slug("2017 CSC 15") == "scc/2017/15"
+    assert ca_neutral_slug("2016 CAF 93") == "fca/2016/93"
+    assert ca_neutral_slug("2018 CF 1145") == "fc/2018/1145"
+
+
 def test_ca_citation_network_becomes_edges_and_drops_self_citations():
     _, stub, record = _record(ROW)
     targets = {r.dst_id for r in record.relations}

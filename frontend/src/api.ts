@@ -233,8 +233,6 @@ export const api = {
   queues: () => req<Record<string, number>>("/queues"),
   alerts: () => req<Alert[]>("/alerts"),
   worklist: (limit = 30) => req<any[]>(`/worklist?limit=${limit}`),
-  snowball: (needsAdapter = false, limit = 50) =>
-    req<any[]>(`/snowball?limit=${limit}&only_unharvestable=${needsAdapter}`),
   unresolved: (limit = 100) => req<any>(`/unresolved?limit=${limit}`),
   coverage: () => req<any>("/coverage"),
   corpusMap: () => req<any>("/corpus-map"),
@@ -271,8 +269,6 @@ export const api = {
     req<any>(`/feedback/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
   unfetchable: (limit = 200, min_citing?: number) =>
     req<any>(`/unresolved/unfetchable?limit=${limit}${min_citing ? `&min_citing=${min_citing}` : ""}`),
-  radiate: (body: Record<string, unknown>) =>
-    req<any>("/radiate", { method: "POST", body: JSON.stringify(body) }),
   discoverCiting: (target: string, via = "auto") =>
     req<any>("/discover-citing", { method: "POST", body: JSON.stringify({ target, via }) }),
   backfillTitles: () => req<any>("/backfill-titles", { method: "POST", body: "{}" }),
@@ -293,7 +289,7 @@ export const api = {
     req<any>("/legislation/version", { method: "POST", body: JSON.stringify({ id, date }) }),
   detectCitations: (text: string) =>
     req<any>("/detect-citations", { method: "POST", body: JSON.stringify({ text }) }),
-  startJob: (kind: "radiate" | "harvest-all" | "seed-text" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr" | "suggest-matches" | "finish-bulk-postprocess" | "canlii-enrich", body: Record<string, unknown>) =>
+  startJob: (kind: "harvest-all" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr" | "suggest-matches" | "finish-bulk-postprocess" | "canlii-enrich", body: Record<string, unknown>) =>
     req<{ job_id: string; error?: string; already_running?: boolean }>(`/jobs/${kind}`, { method: "POST", body: JSON.stringify(body) }),
   systemStorage: () => req<{ database_bytes: number; tables: { name: string; bytes: number }[] }>("/system/storage"),
   jobStatus: (id: string) => req<any>(`/jobs/${id}`),

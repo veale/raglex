@@ -50,6 +50,7 @@ from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
+from .uk_et import UKEmploymentTribunalAdapter
 from .uk_legislation import UKLegislationAdapter
 
 
@@ -62,6 +63,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-caselaw": UKCaseLawAdapter,
     # UK FTT — General Regulatory Chamber (information rights, environment, charity…).
     "uk-grc": lambda **kw: UKCaseLawAdapter(court="ukftt/grc", **kw),
+    # Employment Tribunal — the GOV.UK register's Search + Content Store APIs.  Its
+    # decision-year/case-number identity deliberately matches the BAILII metadata seed,
+    # replacing existing textless UKET stubs with the official full text.
+    "uk-et": UKEmploymentTribunalAdapter,
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
@@ -244,6 +249,14 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "searched at the source.",
         (SourceOption("query", "Keyword query", "free text, searched in the API"),),
         ("neutral citation",),
+    ),
+    "uk-et": SourceInfo(
+        "uk-et", "UK Employment Tribunal (GOV.UK)", "caselaw", "GB", True,
+        "Employment Tribunal decisions from the official GOV.UK register, including "
+        "full PDF-derived text. Existing textless UKET metadata records are enriched "
+        "in place by decision year and case number.",
+        (SourceOption("query", "Keyword query", "free text, searched in GOV.UK"),),
+        ("UKET citation or tribunal case number",),
     ),
     "nl-rechtspraak": SourceInfo(
         "nl-rechtspraak", "NL Rechtspraak (Open Data)", "caselaw", "NL", False,

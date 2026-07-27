@@ -503,19 +503,6 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.harvest_reference(ref=ref, candidate=candidate)
 
     @admin
-    def radiate(seeds: Optional[list[str]] = None, seed_rule: Optional[dict] = None,
-                degrees: int = 2, max_per_degree: int = 40, dry_run: bool = False) -> dict:
-        """Snowball-sample the citation network ``degrees`` hops from a seed set,
-        targeted-harvesting routable citations at each hop. Seeds can be explicit ids
-        (``seeds=["32016R0679", "[2011] EWCA Civ 31"]``) or defined *by rule*
-        (``seed_rule``): ``{"cites": "32016R0679"}`` = every corpus doc citing the
-        GDPR (add ``"hops": 2`` for cases citing cases that cite it); ``{"tag": "..."}``
-        a category; ``{"query": "..."}`` keyword hits. ``dry_run`` previews the seed
-        set. This is the build-a-corpus-around-X engine."""
-        return facade.radiate(seeds=seeds, seed_rule=seed_rule, degrees=degrees,
-                              max_per_degree=max_per_degree, dry_run=dry_run)
-
-    @admin
     def discover_citing(target: str, via: str = "auto", query: Optional[str] = None,
                         max_pages: int = 1) -> dict:
         """Forward-citation discovery — find NEW cases that cite ``target`` from the
@@ -529,19 +516,8 @@ def build_server(config: Config | None = None) -> FastMCP:
     @admin
     def detect_citations(text: str) -> dict:
         """Recognise every citation in a block of text (ECLI, CELEX, neutral citation,
-        legislation, CJEU case number) and report the routable candidates — the preview
-        before seeding. No fetching."""
+        legislation, CJEU case number) and report the routable candidates. No fetching."""
         return facade.detect_citations(text=text)
-
-    @admin
-    def seed_from_text(text: str, degrees: int = 1, include_citing: bool = True,
-                       max_per_degree: int = 40) -> dict:
-        """Paste a block of text → detect every citation in it, harvest those items, then
-        radiate ``degrees`` hops over what they cite/link to AND (``include_citing``) pull
-        what cites them from the live source. The one-shot 'seed cases and go forwards and
-        backwards from them'."""
-        return facade.seed_from_text(text=text, degrees=degrees, include_citing=include_citing,
-                                     max_per_degree=max_per_degree)
 
     @admin
     def source_catalog() -> list[dict]:
@@ -551,11 +527,11 @@ def build_server(config: Config | None = None) -> FastMCP:
 
     @admin
     def create_watch(name: str, spec: dict, cadence_minutes: int = 1440, enabled: bool = True) -> dict:
-        """Save a harvest plan that keyword-limits a harvest and autosnowballs N
-        degrees, run on a cadence. ``spec`` keys: ``source`` (+ ``source_options``),
-        ``keywords`` (list — searched at the API where supported, else post-filtered),
-        ``seed_rule`` (e.g. {"cites": "32016R0679", "hops": 2}), ``degrees``,
-        ``max_pages``, ``max_per_degree``, ``tag``."""
+        """Save a harvest plan run on a cadence. ``spec`` keys: ``source``
+        (+ ``source_options`` and ``keywords`` — searched at the API where supported, else
+        post-filtered), ``discover`` ({"citing": id} — find NEW cases citing a target),
+        ``enrich`` (default true: fetch what each new case cites, one hop), ``max_pages``,
+        ``tag``, ``backfill``."""
         return facade.create_watch(name=name, spec=spec, cadence_minutes=cadence_minutes, enabled=enabled)
 
     @admin
@@ -565,7 +541,8 @@ def build_server(config: Config | None = None) -> FastMCP:
 
     @admin
     def run_watch(watch_id: int) -> dict:
-        """Run one watch now: keyword-limited harvest + autosnowball + tag."""
+        """Run one watch now: harvest the source delta / discover citing cases, fetch what
+        each new case cites (one hop), tag."""
         return facade.run_watch(watch_id=watch_id)
 
     @admin
@@ -649,13 +626,13 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.harvest_all_references(limit=limit, min_citing=min_citing)
 
     @admin
-    def snowball(limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
+    def citation_frontier(limit: int = 50, only_unharvestable: bool = False) -> list[dict]:
         """The citation frontier (§5a): forms the corpus cites but doesn't yet hold,
         grouped by (form, jurisdiction, adapter) and ranked by how often they're
         cited. Each row says whether an adapter can fetch it now, or whether it's a
         frequently-cited body with no adapter yet (a build-an-adapter signal — set
-        only_unharvestable=True to see just those). Feeds the harvest snowball."""
-        return facade.snowball(limit=limit, only_unharvestable=only_unharvestable)
+        only_unharvestable=True to see just those). The completeness worklist."""
+        return facade._citation_frontier(limit=limit, only_unharvestable=only_unharvestable)
 
     @admin
     def import_case_base64(content_base64: str, filename: str, ref: Optional[str] = None,
@@ -720,7 +697,7 @@ def build_server(config: Config | None = None) -> FastMCP:
 
     @admin
     def rebuild_citation_counts() -> dict:
-        """Refresh the citation-frequency roll-up the snowball reads (the live aggregate
+        """Refresh the citation-frequency roll-up the worklist reads (the live aggregate
         over the citations table is slow at scale, so it's cached; this recomputes it)."""
         return facade.rebuild_citation_counts()
 

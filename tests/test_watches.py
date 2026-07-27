@@ -140,19 +140,37 @@ def test_run_watch_uses_per_watch_watermark(monkeypatch):
     assert calls[1]["max_pages"] == 40
 
 
-def test_run_watch_never_snowballs(monkeypatch):
-    """Watches are the systematic path: harvest the register's delta, extract,
-    resolve — no radiate stage. The old seeding pass re-fetched every keyword seed
-    one at a time (each followed by a whole-graph resolve), freezing watch jobs for
-    hours at WAF pace even with degrees: 0."""
+def test_run_watch_harvests_delta_and_enriches_one_hop(monkeypatch):
+    """A watch harvests the register's delta and then fetches, one hop, the routable
+    authorities the new cases cite — no multi-degree radiate. When the delta is empty
+    there is nothing to enrich, and the whole run is one bounded harvest."""
     f = _facade()
-    w = f.create_watch(name="DP", spec={"source": "uk-grc", "degrees": 2,
-                                        "max_pages": 1})
-    monkeypatch.setattr(f, "harvest", lambda source, **kw: {"stored": 0})
-    monkeypatch.setattr(f, "radiate", lambda *a, **kw: (_ for _ in ()).throw(
-        AssertionError("watches must not snowball")))
+    w = f.create_watch(name="DP", spec={"source": "uk-grc", "max_pages": 1})
+    seen: dict = {}
+    monkeypatch.setattr(f, "harvest",
+                        lambda source, **kw: seen.setdefault("harvested", source) and None
+                        or {"stored": 0, "new_ids": []})
+    called = {"enrich": False}
+    monkeypatch.setattr(f, "_enrich_cited",
+                        lambda *a, **kw: called.__setitem__("enrich", True) or {"fetched": 0})
     res = f.run_watch(watch_id=w["watch_id"])
+    assert seen["harvested"] == "uk-grc"
     assert "radiate" not in res
+    assert called["enrich"] is False   # empty delta → no enrichment hop
+
+
+def test_run_watch_enriches_new_cases_one_hop(monkeypatch):
+    """When the harvest brings in new cases, the watch fetches what they cite, once."""
+    f = _facade()
+    w = f.create_watch(name="DP", spec={"source": "uk-grc", "enrich": True})
+    monkeypatch.setattr(f, "harvest",
+                        lambda source, **kw: {"stored": 2, "new_ids": ["a", "b"]})
+    seen: dict = {}
+    monkeypatch.setattr(f, "_enrich_cited",
+                        lambda cat, rs, ts, ids, **kw: (seen.__setitem__("ids", sorted(ids)),
+                                                        {"fetched": 1})[1])
+    res = f.run_watch(watch_id=w["watch_id"])
+    assert seen["ids"] == ["a", "b"] and res["enrich"] == {"fetched": 1}
 
 
 def test_run_watch_backfill_is_first_run_only(monkeypatch):

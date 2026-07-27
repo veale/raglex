@@ -398,9 +398,9 @@ def test_ecli_matches_any_jurisdiction():
     assert {"ECLI:NL:HR:2021:1234", "ECLI:DE:BGH:2019:ABC", "ECLI:EU:C:2020:559"} <= cites
 
 
-# -- snowball: the citation frontier ----------------------------------------
-def test_snowball_classifies_frontier_and_flags_missing_adapter(catalogue, tmp_path):
-    from raglex.citations import snowball
+# -- citation frontier ------------------------------------------------------
+def test_frontier_classifies_and_flags_missing_adapter(catalogue, tmp_path):
+    from raglex.citations import citation_frontier as snowball
 
     ts = TextStore(tmp_path / "text")
     _doc(catalogue, ts, "case-1",

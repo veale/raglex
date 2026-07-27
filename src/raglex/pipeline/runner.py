@@ -172,11 +172,11 @@ class Pipeline:
         # made that walk crawl at ~20 stubs/s against Postgres (hours of no-op over
         # a 300k-item TOC). The prefilter answers "held? extracted?" for 200 stubs
         # in one IN-query; every decision the loop takes per stub is unchanged.
-        annotated = (((s, None, None) for s in stubs) if refetch_held
+        annotated = (((s, None, None, None) for s in stubs) if refetch_held
                      else self._batched_held(stubs))
 
         try:
-            for stub, held_id, held_extracted in annotated:
+            for stub, held_id, held_has_text, held_extracted in annotated:
                 if cancel_check and cancel_check():
                     stats.notes.append("cancelled")
                     cancelled = True
@@ -234,7 +234,7 @@ class Pipeline:
                 # Both lookups were answered by the batched prefilter above (held_id /
                 # held_extracted ride in with the stub); refetch_held skips it entirely.
                 refreshed = False
-                if held_id is not None:
+                if held_id is not None and held_has_text is not False:
                     # …unless the feed says the content CHANGED: a differing contenthash
                     # (FCL's change signal) means the held copy is a superseded revision —
                     # re-fetch it. No hash on either side → assume unchanged (the old rule).
@@ -331,17 +331,19 @@ class Pipeline:
                 # and we already hold it, treat it as deduped (unless a deliberate
                 # refetch/refresh). A genuine upstream revision still stores: it keeps the
                 # stub's id, or is flagged `refreshed` by the contenthash-change path.
-                if (record.stable_id != stub.stable_id and not refetch_held
-                        and not refreshed
-                        and self.catalogue.held_extraction_state([record.stable_id])):
-                    stats.deduped += 1
-                    if not wm_frozen:
-                        highest = _max_watermark(
-                            highest,
-                            stub.hints.get("watermark")
-                            or (stub.hint_date and stub.hint_date.isoformat()),
-                        )
-                    continue
+                if record.stable_id != stub.stable_id and not refetch_held and not refreshed:
+                    real_state = self.catalogue.held_extraction_state([record.stable_id])
+                    # A full-text held copy wins.  A metadata-only copy is deliberately
+                    # replaceable: this fetch may be the source that finally supplies text.
+                    if real_state.get(record.stable_id, (False, False))[0]:
+                        stats.deduped += 1
+                        if not wm_frozen:
+                            highest = _max_watermark(
+                                highest,
+                                stub.hints.get("watermark")
+                                or (stub.hint_date and stub.hint_date.isoformat()),
+                            )
+                        continue
 
                 if self._ingest(record, stats):
                     stats.stored += 1
@@ -426,14 +428,19 @@ class Pipeline:
             list(by_alias.values())) if by_alias else {}
         for s in buf:
             if s.stable_id and s.stable_id in state:
-                yield s, s.stable_id, state[s.stable_id]
+                has_text, extracted = state[s.stable_id]
+                yield s, s.stable_id, has_text, extracted
             elif s.landing_url and s.landing_url in by_url:
-                yield s, by_url[s.landing_url], None
+                held_id = by_url[s.landing_url]
+                has_text, extracted = self.catalogue.held_extraction_state(
+                    [held_id]).get(held_id, (True, False))
+                yield s, held_id, has_text, extracted
             elif s.stable_id and by_alias.get(s.stable_id) in alias_state:
                 dst = by_alias[s.stable_id]
-                yield s, dst, alias_state[dst]
+                has_text, extracted = alias_state[dst]
+                yield s, dst, has_text, extracted
             else:
-                yield s, None, None
+                yield s, None, None, None
 
     def _ingest(self, record: Record, stats: RunStats) -> bool:
         """Dedup → store raw → catalogue. Returns True if stored."""

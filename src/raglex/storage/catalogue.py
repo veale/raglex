@@ -2172,7 +2172,7 @@ class Catalogue:
         else:
             appno_expr = "json_extract(meta_json, '$.appno')"
         minted = {"echr_appno": 0, "fr_number": 0, "fr_code_article": 0,
-                  "de_case": 0, "de_law": 0}
+                  "de_case": 0, "de_law": 0, "ca_french_neutral": 0}
         rows = self.conn.execute(
             f"SELECT ecli, {appno_expr} AS appno FROM documents "
             "WHERE source = 'echr' AND ecli IS NOT NULL AND meta_json IS NOT NULL"
@@ -2253,6 +2253,28 @@ class Catalogue:
                         "ON CONFLICT(alias) DO NOTHING", (alias.casefold(), r["stable_id"], source)
                     )
                     minted["de_law" if source == "de-law" else "de_case"] += 1
+            # Canadian decisions are one Work with English and French neutral-citation
+            # codes.  Older imports keyed the Work on SCC/FCA/FC/TCC/CMAC but left the
+            # corresponding CSC/CAF/CF/CCI/CACM candidates dangling.  Rebuild those
+            # deterministic aliases directly from stable_id — no document re-extraction.
+            from ..citations.courts import CANADIAN_FRENCH_COURT_EQUIVALENTS
+
+            reverse = {english.lower(): french.lower()
+                       for french, english in CANADIAN_FRENCH_COURT_EQUIVALENTS.items()}
+            ca_rows = self.conn.execute(
+                "SELECT stable_id FROM documents WHERE source = 'ca-caselaw'"
+            )
+            for r in ca_rows:
+                parts = r["stable_id"].split("/")
+                if len(parts) != 3 or parts[0].lower() not in reverse:
+                    continue
+                alias = "/".join((reverse[parts[0].lower()], parts[1], parts[2]))
+                cur = self.conn.execute(
+                    "INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?) "
+                    "ON CONFLICT(alias) DO NOTHING",
+                    (alias, r["stable_id"], "ca-french-neutral"),
+                )
+                minted["ca_french_neutral"] += max(cur.rowcount, 0)
         return minted
 
     def backfill_dutch_aliases(self) -> dict:
@@ -2659,21 +2681,27 @@ class Catalogue:
             (limit,),
         ).fetchall()
 
-    def held_extraction_state(self, ids: list[str]) -> dict[str, bool]:
-        """``{stable_id: has_extraction_stamp}`` for the HELD subset of ``ids`` — the
-        pipeline's batched dedup prefilter. A bulk backfill's resume pass re-walks a
-        source's whole catalogue mostly re-seeing held documents; one point SELECT
-        per stub made that walk run at ~20 stubs/s against Postgres (a multi-hour
-        no-op over a 300k-item TOC). One IN-query per chunk instead."""
-        out: dict[str, bool] = {}
+    def held_extraction_state(self, ids: list[str]) -> dict[str, tuple[bool, bool]]:
+        """``{stable_id: (has_text, has_extraction_stamp)}`` for held ``ids``.
+
+        ``has_text`` is part of the dedup decision, not merely dashboard metadata.  A
+        metadata-only document is a placeholder, and a later full-text adapter must be
+        allowed to fetch and supersede it.  Treating every primary-key hit as complete
+        stranded exactly those cross-source enrichments (for example GOV.UK text for a
+        BAILII UKET stub).
+
+        The second flag keeps the existing crash-recovery behaviour: a full-text document
+        stored just before extraction is deduped but carried into the extraction backlog.
+        One batched query still replaces hundreds of point lookups on resume walks."""
+        out: dict[str, tuple[bool, bool]] = {}
         ids = [i for i in dict.fromkeys(ids) if i]
         for i in range(0, len(ids), 400):
             chunk = ids[i:i + 400]
             qs = ",".join("?" * len(chunk))
             for r in self.conn.execute(
-                    f"SELECT stable_id, last_extracted_at FROM documents "
+                    f"SELECT stable_id, has_text, last_extracted_at FROM documents "
                     f"WHERE stable_id IN ({qs})", chunk).fetchall():
-                out[r["stable_id"]] = bool(r["last_extracted_at"])
+                out[r["stable_id"]] = (bool(r["has_text"]), bool(r["last_extracted_at"]))
         return out
 
     def alias_targets(self, refs: list[str]) -> dict[str, str]:

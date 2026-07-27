@@ -76,6 +76,19 @@ class Court:
     generic: bool = False
 
 
+# Official French neutral-citation court codes → the canonical document-id code used by
+# the bilingual Canadian bulk corpus.  A judgment is one Work in two languages:
+# ``2019 CSC 65`` and ``2019 SCC 65`` must therefore land on the same ``scc/2019/65``
+# node, not form parallel French and English case graphs.
+CANADIAN_FRENCH_COURT_EQUIVALENTS: dict[str, str] = {
+    "CSC": "SCC",    # Cour suprême du Canada
+    "CAF": "FCA",    # Cour d'appel fédérale
+    "CF": "FC",      # Cour fédérale
+    "CCI": "TCC",    # Cour canadienne de l'impôt
+    "CACM": "CMAC",  # Cour d'appel de la cour martiale
+}
+
+
 # Seed set — common-law neutral-citation courts. Extend freely; the detector
 # already finds *unknown* codes, this just classifies the ones we recognise.
 COURTS: tuple[Court, ...] = (
@@ -245,6 +258,11 @@ COURTS: tuple[Court, ...] = (
     Court("FC", "Federal Court (Canada)", "CA", bracketed=False),
     Court("TCC", "Tax Court of Canada", "CA", bracketed=False),
     Court("CMAC", "Court Martial Appeal Court of Canada", "CA", bracketed=False),
+    Court("CSC", "Cour suprême du Canada", "CA", bracketed=False),
+    Court("CAF", "Cour d'appel fédérale", "CA", bracketed=False),
+    Court("CF", "Cour fédérale", "CA", bracketed=False),
+    Court("CCI", "Cour canadienne de l'impôt", "CA", bracketed=False),
+    Court("CACM", "Cour d'appel de la cour martiale du Canada", "CA", bracketed=False),
     Court("ONCA", "Court of Appeal for Ontario", "CA", bracketed=False),
     Court("ONSC", "Ontario Superior Court of Justice", "CA", bracketed=False),
     Court("ONSCDC", "Ontario Divisional Court", "CA", bracketed=False),

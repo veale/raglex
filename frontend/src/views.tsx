@@ -564,7 +564,7 @@ const docTypeLabel = (t?: string | null) => t ? (DOC_TYPE_LABEL[t] || t.replace(
 const relationLabel = (t: string) => RELATION_LABEL[t] || t.replace(/_/g, " ");
 
 // Start a background job and poll it to completion, reporting progress as it goes.
-async function runJob(kind: "radiate" | "harvest-all", body: Record<string, unknown>,
+async function runJob(kind: "harvest-all", body: Record<string, unknown>,
                       onProgress: (p: any) => void): Promise<any> {
   const { job_id } = await api.startJob(kind, body);
   for (;;) {
@@ -2121,7 +2121,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
   const [doc, err, reload] = useAsync(() => api.document(id), [id]);
   const [pinAnchor, setPinAnchor] = useState("");
   const [editing, setEditing] = useState(false);
-  // Options (snowball, graph, fix-metadata) and provenance metadata are hidden by default
+  // Options (find-citing, graph, fix-metadata) and provenance metadata are hidden by default
   // behind a subtle toggle so the reading surface stays uncluttered.
   const [showOpts, setShowOpts] = useState(false);
   const tray = useTray();
@@ -2173,7 +2173,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         {showOpts && (
           <div className="opts-tray">
             <div className="row" style={{ alignItems: "flex-start" }}>
-              {canWrite && <Snowball seed={d.stable_id} onDone={reload} />}
+              {canWrite && <FindCiting seed={d.stable_id} onDone={reload} />}
               {canWrite && <button onClick={() => setEditing((e) => !e)} style={{ flex: "0 0 auto" }}>✎ {editing ? "cancel" : "fix metadata"}</button>}
               <button onClick={() => openGraph(d.stable_id)} style={{ flex: "0 0 auto" }}>◴ View citation graph</button>
             </div>
@@ -2480,35 +2480,21 @@ function AugmentPanel({ docId, onDone, pinAnchor, clearPin }: { docId: string; o
   );
 }
 
-// Citation-network actions for this document: snowball OUT (what it cites, N hops)
-// and discover IN (new judgments that cite it, via the live source).
-function Snowball({ seed, onDone }: { seed: string; onDone: () => void }) {
-  const [degrees, setDegrees] = useState(2);
-  const [busy, setBusy] = useState<"" | "out" | "in">("");
+// Discover NEW judgments that cite this document, via the live source (Find Case Law /
+// CELLAR) — forward-citation discovery.
+function FindCiting({ seed, onDone }: { seed: string; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  async function out() {
-    setBusy("out"); setMsg("radiating…");
-    try {
-      const r = await runJob("radiate", { seeds: [seed], degrees },
-        (p) => setMsg(`${p.stage}: fetched ${p.done}/${p.total}…`));
-      const got = (r.degrees || []).reduce((a: number, d: any) => a + d.harvested, 0);
-      setMsg(`✓ fetched ${got} doc(s) across ${r.degrees?.length || 0} degree(s)`); onDone();
-    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(""); }
-  }
   async function inbound() {
-    setBusy("in"); setMsg("searching the source for cases citing this…");
+    setBusy(true); setMsg("searching the source for cases citing this…");
     try {
       const r = await api.discoverCiting(seed);
       setMsg(r.error ? "error: " + r.error : `✓ found ${r.count} new case(s) citing this (via ${r.via})`); onDone();
-    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(""); }
+    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
   }
   return (
     <span style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 4 }}>
-      <button disabled={!!busy} onClick={out} title="Fetch what this cites, then what those cite, N degrees out">❅ {busy === "out" ? "snowballing…" : "Snowball"}</button>
-      <select value={degrees} onChange={(e) => setDegrees(+e.target.value)} disabled={!!busy} style={{ width: 78 }}>
-        {[1, 2, 3].map((n) => <option key={n} value={n}>{n} deg</option>)}
-      </select>
-      <button disabled={!!busy} onClick={inbound} title="Find NEW judgments that cite this, via Find Case Law / CELLAR">🔎 {busy === "in" ? "finding…" : "Find citing"}</button>
+      <button disabled={busy} onClick={inbound} title="Find NEW judgments that cite this, via Find Case Law / CELLAR">🔎 {busy ? "finding…" : "Find citing cases"}</button>
       {msg && <span className={msg.startsWith("error") ? "err" : "muted"} style={{ fontSize: 11 }}>{msg}</span>}
     </span>
   );
@@ -2777,66 +2763,6 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
   );
 }
 
-// --- Import (new / bulk) ---------------------------------------------------
-// Paste any text (a judgment, an email, a reading list) → detect every citation in it
-// and seed the graph forwards (what they cite) and backwards (what cites them).
-function SeedTextPanel({ open }: { open: (id: string) => void }) {
-  const [text, setText] = useState("");
-  const [detected, setDetected] = useState<any[] | null>(null);
-  const [degrees, setDegrees] = useState(1);
-  const [citing, setCiting] = useState(true);
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
-  const detect = async () => {
-    setBusy(true); setMsg("");
-    try { const r = await api.detectCitations(text); setDetected(r.citations || []); }
-    catch (e: any) { setMsg("error: " + e.message); }
-    finally { setBusy(false); }
-  };
-  const seed = async () => {
-    setMsg("starting…");
-    try {
-      const { job_id } = await api.startJob("seed-text", { text, degrees, include_citing: citing });
-      setMsg(`✓ seeding job ${job_id.slice(0, 8)} started — watch progress in Jobs below`);
-    } catch (e: any) { setMsg("error: " + e.message); }
-  };
-  const routable = (detected || []).filter((c) => c.routable).length;
-  return (
-    <div className="panel">
-      <h3 style={{ marginTop: 0 }}>Seed from pasted text
-        <span className="muted"> — paste anything with citations; detect & pull them, then radiate</span></h3>
-      <textarea value={text} onChange={(e) => setText(e.target.value)} style={{ minHeight: 110 }}
-        placeholder="Paste a judgment, a reading list, an email… ECLIs, neutral citations ([2021] UKSC 12), CELEX, and Acts are all detected." />
-      <div className="row" style={{ alignItems: "center", marginTop: 8 }}>
-        <button disabled={busy || !text.trim()} onClick={detect} style={{ flex: "0 0 auto" }}>🔎 Detect</button>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, flex: "0 0 auto", margin: 0 }}>
-          degrees out
-          <select value={degrees} onChange={(e) => setDegrees(Number(e.target.value))} style={{ width: 60 }}>
-            <option value={0}>0</option><option value={1}>1</option><option value={2}>2</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 4, flex: "0 0 auto", margin: 0 }}>
-          <input type="checkbox" checked={citing} onChange={(e) => setCiting(e.target.checked)} style={{ width: "auto" }} />
-          also pull what cites them
-        </label>
-        <button className="primary" disabled={!detected || detected.length === 0} onClick={seed} style={{ flex: "0 0 auto" }}>
-          ⤓ Seed & radiate</button>
-      </div>
-      {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
-      {detected && (
-        <div style={{ marginTop: 6 }}>
-          <p className="muted" style={{ fontSize: 12 }}>{detected.length} citation(s) detected · {routable} routable</p>
-          {detected.map((c, i) => (
-            <span key={i} className="tag" title={c.form}>
-              {c.in_corpus ? <a onClick={() => open(c.candidate)} style={{ cursor: "pointer" }}>{c.candidate} ✓</a> : c.candidate}
-              <span className="muted"> · {c.form}{!c.routable ? " · no adapter" : ""}</span>
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 export function ImportView({ open }: { open?: (id: string) => void }) {
   const [msg, setMsg] = useState("");
@@ -2846,7 +2772,6 @@ export function ImportView({ open }: { open?: (id: string) => void }) {
   const show = (r: any) => setMsg(typeof r === "string" ? r : JSON.stringify(r));
   return (
     <div>
-      <SeedTextPanel open={open || (() => {})} />
       <div className="panel">
         <p className="muted">Import standalone secondary material here. To attach material to a <i>specific</i> case or
           law section, open it in Search/Corpus and use its “Augment” panel instead.</p>
@@ -3377,7 +3302,7 @@ function FrequencySelect({ minutes, onChange }: { minutes: number; onChange: (m:
   );
 }
 
-// --- Watches (scheduled keyword harvest + autosnowball) --------------------
+// --- Keep current: sources, their update status, and the watches on them ----
 // Plain-language capability chips for a source — so it's obvious what a watch on it can and
 // can't do (search at the API vs post-filter, incremental "new since last run", forward-
 // citation discovery, neutral-citation gap-scanning).
@@ -3409,7 +3334,7 @@ function KeepCurrentPanel() {
     ["Pull EU case names / subjects (EUR-Lex)", "daily", "Fills missing CJEU case names so their OSCOLA citations read properly."],
     ["Re-check outstanding legislation amendments", "hourly", "Re-pulls acts whose legislation.gov.uk effects re-check is due (bounded)."],
     ["Propagate changes an act makes", "hourly", "Flags held acts affected by a change for re-pull."],
-    ["Rebuild citation-frequency roll-up", "hourly", "Keeps the worklist ranking + snowball fresh."],
+    ["Rebuild citation-frequency roll-up", "hourly", "Keeps the worklist ranking fresh."],
     ["Top up the statute gazetteer", "weekly", "Pulls newly passed acts from legislation.gov.uk so name citations keep confirming."],
     ["Drain the harvest worklist", "per tick", "Fetches a bounded batch of routable references each tick (set auto-drain on the Unresolved tab)."],
     ["Run due watches", "per tick", "Every enabled watch whose cadence is due starts as a Job."],
@@ -3632,14 +3557,6 @@ const MODE_META: Record<string, { label: string; tone: string; hint: string }> =
   none: { label: "—", tone: "muted", hint: "No incremental path." },
 };
 
-function fmtCadence(min?: number | null): string {
-  if (!min) return "—";
-  if (min % 43200 === 0) return `${min / 43200}mo`;
-  if (min % 10080 === 0) return `${min / 10080}w`;
-  if (min % 1440 === 0) return `${min / 1440}d`;
-  if (min % 60 === 0) return `${min / 60}h`;
-  return `${min}m`;
-}
 function relTime(iso?: string | null): string {
   if (!iso) return "never";
   const t = new Date(iso).getTime();
@@ -3670,97 +3587,245 @@ function RunDots({ runs }: { runs: any[] }) {
   );
 }
 
-function KeepCurrentStatusPanel() {
-  const [data, err, reload, loading] = useAsync(() => api.keepCurrent(), []);
+const JURIS_NAMES: Record<string, string> = { GB: "United Kingdom", EU: "European Union",
+  CoE: "Council of Europe (ECHR)", IE: "Ireland", FR: "France", DE: "Germany", NL: "Netherlands",
+  US: "United States", CA: "Canada", AU: "Australia", NZ: "New Zealand", SG: "Singapore",
+  HK: "Hong Kong", IN: "India", "": "Other" };
+
+// One watch's plan, rendered inline: what it harvests / discovers / enriches / tags.
+function WatchPlan({ w }: { w: any }) {
+  return (
+    <span className="muted" style={{ fontSize: 11 }}>
+      {w.keywords?.length ? <>“{w.keywords.join(", ")}” </> : "all new items "}
+      {w.discover ? <span className="ok">· follows cites of {w.discover} </span> : null}
+      {w.enrich ? "· fetches cited authorities " : "· no enrichment "}
+      {w.tag ? <>· →#{w.tag} </> : null}
+      {w.last_result && <>· <i>{summariseRun(w.last_result)}</i></>}
+    </span>
+  );
+}
+
+// The inline "add a watch to this source" form, revealed inside a source's dropdown.
+function AddWatchInline({ source, info, onCreated }: { source: string; info: any; onCreated: () => void }) {
+  const [name, setName] = useState("");
+  const [keywords, setKeywords] = useState("");
+  const [enrich, setEnrich] = useState(true);
+  const [tag, setTag] = useState("");
+  const [cadence, setCadence] = useState(1440);
+  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const runNow = async (key: string, backfill: boolean) => {
-    setBusy(key + backfill); setMsg("");
+  async function create() {
+    if (!name.trim()) { setMsg("give the watch a name"); return; }
+    setBusy(true); setMsg("");
+    const spec: any = { source, enrich, max_pages: 1 };
+    if (keywords.trim()) spec.keywords = keywords.split(",").map((k) => k.trim()).filter(Boolean);
+    if (tag.trim()) spec.tag = tag.trim();
     try {
-      const r = await api.harvestSource({ source: key, backfill, max_pages: backfill ? null : 3 });
-      setMsg(r.error ? `✗ ${key}: ${r.error}` : `✓ ${backfill ? "backfill" : "harvest"} ${key} queued — see Jobs`);
+      await api.createWatch({ name: name.trim(), spec, cadence_minutes: cadence });
+      setName(""); setKeywords(""); setTag(""); onCreated();
+    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+  }
+  return (
+    <div className="add-watch">
+      <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="new watch name" style={{ minWidth: 160 }} />
+        <input value={keywords} onChange={(e) => setKeywords(e.target.value)} style={{ minWidth: 200 }}
+          placeholder={info?.keyword_search ? "keywords (searched at source), comma-sep" : "keywords (post-filter), comma-sep — optional"} />
+        <label style={{ flex: "0 0 auto" }} title="After harvesting, fetch the routable authorities each new case cites (one hop).">
+          <input type="checkbox" checked={enrich} onChange={(e) => setEnrich(e.target.checked)} /> fetch cited authorities</label>
+        <input value={tag} onChange={(e) => setTag(e.target.value)} placeholder="tag (optional)" style={{ maxWidth: 150 }} />
+        <label style={{ flex: "0 0 auto" }}>every <FrequencySelect minutes={cadence} onChange={setCadence} /></label>
+        <button className="primary" disabled={busy} onClick={create}>{busy ? "saving…" : "+ Add watch"}</button>
+      </div>
+      {msg && <p className="err" style={{ fontSize: 12, margin: "4px 0 0" }}>{msg}</p>}
+    </div>
+  );
+}
+
+// The unified keep-current dashboard: every source, grouped by jurisdiction, showing how it
+// stays current and the watches on it. Expand a source to manage its watches inline (edit
+// cadence, enable/disable, run, delete) and add a new one — status and settings in one place.
+function KeepCurrentDashboard() {
+  const [data, err, reload, loading] = useAsync(() => api.keepCurrent(), []);
+  const [cat] = useAsync(() => api.sourceCatalog(), []);
+  const [allWatches, , reloadWatches] = useAsync(() => api.watches(), []);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+  const reloadAll = () => { reload(); reloadWatches(); };
+  const catByKey: Record<string, any> = {};
+  for (const c of cat ?? []) catByKey[c.key] = c;
+
+  const runNow = async (key: string) => {
+    setBusy("h" + key); setMsg("");
+    try {
+      const r = await api.harvestSource({ source: key, backfill: false, max_pages: 3 });
+      setMsg(r.error ? `✗ ${key}: ${r.error}` : `✓ harvest ${key} queued — watch it in Jobs`);
     } catch (e: any) { setMsg("✗ " + e); } finally { setBusy(null); }
   };
   const toggleWatch = async (id: number, enabled: boolean) => {
     setBusy("w" + id);
-    try { await api.updateWatch(id, { enabled }); reload(); } finally { setBusy(null); }
+    try { await api.updateWatch(id, { enabled }); reloadAll(); } finally { setBusy(null); }
   };
-  if (err) return <div className="panel"><h3>Keep-current status</h3><p className="err">{err}</p></div>;
-  if (!data) return <div className="panel"><h3>Keep-current status</h3><p className="muted">loading…</p></div>;
+  const setCadence = async (id: number, m: number) => { await api.updateWatch(id, { cadence_minutes: m }); reloadAll(); };
+  const runWatch = async (id: number) => {
+    setBusy("r" + id); setMsg("");
+    try { const r = await api.runWatch(id); setMsg(r.error ? "✗ " + r.error : `✓ watch queued — see Jobs`); reloadAll(); }
+    catch (e: any) { setMsg("✗ " + e); } finally { setBusy(null); }
+  };
+  const del = async (id: number) => { if (!confirm("Delete this watch?")) return; await api.deleteWatch(id); reloadAll(); };
 
-  const JURIS: Record<string, string> = { GB: "United Kingdom", EU: "European Union", CoE: "Council of Europe (ECHR)",
-    IE: "Ireland", FR: "France", DE: "Germany", NL: "Netherlands", US: "United States", CA: "Canada",
-    AU: "Australia", NZ: "New Zealand", SG: "Singapore", HK: "Hong Kong", IN: "India", "": "Other" };
+  if (err) return <div className="panel"><h3>Keep current</h3><p className="err">{err}</p></div>;
+  if (!data) return <div className="panel"><h3>Keep current</h3><p className="muted">loading…</p></div>;
+
   const groups: Record<string, any[]> = {};
   for (const s of data.sources) (groups[s.jurisdiction] ||= []).push(s);
-  const order = Object.keys(groups).sort((a, b) => (JURIS[a] || a).localeCompare(JURIS[b] || b));
-  // headline: how many keep-current-capable sources actually have an enabled watch
-  const capable = data.sources.filter((s) => s.can_incremental);
-  const watched = capable.filter((s) => s.watch?.enabled);
-  const gaps = data.sources.filter((s) => s.incremental_mode === "targeted");
+  const order = Object.keys(groups).sort((a, b) => (JURIS_NAMES[a] || a).localeCompare(JURIS_NAMES[b] || b));
+  const capable = data.sources.filter((s: any) => s.can_incremental);
+  const watched = capable.filter((s: any) => (s.watches || []).some((w: any) => w.enabled));
+  const gaps = data.sources.filter((s: any) => s.incremental_mode === "targeted");
+  // discover-citing watches aren't bound to a source — surface them in their own section
+  const citingWatches = (allWatches ?? []).filter((w: any) => !w.spec?.source && w.spec?.discover?.citing);
 
+  const th = (label: string) => <th key={label}>{label}</th>;
   return (
-    <div className="panel">
+    <div className="panel keep-current">
       <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-        <h3 style={{ marginTop: 0 }}>Keep-current status <span className="muted">— by jurisdiction</span></h3>
-        <button onClick={reload} disabled={loading} style={{ flex: "0 0 auto" }}>↻ Refresh</button>
+        <h3 style={{ marginTop: 0 }}>Keep current <span className="muted">— sources, their status, and the watches on them</span></h3>
+        <button onClick={reloadAll} disabled={loading} style={{ flex: "0 0 auto" }}>↻ Refresh</button>
       </div>
       <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-        <b>{watched.length}/{capable.length}</b> pollable sources have an enabled watch keeping them current.
-        Incremental runs re-check <b>{data.overlap_default_days} day(s)</b> before their cursor by default
-        (Settings → “Incremental overlap”), and never let a future-dated item skip the queue.
-        {gaps.length > 0 && <> {gaps.length} source(s) are <b>targeted-only</b> — no feed to poll (a gap).</>}
+        {watched.length}/{capable.length} pollable sources have a watch keeping them current. Incremental runs
+        re-check {data.overlap_default_days} day(s) before their cursor (set in Settings), and never let a
+        future-dated item skip the queue.{gaps.length > 0 && <> {gaps.length} source(s) can only be fetched by
+        naming an item — no feed to poll.</>} Expand a source to add or manage its watches.
       </p>
       {order.map((j) => (
-        <div key={j} style={{ marginBottom: 14 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, margin: "6px 0 2px", borderBottom: "1px solid var(--border)" }}>
-            {JURIS[j] || j} <span className="muted" style={{ fontWeight: 400 }}>({groups[j].length})</span>
-          </div>
-          <table className="grid" style={{ fontSize: 12 }}>
-            <thead><tr>
-              <th>source</th><th>how it updates</th><th>watch</th><th>held</th><th>recent runs</th><th></th>
-            </tr></thead>
+        <div key={j} style={{ marginBottom: 16 }}>
+          <div className="kc-juris">{JURIS_NAMES[j] || j} <span className="muted">({groups[j].length})</span></div>
+          <table className="grid kc-table">
+            <thead><tr>{["source", "how it updates", "held", "recent runs", "watches", ""].map(th)}</tr></thead>
             <tbody>
-              {groups[j].sort((a, b) => a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label)).map((s) => {
+              {groups[j].sort((a: any, b: any) => a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label)).map((s: any) => {
                 const m = MODE_META[s.incremental_mode] || MODE_META.none;
-                const w = s.watch;
+                const ws: any[] = s.watches || [];
+                const enabledN = ws.filter((w) => w.enabled).length;
+                const isOpen = !!expanded[s.key];
+                const canHarvest = s.incremental_mode !== "closed" && s.incremental_mode !== "bulk";
+                const info = catByKey[s.key];
                 return (
-                  <tr key={s.key}>
-                    <td>
-                      <span title={s.key}>{s.label}</span>
-                      <div className="muted" style={{ fontSize: 10 }}>{s.kind} · {s.key}
-                        {s.consecutive_failures > 0 && <span className="err"> · ⚠ {s.consecutive_failures} fails</span>}
-                      </div>
-                    </td>
-                    <td><span className={`cap-chip`} data-tone={m.tone} title={m.hint}>{m.label}</span>
-                      {s.watermark && <div className="muted" style={{ fontSize: 10 }}>cursor {String(s.watermark).slice(0, 19)}</div>}</td>
-                    <td style={{ whiteSpace: "nowrap" }}>
-                      {!w ? (s.can_incremental
-                        ? <span className="muted" title="Pollable, but no watch is wired — it isn't being kept current.">no watch</span>
-                        : <span className="muted">—</span>)
-                        : w.enabled
-                          ? <span className="ok" title={`every ${fmtCadence(w.cadence_minutes)} · last ${relTime(w.last_run_at)} · next ${relTime(w.next_due)}${w.overlap_days != null ? ` · overlap ${w.overlap_days}d` : ""}`}>
-                            ● {fmtCadence(w.cadence_minutes)} · next {relTime(w.next_due)}</span>
-                          : <span className="warn" title="A watch exists but is DISABLED — nothing runs.">○ disabled</span>}
-                    </td>
-                    <td style={{ textAlign: "right" }}>{s.doc_count.toLocaleString()}</td>
-                    <td><RunDots runs={s.recent_runs} /></td>
-                    <td style={{ whiteSpace: "nowrap" }}>
-                      {s.incremental_mode !== "closed" && s.incremental_mode !== "bulk" &&
-                        <button disabled={busy === s.key + false} style={{ fontSize: 11, padding: "1px 6px" }}
-                          title="Harvest new items now (bounded)" onClick={() => runNow(s.key, false)}>↻</button>}
-                      {w && <button disabled={busy === "w" + w.watch_id} style={{ fontSize: 11, padding: "1px 6px", marginLeft: 4 }}
-                        title={w.enabled ? "Disable this watch" : "Enable this watch"} onClick={() => toggleWatch(w.watch_id, !w.enabled)}>
-                        {w.enabled ? "⏸" : "▶"}</button>}
-                    </td>
-                  </tr>
+                  <>
+                    <tr key={s.key} className={isOpen ? "kc-row open" : "kc-row"}>
+                      <td>
+                        <button className="kc-caret" title={isOpen ? "collapse" : "expand — manage watches"}
+                          onClick={() => setExpanded((e) => ({ ...e, [s.key]: !e[s.key] }))}>{isOpen ? "▾" : "▸"}</button>
+                        <span title={s.key}>{s.label}</span>
+                        <div className="muted" style={{ fontSize: 10 }}>{s.kind} · {s.key}
+                          {s.consecutive_failures > 0 && <span className="err"> · ⚠ {s.consecutive_failures} fails</span>}</div>
+                      </td>
+                      <td><span className="cap-chip" data-tone={m.tone} title={m.hint}>{m.label}</span>
+                        {s.watermark && <div className="muted" style={{ fontSize: 10 }}>cursor {String(s.watermark).slice(0, 19)}</div>}</td>
+                      <td style={{ textAlign: "right" }}>{s.doc_count.toLocaleString()}</td>
+                      <td><RunDots runs={s.recent_runs} /></td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {ws.length === 0
+                          ? (s.can_incremental
+                            ? <a className="kc-add" onClick={() => setExpanded((e) => ({ ...e, [s.key]: true }))}>+ add watch</a>
+                            : <span className="muted">—</span>)
+                          : <a onClick={() => setExpanded((e) => ({ ...e, [s.key]: !e[s.key] }))} style={{ cursor: "pointer" }}
+                              title="expand to manage">{enabledN}/{ws.length} active{ws.length === 1 && ws[0].enabled
+                                ? <span className="muted"> · next {relTime(ws[0].next_due)}</span> : null}</a>}
+                      </td>
+                      <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
+                        {canHarvest && <button className="mini" disabled={busy === "h" + s.key}
+                          title="Harvest new items now (bounded)" onClick={() => runNow(s.key)}>↻ harvest now</button>}
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="kc-detail"><td colSpan={6}>
+                        {info && <div style={{ marginBottom: 8 }}><SourceCaps info={info} /></div>}
+                        {ws.length > 0 && <table className="grid kc-watches"><tbody>
+                          {ws.map((w) => (
+                            <tr key={w.watch_id}>
+                              <td style={{ width: 24 }}><input type="checkbox" checked={w.enabled} title="enabled"
+                                onChange={() => toggleWatch(w.watch_id, !w.enabled)} /></td>
+                              <td><b>{w.name}</b><div><WatchPlan w={w} /></div></td>
+                              <td style={{ whiteSpace: "nowrap" }} className="muted">
+                                every <FrequencySelect minutes={w.cadence_minutes} onChange={(mm) => setCadence(w.watch_id, mm)} />
+                                <div style={{ fontSize: 10 }}>last {relTime(w.last_run_at)}{w.enabled && <> · next {relTime(w.next_due)}</>}</div></td>
+                              <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
+                                <button className="mini" disabled={busy === "r" + w.watch_id} onClick={() => runWatch(w.watch_id)}>▸ run</button>{" "}
+                                <a className="kc-del" title="delete" onClick={() => del(w.watch_id)}>✗</a></td>
+                            </tr>
+                          ))}
+                        </tbody></table>}
+                        <AddWatchInline source={s.key} info={info} onCreated={reloadAll} />
+                      </td></tr>
+                    )}
+                  </>
                 );
               })}
             </tbody>
           </table>
         </div>
       ))}
+
+      <div className="kc-juris" style={{ marginTop: 8 }}>Following citations
+        <span className="muted"> — watches that pull NEW cases citing a target, as they appear</span></div>
+      <CitingWatches watches={citingWatches} reload={reloadAll} />
       {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
+    </div>
+  );
+}
+
+// Source-less watches that follow forward-citations of a target (find NEW cases citing X),
+// plus an inline form to add one — the second, connected half of the keep-current surface.
+function CitingWatches({ watches, reload }: { watches: any[]; reload: () => void }) {
+  const [name, setName] = useState("");
+  const [target, setTarget] = useState("");
+  const [enrich, setEnrich] = useState(true);
+  const [tag, setTag] = useState("");
+  const [cadence, setCadence] = useState(1440);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  async function create() {
+    if (!name.trim() || !target.trim()) { setMsg("give a name and a citation to follow"); return; }
+    setBusy(true); setMsg("");
+    const spec: any = { discover: { citing: target.trim(), via: "auto" }, enrich, max_pages: 1 };
+    if (tag.trim()) spec.tag = tag.trim();
+    try { await api.createWatch({ name: name.trim(), spec, cadence_minutes: cadence }); setName(""); setTarget(""); setTag(""); reload(); }
+    catch (e: any) { setMsg("error: " + e); } finally { setBusy(false); }
+  }
+  return (
+    <div style={{ marginBottom: 8 }}>
+      {watches.length > 0 && <table className="grid kc-watches" style={{ marginBottom: 8 }}><tbody>
+        {watches.map((w) => (
+          <tr key={w.watch_id}>
+            <td style={{ width: 24 }}><input type="checkbox" checked={w.enabled}
+              onChange={async () => { await api.updateWatch(w.watch_id, { enabled: !w.enabled }); reload(); }} /></td>
+            <td><b>{w.name}</b> <span className="ok" style={{ fontSize: 11 }}>follows cites of {w.spec.discover.citing}</span>
+              <div><WatchPlan w={{ ...w.spec, enrich: w.spec.enrich !== false, last_result: w.last_result, discover: null }} /></div></td>
+            <td className="muted" style={{ whiteSpace: "nowrap" }}>every <FrequencySelect minutes={w.cadence_minutes}
+              onChange={async (m) => { await api.updateWatch(w.watch_id, { cadence_minutes: m }); reload(); }} /></td>
+            <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+              <button className="mini" onClick={async () => { await api.runWatch(w.watch_id); reload(); }}>▸ run</button>{" "}
+              <a className="kc-del" title="delete" onClick={async () => { if (confirm("Delete this watch?")) { await api.deleteWatch(w.watch_id); reload(); } }}>✗</a></td>
+          </tr>
+        ))}
+      </tbody></table>}
+      <div className="add-watch">
+        <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="watch name" style={{ minWidth: 150 }} />
+          <input value={target} onChange={(e) => setTarget(e.target.value)} style={{ minWidth: 260, color: "var(--ok)" }}
+            placeholder="follow NEW cases citing… e.g. 32016R0679 (GDPR) or [2014] UKSC 38" />
+          <label style={{ flex: "0 0 auto" }} title="Fetch what each newly found case cites (one hop).">
+            <input type="checkbox" checked={enrich} onChange={(e) => setEnrich(e.target.checked)} /> fetch cited authorities</label>
+          <input value={tag} onChange={(e) => setTag(e.target.value)} placeholder="tag (optional)" style={{ maxWidth: 150 }} />
+          <label style={{ flex: "0 0 auto" }}>every <FrequencySelect minutes={cadence} onChange={setCadence} /></label>
+          <button className="primary" disabled={busy} onClick={create}>{busy ? "saving…" : "+ Follow citation"}</button>
+        </div>
+        {msg && <p className="err" style={{ fontSize: 12, margin: "4px 0 0" }}>{msg}</p>}
+      </div>
     </div>
   );
 }
@@ -3771,21 +3836,20 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
       <div className="panel" style={{ background: "transparent", border: "none", padding: 0, marginBottom: 8 }}>
         <h2 style={{ margin: 0 }}>Maintain</h2>
         <p className="muted" style={{ marginTop: 4 }}>
-          Grow the corpus and keep it current. <b>Keep current</b> is automatic upkeep; <b>Backfill a source</b> pulls a
-          register's whole back-catalogue; <b>Backfill gaps</b> chases 100% completeness court-by-court;{" "}
-          <b>Expand coverage</b> pulls in cited-but-missing authorities; <b>Watches</b> pull new material on a schedule;{" "}
-          <b>Rules</b> are optional shorthands.
+          Grow the corpus and keep it current. Keep current shows every source, how it updates, and the
+          watches on it — schedule new material there. Backfill a source pulls a register's whole
+          back-catalogue; Backfill gaps chases completeness court-by-court; Expand coverage pulls in
+          cited-but-missing authorities; Rules are optional shorthands.
         </p>
         <DbSizeStat />
       </div>
       <JobsQueuePanel />
-      <KeepCurrentStatusPanel />
+      <KeepCurrentDashboard />
       <KeepCurrentPanel />
       <BackfillPanel />
       <GapFillPanel />
       <ExpandCoveragePanel />
       <RefinementFlagsPanel open={open} />
-      <WatchesView />
       <RulesView open={open} />
     </div>
   );
@@ -3886,133 +3950,6 @@ function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void
           );
         })}</tbody>
       </table>
-    </div>
-  );
-}
-
-export function WatchesView() {
-  const [cat] = useAsync(() => api.sourceCatalog(), []);
-  const [watches, , reload] = useAsync(() => api.watches(), []);
-  const [name, setName] = useState("");
-  const [source, setSource] = useState("");
-  const [keywords, setKeywords] = useState("");
-  const [cites, setCites] = useState("");
-  const [citing, setCiting] = useState("");
-  const [degrees, setDegrees] = useState(2);
-  const [tag, setTag] = useState("");
-  const [cadence, setCadence] = useState(1440);
-  const [maxPages, setMaxPages] = useState(1);
-  const [srcOpts, setSrcOpts] = useState<Record<string, string>>({});
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState<number | "new" | null>(null);
-
-  const info = (cat ?? []).find((s) => s.key === source);
-
-  async function create() {
-    if (!name || (!source && !cites && !citing)) { setMsg("give a name and a source, a ‘discover citing’ target, or a ‘cites’ rule"); return; }
-    setBusy("new"); setMsg("");
-    const spec: any = { degrees, max_pages: maxPages };
-    if (source) spec.source = source;
-    const opts = Object.fromEntries(Object.entries(srcOpts).filter(([, v]) => v.trim()));
-    if (source && Object.keys(opts).length) spec.source_options = opts;
-    if (keywords.trim()) spec.keywords = keywords.split(",").map((k) => k.trim()).filter(Boolean);
-    if (citing.trim()) spec.discover = { citing: citing.trim(), via: "auto" };
-    if (cites.trim()) spec.seed_rule = { cites: cites.trim() };
-    if (tag.trim()) spec.tag = tag.trim();
-    try {
-      await api.createWatch({ name, spec, cadence_minutes: cadence });
-      setName(""); setKeywords(""); setCites(""); setCiting(""); setTag(""); setSrcOpts({}); reload();
-    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(null); }
-  }
-  async function run(id: number) {
-    setBusy(id); setMsg("");
-    // runs as a background job now — it shows in the Jobs panel with per-stage progress
-    try {
-      const r = await api.runWatch(id);
-      setMsg(r.error ? "error: " + r.error : `✓ watch #${id} queued — watch it run in the Jobs panel (bottom-left)`);
-      reload();
-    } catch (e: any) { setMsg("error: " + e); } finally { setBusy(null); }
-  }
-  return (
-    <div>
-      <div className="panel">
-        <h3>New watch <span className="muted">— a saved harvest plan: keyword-limit a source, then enrich each new case with its citations.</span></h3>
-        <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-          Scheduling pays off when new material keeps arriving. The two <b style={{ color: "var(--ok)" }}>growing</b> watch
-          types: a <b>source/keyword</b> harvest (new decisions are handed down), and <b>🔎 discover cases citing X</b> —
-          forward-citation discovery via Find Case Law / CELLAR, which finds <i>new</i> judgments that cite a landmark
-          as they appear. The snowball then back-fills each new case’s authorities. A pure <b>graph rule</b> (no source/
-          discovery) is largely <i>one-shot</i> — a backward snowball converges; for a one-off radiate from a single
-          document, use the <b>❅ Snowball</b> button there instead.
-        </p>
-        <div className="row" style={{ flexWrap: "wrap" }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="watch name, e.g. ‘UK tax cases’" style={{ minWidth: 180 }} />
-          <select value={source} onChange={(e) => { setSource(e.target.value); setSrcOpts({}); }} style={{ flex: "0 0 auto" }}>
-            <option value="">— source (optional) —</option>
-            {(cat ?? []).map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
-          </select>
-        </div>
-        {/* morph: explain what THIS source supports, in plain-language capability chips */}
-        {info && <div style={{ marginTop: 4 }}>
-          <p className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{info.description}</p>
-          <SourceCaps info={info} /></div>}
-        {/* per-source options (court filter, feed=new, legislation types, …) — the same
-            knobs the CLI's -o takes, so a watch can be scoped without leaving the UI */}
-        {info && (info.options ?? []).length > 0 && <div className="row" style={{ flexWrap: "wrap", marginTop: 4 }}>
-          {(info.options ?? []).filter((o: any) => o.name !== "query").map((o: any) => (
-            <input key={o.name} value={srcOpts[o.name] ?? ""} title={o.label}
-              onChange={(e) => setSrcOpts({ ...srcOpts, [o.name]: e.target.value })}
-              placeholder={`${o.label}${o.placeholder ? ` — ${o.placeholder}` : ""}`} style={{ minWidth: 200 }} />
-          ))}
-        </div>}
-        <div className="row" style={{ flexWrap: "wrap", marginTop: 4 }}>
-          {source && <input value={keywords} onChange={(e) => setKeywords(e.target.value)}
-            placeholder={info?.keyword_search ? "keywords (searched at source), comma-sep" : "keywords (post-filter), comma-sep"} style={{ minWidth: 220 }} />}
-          <input value={citing} onChange={(e) => setCiting(e.target.value)}
-            title="Find NEW cases that cite this, via Find Case Law search (UK) or CELLAR (EU CELEX). This grows over time."
-            placeholder="🔎 discover NEW cases citing… e.g. 32016R0679 (GDPR) or [2014] UKSC 38" style={{ minWidth: 280, color: "var(--ok)" }} />
-          <input value={cites} onChange={(e) => setCites(e.target.value)}
-            placeholder="…or graph rule: corpus docs citing id" style={{ minWidth: 200 }} />
-        </div>
-        <div className="row" style={{ flexWrap: "wrap", marginTop: 4, alignItems: "center" }}>
-          <label style={{ flex: "0 0 auto" }} title="Enrich each newly-found case by fetching what it cites, N hops out">enrich each case <select value={degrees} onChange={(e) => setDegrees(+e.target.value)}>{[0, 1, 2, 3].map((n) => <option key={n} value={n}>{n} degree{n !== 1 ? "s" : ""}</option>)}</select></label>
-          {source && <label style={{ flex: "0 0 auto" }}>pages <input type="number" min={1} max={20} value={maxPages} onChange={(e) => setMaxPages(+e.target.value || 1)} style={{ width: 50 }} /></label>}
-          <input value={tag} onChange={(e) => setTag(e.target.value)} placeholder="tag results into collection (optional)" style={{ maxWidth: 220 }} />
-          <label style={{ flex: "0 0 auto" }} title="How often the scheduler runs this watch (staggered so equal-cadence watches don't all fire at once)">runs <FrequencySelect minutes={cadence} onChange={setCadence} /></label>
-          <button className="primary" disabled={busy === "new"} style={{ flex: "0 0 auto" }} onClick={create}>{busy === "new" ? "saving…" : "+ Create watch"}</button>
-        </div>
-        {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ wordBreak: "break-word" }}>{msg}</p>}
-      </div>
-      <div className="panel">
-        <h3>Watches</h3>
-        {(watches ?? []).length === 0 && <p className="muted">No watches yet.</p>}
-        <table className="grid"><thead><tr><th></th><th>name</th><th>plan</th><th>every</th><th>last run</th><th></th></tr></thead>
-          <tbody>{(watches ?? []).map((w) => (
-            <tr key={w.watch_id}>
-              <td><input type="checkbox" checked={w.enabled} title="enabled"
-                onChange={async () => { await api.updateWatch(w.watch_id, { enabled: !w.enabled }); reload(); }} /></td>
-              <td>{w.name}</td>
-              <td className="muted" style={{ fontSize: 12 }}>
-                {w.spec.source ? <>harvest <b>{w.spec.source}</b>{w.spec.keywords ? ` · “${w.spec.keywords.join(", ")}”` : ""}</> : null}
-                {w.spec.discover ? <span style={{ color: "var(--ok)" }}>🔎 cases citing <b>{w.spec.discover.citing}</b></span> : null}
-                {w.spec.seed_rule ? <> seed: cites <b>{w.spec.seed_rule.cites}</b></> : null}
-                {` · ❅ ${w.spec.degrees ?? 1}°`}{w.spec.tag ? ` · →#${w.spec.tag}` : ""}
-                {!(w.spec.source || w.spec.discover) && <span title="No renewing source — a backward snowball converges, so scheduling adds little" style={{ color: "var(--warn)" }}> · one-shot</span>}
-                {w.last_result && <span> · <i>{summariseRun(w.last_result)}</i></span>}
-              </td>
-              <td className="muted">{w.spec.source || w.spec.discover
-                ? <FrequencySelect minutes={w.cadence_minutes}
-                    onChange={async (m) => { await api.updateWatch(w.watch_id, { cadence_minutes: m }); reload(); }} />
-                : "—"}</td>
-              <td className="muted">{w.last_run_at ? String(w.last_run_at).slice(0, 16).replace("T", " ") : "never"}</td>
-              <td style={{ whiteSpace: "nowrap" }}>
-                <button disabled={busy === w.watch_id} onClick={() => run(w.watch_id)}>{busy === w.watch_id ? "…" : "▸ run"}</button>{" "}
-                <a style={{ cursor: "pointer" }} title="delete" onClick={async () => { await api.deleteWatch(w.watch_id); reload(); }}>✗</a>
-              </td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </div>
     </div>
   );
 }
@@ -4179,11 +4116,12 @@ function fmtEta(s: number): string {
 
 function summariseRun(r: any): string {
   if (!r) return "";
-  const got = (r.radiate?.degrees || []).reduce((a: number, d: any) => a + d.harvested, 0);
   const stored = r.harvest?.stored ?? 0;
   const disc = r.discover?.count ?? 0;
+  const fetched = r.enrich?.fetched ?? 0;
   return [stored ? `harvested ${stored}` : "", disc ? `discovered ${disc}` : "",
-          `snowballed ${got}`, r.tagged ? `tagged ${r.tagged}` : ""].filter(Boolean).join(" · ");
+          fetched ? `+${fetched} cited` : "", r.tagged ? `tagged ${r.tagged}` : ""]
+    .filter(Boolean).join(" · ") || "no new material";
 }
 
 // --- Unresolved references -------------------------------------------------

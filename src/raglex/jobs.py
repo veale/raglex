@@ -1,6 +1,6 @@
 """Background jobs (§8) — durable, cross-process, restartable.
 
-Long operations (drain the worklist, re-scan the corpus, snowball from a seed) run in a
+Long operations (drain the worklist, re-scan the corpus, run a watch) run in a
 thread and report progress so the UI can show "fetching 5/30" instead of blocking on one
 request. The registry backing them used to be a dict in the API process, which cost three
 things worth having:
@@ -33,8 +33,8 @@ from typing import Callable
 log = logging.getLogger("raglex.jobs")
 
 # Jobs that pass over the WHOLE corpus — pointless (and CPU-wasteful) to run two at once,
-# so these stay one-at-a-time. Everything else (seed-from-text, harvest a category,
-# radiate, expand-citing) is keyed to a specific input and may run simultaneously.
+# so these stay one-at-a-time. Everything else (harvest a category, expand-citing) is
+# keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "backfill-eu-stubs",
@@ -94,7 +94,7 @@ _SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations"})
 # one of these finishes, ``_chain_postprocess`` refreshes those layers. The follow-ups
 # themselves are excluded, so there is no rebuild→rebuild loop.
 CHAIN_TRIGGER_KINDS = frozenset({
-    "harvest-source", "harvest-all", "auto-drain", "expand-citing", "radiate", "seed-text",
+    "harvest-source", "harvest-all", "auto-drain", "expand-citing",
     "refresh-category", "pull-ag-opinions", "harvest-echr", "canlii-enrich",
     "import-bailii-corpus", "import-bailii-zip", "import-bailii-dir", "import-bailii-parquet",
     "import-indian-sci", "import-sg-seed", "import-westlaw-zip", "import-westlaw-dir",
@@ -265,10 +265,8 @@ RUNNERS: dict[str, Callable] = {
     "pull-ag-opinions": lambda f, p, cb, cancel: f.pull_ag_opinions(on_progress=cb, cancel_check=cancel),
     "harvest-all": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),
     "auto-drain": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),
-    "radiate": lambda f, p, cb, cancel: f.radiate(**p, on_progress=cb, cancel_check=cancel),
     "expand-citing": lambda f, p, cb, cancel: f.expand_citing_cases(**p, on_progress=cb, cancel_check=cancel),
     "refresh-category": lambda f, p, cb, cancel: f.refresh_category(**p, on_progress=cb, cancel_check=cancel),
-    "seed-text": lambda f, p, cb, cancel: f.seed_from_text(**p, on_progress=cb, cancel_check=cancel),
     "match-reports": lambda f, p, cb, cancel: f.match_report_citations(on_progress=cb, cancel_check=cancel),
     "import-bailii-corpus": lambda f, p, cb, cancel: f.import_bailii_corpus(**p, on_progress=cb, cancel_check=cancel),
     "import-bailii-zip": lambda f, p, cb, cancel: f.import_bailii_zip(**p, on_progress=cb, cancel_check=cancel),

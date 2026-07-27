@@ -292,6 +292,32 @@ def test_propagate_changes_flags_held_affected_acts(config, monkeypatch):
     assert any(c["affected_id"] == "ukpga/2000/36" for c in changes)
 
 
+def test_changes_feed_skips_assimilated_eu_legislation(config, monkeypatch):
+    """The bounded UK changes-feed worker must not spend its quota on eudn/eur ids,
+    for which legislation.gov.uk returns a guaranteed 404."""
+    from raglex.core.models import DocType, ExtractedVia, Record
+
+    f = Facade(config)
+    with f._open() as (cat, _rs, _ts):
+        for sid in ("eudn/1992/23", "eur/2016/679", "ukpga/2018/12"):
+            rec = Record(
+                source="uk-legislation", stable_id=sid, doc_type=DocType.LEGISLATION,
+                title=sid, extracted_via=ExtractedVia.STRUCTURED,
+            )
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec)
+
+    seen = []
+    monkeypatch.setattr(
+        f, "propagate_changes_from",
+        lambda *, stable_id, **kw: seen.append(stable_id)
+        or {"act": stable_id, "edges": 0, "flagged_for_repull": 0},
+    )
+    result = f.propagate_changes(limit=10)
+    assert result["scanned"] == 1
+    assert seen == ["ukpga/2018/12"]
+
+
 def test_detect_citations_from_pasted_text(config):
     f = Facade(config)
     text = ("In Case C-311/18, ECLI:EU:C:2020:559 the Court considered Article 46 GDPR. "

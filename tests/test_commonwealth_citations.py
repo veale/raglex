@@ -173,6 +173,13 @@ def test_canadian_neutral_citation_is_bracketless_and_year_first():
     assert candidates("Kerr v Baranow, 2011 SCC 10")["2011 SCC 10"] == "scc/2011/10"
 
 
+def test_canadian_french_neutral_codes_share_the_english_case_node():
+    got = candidates("Voir 2016 CAF 93, 2008 CSC 9 et 2018 CF 1145.")
+    assert got["2016 CAF 93"] == "fca/2016/93"
+    assert got["2008 CSC 9"] == "scc/2008/9"
+    assert got["2018 CF 1145"] == "fc/2018/1145"
+
+
 def test_canlii_identifier_mints_a_candidate():
     """CanLII ids are stable and addressable, unlike a printed page reference."""
     got = candidates("R v Miller, 1998 CanLII 5115 (ONCA)")

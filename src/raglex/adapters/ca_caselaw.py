@@ -103,14 +103,21 @@ _CA_NEUTRAL = re.compile(
 
 
 def ca_neutral_slug(citation: str | None) -> str | None:
-    """``"2011 SCC 10"`` → ``"scc/2011/10"`` — the same slug the citation extractor
-    mints for a Canadian neutral citation, so an imported decision lands on the node
-    the corpus was already citing. None when the string carries no neutral citation
-    (docket-style identifiers, which are not citation-addressable)."""
+    """An English *or French* Canadian neutral citation → one canonical case slug.
+
+    ``2011 SCC 10`` and ``2011 CSC 10`` are two official-language expressions of the
+    same judgment, so both become ``scc/2011/10``.  None means the citation is a docket
+    or report reference rather than a neutral citation.
+    """
     m = _CA_NEUTRAL.search(citation or "")
     if not m:
         return None
-    return f"{m.group('court').lower()}/{m.group('year')}/{int(m.group('num'))}"
+    from ..citations.courts import CANADIAN_FRENCH_COURT_EQUIVALENTS
+
+    court = CANADIAN_FRENCH_COURT_EQUIVALENTS.get(
+        m.group("court").upper(), m.group("court").upper()
+    )
+    return f"{court.lower()}/{m.group('year')}/{int(m.group('num'))}"
 
 
 def _surrogate_id(court: str, url: str, citation: str) -> str:

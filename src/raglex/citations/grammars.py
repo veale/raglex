@@ -236,8 +236,8 @@ _COURT_ALIASES = {"EWCH": "EWHC"}
 _LEGISLATION_SERIES = {"ASP": "asp", "ANAW": "anaw", "ASC": "asc", "NIA": "nia"}
 
 
-def _neutral(m: "re.Match[str]") -> Normalised:
-    court = m.group("court")
+def _neutral(m: "re.Match[str]", *, court_override: str | None = None) -> Normalised:
+    court = court_override or m.group("court")
     cu = court.upper()
     if cu in NON_CITATION_TOKENS:
         return None, None, DROP  # currency / ISBN / locator / structure word — not a citation
@@ -257,6 +257,20 @@ def _neutral(m: "re.Match[str]") -> Normalised:
         parts.append(seg.lower())
     parts += [m.group("year"), m.group("num")]
     return "/".join(parts), None, "case"
+
+
+def _neutral_bracketless(m: "re.Match[str]") -> Normalised:
+    """Canada's two official-language codes identify one decision.
+
+    Only apply this mapping to the bare year-first grammar.  Bracket style is the
+    jurisdiction discriminator for colliding Commonwealth codes (notably FCA), and a
+    bracketed token must retain its ordinary meaning.
+    """
+    from .courts import CANADIAN_FRENCH_COURT_EQUIVALENTS
+
+    court = m.group("court")
+    canonical = CANADIAN_FRENCH_COURT_EQUIVALENTS.get(court.upper(), court)
+    return _neutral(m, court_override=canonical)
 
 
 # Bracketed form: "[2024] UKSC 12", "[2024] EWCA Civ 1", "[2012] UKUT 440 (AAC)",
@@ -354,7 +368,7 @@ register(Grammar(
 register(Grammar(
     "neutral_citation_bracketless", "case",
     re.compile(r"\b(?P<year>(?:19|20)\d{2})\s+(?P<court>[A-Z]{2,6})\s+(?P<num>\d{1,5})\b"),
-    _neutral,
+    _neutral_bracketless,
 ))
 
 
