@@ -310,6 +310,42 @@ def test_export_retrieval_citations_batches_and_filters(facade):
     assert "Smith v Jones" in [i["citation"] for b in withn["batches"] for i in b["items"]]
 
 
+def test_export_excludes_references_already_resolvable_via_alias(facade):
+    """The "same cases keep coming back" bug: importing a case mints an alias for its report
+    citation, so the citation is satisfiable — but the citing EDGE stays 'pending' until the
+    resolver re-runs, so the pending-reference rollup still holds it. The export must drop
+    anything already resolvable (alias → held doc), or the user re-retrieves it forever."""
+    from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
+                                    ResolutionStatus, TypedRelation)
+    from raglex.core.text import fold
+    from datetime import date
+    with facade._open() as (cat, rs, ts):
+        held = Record(source="uk-caselaw", stable_id="ewca/civ/2001/1",
+                      doc_type=DocType.JUDGMENT, decision_date=date(2001, 1, 1),
+                      text="held", raw_bytes=b"h", extracted_via=ExtractedVia.STRUCTURED)
+        held.ensure_payload_hash()
+        cat.upsert_document(held, text_path=str(ts.put(held.payload_hash, "held")))
+        di = 0
+        for raw, cnt in {"[1987] AC 460": 6, "[1999] 2 WLR 200": 5}.items():
+            for _ in range(cnt):
+                sid = f"c/{di}"; di += 1
+                rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                             decision_date=date(2024, 1, 1), text="t", raw_bytes=b"t",
+                             extracted_via=ExtractedVia.STRUCTURED,
+                             relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                        raw_citation_string=raw, dst_id=None,
+                                        resolution_status=ResolutionStatus.PENDING)])
+                rec.ensure_payload_hash()
+                cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash + sid, "t")))
+        # the imported authority: an alias now points the report citation at the held case
+        cat.put_alias(fold("[1987] AC 460"), "ewca/civ/2001/1", source="import-case")
+        cat.conn.commit()
+    res = facade.export_retrieval_citations(min_citing=2)
+    flat = [i["citation"] for b in res["batches"] for i in b["items"]]
+    assert "[1987] AC 460" not in flat        # already held via alias → excluded
+    assert "[1999] 2 WLR 200" in flat          # genuinely unheld → still listed
+
+
 def test_export_retrieval_citations_jurisdiction_filter(facade):
     from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
                                     ResolutionStatus, TypedRelation)

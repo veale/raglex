@@ -3928,7 +3928,23 @@ class Facade:
                     "series": series, "jurisdiction": jur,
                 })
             rows.sort(key=lambda r: r["citing_count"], reverse=True)
-            out = rows[:limit]
+            # Drop references that are ALREADY satisfiable before returning them. The
+            # pending-reference rollup keys off each citing EDGE's resolution_status, which
+            # stays 'pending' until the resolver re-runs over it — but the authority may
+            # already be HELD with an alias pointing the citation at it (a prior Westlaw/
+            # BAILII import, CanLII enrichment, a parallel-cite merge). Listing those anyway
+            # is why an imported case kept reappearing on the Westlaw retrieval export for
+            # days. Checked only over the ranked head we actually return (a bounded number of
+            # indexed point lookups), not the whole ~100k-row pending scan.
+            out = []
+            skipped_resolvable = 0
+            for r in rows:
+                if len(out) >= limit:
+                    break
+                if self._resolved_target(cat, r["candidate"], r["raw"]):
+                    skipped_resolvable += 1
+                    continue
+                out.append(r)
             # The Westlaw/Lexis export only needs the citation string + rank, and asks for a
             # huge `limit` (the long tail). Skip the per-item citing-documents / suggestions /
             # cited-from enrichment for it — those are three more queries over up-to-20k refs
@@ -3938,7 +3954,8 @@ class Facade:
                     r["citing_documents"] = []
                     r["suggestions"] = []
                     r["cited_from"] = []
-                return {"total": len(rows), "references": out, "min_citing": floor}
+                return {"total": len(rows), "references": out, "min_citing": floor,
+                        "already_held_skipped": skipped_resolvable}
             refs = [r["ref"] for r in out]
             citing = cat.citing_documents_for(refs) if refs else {}
             sugg = cat.suggestions_for(refs) if refs else {}
@@ -3959,7 +3976,7 @@ class Facade:
                     buckets[b] = buckets.get(b, 0) + 1
             r["cited_from"] = [b for b, _ in sorted(buckets.items(), key=lambda kv: -kv[1])]
         return {"total": len(rows), "references": out,
-                "min_citing": floor}
+                "min_citing": floor, "already_held_skipped": skipped_resolvable}
 
     # -- export the unfetchable frontier for Westlaw / Lexis batch retrieval ----
     def export_retrieval_citations(self, *, min_citing: int = 2, batch_size: int = 100,
