@@ -1,4 +1,4 @@
-from raglex.adapters.eu_edps import EUDPR, parse_edps_page
+from raglex.adapters.eu_edps import EDPSBinaryHTTP, EUDPR, parse_edps_page
 
 
 PAGE = """
@@ -19,3 +19,20 @@ def test_parse_edps_opinion_card():
     assert str(row["published"]) == "2026-07-23"
     assert row["pdf_url"] == "https://www.edps.europa.eu/system/files/2026-07/example_en.pdf"
     assert EUDPR == "32018R1725"
+
+
+class _Response:
+    status_code = 200
+    content = b"%PDF-test"
+
+
+class _Session:
+    def get(self, url, **kwargs):
+        return _Response()
+
+
+def test_edps_binary_client_accepts_injected_chrome_session():
+    response = EDPSBinaryHTTP(
+        "edps-test", min_interval=0, session=_Session()
+    ).get("https://www.edps.europa.eu/opinion.pdf")
+    assert response.content.startswith(b"%PDF")

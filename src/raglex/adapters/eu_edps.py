@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import date, datetime
 from typing import Iterator
 from urllib.parse import urljoin, urlsplit
 
 from ..core.adapter import BaseAdapter
+from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
     DocType,
@@ -23,6 +25,42 @@ from ..extraction import extract_bytes
 BASE = "https://www.edps.europa.eu"
 OPINIONS = BASE + "/data-protection/our-work/our-work-by-type/opinions_en"
 EUDPR = "32018R1725"
+
+
+class EDPSBinaryHTTP:
+    """Chrome-TLS binary client for the EDPS CDN (plain httpx is WAF-blocked)."""
+
+    def __init__(
+        self, source: str, *, min_interval: float = 1.0, session=None
+    ) -> None:
+        self.source = source
+        self.min_interval = min_interval
+        self._last = 0.0
+        self._session = session
+        self._fallback = None
+
+    def get(self, url: str, **kwargs):
+        wait = self.min_interval - (time.monotonic() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last = time.monotonic()
+        if self._session is None:
+            try:
+                from curl_cffi import requests as creq
+            except ImportError:
+                if self._fallback is None:
+                    self._fallback = RateLimitedClient(
+                        self.source, min_interval=self.min_interval, timeout=120
+                    )
+                return self._fallback.get(url, **kwargs)
+            self._session = creq.Session(impersonate="chrome124", timeout=120)
+        response = self._session.get(url, **kwargs)
+        if response.status_code >= 400:
+            raise FetchError(
+                f"{self.source}: HTTP {response.status_code} for {url}",
+                transient=response.status_code >= 500,
+            )
+        return response
 
 
 def _date(value: str | None) -> date | None:
@@ -68,8 +106,8 @@ class EDPSOpinionsAdapter(BaseAdapter):
     min_interval = 1.0
 
     def __init__(self, *, client: RateLimitedClient | None = None, fetcher=None) -> None:
-        self._client = client or RateLimitedClient(
-            self.source, min_interval=self.min_interval, timeout=120
+        self._client = client or EDPSBinaryHTTP(
+            self.source, min_interval=self.min_interval
         )
         if fetcher is None:
             from ..scraping.fetcher import get_fetcher
