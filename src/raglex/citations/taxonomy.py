@@ -264,6 +264,13 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         sub, label = _leg_subtype(prefix)
         return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"], sub, label,
                    {"source": "uk-legislation", "id_prefix": prefix})
+    if source == "uk-cpr":
+        is_pd = stable_id.startswith("uk/cpr/pd/")
+        return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"],
+                   "practice-directions" if is_pd else "procedure-rules",
+                   "Civil Practice Directions" if is_pd else "Civil Procedure Rules",
+                   {"source": "uk-cpr",
+                    **({"id_prefix": "uk/cpr/pd"} if is_pd else {})})
     # The House of Lords scraper (uk-hol) shares the UK case-law taxonomy: its ukhl/YYYY/N
     # (and pre-2001 hol/ surrogate) cases belong under the same "House of Lords" sub-type as
     # the pending "[YYYY] UKHL N" citations, so held + pending line up in one row.
@@ -400,6 +407,12 @@ def classify_candidate(candidate: str, kind: str = "") -> Tax:
     if cand.lower().startswith("nl:ljn:"):
         return Tax("nl-caselaw", CATEGORY_LABELS["nl-caselaw"], "case",
                    "Dutch decision", {"source": "nl-rechtspraak"})
+    if cand.lower() == "uk/cpr" or cand.lower().startswith("uk/cpr/"):
+        is_pd = cand.lower().startswith("uk/cpr/pd/")
+        return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"],
+                   "practice-directions" if is_pd else "procedure-rules",
+                   "Civil Practice Directions" if is_pd else "Civil Procedure Rules",
+                   {"source": "uk-cpr"})
     if adapter == "uk-legislation":
         prefix = cand.split("/", 1)[0].lower() if "/" in cand else cand.lower()
         sub, label = _leg_subtype(prefix)

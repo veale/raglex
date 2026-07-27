@@ -668,6 +668,90 @@ def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
     return found
 
 
+# CPR lists need one edge per printed rule/paragraph, which the one-regex-match /
+# one-Citation grammar contract cannot express. Keep this narrow companion beside
+# the grammar pass (the same pattern used for German multi-provision references).
+_CPR_RULE_TOKEN = r"\d+[A-Z]?\.\d+[A-Z]?(?:\([A-Za-z0-9]+\))*"
+_CPR_RULE_LIST_BODY = (
+    rf"{_CPR_RULE_TOKEN}(?:\s*(?:,|and|&|to|through|[–—-])\s*"
+    rf"(?:r(?:ule)?s?\.?\s*)?{_CPR_RULE_TOKEN})+"
+)
+_CPR_RULE_LISTS = (
+    re.compile(
+        rf"\b(?:CPR|Civil\s+Procedure\s+Rules(?:\s+1998)?)\s*,?\s*"
+        rf"(?:(?:r(?:ule)?s?)\.?\s*)?(?P<list>{_CPR_RULE_LIST_BODY})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:r(?:ule)?s?)\.?\s*(?P<list>{_CPR_RULE_LIST_BODY})"
+        rf"\s+(?:of|under)\s+(?:the\s+)?"
+        rf"(?:CPR|Civil\s+Procedure\s+Rules(?:\s+1998)?)\b",
+        re.IGNORECASE,
+    ),
+)
+_CPR_RULE_ONE = re.compile(_CPR_RULE_TOKEN, re.IGNORECASE)
+_CPR_PARA_TOKEN = r"\d+(?:\.\d+)*(?:\([A-Za-z0-9]+\))*"
+_CPR_PARA_LIST_BODY = (
+    rf"{_CPR_PARA_TOKEN}(?:\s*(?:,|and|&|to|through|[–—-])\s*{_CPR_PARA_TOKEN})+"
+)
+_CPR_PD_LISTS = (
+    re.compile(
+        rf"\b(?:CPR\s+)?(?:Practice\s+Direction|PD)\s*"
+        rf"(?P<pd>\d+(?:[A-Z]+(?:\d+)?)?)\s*,?\s*"
+        rf"(?:paras?|paragraphs?)\.?\s*(?P<list>{_CPR_PARA_LIST_BODY})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:paras?|paragraphs?)\.?\s*(?P<list>{_CPR_PARA_LIST_BODY})"
+        rf"\s*(?:(?:of|under)\s+(?:the\s+)?|,\s*)(?:CPR\s+)?"
+        rf"(?:Practice\s+Direction|PD)\s*(?P<pd>\d+(?:[A-Z]+(?:\d+)?)?)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _cpr_code(value: str) -> str:
+    m = re.fullmatch(r"0*(\d+)([A-Za-z]*)(\d*)", value)
+    return (f"{int(m.group(1))}{m.group(2).lower()}{m.group(3)}"
+            if m else value.casefold())
+
+
+def _cpr_list_citations(text: str) -> list[Citation]:
+    out: list[Citation] = []
+    seen: set[tuple[int, int, str, str]] = set()
+    for pattern in _CPR_RULE_LISTS:
+        for match in pattern.finditer(text):
+            for one in _CPR_RULE_ONE.finditer(match.group("list")):
+                printed = one.group(0)
+                base = printed.split("(", 1)[0].casefold()
+                key = (match.start(), match.end(), base, printed)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(Citation(
+                    raw=match.group(0), entity_kind="regulation",
+                    candidate_id=f"uk/cpr/rule/{base}", pinpoint=f"rule {printed}",
+                    char_start=match.start(), char_end=match.end(),
+                    method="uk_cpr_rule_list",
+                ))
+    for pattern in _CPR_PD_LISTS:
+        for match in pattern.finditer(text):
+            pd = _cpr_code(match.group("pd"))
+            for one in re.finditer(_CPR_PARA_TOKEN, match.group("list"), re.IGNORECASE):
+                printed = one.group(0)
+                key = (match.start(), match.end(), pd, printed)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(Citation(
+                    raw=match.group(0), entity_kind="guidance",
+                    candidate_id=f"uk/cpr/pd/{pd}", pinpoint=f"paragraph {printed}",
+                    char_start=match.start(), char_end=match.end(),
+                    method="uk_cpr_pd_paragraph_list",
+                ))
+    return out
+
+
 def extract_citations(text: str, *, llm: CitationExtractor | None = None,
                       aliases: dict[str, str] | None = None,
                       defs_out: list[dict] | None = None) -> list[Citation]:
@@ -686,6 +770,7 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     cites = alias_citations(text, aliases) if aliases else []
     from .french import french_citations
     cites += french_citations(text)
+    cites += _cpr_list_citations(text)
     cites += grammar_citations(text)
     # Run the narrow Dutch statute vocabulary before German's deliberately broad law-
     # abbreviation parser: ``art. 18 WAO`` is Dutch and otherwise has the exact same
@@ -727,7 +812,8 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     occupied: list[tuple[int, int]] = []
     for c in ordered:
         exact_multi = c.method in ("de_law_reference", "nl_juriconnect",
-                                   "fr_code_articles", "fr_echr_articles") and any(
+                                   "fr_code_articles", "fr_echr_articles",
+                                   "uk_cpr_rule_list", "uk_cpr_pd_paragraph_list") and any(
             k.char_start == c.char_start and k.char_end == c.char_end
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)
         if not exact_multi and any(s <= c.char_start and c.char_end <= e for s, e in occupied):

@@ -46,7 +46,10 @@ PER_PAGE = 20
 _RESULT = re.compile(
     r'<a href="(https://www\.judgments\.fedcourt\.gov\.au/judgments/Judgments/[^"]+)"'
     r'\s+title="([^"]*)">')
-_META = re.compile(r'<p class=meta>([^<]*)<span class="divide">')
+# Funnelback changed ``class=meta`` to valid quoted HTML (``class="meta"``) in
+# 2026. The old exact regex then found zero metadata rows; ``zip(results, metas)``
+# silently collapsed a healthy 20-result page to an empty discovery run.
+_META = re.compile(r'<p\s+class=(?:"|\')?meta(?:"|\')?>([^<]*)<span class="divide">')
 # the citable token in the URL tail: 2026fca0981 → (2026, fca, 0981)
 _SEG = re.compile(r'(\d{4})([a-z]+)(\d+)$')
 # the judgment body sits in a judgment_content div (docx_judgment_content for the

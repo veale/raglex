@@ -684,6 +684,153 @@ register(Grammar(
 ))
 
 # legislation.gov.uk URI, with optional /section/N pinpoint.
+# ── Civil Procedure Rules and Practice Directions ────────────────────────────
+# The current consolidation is not provision-addressable on legislation.gov.uk.
+# The Ministry of Justice adapter holds one record per Part/PD and aliases every
+# printed rule number (uk/cpr/rule/3.9 -> uk/cpr/part/3).  Grammar candidates use
+# those addresses so resolution lands on the current consolidated text, while the
+# pinpoint preserves the full sub-rule.
+_CPR_NAME = r"(?:CPR|Civil\s+Procedure\s+Rules(?:\s+1998)?)"
+_CPR_RULE = r"\d+[A-Z]?\.\d+[A-Z]?(?:\([A-Za-z0-9]+\))*"
+_CPR_PART = r"\d+[A-Z]?"
+_CPR_PD = r"\d+[A-Z]+(?:\d+)?"
+_CPR_PARA = r"\d+(?:\.\d+)*(?:\([A-Za-z0-9]+\))*"
+
+
+def _cpr_code(value: str) -> str:
+    m = re.fullmatch(r"0*(\d+)([A-Za-z]*)(\d*)", value.strip())
+    if not m:
+        return value.casefold()
+    return f"{int(m.group(1))}{m.group(2).lower()}{m.group(3)}"
+
+
+def _cpr_rule(m: "re.Match[str]") -> Normalised:
+    printed = re.sub(r"\s+", "", m.group("rule"))
+    base = printed.split("(", 1)[0].casefold()
+    return f"uk/cpr/rule/{base}", f"rule {printed}", "regulation"
+
+
+def _cpr_part(m: "re.Match[str]") -> Normalised:
+    code = _cpr_code(m.group("part"))
+    return f"uk/cpr/part/{code}", f"Part {code.upper()}", "regulation"
+
+
+def _cpr_pd(m: "re.Match[str]") -> Normalised:
+    code = _cpr_code(m.group("pd"))
+    para = m.groupdict().get("para") or m.groupdict().get("para_br")
+    return f"uk/cpr/pd/{code}", f"paragraph {para}" if para else None, "guidance"
+
+
+# "CPR 3.9(1)(a)", "CPR r. 3.9", "Civil Procedure Rules 1998, rule 3.9".
+register(Grammar(
+    "uk_cpr_rule_prefix", "regulation",
+    re.compile(
+        rf"\b{_CPR_NAME}\s*,?\s*(?:(?:r(?:ule)?s?)\.?\s*)?"
+        rf"(?P<rule>{_CPR_RULE})(?![A-Za-z0-9(])",
+        re.IGNORECASE,
+    ),
+    _cpr_rule,
+))
+
+# "rule 3.9 of the CPR" / "r. 3.9 under the Civil Procedure Rules".
+register(Grammar(
+    "uk_cpr_rule_suffix", "regulation",
+    re.compile(
+        rf"\b(?:r(?:ule)?s?)\.?\s*(?P<rule>{_CPR_RULE})"
+        rf"\s+(?:of|under)\s+(?:the\s+)?{_CPR_NAME}\b",
+        re.IGNORECASE,
+    ),
+    _cpr_rule,
+))
+
+# "CPR Part 36", "Pt 52 of the CPR".
+register(Grammar(
+    "uk_cpr_part_prefix", "regulation",
+    re.compile(rf"\b{_CPR_NAME}\s*,?\s*(?:Part|Pt\.?)\s*(?P<part>{_CPR_PART})\b",
+               re.IGNORECASE),
+    _cpr_part,
+))
+register(Grammar(
+    "uk_cpr_part_suffix", "regulation",
+    re.compile(
+        rf"\b(?:Part|Pt\.?)\s*(?P<part>{_CPR_PART})"
+        rf"\s+(?:of|under)\s+(?:the\s+)?{_CPR_NAME}\b",
+        re.IGNORECASE,
+    ),
+    _cpr_part,
+))
+
+# "Practice Direction 3D para 5.2", "CPR PD51U, paragraph 2.1",
+# "paragraph 18.1 of PD 32".  Numeric-only PDs (PD 32) are valid, but a decimal
+# cannot be a PD code, which keeps "Practice Direction 5.5" from being mistaken
+# for a document identity.
+register(Grammar(
+    "uk_cpr_practice_direction", "guidance",
+    re.compile(
+        rf"\b(?:CPR\s+)?(?:Practice\s+Direction|PD)\s*"
+        rf"(?P<pd>{_CPR_PD}|\d+)"
+        rf"(?:\s*,?\s*(?:para(?:graph)?|§)\.?\s*(?P<para>{_CPR_PARA}))?\b",
+        re.IGNORECASE,
+    ),
+    _cpr_pd,
+))
+register(Grammar(
+    "uk_cpr_practice_direction_suffix", "guidance",
+    re.compile(
+        rf"(?:\b(?:para(?:graph)?|§)\.?\s*(?P<para>{_CPR_PARA})"
+        rf"|\[(?P<para_br>{_CPR_PARA})\])"
+        rf"\s*(?:(?:of|under)\s+(?:the\s+)?|,\s*)(?:CPR\s+)?"
+        rf"(?:Practice\s+Direction|PD)\s*(?P<pd>{_CPR_PD}|\d+)\b",
+        re.IGNORECASE,
+    ),
+    _cpr_pd,
+))
+register(Grammar(
+    "uk_cpr_practice_direction_welsh", "guidance",
+    re.compile(
+        rf"\bCyfarwyddyd\s+Ymarfer\s*(?P<pd>{_CPR_PD}|\d+)"
+        rf"(?:\s*,?\s*paragraff\s*(?P<para>{_CPR_PARA}))?\b",
+        re.IGNORECASE,
+    ),
+    lambda m: (
+        f"uk/cpr/pd/{_cpr_code(m.group('pd'))}/cy",
+        f"paragraff {m.group('para')}" if m.group("para") else None,
+        "guidance",
+    ),
+))
+
+# The most frequently cited named, non-numbered direction has no PD code.
+register(Grammar(
+    "uk_cpr_pre_action_direction", "guidance",
+    re.compile(
+        r"\bPractice\s+Direction\s*(?:\(|[-–—:]?\s*)"
+        r"(?:on\s+)?Pre-Action\s+Conduct(?:\s+and\s+Protocols)?\)?",
+        re.IGNORECASE,
+    ),
+    lambda m: ("uk/cpr/pd/pre-action-conduct-and-protocols", None, "guidance"),
+))
+register(Grammar(
+    "uk_cpr_insolvency_direction", "guidance",
+    re.compile(
+        r"\b(?:Practice\s+Direction\s*[:–—-]\s*Insolvency\s+Proceedings"
+        r"|Insolvency\s+Practice\s+Direction)\b",
+        re.IGNORECASE,
+    ),
+    lambda m: ("uk/cpr/pd/insolvency-proceedings", None, "guidance"),
+))
+
+# A bare full title is useful and unambiguous.  Bare "CPR" is deliberately not a
+# grammar: it is also a Canadian law-report abbreviation and would pollute non-UK
+# material.  Once a judgment defines "(CPR)", Raglex's shorthand pass can still
+# link later uses in that document.
+register(Grammar(
+    "uk_cpr_instrument", "regulation",
+    re.compile(r"\bCivil\s+Procedure\s+Rules(?:\s+1998)?\b", re.IGNORECASE),
+    lambda m: ("uk/cpr", None, "regulation"),
+))
+
+
+# legislation.gov.uk URI, with optional /section/N pinpoint.
 register(Grammar(
     "uk_legislation_uri", "act",
     re.compile(r"legislation\.gov\.uk/(?:id/)?(?P<path>[a-z]{2,6}/\d{4}/\d+)(?:/section/(?P<sec>\d+[a-z]?))?", re.IGNORECASE),

@@ -50,6 +50,7 @@ from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
+from .uk_cpr import UKCivilProcedureRulesAdapter
 from .uk_et import UKEmploymentTribunalAdapter
 from .uk_legislation import UKLegislationAdapter
 
@@ -67,6 +68,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # decision-year/case-number identity deliberately matches the BAILII metadata seed,
     # replacing existing textless UKET stubs with the official full text.
     "uk-et": UKEmploymentTribunalAdapter,
+    # The Ministry of Justice's current consolidated Civil Procedure Rules: one
+    # record per Part / Practice Direction, with exact rule-number aliases.
+    "uk-cpr": UKCivilProcedureRulesAdapter,
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
@@ -257,6 +261,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "in place by decision year and case number.",
         (SourceOption("query", "Keyword query", "free text, searched in GOV.UK"),),
         ("UKET citation or tribunal case number",),
+    ),
+    "uk-cpr": SourceInfo(
+        "uk-cpr", "UK Civil Procedure Rules (current consolidation)", "legislation", "GB",
+        False,
+        "The Ministry of Justice's current consolidated Civil Procedure Rules: every "
+        "active Part and Practice Direction as structured HTML. The official index is "
+        "walked on each maintenance run and substantive content hashes detect amendments "
+        "or replacements. Rule and PD citations resolve to the exact current Part or "
+        "Direction; each rule Part remains linked to SI 1998/3132 on legislation.gov.uk.",
+        (SourceOption("ids", "Parts, rules, or directions",
+                      "uk/cpr/part/3, uk/cpr/rule/3.9, uk/cpr/pd/3d"),),
+        ("CPR rule (CPR 3.9)", "CPR Part", "Practice Direction (PD 3D)"),
     ),
     "nl-rechtspraak": SourceInfo(
         "nl-rechtspraak", "NL Rechtspraak (Open Data)", "caselaw", "NL", False,
@@ -838,6 +854,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
     "au-tas": "full-walk", "ie-legislation": "full-walk",
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
+    "uk-cpr": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
     "echr": "targeted", "eu-cellar": "targeted", "eu-legislation": "targeted",
     "au-nsw": "targeted",

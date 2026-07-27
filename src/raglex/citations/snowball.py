@@ -154,6 +154,8 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         return "ECHR application no.", "CoE", "echr"
     if candidate.lower() == "echr/convention":
         return "ECHR (Convention)", "CoE", None  # the treaty node; added in-corpus, not crawled
+    if low == "uk/cpr" or low.startswith("uk/cpr/"):
+        return "UK Civil Procedure Rules / Practice Direction", "GB", "uk-cpr"
     # Assimilated EU law (legislation.gov.uk /european/…) — the UK-hosted version,
     # fetched via uk-legislation (distinct from the EU original it assimilates).
     head = candidate.split("/", 1)[0].lower() if "/" in candidate else ""

@@ -44,6 +44,12 @@ def test_parse_serp_extracts_rows():
     assert rows[0]["jurisdiction"] == "commonwealth"
 
 
+def test_parse_serp_accepts_funnelbacks_quoted_meta_class():
+    html = _serp(R1).replace("<p class=meta>", '<p class="meta">')
+    assert [r["slug"] for r in parse_serp(html)] == [
+        "fca/2026/981", "fcafc/2026/12", "nfsc/2026/3"]
+
+
 class _Page:
     def __init__(self, html):
         self.html = html
