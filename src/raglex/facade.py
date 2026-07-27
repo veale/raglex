@@ -3871,7 +3871,8 @@ class Facade:
                             placeholder={"total": None, "references": []})
 
     def _unfetchable_uncached(self, limit: int, *, min_citing: int | None = None,
-                              scan_limit: int | None = None, enrich: bool = True) -> dict:
+                              scan_limit: int | None = None, enrich: bool = True,
+                              offset: int = 0) -> dict:
         from .citations.frontier import classify as _frontier_classify
         from .citations.snowball import _classify
         from .adapters.bailii import external_link
@@ -3882,10 +3883,14 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             # Read the pre-aggregated worklist (ms); the live GROUP BY over the pending
             # slice is ~96s even bounded, so fall back to it only for a fresh/un-rolled DB.
-            groups = cat.pending_reference_groups_rollup(min_citing=floor, limit=scan_limit)
+            # ``offset`` pages deeper (the export scans page-by-page under a jurisdiction
+            # filter so foreign refs at the top don't cap the batch).
+            groups = cat.pending_reference_groups_rollup(min_citing=floor, limit=scan_limit,
+                                                         offset=offset)
             if not groups:
                 groups = cat.pending_reference_groups(min_citing=floor, limit=scan_limit,
                                                       need_echr=False)
+            scanned = len(groups)
             for g in groups:
                 ref, raw, cand = g["ref"], g["raw"], g["candidate"]
                 if not ref or _is_junk_ref(ref):
@@ -3955,7 +3960,7 @@ class Facade:
                     r["suggestions"] = []
                     r["cited_from"] = []
                 return {"total": len(rows), "references": out, "min_citing": floor,
-                        "already_held_skipped": skipped_resolvable}
+                        "already_held_skipped": skipped_resolvable, "scanned": scanned}
             refs = [r["ref"] for r in out]
             citing = cat.citing_documents_for(refs) if refs else {}
             sugg = cat.suggestions_for(refs) if refs else {}
@@ -3976,7 +3981,8 @@ class Facade:
                     buckets[b] = buckets.get(b, 0) + 1
             r["cited_from"] = [b for b, _ in sorted(buckets.items(), key=lambda kv: -kv[1])]
         return {"total": len(rows), "references": out,
-                "min_citing": floor, "already_held_skipped": skipped_resolvable}
+                "min_citing": floor, "already_held_skipped": skipped_resolvable,
+                "scanned": scanned}
 
     # -- export the unfetchable frontier for Westlaw / Lexis batch retrieval ----
     def export_retrieval_citations(self, *, min_citing: int = 2, batch_size: int = 100,
@@ -4010,35 +4016,25 @@ class Facade:
         cite_shape = _re.compile(r"[\[(](?:1[6-9]|20)\d{2}[\])]")
         seen: set[str] = set()
         items: list[dict] = []
-        # Reuse the frontier computation, then filter to pasteable cites. min_citing is
-        # applied per-item below, so push the caller's floor into SQL. CRUCIAL: bound BOTH
-        # the returned rows AND the initial scan to scan_limit — the pending-reference
-        # roll-up is ~950k rows ordered by citation count, and scanning+Python-classifying
-        # all of them (the old call left scan_limit=None) never returned, so the export
-        # "never finished". The roll-up is citation-ranked, so the top scan_limit rows ARE
-        # the most-cited authorities the export wants. Served stale-while-revalidate so a
-        # repeat export (or a second format) is instant instead of recomputing the scan.
         floor = max(1, min_citing)
-        frontier = self._cached(
-            f"unfetchable:export:{scan_limit}:{floor}", 300,
-            lambda: self._unfetchable_uncached(scan_limit, scan_limit=scan_limit,
-                                               min_citing=floor, enrich=False))
-        for r in frontier["references"]:
+
+        def _take(r) -> None:
+            """Classify one frontier row and, if it's a pasteable target matching the
+            series/jurisdiction filters, add it to ``items`` (deduped)."""
             if r["citing_count"] < min_citing:
-                continue
+                return
             # Collapse internal whitespace: a citation extracted across a PDF line break
             # ("[1991] ATPR\n   41") is stored with the newline, and pasted verbatim it
             # spans two lines and won't retrieve. One space between tokens is the paste form.
             raw = " ".join((r["raw"] or r["ref"] or "").split())
             series = r.get("series")          # computed once, on the frontier row
             if series and series.upper() in ("ECR", "EHRR"):
-                continue  # own sources (CELLAR / HUDOC), not a Westlaw/Lexis target
+                return  # own sources (CELLAR / HUDOC), not a Westlaw/Lexis target
             is_cite = bool(r["is_report"]) or is_report_citation(raw) or bool(cite_shape.search(raw))
-            if not is_cite:
-                if not (include_names and r["form"] == "case (by name)"):
-                    continue
+            if not is_cite and not (include_names and r["form"] == "case (by name)"):
+                return
             if want_series and (not series or series.upper() not in want_series):
-                continue
+                return
             # Jurisdiction: a recognised report series maps directly; otherwise the
             # reference is a neutral citation ("[2019] IESC 4") or bare name, whose
             # jurisdiction is read from the candidate's court token — so Irish (IESC/
@@ -4046,13 +4042,39 @@ class Facade:
             # leak into a UK-only Westlaw batch.
             jur = r.get("jurisdiction")
             if want_jur and jur not in want_jur:
-                continue
+                return
             key = _re.sub(r"[\s.'’\[\]()]+", "", raw).upper()  # fold for dedup
             if not key or key in seen:
-                continue
+                return
             seen.add(key)
             items.append({"citation": raw, "citing_count": r["citing_count"],
                           "series": series, "jurisdiction": jur, "form": r["form"]})
+
+        # PAGE the citation-ranked pending frontier rather than taking a single top slice.
+        # A jurisdiction/series-filtered export (a UK Westlaw subscription can't fetch
+        # foreign reports) would otherwise be capped by whatever ranks in the global top
+        # ``scan_limit`` — dominated by heavily-cited foreign reports — so the user's own
+        # backlog never surfaced. When a filter is active we keep scanning DEEPER pages
+        # (skipping the crowd of other jurisdictions) until we've collected enough of the
+        # selected one or the pool is exhausted; an unfiltered export still stops at one
+        # page (the top is what it wants). Each page cached so re-exports/formats are instant.
+        page = scan_limit
+        filtered = bool(want_jur or want_series)
+        target = batch_size * 100                    # plenty of batches; stop once satisfied
+        max_scan = (400_000 if filtered else scan_limit)
+        offset = 0
+        while offset < max_scan:
+            frontier = self._cached(
+                f"unfetchable:export:{page}:{floor}:{offset}", 300,
+                lambda off=offset: self._unfetchable_uncached(
+                    page, scan_limit=page, min_citing=floor, enrich=False, offset=off))
+            for r in frontier["references"]:
+                _take(r)
+            offset += page
+            if frontier.get("scanned", 0) < page:
+                break                                 # reached the end of the pending pool
+            if not filtered or len(items) >= target:
+                break                                 # unfiltered: top page is enough
 
         items.sort(key=lambda x: x["citing_count"], reverse=True)
         batches = []

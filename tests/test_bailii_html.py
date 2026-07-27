@@ -346,6 +346,38 @@ def test_export_excludes_references_already_resolvable_via_alias(facade):
     assert "[1999] 2 WLR 200" in flat          # genuinely unheld → still listed
 
 
+def test_export_pages_forward_so_a_jurisdiction_filter_isnt_capped_by_the_top_window(facade):
+    """A UK-filtered export must surface UK reports that rank BELOW the global top window —
+    otherwise heavily-cited foreign reports at the top starve the batch (the user's "only 2
+    batches?" bug). With a tiny scan window, paging must reach the low-ranked UK refs."""
+    from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
+                                    ResolutionStatus, TypedRelation)
+    from datetime import date
+    # foreign (Canadian DLR) refs rank at the top by citation count; UK (AC/WLR) rank below
+    reports = {"(2020) 70 DLR (4th) 1": 9, "(2019) 68 DLR (4th) 2": 8,
+               "(2018) 66 DLR (4th) 3": 7, "[1987] AC 460": 3, "[1999] 2 WLR 200": 2}
+    with facade._open() as (cat, rs, ts):
+        di = 0
+        for raw, cnt in reports.items():
+            for _ in range(cnt):
+                sid = f"p/{di}"; di += 1
+                rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                             decision_date=date(2024, 1, 1), text="t", raw_bytes=b"t",
+                             extracted_via=ExtractedVia.STRUCTURED,
+                             relations=[TypedRelation(relationship_type=RelationshipType.MENTIONS,
+                                        raw_citation_string=raw, dst_id=None,
+                                        resolution_status=ResolutionStatus.PENDING)])
+                rec.ensure_payload_hash()
+                cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash + sid, "t")))
+        cat.rebuild_pending_reference_stats()  # populate the roll-up the export pages over
+    # scan_limit=2 → the top window holds only the two most-cited (Canadian) refs; without
+    # paging a UK-filtered export would be empty. Paging must reach the UK reports.
+    res = facade.export_retrieval_citations(min_citing=2, scan_limit=2, jurisdictions=("uk",))
+    flat = [i["citation"] for b in res["batches"] for i in b["items"]]
+    assert "[1987] AC 460" in flat and "[1999] 2 WLR 200" in flat
+    assert not any("DLR" in c for c in flat)   # foreign refs excluded by the jurisdiction filter
+
+
 def test_export_retrieval_citations_jurisdiction_filter(facade):
     from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
                                     ResolutionStatus, TypedRelation)

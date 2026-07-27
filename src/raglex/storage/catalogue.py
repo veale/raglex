@@ -2342,13 +2342,44 @@ class Catalogue:
         """,
     )
 
+    def _dedot_sql(self, col: str) -> str:
+        """A SQL expression that reduces a ``fold()``-ed citation (dots KEPT) to the
+        ``fold_citation()`` key report aliases are often stored under (abbreviation dots
+        STRIPPED — a '.' after a lowercase letter and not before a digit — whitespace
+        collapsed). See core.text.fold_citation. This closes the resolver's dotted-vs-
+        de-dotted gap: an edge's raw_fold is "[1996] 3 s.c.r. 458" while its alias is
+        "[1996] 3 scr 458", so the literal ``a.alias = raw_fold`` join (pass 3) never
+        matched and the case — though HELD — stayed pending forever and kept reappearing
+        on the retrieval export. Mirrors get_alias()'s de-dotted retry.
+
+        Backend-specific: SQLite has no regexp_replace. Its literal ``replace(col,'.','')``
+        drops every dot (fine at dev/test scale — report cites rarely carry decimals);
+        Postgres reproduces the abbreviation-only rule exactly (ARE has no lookbehind, so
+        the preceding lowercase letter is captured and re-emitted)."""
+        if self.backend == "postgres":
+            return (r"btrim(regexp_replace("
+                    r"regexp_replace(%s, '([a-z])\.(?![0-9])', '\1', 'g'), "
+                    r"'\s+', ' ', 'g'))" % col)
+        return f"replace({col}, '.', '')"
+
     def resolve_pending(self) -> int:
         """Flip every pending edge whose target is now a node. Returns the number
         resolved. Idempotent and safe to re-run after each ingest — that is how a
         citation to a freshly-harvested target becomes a live edge (§5b)."""
         total = 0
+        # pass 4: the de-dotted report-citation match (fold vs fold_citation mismatch),
+        # built per-backend so it can't live in the static _RESOLVE_PASSES tuple.
+        dedot_pass = f"""
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM citation_aliases a JOIN documents d
+              ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+            WHERE relations.resolution_status = 'pending'
+              AND relations.raw_fold IS NOT NULL
+              AND a.alias = {self._dedot_sql('relations.raw_fold')}
+              AND a.alias <> relations.raw_fold
+        """
         with self._atomic():
-            for sql in self._RESOLVE_PASSES:
+            for sql in (*self._RESOLVE_PASSES, dedot_pass):
                 cur = self.conn.execute(sql)
                 total += max(cur.rowcount, 0)
         return total
@@ -2413,6 +2444,17 @@ class Catalogue:
               AND relations.resolution_status = 'pending'
               AND relations.raw_fold IS NOT NULL
               AND a.alias = relations.raw_fold
+            """,
+            # pass 4: de-dotted report-citation match (see resolve_pending / _dedot_sql).
+            f"""
+            UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
+            FROM citation_aliases a JOIN documents d
+              ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
+            WHERE relations.relation_id >= ? AND relations.relation_id <= ?
+              AND relations.resolution_status = 'pending'
+              AND relations.raw_fold IS NOT NULL
+              AND a.alias = {self._dedot_sql('relations.raw_fold')}
+              AND a.alias <> relations.raw_fold
             """,
         )
         total = 0
@@ -2783,10 +2825,13 @@ class Catalogue:
             "SELECT COUNT(*) AS n FROM pending_reference_stats").fetchone()["n"]
 
     def pending_reference_groups_rollup(self, *, min_citing: int = 1,
-                                        limit: int | None = None) -> list[sqlite3.Row]:
+                                        limit: int | None = None,
+                                        offset: int = 0) -> list[sqlite3.Row]:
         """The worklist from the roll-up (milliseconds), same row shape as
         :meth:`pending_reference_groups`. Empty until first rebuilt — the caller falls
-        back to the live aggregate then (fresh DB / test)."""
+        back to the live aggregate then (fresh DB / test). ``offset`` pages deeper into
+        the citation-count-ranked list (the export scans page-by-page so a
+        jurisdiction-filtered run isn't capped by the global top window)."""
         params: list = []
         where = ""
         if min_citing > 1:
@@ -2794,12 +2839,17 @@ class Catalogue:
             params.append(int(min_citing))
         tail = ""
         if limit is not None:
+            # a stable secondary sort key (ref) so paging with OFFSET doesn't skip/repeat
+            # rows that tie on citing_count across pages
             tail = "LIMIT ?"
             params.append(int(limit))
+            if offset:
+                tail += " OFFSET ?"
+                params.append(int(offset))
         return self.conn.execute(
             f"SELECT ref, candidate, raw, anchor, methods, occurrences, citing_count, "
             f"echr_citing FROM pending_reference_stats {where} "
-            f"ORDER BY citing_count DESC {tail}", params).fetchall()
+            f"ORDER BY citing_count DESC, ref {tail}", params).fetchall()
 
     def pending_reference_stats_age(self) -> str | None:
         """When the worklist roll-up was last rebuilt (ISO), for the 'last refreshed' line."""
