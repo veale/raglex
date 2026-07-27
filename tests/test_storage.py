@@ -128,3 +128,25 @@ def test_sqlite_and_postgres_ddl_declare_the_same_tables():
     pg_tables = tables(_postgres.PG_DDL)
     # embeddings uses backend-specific vector/FTS types but must exist in both
     assert sqlite_tables == pg_tables
+
+
+def test_postgres_bind_translation_ignores_quoted_question_marks():
+    """Regex syntax and prose containing '?' are SQL data, not bind parameters."""
+    from raglex.storage._postgres import _bind_sql
+
+    sql = (
+        "UPDATE relations SET raw_fold = regexp_replace(raw_fold, "
+        "'([a-z])\\.(?![0-9])', '\\1', 'g') "
+        'WHERE relation_id >= ? AND "odd?column" = ? '
+        "-- ? is not a parameter\n"
+        "AND note = $$why?$$ /* nor ? here */ AND ratio LIKE '90%'"
+    )
+    bound = _bind_sql(sql)
+
+    assert bound.count("%s") == 2
+    assert "'([a-z])\\.(?![0-9])'" in bound
+    assert '"odd?column"' in bound
+    assert "-- ? is not a parameter" in bound
+    assert "$$why?$$" in bound
+    assert "/* nor ? here */" in bound
+    assert "'90%%'" in bound

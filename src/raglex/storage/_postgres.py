@@ -27,6 +27,124 @@ def vector_literal(vec: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
 
+def _bind_sql(sql: str) -> str:
+    """Translate portable ``?`` bind markers without touching SQL literals.
+
+    A plain ``str.replace`` also rewrites question marks inside quoted strings.  That
+    broke the resolver's PostgreSQL regexp ``(?![0-9])``: psycopg saw three bind
+    markers in a query which genuinely had only the two relation-range parameters.
+    Keep this deliberately small lexer here, at the backend boundary, so regexes,
+    comments, quoted identifiers and dollar-quoted function bodies remain literal.
+    """
+    sql = sql.replace("%", "%%")
+    out: list[str] = []
+    i = 0
+    state = "normal"
+    dollar_tag = ""
+    block_depth = 0
+    n = len(sql)
+
+    while i < n:
+        if state == "normal":
+            if sql.startswith("--", i):
+                out.append("--")
+                i += 2
+                state = "line_comment"
+                continue
+            if sql.startswith("/*", i):
+                out.append("/*")
+                i += 2
+                state = "block_comment"
+                block_depth = 1
+                continue
+            ch = sql[i]
+            if ch == "'":
+                out.append(ch)
+                i += 1
+                state = "single_quote"
+                continue
+            if ch == '"':
+                out.append(ch)
+                i += 1
+                state = "double_quote"
+                continue
+            if ch == "$":
+                match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", sql[i:])
+                if match:
+                    dollar_tag = match.group(0)
+                    out.append(dollar_tag)
+                    i += len(dollar_tag)
+                    state = "dollar_quote"
+                    continue
+            if ch == "?":
+                out.append("%s")
+            else:
+                out.append(ch)
+            i += 1
+            continue
+
+        if state == "single_quote":
+            ch = sql[i]
+            out.append(ch)
+            i += 1
+            if ch == "'" and i < n and sql[i] == "'":
+                out.append("'")
+                i += 1
+            elif ch == "'":
+                state = "normal"
+            elif ch == "\\" and i < n:
+                # PostgreSQL E'…' strings can backslash-escape a quote.
+                out.append(sql[i])
+                i += 1
+            continue
+
+        if state == "double_quote":
+            ch = sql[i]
+            out.append(ch)
+            i += 1
+            if ch == '"' and i < n and sql[i] == '"':
+                out.append('"')
+                i += 1
+            elif ch == '"':
+                state = "normal"
+            continue
+
+        if state == "line_comment":
+            ch = sql[i]
+            out.append(ch)
+            i += 1
+            if ch in "\r\n":
+                state = "normal"
+            continue
+
+        if state == "block_comment":
+            if sql.startswith("/*", i):
+                out.append("/*")
+                i += 2
+                block_depth += 1
+            elif sql.startswith("*/", i):
+                out.append("*/")
+                i += 2
+                block_depth -= 1
+                if block_depth == 0:
+                    state = "normal"
+            else:
+                out.append(sql[i])
+                i += 1
+            continue
+
+        # PostgreSQL dollar-quoted bodies do not escape their delimiter.
+        if sql.startswith(dollar_tag, i):
+            out.append(dollar_tag)
+            i += len(dollar_tag)
+            state = "normal"
+        else:
+            out.append(sql[i])
+            i += 1
+
+    return "".join(out)
+
+
 class PgConnShim:
     """Make a psycopg connection look enough like a sqlite3 connection for the
     shared catalogue code: ``execute(sql, params)`` (translating ``?`` → ``%s``),
@@ -51,7 +169,7 @@ class PgConnShim:
         # SQL (LIKE 'dpa-%') must be doubled or it raises the same error — the
         # bug that 500'd every Explore drill with a kind filter. Escape first,
         # then translate the catalogue's portable ? placeholders.
-        return self.raw.execute(sql.replace("%", "%%").replace("?", "%s"), params)
+        return self.raw.execute(_bind_sql(sql), params)
 
     # "CREATE INDEX IF NOT EXISTS <name>" — the statements that must be pre-checked
     # against the catalog rather than executed: Postgres acquires the table's SHARE
@@ -75,7 +193,7 @@ class PgConnShim:
         if not rows:
             return
         with self.raw.cursor() as cur:
-            cur.executemany(sql.replace("%", "%%").replace("?", "%s"), rows)
+            cur.executemany(_bind_sql(sql), rows)
 
     def executescript(self, script: str) -> None:
         # Tolerate the concurrent-startup race: the api and scheduler containers (and
