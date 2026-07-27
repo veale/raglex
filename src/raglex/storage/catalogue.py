@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS documents (
     payload_hash     TEXT,
     has_text         INTEGER NOT NULL DEFAULT 0,
     has_embedding    INTEGER NOT NULL DEFAULT 0,
+    search_excluded  INTEGER NOT NULL DEFAULT 0,
     extracted_via    TEXT,
     added_by         TEXT NOT NULL DEFAULT 'harvest',
     topic_tags       TEXT NOT NULL DEFAULT '[]',
@@ -552,6 +553,9 @@ def _apply_filters(sql: str, params: list, filters: dict | None) -> tuple[str, l
     (jurisdiction), doc_type, topic tag, or minimum year — applied BEFORE both
     rankers so fusion runs over the relevant slice."""
     filters = filters or {}
+    # A regulator item can remain held for dedup/audit while being deliberately
+    # invisible to both lexical and semantic retrieval.
+    sql += " AND d.search_excluded = 0"
     if filters.get("source"):
         vals = filters["source"]
         sql += f" AND d.source IN ({','.join('?' * len(vals))})"
@@ -672,6 +676,9 @@ class Catalogue:
             # A durable per-pass marker: a resumed citation scan excludes documents
             # already stamped with its root run id, regardless of ordering/new inserts.
             ("documents", "last_extraction_run_id", "TEXT"),
+            # Retain citation-free regulator items for content-hash dedup/audit, but
+            # omit them from retrieval and embedding.
+            ("documents", "search_excluded", "INTEGER NOT NULL DEFAULT 0"),
             ("jobs", "root_job_id", "TEXT"),
             ("jobs", "resumed_from", "TEXT"),
             ("jobs", "resume_policy", "TEXT NOT NULL DEFAULT 'restart'"),
@@ -916,9 +923,10 @@ class Catalogue:
             INSERT INTO documents (
                 stable_id, ecli, source, doc_type, title, court, decision_date,
                 language, source_language, version, is_latest, landing_url,
-                raw_path, text_path, payload_hash, has_text, extracted_via, added_by,
+                raw_path, text_path, payload_hash, has_text, search_excluded,
+                extracted_via, added_by,
                 topic_tags, topic_score, upstream_status, fetched_at, meta_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(stable_id) DO UPDATE SET
                 ecli=excluded.ecli, source=excluded.source, doc_type=excluded.doc_type,
                 title=excluded.title, court=excluded.court,
@@ -926,7 +934,8 @@ class Catalogue:
                 source_language=excluded.source_language, version=excluded.version,
                 landing_url=excluded.landing_url, raw_path=excluded.raw_path,
                 text_path=excluded.text_path, payload_hash=excluded.payload_hash,
-                has_text=excluded.has_text, extracted_via=excluded.extracted_via,
+                has_text=excluded.has_text, search_excluded=excluded.search_excluded,
+                extracted_via=excluded.extracted_via,
                 topic_tags=excluded.topic_tags, topic_score=excluded.topic_score,
                 fetched_at=excluded.fetched_at, meta_json=excluded.meta_json
             """,
@@ -947,6 +956,7 @@ class Catalogue:
                 text_path,
                 record.payload_hash,
                 1 if record.text else 0,
+                1 if record.extra.get("search_excluded") else 0,
                 str(record.extracted_via),
                 str(record.added_by),
                 json.dumps(record.topic_tags),
@@ -3716,6 +3726,7 @@ class Catalogue:
             f"""
             SELECT * FROM documents d
             WHERE d.has_text = 1 AND d.text_path IS NOT NULL
+              AND d.search_excluded = 0
               AND NOT EXISTS (
                 SELECT 1 FROM embeddings e
                 WHERE e.doc_id = d.stable_id AND e.provider = ?
@@ -4094,6 +4105,7 @@ class Catalogue:
         target (by id/ECLI/candidate); ``cited_by`` keeps documents cited BY the given source."""
         clauses: list[str] = []
         params: list[object] = []
+        clauses.append("d.search_excluded = 0")
         if source:
             clauses.append("d.source = ?"); params.append(source)
         if doc_type:

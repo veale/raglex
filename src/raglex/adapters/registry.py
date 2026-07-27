@@ -18,7 +18,9 @@ from .au_caselaw import AustralianCaseLawAdapter
 from .au_nsw_caselaw import NSWCaselawAdapter
 from .au_fca_caselaw import FCACaselawAdapter
 from .au_hca_caselaw import HCACaselawAdapter
+from .au_vic_legislation import VictoriaLegislationAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
+from .ca_lexum import CanadianLexumAdapter
 from .ca_legislation import CanadaFederalAdapter
 from .canlii import CanLIIAdapter
 from .courtlistener import CourtListenerAdapter
@@ -43,15 +45,19 @@ from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
 from .eu_preparatory import EUPreparatoryAdapter
+from .eu_ombudsman import EUOmbudsmanAdapter
 from .hol import HouseOfLordsAdapter
 from .ie_caselaw import IrishCaseLawAdapter
+from .ie_dpc import IrishDPCAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
+from .uk_cat import CompetitionAppealTribunalAdapter
 from .uk_cpr import UKCivilProcedureRulesAdapter
 from .uk_et import UKEmploymentTribunalAdapter
+from .uk_govuk_regulator import GOVUKRegulatorAdapter
 from .uk_legislation import UKLegislationAdapter
 
 
@@ -64,10 +70,21 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-caselaw": UKCaseLawAdapter,
     # UK FTT — General Regulatory Chamber (information rights, environment, charity…).
     "uk-grc": lambda **kw: UKCaseLawAdapter(court="ukftt/grc", **kw),
+    "uk-ftt-tax": lambda **kw: UKCaseLawAdapter(court="ukftt/tc", **kw),
+    "uk-utaac": lambda **kw: UKCaseLawAdapter(court="ukut/aac", **kw),
+    "uk-iac": lambda **kw: UKCaseLawAdapter(court="ukut/iac", **kw),
+    "uk-cat": CompetitionAppealTribunalAdapter,
     # Employment Tribunal — the GOV.UK register's Search + Content Store APIs.  Its
     # decision-year/case-number identity deliberately matches the BAILII metadata seed,
     # replacing existing textless UKET stubs with the official full text.
     "uk-et": UKEmploymentTribunalAdapter,
+    "uk-cma": lambda **kw: GOVUKRegulatorAdapter(
+        source="uk-cma", document_type="cma_case", court="CMA", **kw),
+    "uk-ofgem": lambda **kw: GOVUKRegulatorAdapter(
+        source="uk-ofgem", organisation="ofgem", court="Ofgem", **kw),
+    "uk-ofwat": lambda **kw: GOVUKRegulatorAdapter(
+        source="uk-ofwat", organisation="the-water-services-regulation-authority",
+        court="Ofwat", **kw),
     # The Ministry of Justice's current consolidated Civil Procedure Rules: one
     # record per Part / Practice Direction, with exact rule-number aliases.
     "uk-cpr": UKCivilProcedureRulesAdapter,
@@ -113,6 +130,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-legislation": UKLegislationAdapter,
     "eu-legislation": EULegislationAdapter,
     "eu-preparatory": EUPreparatoryAdapter,
+    "eu-ombudsman": EUOmbudsmanAdapter,
     # Ireland — the eISB (Acts + SIs as enacted/made, the OFFICIAL text) and the LRC
     # Revised Acts (administrative consolidations, point-in-time). Both speak ELI, so
     # Ireland is another ELI source beside legislation.gov.uk and EUR-Lex.
@@ -125,6 +143,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "au-qld": lambda **kw: LawMakerAdapter(jurisdiction="qld", **kw),
     "au-nsw": lambda **kw: LawMakerAdapter(jurisdiction="nsw", **kw),
     "au-tas": lambda **kw: LawMakerAdapter(jurisdiction="tas", **kw),
+    "au-vic": VictoriaLegislationAdapter,
     # Singapore — Singapore Statutes Online (SSO). Keyless server-rendered HTML, no ELI;
     # keyed by SSO's own act code (sg/act/coa1967). `subsidiary=true` browses the SL listing.
     "sg-legislation": SGLegislationAdapter,
@@ -137,6 +156,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Neutral-citation slugs match the extractor's, so importing resolves the Canadian
     # citations the corpus already holds pending; law-report citations become aliases.
     "ca-caselaw": CanadianCaseLawAdapter,
+    # Official live overlays on the A2AJ bulk seed. Their RSS feeds include
+    # translations/corrections as well as new decisions; neutral-citation identity
+    # enriches the same nodes already held from bulk.
+    "ca-scc-live": lambda **kw: CanadianLexumAdapter(court="scc", **kw),
+    "ca-tcc-live": lambda **kw: CanadianLexumAdapter(court="tcc", **kw),
     # CanLII API — Canadian case METADATA + the citator, never full text (their API is
     # metadata-only by design). Resolves pending Canadian citations into metadata-stub
     # documents with a verified "view on CanLII" link, and enriches held decisions
@@ -176,6 +200,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # neutral-cite slug ("[2025] IESC 49" → iesc/2025/49); multi-judgment cases store one
     # opinion per PDF, grouped by case_citation, the lead owning the bare slug.
     "ie-caselaw": IrishCaseLawAdapter,
+    "ie-dpc": IrishDPCAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -254,6 +279,26 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("query", "Keyword query", "free text, searched in the API"),),
         ("neutral citation",),
     ),
+    "uk-ftt-tax": SourceInfo(
+        "uk-ftt-tax", "UK FTT — Tax Chamber", "caselaw", "GB", True,
+        "Official Find Case Law Tax Chamber feed and full Akoma Ntoso judgments.",
+        (SourceOption("query", "Keyword query", "free text"),), ("UKFTT (TC) citation",),
+    ),
+    "uk-utaac": SourceInfo(
+        "uk-utaac", "UK Upper Tribunal — Administrative Appeals", "caselaw", "GB", True,
+        "Official Find Case Law Administrative Appeals Chamber feed and full judgments.",
+        (SourceOption("query", "Keyword query", "free text"),), ("UKUT (AAC) citation",),
+    ),
+    "uk-iac": SourceInfo(
+        "uk-iac", "UK Upper Tribunal — Immigration and Asylum", "caselaw", "GB", True,
+        "Official Find Case Law Immigration and Asylum Chamber feed and full judgments.",
+        (SourceOption("query", "Keyword query", "free text"),), ("UKUT (IAC) citation",),
+    ),
+    "uk-cat": SourceInfo(
+        "uk-cat", "Competition Appeal Tribunal judgments", "caselaw", "GB", False,
+        "The Tribunal's official sitemap, judgment pages and full decision PDFs.",
+        (), ("CAT neutral citation",),
+    ),
     "uk-et": SourceInfo(
         "uk-et", "UK Employment Tribunal (GOV.UK)", "caselaw", "GB", True,
         "Employment Tribunal decisions from the official GOV.UK register, including "
@@ -273,6 +318,22 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("ids", "Parts, rules, or directions",
                       "uk/cpr/part/3, uk/cpr/rule/3.9, uk/cpr/pd/3d"),),
         ("CPR rule (CPR 3.9)", "CPR Part", "Practice Direction (PD 3D)"),
+    ),
+    "uk-cma": SourceInfo(
+        "uk-cma", "Competition and Markets Authority cases", "guidance", "GB", False,
+        "Official CMA case register through GOV.UK Search and Content APIs. Full case "
+        "attachments are combined with the case page; citation-free items remain "
+        "processed but are excluded from retrieval.",
+    ),
+    "uk-ofgem": SourceInfo(
+        "uk-ofgem", "Ofgem regulatory publications", "guidance", "GB", False,
+        "Official Ofgem GOV.UK publications and attached PDFs, relevance-gated by "
+        "recognised case or legislation citations.",
+    ),
+    "uk-ofwat": SourceInfo(
+        "uk-ofwat", "Ofwat regulatory publications", "guidance", "GB", False,
+        "Official Water Services Regulation Authority GOV.UK publications and attached "
+        "PDFs, relevance-gated by recognised case or legislation citations.",
     ),
     "nl-rechtspraak": SourceInfo(
         "nl-rechtspraak", "NL Rechtspraak (Open Data)", "caselaw", "NL", False,
@@ -418,6 +479,13 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("years", "Year range", "2020-2026")),
         ("CELEX (52021PC0554)", "COM/SWD/SEC/JOIN document number"),
     ),
+    "eu-ombudsman": SourceInfo(
+        "eu-ombudsman", "European Ombudsman decisions", "guidance", "EU", False,
+        "Official English decisions from the Ombudsman's public REST API. Items are "
+        "retained for dedup but enter retrieval only when the legal grammars recognise "
+        "a case or legislation citation.",
+        (), ("Ombudsman case reference",),
+    ),
     "ie-legislation": SourceInfo(
         "ie-legislation", "Irish legislation — as enacted (eISB)", "legislation", "IE", False,
         "Acts and Statutory Instruments from the electronic Irish Statute Book, as "
@@ -445,6 +513,13 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("language", "Language", "en (default) | ga")),
         ("ELI id (ie/2003/act/32)",),
     ),
+    "ie-dpc": SourceInfo(
+        "ie-dpc", "Irish Data Protection Commission decisions", "guidance", "IE", False,
+        "The DPC's official decision register and operative PDFs. The register's "
+        "Articles facet becomes structured links to GDPR articles or, where explicitly "
+        "prefixed S, sections of the Irish Data Protection Act 2018.",
+        (), ("DPC inquiry reference",),
+    ),
     "au-cth": SourceInfo(
         "au-cth", "Australian Commonwealth legislation (Federal Register, OData API)",
         "legislation", "AU", True,
@@ -458,6 +533,12 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("filter", "Extra OData $filter", "year eq 2024"),
          SourceOption("principal_only", "Principal titles only", "true (default) | false")),
         ("FRL Title id (C1901A00002)", "au/cth/act/1901/2", "legislation.gov.au URL"),
+    ),
+    "au-vic": SourceInfo(
+        "au-vic", "Victoria current consolidated legislation", "legislation", "AU", False,
+        "Official legislation.vic.gov.au JSON:API for in-force Acts and statutory "
+        "rules, with the current authorised PDF/DOCX body and effective date.",
+        (), ("au/vic/act/year/number", "au/vic/regulation/year/number"),
     ),
     "au-qld": SourceInfo(
         "au-qld", "Queensland legislation (LawMaker)", "legislation", "AU", False,
@@ -543,6 +624,21 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("min_year", "Earliest decision year", "2000"),
          SourceOption("language", "Preferred text language", "en (default) | fr")),
         ("neutral citation (2011 SCC 10)", "scc/2011/10"),
+    ),
+    "ca-scc-live": SourceInfo(
+        "ca-scc-live", "Supreme Court of Canada — official live decisions",
+        "caselaw", "CA", False,
+        "The Court's official RSS and complete HTML judgments. The feed reports "
+        "translations, amendments and corrections as well as new decisions; neutral "
+        "citation identity merges them with the Canadian bulk seed.",
+        (), ("SCC neutral citation",),
+    ),
+    "ca-tcc-live": SourceInfo(
+        "ca-tcc-live", "Tax Court of Canada — official live decisions",
+        "caselaw", "CA", False,
+        "The Tax Court's official RSS and complete HTML judgments, preserving native "
+        "paragraph anchors and merging with the bulk seed by neutral citation.",
+        (), ("TCC neutral citation",),
     ),
     "ca-canlii": SourceInfo(
         "ca-canlii", "Canadian case law metadata (CanLII API)", "caselaw", "CA", False,
@@ -843,18 +939,24 @@ INCREMENTAL_MODE: dict[str, str] = {
     "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
     "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
     # client-side early-stop on a newest-first feed
-    "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-legislation": "early-stop",
+    "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-ftt-tax": "early-stop",
+    "uk-utaac": "early-stop", "uk-iac": "early-stop", "uk-legislation": "early-stop",
+    "uk-cma": "early-stop", "uk-ofgem": "early-stop", "uk-ofwat": "early-stop",
     "au-nsw-caselaw": "early-stop", "au-fca": "early-stop", "au-hca": "early-stop",
+    "ca-scc-live": "early-stop", "ca-tcc-live": "early-stop",
     "ie-caselaw": "early-stop", "ie-revised": "early-stop", "nz-caselaw": "early-stop",
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
+    "eu-ombudsman": "full-walk",
     "sg-legislation": "full-walk", "sg-sl": "full-walk", "ca-federal": "full-walk",
     "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
-    "au-tas": "full-walk", "ie-legislation": "full-walk",
+    "au-tas": "full-walk", "au-vic": "full-walk", "ie-legislation": "full-walk",
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
     "uk-cpr": "full-walk",
+    "uk-cat": "full-walk",
+    "ie-dpc": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
     "echr": "targeted", "eu-cellar": "targeted", "eu-legislation": "targeted",
     "au-nsw": "targeted",

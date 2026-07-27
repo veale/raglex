@@ -444,6 +444,36 @@ class Pipeline:
 
     def _ingest(self, record: Record, stats: RunStats) -> bool:
         """Dedup → store raw → catalogue. Returns True if stored."""
+        # Broad regulator registers mix decisions and legal guidance with speeches,
+        # vacancies and newsletters. Sources may opt into a strict relevance gate:
+        # keep the fetched bytes/text and content hash as a durable processed row,
+        # but suppress it from search unless a grammar sees a case or legislation.
+        if record.extra.get("require_recognized_legal_citation"):
+            from ..citations.extractor import grammar_citations
+
+            legal_kinds = {
+                "case", "opinion", "act", "regulation", "directive", "decision",
+                "treaty", "eu_instrument",
+            }
+            legal = [
+                c for c in grammar_citations(record.text or "")
+                if c.entity_kind in legal_kinds
+            ]
+            # Authoritative structured provision metadata is stronger than a grammar
+            # match (e.g. the Irish DPC's explicit GDPR-Articles facet).
+            structured = [
+                r for r in record.relations
+                if r.dst_id or r.raw_citation_string
+            ]
+            record.extra["recognized_legal_citations"] = len(legal) + len(structured)
+            if legal or structured:
+                record.extra.pop("search_excluded", None)
+                record.extra.pop("search_exclusion_reason", None)
+            else:
+                record.extra["search_excluded"] = True
+                record.extra["search_exclusion_reason"] = (
+                    "no_recognized_case_or_legislation"
+                )
         record.ensure_payload_hash()
 
         # Outstanding amendments (§0): (re)schedule the effects re-check BEFORE the

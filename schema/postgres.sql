@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS documents (
     payload_hash     TEXT,                         -- SHA-256 of raw bytes; content-hash dedup (§5)
     has_text         BOOLEAN NOT NULL DEFAULT FALSE,
     has_embedding    BOOLEAN NOT NULL DEFAULT FALSE,
+    search_excluded  BOOLEAN NOT NULL DEFAULT FALSE, -- retained/deduped, omitted from retrieval
     extracted_via    TEXT,                         -- structured|regex|llm|manual|scrape
     added_by         TEXT NOT NULL DEFAULT 'harvest', -- harvest|user|llm (§10)
     topic_tags       JSONB NOT NULL DEFAULT '[]',   -- denormalised cache of document_tags

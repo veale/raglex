@@ -69,6 +69,25 @@ def test_pipeline_stores_everything_no_topic_gate(catalogue, rawstore):
     assert catalogue.get_document("b") is not None
 
 
+def test_regulator_relevance_gate_keeps_placeholder_but_excludes_noise(catalogue, rawstore):
+    legal = _rec("reg/legal", "The decision applies [2024] UKSC 1.")
+    noise = _rec("reg/noise", "Quarterly staffing update and office opening hours.")
+    for rec in (legal, noise):
+        rec.extra["require_recognized_legal_citation"] = True
+
+    stats = Pipeline(catalogue, rawstore).run(FakeAdapter([legal, noise]))
+
+    assert stats.stored == 2
+    assert catalogue.get_document("reg/legal")["search_excluded"] == 0
+    held_noise = catalogue.get_document("reg/noise")
+    assert held_noise is not None
+    assert held_noise["search_excluded"] == 1
+    assert catalogue.document_meta("reg/noise")["search_exclusion_reason"] == (
+        "no_recognized_case_or_legislation"
+    )
+    assert [r["stable_id"] for r in catalogue.search_documents(query="staffing")] == []
+
+
 def test_pipeline_content_hash_dedup(catalogue, rawstore):
     rec = _rec("a", "personal data GDPR 2016/679 data protection", d=date(2024, 1, 1))
     pipe = Pipeline(catalogue, rawstore)

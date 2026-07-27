@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS documents (
     payload_hash     TEXT,
     has_text         INTEGER NOT NULL DEFAULT 0,
     has_embedding    INTEGER NOT NULL DEFAULT 0,
+    search_excluded  INTEGER NOT NULL DEFAULT 0,
     extracted_via    TEXT,
     added_by         TEXT NOT NULL DEFAULT 'harvest',
     topic_tags       TEXT NOT NULL DEFAULT '[]',
