@@ -35,11 +35,13 @@ publishes it.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter
+from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
     DocType,
@@ -68,6 +70,44 @@ _MONTHS = {m: i for i, m in enumerate(
      "september", "october", "november", "december"], start=1)}
 # "Part 5", "Part 7", "Chapter 5 of Part 7", "Part 3 Guidance" — OSA structural units.
 _PART = re.compile(r"\b(Chapter\s+\d+\s+of\s+Part\s+\d+|Part\s+\d+|Chapter\s+\d+)\b", re.IGNORECASE)
+
+
+class OfcomHTTP:
+    """Chrome-TLS client for Ofcom's WAF, with the adapter's normal pacing.
+
+    Ofcom started returning 403 to plain httpx in July 2026.  The pages remain
+    server-rendered and need no browser; curl_cffi's Chrome handshake is sufficient.
+    """
+
+    def __init__(self, source: str, *, min_interval: float = 1.0) -> None:
+        self.source = source
+        self.min_interval = min_interval
+        self._last_request_at = 0.0
+        self._session = None
+        self._fallback = None
+
+    def get(self, url: str, **kwargs):
+        wait = self.min_interval - (time.monotonic() - self._last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request_at = time.monotonic()
+        try:
+            from curl_cffi import requests as creq
+        except ImportError:
+            if self._fallback is None:
+                self._fallback = RateLimitedClient(
+                    self.source, min_interval=self.min_interval
+                )
+            return self._fallback.get(url, **kwargs)
+        if self._session is None:
+            self._session = creq.Session(impersonate="chrome124", timeout=90)
+        response = self._session.get(url, **kwargs)
+        if response.status_code >= 400:
+            raise FetchError(
+                f"{self.source}: HTTP {response.status_code} for {url}",
+                transient=response.status_code >= 500,
+            )
+        return response
 
 
 def _clean(fragment: str) -> str:
@@ -194,7 +234,9 @@ class OfcomOSAAdapter(BaseAdapter):
     requires_proxy = False
 
     def __init__(self, *, client: RateLimitedClient | None = None) -> None:
-        self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
+        self._client = client or OfcomHTTP(
+            self.source, min_interval=self.min_interval
+        )
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         resp = self._client.get(PAGE_URL, headers=_HEADERS)

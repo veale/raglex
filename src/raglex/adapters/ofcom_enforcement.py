@@ -51,7 +51,7 @@ from ..core.models import (
     Stub,
     TypedRelation,
 )
-from .ofcom import _slug as _guidance_slug  # shared PDF→ofcom-osa slug, for cross-links
+from .ofcom import OfcomHTTP, _slug as _guidance_slug  # shared WAF client + PDF slug
 
 BASE_URL = "https://www.ofcom.org.uk"
 OSA_ID = "ukpga/2023/50"
@@ -226,7 +226,9 @@ class OfcomEnforcementAdapter(BaseAdapter):
         # actions published within this window are detail-hashed on EVERY run (open
         # investigations mutate in place); older cursor-passed actions get light stubs
         self.sweep_days = int(sweep_days)
-        self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
+        self._client = client or OfcomHTTP(
+            self.source, min_interval=self.min_interval
+        )
 
     # The listing endpoint is unreliable about NumberOfResults: some values return the
     # whole set, others fall back to a single page of 27 — with no pattern (54→54, 81→27,
