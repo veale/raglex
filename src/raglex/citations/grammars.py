@@ -157,6 +157,22 @@ register(Grammar(
     _ecli,
 ))
 
+
+def _irish_tacd(m: "re.Match[str]") -> Normalised:
+    return f"tacd/{m.group('year')}/{int(m.group('num'))}", None, "case"
+
+
+# The Irish Tax Appeals Commission prints and cites its determinations compactly:
+# ``79TACD2026`` (sequence, TACD, year), not in the year-first neutral-cite shape.
+register(Grammar(
+    "irish_tacd", "case",
+    re.compile(
+        r"\b(?P<num>\d{1,5})\s*TACD\s*(?P<year>(?:20)\d{2})\b",
+        re.IGNORECASE,
+    ),
+    _irish_tacd,
+))
+
 # -- neutral citations (common-law systems) ---------------------------------
 # Detect the *shape* generically — for known AND unknown courts — so an unknown
 # court token is still captured as a hanging edge and surfaces in the snowball

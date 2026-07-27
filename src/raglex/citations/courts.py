@@ -161,6 +161,7 @@ COURTS: tuple[Court, ...] = (
     Court("IEIC", "Information Commissioner (Ireland)", "IE"),
     Court("IECompA", "Competition Authority (Ireland)", "IE"),
     Court("IEDPC", "Data Protection Commission (Ireland)", "IE"),
+    Court("TACD", "Tax Appeals Commission Determinations", "IE"),
 
     # ---- Crown Dependencies (BAILII /je/, /gg/, /im/) ---------------------
     # BAILII keys Jersey judgments by the source rather than the court: "UR" is the

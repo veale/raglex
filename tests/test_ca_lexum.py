@@ -1,4 +1,9 @@
-from raglex.adapters.ca_lexum import neutral_slug, parse_decision_html, parse_rss
+from raglex.adapters.ca_lexum import (
+    neutral_slug,
+    parse_decision_html,
+    parse_recent_additions,
+    parse_rss,
+)
 
 
 def test_parse_lexum_rss_tracks_corrections_not_only_decision_date():
@@ -27,3 +32,21 @@ def test_parse_lexum_html_preserves_native_paragraphs():
     assert out["metadata"]["neutral citation"] == "2026 TCC 138"
     assert [s.label for s in out["segments"]] == ["[1]", "[2]"]
     assert out["text"][out["segments"][1].char_start:].startswith("[ 2 ]")
+
+
+def test_neutral_slug_normalises_french_federal_court_codes():
+    assert neutral_slug("Example, 2026 CF 42") == "fc/2026/42"
+    assert neutral_slug("Exemple, 2026 CAF 7") == "fca/2026/7"
+
+
+def test_parse_fca_recent_additions():
+    raw = b"""<ul class="collectionItemList"><li>
+      <div class="info" lang="fr"><span class="title">
+      <a href="/fca-caf/decisions/fr/item/521881/index.do">Pindi c. Canada</a>
+      </span><span class="citation">2026 CAF 129</span>
+      <span class="publicationDate">2026-07-09</span></div>
+    </li></ul>"""
+    row = parse_recent_additions(raw, "https://decisia.lexum.com/fca-caf/en/ann.do")[0]
+    assert row["item_id"] == "521881"
+    assert row["language"] == "fr"
+    assert neutral_slug(row["title"]) == "fca/2026/129"

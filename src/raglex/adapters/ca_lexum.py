@@ -1,9 +1,11 @@
 """Official live Canadian decisions from the Lexum/Decisia court portals.
 
 The A2AJ import is the historical seed.  These feeds are the current, authoritative
-overlay for the Supreme Court of Canada and Tax Court of Canada: their RSS channels
-explicitly publish new, translated, amended and corrected decisions, and the linked
-HTML contains the complete judgment plus native paragraph anchors.
+overlay for the Supreme Court, Tax Court, Federal Court and Federal Court of Appeal.
+The first three publish RSS channels; the Court of Appeal exposes the same bounded
+"Recent Additions" data as server-rendered HTML.  Both channels include translated,
+amended and corrected decisions, and the linked HTML contains the complete judgment
+plus native paragraph anchors.
 """
 
 from __future__ import annotations
@@ -19,7 +21,15 @@ from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
 
 _ITEM_ID = re.compile(r"/item/(\d+)/")
-_NEUTRAL = re.compile(r"\b((?:19|20)\d{2})\s+(SCC|TCC)\s+(\d+)\b", re.I)
+_NEUTRAL = re.compile(
+    r"\b((?:19|20)\d{2})\s+(SCC|CSC|TCC|CCI|FCA|CAF|FC|CF)\s+(\d+)\b", re.I
+)
+_COURT_ALIASES = {
+    "scc": "scc", "csc": "scc",
+    "tcc": "tcc", "cci": "tcc",
+    "fc": "fc", "cf": "fc",
+    "fca": "fca", "caf": "fca",
+}
 _CHANGE_DATE = re.compile(
     r"(?:published|updated|translated|amended|corrected)\s+on\s+((?:19|20)\d{2}-\d{2}-\d{2})",
     re.I,
@@ -28,7 +38,10 @@ _CHANGE_DATE = re.compile(
 
 def neutral_slug(value: str | None) -> str | None:
     m = _NEUTRAL.search(value or "")
-    return f"{m.group(2).lower()}/{m.group(1)}/{int(m.group(3))}" if m else None
+    return (
+        f"{_COURT_ALIASES[m.group(2).lower()]}/{m.group(1)}/{int(m.group(3))}"
+        if m else None
+    )
 
 
 def parse_rss(raw: bytes | str) -> list[dict]:
@@ -48,6 +61,37 @@ def parse_rss(raw: bytes | str) -> list[dict]:
             out.append({
                 "title": title, "link": link, "item_id": item_id,
                 "decision_date": decided, "changed": changed,
+            })
+    return out
+
+
+def parse_recent_additions(raw: bytes | str, base_url: str) -> list[dict]:
+    """Parse a Norma/Decisia ``ann.do`` page into the RSS-shaped row contract."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(raw, "html.parser")
+    out: list[dict] = []
+    for row in soup.select(".collectionItemList > li"):
+        link = row.select_one(".title a[href*='/item/']")
+        if link is None:
+            continue
+        href = urljoin(base_url, link.get("href") or "")
+        item = _ITEM_ID.search(href)
+        published = row.select_one(".publicationDate")
+        citation = row.select_one(".citation")
+        title = " ".join(link.get_text(" ", strip=True).split())
+        neutral = " ".join(citation.get_text(" ", strip=True).split()) if citation else ""
+        changed = published.get_text(" ", strip=True) if published else None
+        info = row.select_one(".info")
+        language = ((info.get("lang") if info else None) or "en").lower()
+        if href and item:
+            out.append({
+                "title": f"{title} - {neutral}" if neutral else title,
+                "link": href,
+                "item_id": item.group(1),
+                "decision_date": changed,
+                "changed": changed,
+                "language": language,
             })
     return out
 
@@ -121,14 +165,19 @@ class CanadianLexumAdapter(BaseAdapter):
         court: str = "scc",
         client: RateLimitedClient | None = None,
     ) -> None:
-        if court not in {"scc", "tcc"}:
-            raise ValueError("court must be scc or tcc")
+        if court not in {"scc", "tcc", "fc", "fca"}:
+            raise ValueError("court must be scc, tcc, fc or fca")
         self.court = court
         self.source = f"ca-{court}-live"
-        if court == "scc":
-            self.rss_url = "https://decisions.scc-csc.ca/scc-csc/scc-csc/en/rss.do"
-        else:
-            self.rss_url = "https://decision.tcc-cci.gc.ca/tcc-cci/decisions/en/rss.do"
+        self.rss_url = {
+            "scc": "https://decisions.scc-csc.ca/scc-csc/scc-csc/en/rss.do",
+            "tcc": "https://decision.tcc-cci.gc.ca/tcc-cci/decisions/en/rss.do",
+            "fc": "https://decisions.fct-cf.gc.ca/fc-cf/decisions/en/rss.do",
+        }.get(court)
+        self.recent_url = (
+            "https://decisia.lexum.com/fca-caf/en/ann.do?iframe=true"
+            if court == "fca" else None
+        )
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=60
         )
@@ -136,7 +185,21 @@ class CanadianLexumAdapter(BaseAdapter):
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         # The official channel is a bounded rolling list, not a pageable back catalogue.
         # It deliberately includes old decisions whose translation/correction changed.
-        items = parse_rss(self._client.get(self.rss_url).content)
+        if self.rss_url:
+            items = parse_rss(self._client.get(self.rss_url).content)
+        else:
+            items = []
+            page_limit = min(max_pages or 4, 4)
+            for page in range(1, page_limit + 1):
+                url = self.recent_url + (f"&page={page}" if page > 1 else "")
+                batch = parse_recent_additions(
+                    self._client.get(url).content, self.recent_url
+                )
+                if not batch:
+                    break
+                items.extend(batch)
+                if since and batch[-1]["changed"] and batch[-1]["changed"] <= since:
+                    break
         for item in items:
             changed = item["changed"]
             if since and changed and changed <= since:
@@ -155,6 +218,7 @@ class CanadianLexumAdapter(BaseAdapter):
                     # Pipeline compares this to stored metadata, so a correction in the
                     # RSS re-fetches a held bulk/live judgment instead of prefiltering it.
                     "contenthash": changed,
+                    "language": item.get("language", "en"),
                 },
             )
 
@@ -173,6 +237,7 @@ class CanadianLexumAdapter(BaseAdapter):
             return None
         decision_date = _iso(meta.get("date")) or stub.hint_date
         landing = stub.landing_url
+        language = str(stub.hints.get("language") or "en")
         return Record(
             source=self.source,
             stable_id=stable_id,
@@ -180,8 +245,8 @@ class CanadianLexumAdapter(BaseAdapter):
             title=parsed["title"] or stub.title or stable_id,
             court=self.court,
             decision_date=decision_date,
-            language="en",
-            source_language="en",
+            language=language,
+            source_language=language,
             landing_url=landing,
             raw_bytes=response.content,
             raw_ext="html",
@@ -200,4 +265,3 @@ class CanadianLexumAdapter(BaseAdapter):
                 "canonical_url": urljoin(landing, landing),
             },
         )
-

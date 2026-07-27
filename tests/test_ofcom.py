@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from raglex.adapters.ofcom import (
+    OfcomHTTP,
     OfcomOSAAdapter,
     OSA_ID,
     parse_page,
@@ -64,6 +65,53 @@ class _FakeClient:
 
     def get(self, url, headers=None):
         return _Resp(self.pdf if url.endswith(".pdf") or "?v=" in url else self.page)
+
+
+class _BlockedSession:
+    def get(self, url, **kwargs):
+        response = _Resp(b"blocked")
+        response.status_code = 403
+        return response
+
+
+class _StealthPage:
+    status = 200
+    html = "<html><body>Ofcom regulatory documents</body></html>"
+
+
+class _StealthFetcher:
+    def __init__(self):
+        self.urls = []
+
+    def fetch(self, url, **kwargs):
+        self.urls.append(url)
+        return _StealthPage()
+
+
+def test_ofcom_http_escalates_blocked_html_to_linked_stealth_fetcher():
+    stealth = _StealthFetcher()
+    client = OfcomHTTP(
+        "ofcom-test",
+        min_interval=0,
+        session=_BlockedSession(),
+        stealth_fetcher=stealth,
+    )
+    response = client.get("https://www.ofcom.org.uk/online-safety/documents")
+    assert b"Ofcom regulatory documents" in response.content
+    assert stealth.urls == ["https://www.ofcom.org.uk/online-safety/documents"]
+
+
+def test_ofcom_http_does_not_send_binary_pdfs_through_html_fetcher():
+    stealth = _StealthFetcher()
+    client = OfcomHTTP(
+        "ofcom-test",
+        min_interval=0,
+        session=_BlockedSession(),
+        stealth_fetcher=stealth,
+    )
+    with pytest.raises(Exception, match="HTTP 403"):
+        client.get("https://www.ofcom.org.uk/a-document.pdf")
+    assert stealth.urls == []
 
 
 def _tiny_pdf(text: str) -> bytes:

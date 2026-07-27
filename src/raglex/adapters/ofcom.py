@@ -39,6 +39,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterator
+from urllib.parse import urlsplit
 
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
@@ -79,29 +80,71 @@ class OfcomHTTP:
     server-rendered and need no browser; curl_cffi's Chrome handshake is sufficient.
     """
 
-    def __init__(self, source: str, *, min_interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        source: str,
+        *,
+        min_interval: float = 1.0,
+        stealth_fetcher=None,
+        session=None,
+    ) -> None:
         self.source = source
         self.min_interval = min_interval
         self._last_request_at = 0.0
-        self._session = None
+        self._session = session
         self._fallback = None
+        self._stealth_fetcher = stealth_fetcher
+
+    def _stealth_html(self, url: str, headers: dict | None):
+        if self._stealth_fetcher is None:
+            from ..scraping.fetcher import get_fetcher
+
+            # When RagLex is linked to Scrapling MCP this resolves to the shared
+            # Camoufox service; otherwise it retains the in-process stealth fallback.
+            self._stealth_fetcher = get_fetcher(
+                "stealth",
+                source=self.source,
+                min_interval=self.min_interval,
+                requires_js=True,
+            )
+        page = self._stealth_fetcher.fetch(url, headers=headers)
+        if page.status >= 400 or not page.html:
+            raise FetchError(
+                f"{self.source}: stealth HTTP {page.status} for {url}",
+                transient=page.status >= 500,
+            )
+
+        @dataclass(slots=True)
+        class _Response:
+            content: bytes
+            status_code: int = 200
+
+        return _Response(page.html.encode("utf-8"))
 
     def get(self, url: str, **kwargs):
         wait = self.min_interval - (time.monotonic() - self._last_request_at)
         if wait > 0:
             time.sleep(wait)
         self._last_request_at = time.monotonic()
-        try:
-            from curl_cffi import requests as creq
-        except ImportError:
-            if self._fallback is None:
-                self._fallback = RateLimitedClient(
-                    self.source, min_interval=self.min_interval
-                )
-            return self._fallback.get(url, **kwargs)
         if self._session is None:
+            try:
+                from curl_cffi import requests as creq
+            except ImportError:
+                if self._fallback is None:
+                    self._fallback = RateLimitedClient(
+                        self.source, min_interval=self.min_interval
+                    )
+                return self._fallback.get(url, **kwargs)
             self._session = creq.Session(impersonate="chrome124", timeout=90)
         response = self._session.get(url, **kwargs)
+        # The iMac's egress IP is blocked even with Chrome TLS.  HTML pages can
+        # safely escalate to the already-linked Scrapling service.  PDFs stay on
+        # the binary HTTP path because the MCP fetch contract returns HTML text.
+        if (
+            response.status_code in {403, 429, 503}
+            and not urlsplit(url).path.lower().endswith(".pdf")
+        ):
+            return self._stealth_html(url, kwargs.get("headers"))
         if response.status_code >= 400:
             raise FetchError(
                 f"{self.source}: HTTP {response.status_code} for {url}",
