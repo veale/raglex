@@ -1,4 +1,4 @@
-from raglex.adapters.uk_fca_notices import notice_metadata, parse_sitemap
+from raglex.adapters.uk_fca_notices import FCANoticesAdapter, notice_metadata, parse_sitemap
 
 
 SITEMAP = b"""<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url>
@@ -28,3 +28,18 @@ def test_fca_notice_metadata():
     assert str(meta["date"]) == "2026-07-27"
     assert meta["subject"] == "Example Limited"
     assert meta["reference_number"] == "123456"
+
+
+class _Response:
+    content = SITEMAP
+
+
+class _Client:
+    def get(self, url):
+        return _Response()
+
+
+def test_fca_discovery_bounds_result_documents_not_sitemap_recursion():
+    rows = list(FCANoticesAdapter(client=_Client()).discover(None, max_pages=1))
+    assert len(rows) == 1
+    assert rows[0].stable_id == "uk/fca/final/example-limited-2026"

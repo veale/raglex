@@ -96,7 +96,6 @@ class FCANoticesAdapter(BaseAdapter):
         queue = [SITEMAP]
         seen_indexes: set[str] = set()
         notices: list[dict] = []
-        pages = 0
         while queue:
             url = queue.pop(0)
             if url in seen_indexes:
@@ -105,10 +104,15 @@ class FCANoticesAdapter(BaseAdapter):
             indexes, rows = parse_sitemap(self._client.get(url).content)
             queue.extend(index for index in indexes if index not in seen_indexes)
             notices.extend(rows)
-            pages += 1
-            if max_pages is not None and pages >= max_pages:
-                break
-        for row in sorted(notices, key=lambda item: item.get("changed") or "", reverse=True):
+        ordered = sorted(
+            notices, key=lambda item: item.get("changed") or "", reverse=True
+        )
+        # The FCA puts all 5k notices in one sitemap leaf.  Treat max_pages as
+        # 100-document result pages, not XML-recursion depth: a first watch run is
+        # bounded while every run can still inspect the newest notices.
+        if max_pages is not None:
+            ordered = ordered[:max_pages * 100]
+        for row in ordered:
             changed = row.get("changed")
             if since and changed and changed <= since:
                 continue
