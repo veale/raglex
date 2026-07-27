@@ -64,10 +64,12 @@ from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
 from .uk_cat import CompetitionAppealTribunalAdapter
 from .uk_cpr import UKCivilProcedureRulesAdapter
+from .uk_cps_guidance import CPSProsecutionGuidanceAdapter
 from .uk_et import UKEmploymentTribunalAdapter
 from .uk_govuk_regulator import GOVUKRegulatorAdapter
 from .uk_fca_notices import FCANoticesAdapter
 from .uk_legislation import UKLegislationAdapter
+from .uk_lawcom import LawCommissionReportsAdapter
 
 
 def _scrape_factory(recipe):
@@ -101,6 +103,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # The Ministry of Justice's current consolidated Civil Procedure Rules: one
     # record per Part / Practice Direction, with exact rule-number aliases.
     "uk-cpr": UKCivilProcedureRulesAdapter,
+    "uk-cps-guidance": CPSProsecutionGuidanceAdapter,
+    "uk-lawcom-reports": LawCommissionReportsAdapter,
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
@@ -345,6 +349,26 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("ids", "Parts, rules, or directions",
                       "uk/cpr/part/3, uk/cpr/rule/3.9, uk/cpr/pd/3d"),),
         ("CPR rule (CPR 3.9)", "CPR Part", "Practice Direction (PD 3D)"),
+    ),
+    "uk-cps-guidance": SourceInfo(
+        "uk-cps-guidance", "CPS prosecution guidance library",
+        "scrape", "GB", False,
+        "The Crown Prosecution Service's official A–Z prosecution-guidance library. "
+        "Current HTML guidance and library PDFs are stored with canonical titles, "
+        "revision dates and heading anchors; citation-free outliers are retained as "
+        "processed records but excluded from search.",
+        (), ("CPS prosecution-guidance URL", "guidance title"),
+    ),
+    "uk-lawcom-reports": SourceInfo(
+        "uk-lawcom-reports", "Law Commission completed-project documents",
+        "scrape", "GB", False,
+        "All PDFs nested in the Documents sections of the Law Commission's completed "
+        "project pages, including National Archives-preserved projects. Paragraph-initial "
+        "colon definitions with labels up to 15 characters create document-local Act/SI "
+        "shorthands and provision pinpoints. Repeated undefined 'the YYYY Act' references "
+        "use a conservative unique-year fallback; the Freedom of Information Act is "
+        "excluded as a 2000 fallback candidate.",
+        (), ("Law Commission number", "project/document title"),
     ),
     "uk-cma": SourceInfo(
         "uk-cma", "Competition and Markets Authority cases", "guidance", "GB", False,
@@ -1099,7 +1123,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "au-wa": "full-walk", "au-esafety-osa": "full-walk",
     "ie-legislation": "full-walk",
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
-    "uk-cpr": "full-walk",
+    "uk-cpr": "full-walk", "uk-cps-guidance": "full-walk",
+    "uk-lawcom-reports": "full-walk",
     "uk-cat": "full-walk",
     "ie-dpc": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)

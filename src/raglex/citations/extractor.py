@@ -94,6 +94,23 @@ _SHORTHAND_DEF = re.compile(
     r"|(?:hereina?fter|hereafter|henceforth)\s+[\"“']?(?P<hf>[A-Z][A-Za-z'’&.\- ]{1,40})[\"”']?"
 )
 
+# Law Commission reports commonly put a short glossary definition at the start of
+# its own line, in the reverse order from the bracket form above:
+#
+#   “the 1967 Act”: Leasehold Reform Act 1967.
+#   LRA: Land Registration Act 2002.
+#
+# The line boundary, colon, ≤15-character label and immediately following resolvable
+# statute are all required.  This is deliberately much narrower than treating any
+# prose before a colon as an alias.
+_COLON_STATUTE_SHORTHAND = re.compile(
+    r"(?:^|\n)[ \t]*"
+    r"(?:[\"“](?P<quoted>[^\"”:\n]{2,15})[\"”]"
+    r"|(?P<bare>(?:(?i:the\s+)?(?:18|19|20)\d{2}\s+Act|"
+    r"[A-Za-z][A-Za-z0-9.\- ]{1,14})))"
+    r"[ \t]*:[ \t]*$"
+)
+
 
 # The CJEU/AG-opinion idiom: a case is introduced in full, then relabelled with a
 # short "judgment in <Name>" tag beside the citation, and every later reference is
@@ -199,6 +216,28 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
             continue
         is_statute = (c.entity_kind or "") in _STATUTE_KINDS
         is_case = (c.entity_kind or "") in ("case", "opinion")
+        if is_statute:
+            # Reverse glossary form: short label at line start, full Act after the
+            # colon. The host must already resolve, so a colon can never invent a
+            # destination merely from a year.
+            before = text[max(0, c.char_start - 80):c.char_start]
+            cm = _COLON_STATUTE_SHORTHAND.search(before)
+            if cm:
+                _register(
+                    cm.group("quoted") or cm.group("bare") or "",
+                    c,
+                    abbrev=True,
+                )
+            # Some official reports put an SI acronym between its title and printed
+            # series number: ``... Regulations 2008 (BPRs) (SI 2008/1276)``.
+            # The SI grammar needs the series number to resolve the instrument and
+            # therefore consumes the intervening acronym as part of the same span.
+            if c.method == "uk_si_named":
+                internal = re.search(
+                    r"\(([A-Za-z][A-Za-z0-9.]{1,14})\)", c.raw
+                )
+                if internal:
+                    _register(internal.group(1), c, abbrev=True)
         # Bracketed short-name / abbreviation right after ANY citation — a case
         # ("Suncor"), a statute ("FMIOA"), a treaty ("Vienna Convention"). This is
         # the "(short)" that legal drafting drops after a full first/second mention.
@@ -255,12 +294,28 @@ def _link_shorthand_uses(
            rf"|judgment\s+in\s+{esc}\s*,?\s*(?:paragraphs?|paras?\.?)\s*"
            rf"(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})")
     if abbrev:
+        # The compact drafting form puts the shorthand first and its pinpoint
+        # afterwards: ``GPSR, reg 5`` / ``BPRs, regs 3, 13(1) and 13(4)``.
+        # Keep a multi-provision run intact as one auditable pinpoint string.
+        post_list = (
+            r"\d+[A-Za-z]?(?:\s*\([^)]*\))*"
+            r"(?:\s*(?:,|and|to|&|[-–—])\s*"
+            r"\d+[A-Za-z]?(?:\s*\([^)]*\))*)*"
+        )
+        pat += (
+            rf"|(?<![\[(\"“'])\b{esc}\b\s*,?\s*"
+            rf"(?P<postprov>(?:(?i:sections?|ss?\.?|regulations?|regs?\.?)"
+            rf"\s*{post_list}|(?i:Sched(?:ule)?\.?)\s*[IVXLC\d]+))"
+        )
         # a bare mention, optionally preceded by "the" — but not when it's being
         # (re)defined in brackets, which the def pass already owns
-        pat += (rf"|(?<![\[(\"“'])(?:(?P<prov>(?:ss?\.?\s*\d+[A-Za-z]?(?:\s*\([^)]*\))*"
+        pat += (rf"|(?<![\[(\"“'])(?:(?P<prov>(?:(?i:sections?|ss?\.?|"
+                rf"regulations?|regs?\.?)\s*"
+                rf"\d+[A-Za-z]?(?:\s*\([^)]*\))*"
                 rf"|Sched(?:ule)?\.?\s*[IVXLC\d]+))\s+(?:of|to)\s+(?:the\s+)?)?"
                 rf"\b{esc}\b(?![\"”'\])])")
-    use_re = re.compile(pat, re.IGNORECASE if not abbrev else 0)
+    year_act = bool(re.fullmatch(r"the\s+(?:18|19|20)\d{2}\s+Act", name, re.I))
+    use_re = re.compile(pat, re.IGNORECASE if (not abbrev or year_act) else 0)
     for m in use_re.finditer(text):
         s, e = m.start(), m.end()
         if s <= after:   # only USES after the definition count
@@ -268,13 +323,20 @@ def _link_shorthand_uses(
         if any(os < e and s < oe for os, oe in occupied):
             continue
         run = m.groupdict().get("run") or m.groupdict().get("run2")
-        prov = m.groupdict().get("prov")
+        prov = m.groupdict().get("prov") or m.groupdict().get("postprov")
         provision_pin = None
         if prov:
-            provision_pin = (re.sub(r"(?i)^Sched(?:ule)?\.?\s*", "Sch. ", prov)
-                             if re.match(r"(?i)^Sched", prov)
-                             else re.sub(r"(?i)^ss?\.?\s*", "s. ", prov))
-            provision_pin = re.sub(r"\s*(\([^)]*\))\s*", r"\1", provision_pin)
+            if re.match(r"(?i)^Sched", prov):
+                provision_pin = re.sub(r"(?i)^Sched(?:ule)?\.?\s*", "Sch. ", prov)
+            elif re.match(r"(?i)^(?:regulations?|regs?\.?)", prov):
+                provision_pin = re.sub(
+                    r"(?i)^(?:regulations?|regs?\.?)\s*", "reg. ", prov
+                )
+            else:
+                provision_pin = re.sub(
+                    r"(?i)^(?:sections?|ss?\.?)\s*", "s. ", prov
+                )
+            provision_pin = re.sub(r"\s+(\([^)]*\))", r"\1", provision_pin)
         out.append(Citation(
             raw=m.group(0), entity_kind=entity_kind, candidate_id=candidate_id,
             pinpoint=_pin_text(run) if run else provision_pin,
@@ -347,7 +409,13 @@ def attach_stored_shorthands(
     if not stored:
         return kept
     out = list(kept)
-    occupied = [(c.char_start, c.char_end) for c in kept]
+    # A stored, parent-gated shorthand is stronger evidence than the deliberately
+    # low-confidence generic carry-forward pass. In ``section 2 of the DPA``, that
+    # pass has already claimed ``section 2`` before the stored shorthand is applied;
+    # allow the complete shorthand phrase to supersede it.
+    occupied = [
+        (c.char_start, c.char_end) for c in kept if c.method != "carry_forward"
+    ]
     # Presence pre-filter, which is not an optimisation but the thing that makes the
     # feature affordable at all. A heavily-cited case accumulates a short name from
     # every document that ever defined one, and EVERY document citing it would
@@ -380,7 +448,18 @@ def attach_stored_shorthands(
             text, name, entity_kind=entity_kind, candidate_id=candidate_id,
             abbrev=abbrev, out=out, occupied=occupied,
             method="shorthand_global", confidence=0.6)
-    return out
+    strong = [c for c in out if c.method == "shorthand_global"]
+    return [
+        c for c in out
+        if not (
+            c.method == "carry_forward"
+            and any(
+                g.candidate_id == c.candidate_id
+                and g.char_start < c.char_end and c.char_start < g.char_end
+                for g in strong
+            )
+        )
+    ]
 
 
 # A list of articles all governed by one instrument — "Articles 7, 8 and 11 and

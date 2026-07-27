@@ -646,6 +646,66 @@ def test_case_shortnames_handle_lowercase_accents_and_parenthesised_parties():
     }
 
 
+def test_line_initial_colon_statute_shorthands_carry_provision_pinpoints():
+    text = (
+        "“the 1967 Act”: Leasehold Reform Act 1967.\n"
+        "LRA: Land Registration Act 2002.\n"
+        "Section 1(2) of the 1967 Act applies, with s. 3 of LRA."
+    )
+    sh = [c for c in extract_citations(text) if c.method == "shorthand"]
+    assert {(c.candidate_id, c.pinpoint) for c in sh} >= {
+        ("ukpga/1967/88", "s. 1(2)"),
+        ("ukpga/2002/9", "s. 3"),
+    }
+
+
+def test_line_initial_colon_si_shorthands_resolve_series_numbers():
+    text = (
+        "GPSR: General Product Safety Regulations 2005, SI No 1803.\n"
+        "BPRs: Business Protection from Misleading Marketing Regulations 2008, "
+        "SI No 1276.\n"
+        "Regulation 7 of GPSR and regulation 4 of BPRs apply."
+    )
+    sh = [c for c in extract_citations(text) if c.method == "shorthand"]
+    assert {(c.candidate_id, c.pinpoint) for c in sh} >= {
+        ("uksi/2005/1803", "reg. 7"),
+        ("uksi/2008/1276", "reg. 4"),
+    }
+
+
+def test_lawcom_si_series_variants_and_inline_acronyms():
+    text = (
+        "GPSR: General Product Safety Regulations 2005 SI 2005/1803.\n"
+        "The General Product Safety Regulations SI 2005 No 1803 (GPSR).\n"
+        "Business Protection from Misleading Marketing Regulations 2008 "
+        "(BPRs) (SI 2008/1276), reg 15. "
+        "GPSR, reg 5. BPRs, regs 3, 13(1) and 13(4)."
+    )
+    cites = extract_citations(text)
+    assert any(
+        c.method == "uk_si_named" and c.candidate_id == "uksi/2005/1803"
+        for c in cites
+    )
+    assert any(
+        c.method == "uk_si_named" and c.candidate_id == "uksi/2008/1276"
+        for c in cites
+    )
+    sh = [c for c in cites if c.method == "shorthand"]
+    assert {(c.candidate_id, c.pinpoint) for c in sh} >= {
+        ("uksi/2005/1803", "reg. 5"),
+        ("uksi/2008/1276", "reg. 3, 13(1) and 13(4)"),
+    }
+
+
+def test_colon_shorthand_requires_a_short_paragraph_initial_label():
+    text = (
+        "This prose mentions “LRA”: Land Registration Act 2002.\n"
+        "A label far beyond fifteen characters: Leasehold Reform Act 1967.\n"
+        "Section 3 of LRA and section 1 of the 1967 Act."
+    )
+    assert not any(c.method == "shorthand" for c in extract_citations(text))
+
+
 def test_cfreu_is_an_unambiguous_charter_name():
     c = next(c for c in extract_citations("Article 47 CFREU") if c.candidate_id == "12012P")
     assert c.pinpoint == "Article 47"

@@ -911,6 +911,40 @@ register(Grammar(
     _resolve_named_statute,
 ))
 
+# Law Commission glossaries and government guidance often give a statutory
+# instrument's full title followed by the printed series form rather than a URL:
+# ``General Product Safety Regulations 2005, SI No 1803``.  The series number is
+# the authoritative legislation.gov.uk identity, so this resolves directly.
+def _uk_si_named(m: "re.Match[str]") -> Normalised:
+    year = m.group("series_year") or m.group("title_year")
+    num = m.group("num_no") or m.group("num_series") or m.group("num_plain")
+    return (
+        f"uksi/{year}/{int(num)}",
+        None,
+        "regulation",
+    )
+
+
+register(Grammar(
+    "uk_si_named", "regulation",
+    re.compile(
+        r"(?P<title>[A-Z][A-Za-z0-9'’().,\-]*"
+        r"(?:\s+(?:and|of|for|to|in|on|the|from|by|with|without|against|"
+        r"No\.?|[A-Z][A-Za-z0-9'’().,\-]*)){0,14}?"
+        r"\s+(?:Regulations?|Rules|Order))"
+        r"(?:\s+(?P<title_year>(?:19|20)\d{2}))?"
+        r"(?:\s*\((?P<abbr>[A-Za-z][A-Za-z0-9.]{1,14})\))?"
+        r"\s*,?\s*\(?S\.?\s*I\.?\s*"
+        r"(?:"
+        r"No\.?\s*(?P<num_no>\d{1,5})"
+        r"|(?P<series_year>(?:19|20)\d{2})\s*"
+        r"(?:/|No\.?\s*)(?P<num_series>\d{1,5})"
+        r"|(?P<num_plain>\d{1,5})"
+        r")\)?\b"
+    ),
+    _uk_si_named,
+))
+
 
 # Commonwealth citation forms that break the shapes above — India's colon-delimited
 # neutral citation and AIR, Canada's CanLII slot, the South African SA-report shape,
