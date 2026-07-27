@@ -21,6 +21,7 @@ from .au_hca_caselaw import HCACaselawAdapter
 from .au_vic_legislation import VictoriaLegislationAdapter
 from .au_sa_legislation import SouthAustraliaLegislationAdapter
 from .au_wa_legislation import WesternAustraliaLegislationAdapter
+from .au_esafety import ESafetyOnlineSafetyAdapter
 from .ca_caselaw import CanadianCaseLawAdapter
 from .ca_lexum import CanadianLexumAdapter
 from .ca_legislation import CanadaFederalAdapter
@@ -161,6 +162,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "au-vic": VictoriaLegislationAdapter,
     "au-sa": SouthAustraliaLegislationAdapter,
     "au-wa": WesternAustraliaLegislationAdapter,
+    # Commonwealth eSafety publications under the Online Safety Act 2021: the
+    # registered codes/standards/notices plus the regulator's current guidance.
+    "au-esafety-osa": ESafetyOnlineSafetyAdapter,
     # Singapore — Singapore Statutes Online (SSO). Keyless server-rendered HTML, no ELI;
     # keyed by SSO's own act code (sg/act/coa1967). `subsidiary=true` browses the SL listing.
     "sg-legislation": SGLegislationAdapter,
@@ -638,6 +642,16 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "causes only that consolidation to be refetched.",
         (), ("au/wa/act/year/number", "au/wa/regulation/year/number"),
     ),
+    "au-esafety-osa": SourceInfo(
+        "au-esafety-osa", "Australian eSafety Online Safety Act publications",
+        "scrape", "AU", False,
+        "The eSafety Commissioner's official live Register of Online Safety Codes and "
+        "Standards plus its Regulatory Guidance page. Canonically titled current PDFs "
+        "are linked to the Online Safety Act 2021 (Cth); only references explicitly "
+        "qualified as sections of 'the Act' are provision-anchored, avoiding internal "
+        "code sections. Chrome-TLS is used first with linked Scrapling fallback.",
+        (), ("eSafety publication title", "eSafety PDF URL"),
+    ),
     "au-qld": SourceInfo(
         "au-qld", "Queensland legislation (LawMaker)", "legislation", "AU", False,
         "Queensland Acts and subordinate legislation via LawMaker's deterministic "
@@ -1082,7 +1096,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
     "au-tas": "full-walk", "au-vic": "full-walk", "au-sa": "server",
-    "au-wa": "full-walk",
+    "au-wa": "full-walk", "au-esafety-osa": "full-walk",
     "ie-legislation": "full-walk",
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
     "uk-cpr": "full-walk",

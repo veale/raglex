@@ -280,6 +280,31 @@ register(Grammar(
 AU_JURISDICTION_TAGS = ("Cth", "Commonwealth", "NSW", "Vic", "Qld", "WA", "SA",
                         "Tas", "ACT", "NT")
 _AU_JURIS = "|".join(AU_JURISDICTION_TAGS)
+AU_ONLINE_SAFETY_ACT_2021 = "au/cth/act/2021/76"
+
+
+def _au_online_safety_act(m: "re.Match[str]") -> Normalised:
+    """The eSafety corpus often omits ``(Cth)`` after its governing Act.
+
+    The title/year pair is globally distinctive but collides lexically with the UK
+    Online Safety Act 2023.  Resolve this exact Australian Act directly so an omitted
+    jurisdiction tag never falls into the generic UK title grammar.
+    """
+    sec = m.groupdict().get("sec")
+    return AU_ONLINE_SAFETY_ACT_2021, (f"s. {sec}" if sec else None), "act"
+
+
+register(Grammar(
+    "au_online_safety_act", "act",
+    re.compile(
+        r"(?:s(?:ection|s|\.)?\.?\s*"
+        r"(?P<sec>\d+[A-Za-z]?(?:\(\d+[A-Za-z]?\))*)\s+of\s+)?"
+        r"(?:the\s+)?Online\s+Safety\s+Act\s+2021"
+        r"(?:\s*\((?:Cth|Commonwealth)\))?",
+        re.IGNORECASE,
+    ),
+    _au_online_safety_act,
+))
 
 
 def _au_statute(m: "re.Match[str]") -> Normalised:
