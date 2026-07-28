@@ -524,6 +524,29 @@ def create_app(config: Config | None = None) -> FastAPI:
         return _start_job("backfill-eu-case-names", "EU case names + subjects (EUR-Lex)",
                           params)
 
+    @app.post("/jobs/backfill-ag-names")
+    def job_backfill_ag_names_ep(payload: dict = Body(default={})) -> dict:
+        """Fill in who delivered each held AG Opinion (CELLAR's structured relation, with
+        the Opinion's printed heading as the fallback). Local + one batched SPARQL per 200."""
+        limit = (payload or {}).get("limit")
+        return _start_job("backfill-ag-names", "AG names for held Opinions",
+                          {"limit": int(limit)} if isinstance(limit, int) else {})
+
+    @app.post("/jobs/repair-mojibake")
+    def job_repair_mojibake_ep(payload: dict = Body(default={})) -> dict:
+        """Repair Windows-1252 punctuation mis-decoded into the C1 control block (the
+        empty-rectangle glyphs). 1:1, so no citation offset moves; scope with ``source``."""
+        params = {k: v for k, v in (payload or {}).items() if k in ("source", "limit")}
+        return _start_job("repair-mojibake", "repair mis-decoded text", params)
+
+    @app.post("/jobs/backfill-intituling")
+    def job_backfill_intituling_ep(payload: dict = Body(default={})) -> dict:
+        """Record who decided each held judgment (and who argued it), read off its own
+        first page. Scope with ``source`` (default uk-caselaw)."""
+        params = {k: v for k, v in (payload or {}).items() if k in ("source", "limit")}
+        return _start_job("backfill-intituling", "bench + counsel from judgment headers",
+                          params)
+
     @app.post("/backfill-titles")
     def backfill_titles_ep(payload: dict = Body(default={})) -> dict:
         """Fill missing CJEU case names from CELLAR (synchronous; the job endpoint above is

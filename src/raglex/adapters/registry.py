@@ -75,6 +75,8 @@ from .uk_govuk_regulator import GOVUKRegulatorAdapter
 from .uk_fca_notices import FCANoticesAdapter
 from .uk_legislation import UKLegislationAdapter
 from .uk_ftt_ir import InformationRightsAdapter
+from .eu_digital_strategy import DigitalStrategyLibraryAdapter
+from .uk_judiciary import JudiciaryGuidanceAdapter
 from .uk_lawcom import LawCommissionReportsAdapter
 
 
@@ -116,6 +118,13 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Keyed by neutral citation where one exists, so the recent overlap with uk-grc
     # dedups onto one node instead of storing the decision twice.
     "uk-ftt-ir": InformationRightsAdapter,
+    # Judicial guidance on judiciary.uk — the Crown Court Compendium, the Equal Treatment
+    # Bench Book and the Chief Coroner's guidance/law sheets. Discovery hashes what each
+    # landing page OFFERS, so a monthly check on an unchanged page downloads nothing.
+    "uk-judiciary": JudiciaryGuidanceAdapter,
+    # The Commission's digital-policy publication register (DG CONNECT), pre-filtered to
+    # policy/legislation + reports; each item's downloads panel holds the real documents.
+    "eu-digital-strategy": DigitalStrategyLibraryAdapter,
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
@@ -372,6 +381,30 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "revision dates and heading anchors; citation-free outliers are retained as "
         "processed records but excluded from search.",
         (), ("CPS prosecution-guidance URL", "guidance title"),
+    ),
+    "eu-digital-strategy": SourceInfo(
+        "eu-digital-strategy", "EU digital-strategy library (DG CONNECT)", "guidance", "EU", False,
+        "The Commission's digital-policy publication register, filtered to Policy and "
+        "legislation + Report/Study: AI Act guidelines and Commission opinions, DSA/DMA "
+        "material, codes of practice, connectivity and cybersecurity reports. Each item's "
+        "downloads panel is followed to the document itself (the newsroom redirection "
+        "endpoint serves the PDF directly); where a document is published in several "
+        "languages only the English version is taken, and annexes published alongside are "
+        "recorded on the record. Newest-first, so an incremental run stops at the cursor.",
+        (), ("library item URL", "document title"),
+    ),
+    "uk-judiciary": SourceInfo(
+        "uk-judiciary", "UK judicial guidance (judiciary.uk)", "guidance", "GB", False,
+        "The Judicial College's bench books and the Chief Coroner's guidance: the Crown "
+        "Court Compendium (Parts I and II), the Equal Treatment Bench Book, and the ~30 "
+        "numbered Chief Coroner guidance notes, five law sheets and the Treasure guide. "
+        "Each is cited by its own reference (\"Guidance No 16A\", \"Law Sheet No 1\"), "
+        "minted as an alias. Revised a couple of times a year, so discovery fingerprints "
+        "the documents each landing page offers and a monthly check on an unchanged page "
+        "fetches nothing at all.",
+        (SourceOption("collection", "One collection only",
+                      "crown-court-compendium | equal-treatment-bench-book | chief-coroner"),),
+        ("Chief Coroner guidance number", "document title"),
     ),
     "uk-ftt-ir": SourceInfo(
         "uk-ftt-ir", "UK FTT — Information Rights decisions register", "caselaw", "GB", False,
@@ -1184,6 +1217,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
     "uk-cpr": "full-walk", "uk-cps-guidance": "full-walk",
     "uk-lawcom-reports": "full-walk",
+    "uk-judiciary": "full-walk",   # a fingerprint check, not a feed
+    "eu-digital-strategy": "early-stop",   # newest-first listing → stop at the cursor
     "uk-cat": "full-walk",
     "ie-dpc": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
