@@ -523,7 +523,8 @@ class Pipeline:
         # chunker can read it back by char span.
         text_path = None
         if self.textstore is not None and record.text and record.payload_hash:
-            text_path = str(self.textstore.put(record.payload_hash, record.text))
+            text_path = str(self.textstore.put(record.payload_hash, record.text,
+                                               source=record.source))
             # Persist the adapter's structural segments alongside the text (§6b).
             self.textstore.put_segments(record.payload_hash, record.segments)
 

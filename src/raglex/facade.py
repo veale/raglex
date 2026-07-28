@@ -9914,6 +9914,85 @@ class Facade:
             "undated": undated,
         }
 
+    def localise_text(self, *, sources: list[str] | None = None,
+                      limit: int = 2_000_000, on_progress=None,
+                      cancel_check=None) -> dict:
+        """Copy the text of the given sources onto the PRIMARY (fast) store.
+
+        The query path reads the document text twice — once to verify a literal
+        quotation, once to build the snippet — so free-text search is only usable
+        where the text is local: 0.046 ms a document against 22.57 ms over the mount,
+        measured. This brings a jurisdiction across.
+
+        Deliberately explicit. ``TextStore.put`` writes in place precisely so that a
+        corpus-wide repair cannot migrate documents onto the small disk by accident;
+        this is the one caller that says "yes, move it", and it is scoped by source.
+        Idempotent — a payload already local is skipped — and safe to interrupt."""
+        st = {"scanned": 0, "copied": 0, "already": 0, "missing": 0, "bytes": 0}
+        with self._open() as (cat, _rs, ts):
+            if ts.fallback is None:
+                return {"error": "no fallback store configured — nothing to copy from",
+                        **st}
+            where = "WHERE has_text = 1 AND payload_hash IS NOT NULL"
+            params: list[object] = []
+            if sources:
+                where += f" AND source IN ({','.join('?' * len(sources))})"
+                params.extend(sources)
+            rows = cat.conn.execute(
+                f"SELECT DISTINCT payload_hash FROM documents {where} LIMIT ?",
+                params + [limit]).fetchall()
+            total = len(rows)
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                ph = r["payload_hash"]
+                st["scanned"] += 1
+                if ts.locate(ph) == "local":
+                    st["already"] += 1
+                    continue
+                try:
+                    text = ts.get(ph)
+                except OSError:
+                    st["missing"] += 1
+                    continue
+                ts.put_local(ph, text)
+                # the sidecar follows the text: put_segments writes beside whichever
+                # copy path_for now resolves to, which is the local one
+                segs = ts.get_segments(ph)
+                if segs:
+                    ts.put_segments(ph, segs)
+                st["copied"] += 1
+                st["bytes"] += len(text.encode("utf-8"))
+                if n % 500 == 0:
+                    _progress(on_progress, stage="copying text to local storage",
+                              done=n, total=total,
+                              item=f"{st['bytes'] / 1e9:.2f} GB copied")
+        return st
+
+    def text_storage(self) -> dict:
+        """Where the corpus's text actually lives, per source — so a split store is
+        legible rather than something to infer from latency."""
+        with self._open() as (cat, _rs, ts):
+            if ts.fallback is None:
+                return {"split": False, "root": str(ts.root)}
+            rows = cat.conn.execute(
+                "SELECT source, payload_hash FROM documents "
+                "WHERE has_text = 1 AND payload_hash IS NOT NULL").fetchall()
+            per: dict[str, dict] = {}
+            seen: set[str] = set()
+            for r in rows:
+                ph = r["payload_hash"]
+                if ph in seen:
+                    continue
+                seen.add(ph)
+                e = per.setdefault(r["source"], {"source": r["source"], "local": 0,
+                                                 "remote": 0, "missing": 0})
+                where = ts.locate(ph)
+                e["local" if where == "local"
+                  else "remote" if where == "fallback" else "missing"] += 1
+            return {"split": True, "root": str(ts.root), "fallback": str(ts.fallback),
+                    "sources": sorted(per.values(), key=lambda x: -(x["local"] + x["remote"]))}
+
     def build_freetext_index(self, *, sources: list[str] | None = None,
                              reindex: bool = False, limit: int = 1_000_000,
                              on_progress=None, cancel_check=None) -> dict:

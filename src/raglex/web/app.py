@@ -437,6 +437,19 @@ def create_app(config: Config | None = None) -> FastAPI:
             sources=split(source) or None, doc_type=split(doc_type) or None,
             court=split(court) or None, year_from=year_from)
 
+    @app.get("/system/text-storage")
+    def text_storage_ep() -> dict:
+        """Where each source's text physically lives when the store is split across a
+        fast local root and a remote one."""
+        return facade.text_storage()
+
+    @app.post("/jobs/localise-text")
+    def job_localise_text_ep(payload: dict = Body(default={})) -> dict:
+        """Copy the text of the given ``sources`` onto the local store, so free-text
+        verification and snippets read at memory speed rather than over the mount."""
+        params = {k: v for k, v in (payload or {}).items() if k in ("sources", "limit")}
+        return _start_job("localise-text", "copy text to local storage", params)
+
     @app.get("/search/status")
     def search_status_ep() -> dict:
         """Both retrieval paths in one picture: what the free-text index covers, what
