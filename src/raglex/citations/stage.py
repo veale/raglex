@@ -25,6 +25,7 @@ from ..core.models import DocType, ExtractedVia, RelationshipType, ResolutionSta
 from ..storage.catalogue import Catalogue
 from ..storage.textstore import TextStore
 from .extractor import CitationExtractor, extract_citations
+from .us_cases import AMBIGUOUS_METHOD
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,18 @@ def _allows_us_reporters(doc) -> bool:
         return True
     return (str(doc["doc_type"]) in _CASE_DOC_TYPES
             and source.startswith(_COMMON_LAW_CASE_SOURCES))
+
+
+def _is_us_source(doc) -> bool:
+    """A US document — the only place an AMBIGUOUS reporter abbreviation is trusted.
+
+    A single-letter series between two numbers ("12 F. 13") is a real citation in an
+    American law report and page/folio notation nearly everywhere else, so the
+    common-law allowance above is too generous for that class: a Canadian judgment
+    citing US authority does so in F.2d/F.3d, while its French half is full of
+    ``p.``-shaped noise. National material only, then — the rule the Pacific Reporter
+    phantoms ("10 p. 100" = "10 pour cent") earned the hard way."""
+    return str(doc["source"] or "").lower().startswith("us-")
 
 
 # --- runaway-extraction guard -------------------------------------------------
@@ -634,7 +647,9 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     documents into one transaction (the run is restartable off the
     ``last_extracted_at`` stamp, so per-document durability buys nothing there)."""
     if not _allows_us_reporters(doc):
-        cites = [c for c in cites if c.method != "us_reporter"]
+        cites = [c for c in cites if not c.method.startswith("us_reporter")]
+    elif not _is_us_source(doc):
+        cites = [c for c in cites if c.method != AMBIGUOUS_METHOD]
 
     # Inside LEGISLATION, a bare "Article 3" / "paragraph 2" is almost always the
     # instrument referring to ITSELF, not to the directive it last named — the

@@ -345,7 +345,22 @@ class Pipeline:
                             )
                         continue
 
-                if self._ingest(record, stats):
+                try:
+                    stored = self._ingest(record, stats)
+                except Exception as exc:  # noqa: BLE001
+                    # Same rule as the fetch guard above, for the store half: a record
+                    # that reached us intact can still be unstorable (text carrying a
+                    # lone surrogate or a NUL that UTF-8/psycopg refuse to encode, an
+                    # over-long field…). Failing the item is right; failing the run —
+                    # losing every item after it — is not.
+                    stats.errors += 1
+                    stats.errors_transient += 1
+                    wm_frozen = True
+                    stats.notes.append(f"{record.stable_id}: {type(exc).__name__}: {exc}")
+                    log.exception("unexpected error storing %s", record.stable_id)
+                    continue
+
+                if stored:
                     stats.stored += 1
                     stats.stored_ids.append(record.stable_id)
                     if refreshed:

@@ -253,3 +253,66 @@ def test_misdated_case_probe_and_repair(catalogue):
     good = catalogue.conn.execute(
         "SELECT decision_date FROM documents WHERE stable_id='ewhc/admin/2024/50'").fetchone()
     assert str(good["decision_date"]).startswith("2024")
+
+
+# -- phantom US reporters ----------------------------------------------------
+def _seed_us_reporters(catalogue):
+    """A French judgment whose "10 p. 100" (= 10 per cent) became a Pacific Reporter
+    case, a Canadian judgment citing a bare "12 F. 13", and — as the control — a real
+    US judgment citing the same single-letter series, plus a real F.3d citation."""
+    for sid, source in [("fr/case/1", "fr-dila"), ("ca/case/1", "ca-caselaw"),
+                        ("us/case/1", "us-caselaw")]:
+        catalogue.conn.execute(
+            "INSERT INTO documents (stable_id, source, doc_type, title, version, is_latest, "
+            "has_text, has_embedding, added_by, topic_tags, upstream_status, fetched_at) "
+            "VALUES (?,?, 'judgment', ?, 1, 1, 1, 0, 'harvest', '[]', 'live', '2026-01-01')",
+            (sid, source, sid))
+    rows = [
+        ("fr/case/1", "10 p. 100", "us/p/10/100"),      # French per-cent → phantom
+        ("us/case/1", "163 P. 1002", "us/p/163/1002"),  # bare Pacific, even in US material
+        ("ca/case/1", "12 F. 13", "us/f/12/13"),        # single letter outside the US
+        ("us/case/1", "12 F. 13", "us/f/12/13"),        # …the same, at home: legitimate
+        ("ca/case/1", "347 F.3d 1200", "us/f3d/347/1200"),   # unambiguous: always kept
+    ]
+    for src, raw, cand in rows:
+        catalogue.conn.execute(
+            "INSERT INTO citations (src_id, raw, entity_kind, candidate_id, char_start, "
+            "char_end, method, created_at) VALUES (?,?,'case',?,0,5,'us_reporter','2026-01-01')",
+            (src, raw, cand))
+        catalogue.conn.execute(
+            "INSERT INTO relations (src_id, candidate_id, raw_citation_string, "
+            "resolution_status, relationship_type, extracted_via) "
+            "VALUES (?,?,?,'pending','mentions','regex')", (src, cand, raw))
+    # a human-made edge to the same phantom target — curation is never deleted
+    catalogue.conn.execute(
+        "INSERT INTO relations (src_id, candidate_id, resolution_status, "
+        "relationship_type, extracted_via) "
+        "VALUES ('fr/case/1', 'us/p/10/100', 'pending', 'mentions', 'manual')")
+    catalogue.conn.commit()
+
+
+def test_ambiguous_us_reporter_probe_counts_only_the_phantoms(catalogue):
+    _seed_us_reporters(catalogue)
+    probe = run_probes(catalogue, only=["ambiguous_us_reporter"])[0]
+    # both bare-Pacific rows (wherever they sit) + the non-US single letter
+    assert probe.count == 3
+    assert {s["candidate_id"] for s in probe.samples} == {
+        "us/p/10/100", "us/p/163/1002", "us/f/12/13"}
+    assert probe.repairable
+
+
+def test_ambiguous_us_reporter_repair_spares_us_material_and_curation(catalogue):
+    _seed_us_reporters(catalogue)
+    out = run_repair(catalogue, "ambiguous_us_reporter")
+    assert out == {"citations_deleted": 3, "edges_deleted": 3}
+
+    kept = [(r["src_id"], r["candidate_id"]) for r in catalogue.conn.execute(
+        "SELECT src_id, candidate_id FROM citations ORDER BY candidate_id").fetchall()]
+    assert kept == [("us/case/1", "us/f/12/13"), ("ca/case/1", "us/f3d/347/1200")]
+    manual = catalogue.conn.execute(
+        "SELECT extracted_via FROM relations WHERE candidate_id = 'us/p/10/100'"
+    ).fetchall()
+    assert [r["extracted_via"] for r in manual] == ["manual"]
+    # clean afterwards, and re-runnable
+    assert run_probes(catalogue, only=["ambiguous_us_reporter"])[0].count == 0
+    assert run_repair(catalogue, "ambiguous_us_reporter")["citations_deleted"] == 0

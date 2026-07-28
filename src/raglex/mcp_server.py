@@ -272,6 +272,17 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.repair_probe(name)
 
     @admin
+    def merge_westlaw_duplicates(apply: bool = False, limit: Optional[int] = None) -> dict:
+        """Collapse Westlaw imports held twice: a case keyed by a ``westlaw:`` surrogate
+        (report-citation slug, WL number or content hash) that the corpus ALSO holds under
+        its real citation, because the RTF was imported before its BAILII/FCL copy. Folds
+        the surrogate into the citation-keyed document, carrying text, edges, aliases and
+        tags. Matches only on a precise identifier (a parallel report citation or a
+        WL/ECLI/CJEU id), never a party name. DRY RUN unless ``apply=True`` — the dry run
+        lists every planned merge."""
+        return facade.refix_westlaw_imports(apply=apply, limit=limit)
+
+    @admin
     def rebuild_authority() -> dict:
         """Recompute the citation-network PageRank roll-up (batch; run after large
         imports or resolution sweeps so ranking/citator/related stay current)."""
@@ -429,8 +440,13 @@ def build_server(config: Config | None = None) -> FastMCP:
     def backfill_eu_case_metadata(limit: int = 500) -> dict:
         """Augment harvested CJEU cases from the EUR-Lex webservice with the official
         case name + subject-matter tags (the free CELLAR data omits these). Batched +
-        quota-friendly; needs EURLEX_USERNAME/PASSWORD in settings."""
-        return facade.backfill_titles(limit=limit)
+        quota-friendly; needs EURLEX_USERNAME/PASSWORD in settings. Runs as a background
+        job (one external call per 50 cases) — poll it for progress. The scheduler runs
+        the same job daily when the 'eu-case-names' task is enabled."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "backfill-eu-case-names", "EU case names + subjects (EUR-Lex)",
+            {"limit": limit})
 
     @admin
     def coverage() -> dict:

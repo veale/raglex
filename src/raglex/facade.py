@@ -2053,6 +2053,7 @@ class Facade:
         (``similar`` — "cases like this"), each of which the agent can then query in depth."""
         from .citations import extract_citations
         from .citations.snowball import _classify
+        from .core.text import fold_citation
         from .resolve.matchers import first_candidate
 
         raw = (citation or "").strip()
@@ -2080,6 +2081,15 @@ class Facade:
                 # maybe the agent passed a stable_id straight through
                 if cat.get_document(raw) is not None:
                     held_id, cand = raw, raw
+            if held_id is None:
+                # No candidate id doesn't mean no document. A classic law report
+                # ("[1932] AC 562"), a case cited by name ("Donoghue v Stevenson") and a
+                # retired surrogate id all yield candidate=None from the grammars — and
+                # they are precisely the forms every importer mints ALIASES for. Without
+                # this hop the whole alias table was unreachable from lookup: Donoghue
+                # came back "not held" while the corpus held it twice over.
+                probe = fold_citation(raw)
+                held_id = cat.find_document_id(probe) if probe else None
         form = adapter = None
         if cand:
             form, _juris, adapter = _classify(cand, "case")
@@ -5515,7 +5525,7 @@ class Facade:
 
         names = load_name_index(names_csv) if names_csv else {}
         st = {"total": 0, "imported": 0, "secondary": 0, "no_slug": 0, "named": 0,
-              "aliases": 0, "citation_mismatch": 0, "extracted": 0}
+              "aliases": 0, "citation_mismatch": 0, "merged_surrogate": 0, "extracted": 0}
         out_f = open(out_jsonl, "w", encoding="utf-8") if out_jsonl else None
         try:
             with self._open() as (cat, rs, ts):
@@ -5589,6 +5599,11 @@ class Facade:
                             meta["catchwords"] = clean.catchwords
                         if mismatch:
                             meta["citation_mismatch"] = mismatch
+
+                        if slug not in existing and self._adopt_surrogate_duplicate(
+                                cat, slug, secondary):
+                            existing.add(slug)
+                            st["merged_surrogate"] = st.get("merged_surrogate", 0) + 1
 
                         if slug in existing:
                             # already held (Find Case Law / HoL): keep the authoritative text,
@@ -5669,6 +5684,47 @@ class Facade:
                 on_progress=on_progress, cancel_check=cancel_check).get("aliased", 0)
         self._invalidate_caches()
         return st
+
+    # An id minted only because no citation-derived identity was available at import time
+    # (a Westlaw report slug, WL number or content hash). It names a real case, but by the
+    # weakest key in the ladder — so a copy that arrives later under its neutral citation
+    # should absorb it rather than sit beside it.
+    _SURROGATE_ID_RE = re.compile(r"^westlaw:", re.I)
+
+    def _adopt_surrogate_duplicate(self, cat, target: str, citations) -> str | None:
+        """Fold a held SURROGATE copy of this case into ``target`` before importing it.
+
+        The Westlaw importer already checks whether a case it is about to key by a
+        surrogate is *already* held under a real citation — but only forwards. A Westlaw
+        RTF imported BEFORE the same case's BAILII/FCL copy therefore stayed a permanent
+        duplicate: Donoghue v Stevenson was held twice, as ``westlaw:1932-a-c-562`` (08:28)
+        and ``ukhl/1932/100`` (18:11 the same day), with nothing to collapse them. Close
+        the loop from the other side — if a parallel report citation of the incoming case
+        resolves to a held surrogate, re-key that document onto ``target``, carrying its
+        text, edges, aliases, tags and versions with it (:meth:`Catalogue.rekey_document`).
+
+        Precise identifiers only: a report citation names one case, a party name does not
+        ("Harris v Harris"). Returns the absorbed id, or None if there was nothing to fold.
+        """
+        from .core.text import fold
+        from .resolve.matchers import first_candidate
+
+        for c in citations:
+            cand = first_candidate(c)
+            key = fold(cand.value) if cand else fold(c or "")
+            if not key or key == target:
+                continue
+            held = cat.get_alias(key)
+            if (not held or held == target
+                    or not self._SURROGATE_ID_RE.match(held)
+                    or cat.get_document(held) is None):
+                continue
+            cat.rekey_document(held, target, commit=False)
+            # the retired id stays resolvable: old links and any edge minted against it
+            # still land on the surviving document.
+            cat.put_alias(fold(held), target, source="merged-surrogate", commit=False)
+            return held
+        return None
 
     @staticmethod
     def _bailii_html_supersedes(existing, existing_meta: dict, new_len: int, old_len: int) -> bool:
@@ -5766,7 +5822,7 @@ class Facade:
         from .core.text import fold
 
         st = {"total": 0, "imported": 0, "superseded": 0, "secondary": 0,
-              "unparseable": 0, "aliases": 0, "extracted": 0}
+              "unparseable": 0, "aliases": 0, "merged_surrogate": 0, "extracted": 0}
         files: list[dict] = []  # per-file dispositions for the UI
         with self._open() as (cat, rs, ts):
             to_extract: list[str] = []
@@ -5850,6 +5906,10 @@ class Facade:
                             "bailii_citations": list(parsed.citations),
                             "bailii_court": parsed.court_label}
                 existing = cat.get_document(slug)
+                if existing is None and self._adopt_surrogate_duplicate(
+                        cat, slug, parsed.citations):
+                    existing = cat.get_document(slug)
+                    st["merged_surrogate"] = st.get("merged_surrogate", 0) + 1
                 old_meta = cat.document_meta(slug) if existing is not None else {}
 
                 if existing is not None and existing["payload_hash"] == payload_hash:
@@ -6588,7 +6648,7 @@ class Facade:
         cols = ["path", "title", "citation", "date", "court", "database_name", "html_content"]
         st = {"total": 0, "rows_scanned": 0, "resumed_at": start_row, "imported": 0,
               "superseded": 0, "secondary": 0, "enriched": 0, "stub": 0, "skipped": 0,
-              "unparseable": 0, "aliases": 0, "extracted": 0}
+              "unparseable": 0, "aliases": 0, "merged_surrogate": 0, "extracted": 0}
         files: list[dict] = []
         with self._open() as (cat, rs, ts):
             seen = 0
@@ -6707,6 +6767,12 @@ class Facade:
                 held = cat.get_document(dst)
                 if held is not None:
                     target, existing = dst, held
+        # …and a pre-neutral case may already be held under a Westlaw surrogate imported
+        # before this copy existed — absorb it instead of standing up a duplicate.
+        if existing is None and self._adopt_surrogate_duplicate(
+                cat, target, parsed.self_citations):
+            existing = cat.get_document(target)
+            st["merged_surrogate"] = st.get("merged_surrogate", 0) + 1
 
         # -- alias ladder: distinctive name variants + self-citations + chamberless -
         alias_pairs: list[tuple[str, str]] = []
@@ -7254,8 +7320,10 @@ class Facade:
         ``meta_json`` (no re-parse of the raw RTF needed) and, where it differs, re-key the
         document in place (:meth:`Catalogue.rekey_document`, cascading every reference). Also
         folds a doc into a held record that shares a **precise** alias (report citation or
-        WL/ECLI/CJEU id) — never a bare party name. ``apply=False`` is a dry run that just
-        reports the planned changes."""
+        WL/ECLI/CJEU id) — never a bare party name; that second half applies to EVERY
+        ``westlaw:`` id, because a report slug is still a surrogate and the case may have
+        arrived under its neutral citation later (import order alone decided which of the
+        two exists). ``apply=False`` is a dry run that just reports the planned changes."""
         import json
 
         from .adapters.westlaw_rtf import ParsedWestlaw, westlaw_identity
@@ -7270,18 +7338,18 @@ class Facade:
                 ('%"imported": "westlaw-rtf"%',)).fetchall()
             if limit:
                 rows = rows[:limit]
-            # Only the opaque content-hash surrogates need repair — a doc already keyed by
-            # an ECLI, a neutral slug, a WL id or a report slug is authoritative and must be
-            # left alone (its meta_json may be incomplete after a merge, so recomputing from
-            # meta could wrongly demote a good id).
+            # Only the opaque content-hash surrogates get their identity RECOMPUTED — a doc
+            # already keyed by an ECLI, a neutral slug, a WL id or a report slug is as good
+            # as its metadata allows and must be left alone (its meta_json may be incomplete
+            # after a merge, so recomputing from meta could wrongly demote a good id).
             hash_id = re.compile(r"^westlaw:[0-9a-f]{16}$")
             for n, r in enumerate(rows, 1):
                 if cancel_check and cancel_check():
                     break
                 st["scanned"] += 1
                 cur = r["stable_id"]
-                if not hash_id.match(cur):
-                    st["unchanged"] += 1
+                if not cur.lower().startswith("westlaw:"):
+                    st["unchanged"] += 1  # already keyed by a real citation
                     continue
                 try:
                     wl = (json.loads(r["meta_json"]) or {}).get("westlaw") or {}
@@ -7294,13 +7362,21 @@ class Facade:
                     neutral_citation=wl.get("neutral_citation"),
                     ecli=wl.get("ecli"), wl_number=wl.get("wl_number"),
                     case_number=wl.get("case_number"))
-                # only ever re-key TO a citation-derived identity — never to a fresh hash
-                if not (p.neutral_citation or p.ecli or p.wl_number or p.report_citations):
-                    st["unchanged"] += 1
-                    continue
-                target, kind = westlaw_identity(p)
+                is_hash = bool(hash_id.match(cur))
+                if is_hash:
+                    # only ever re-key TO a citation-derived identity — never to a fresh hash
+                    if not (p.neutral_citation or p.ecli or p.wl_number or p.report_citations):
+                        st["unchanged"] += 1
+                        continue
+                    target, kind = westlaw_identity(p)
+                else:
+                    # keep the id; a report/WL slug is still only a SURROGATE, so it stays
+                    # eligible for the merge check below — the Donoghue case, held as both
+                    # westlaw:1932-a-c-562 and ukhl/1932/100 because the Westlaw RTF was
+                    # imported first and nothing ever revisited it.
+                    target, kind = cur, "surrogate"
                 # fold into a held record sharing a precise alias (report cite / id)
-                if kind in ("wl", "report", "hash"):
+                if kind in ("wl", "report", "hash", "surrogate"):
                     precise = list(p.report_citations) + [
                         x for x in (p.wl_number, p.ecli, p.case_number) if x]
                     for c in precise:
@@ -7309,6 +7385,11 @@ class Facade:
                         held = cat.get_alias(key)
                         if held is None and cat.get_document(key) is not None:
                             held = key
+                        # A hash id may fold into any held twin (including a better Westlaw
+                        # surrogate); an id that is already a report/WL slug only ever yields
+                        # to a real citation-derived identity, never to another surrogate.
+                        if held and not is_hash and self._SURROGATE_ID_RE.match(held):
+                            continue
                         if held and held != cur and cat.get_document(held) is not None:
                             target, kind = held, "merged"
                             break
@@ -7318,6 +7399,9 @@ class Facade:
                 changes.append({"old": cur, "new": target, "kind": kind})
                 if apply:
                     action = cat.rekey_document(cur, target, commit=False)
+                    # the retired id stays resolvable — a link or an edge minted against it
+                    # still lands on the surviving document.
+                    cat.put_alias(fold(cur), target, source="merged-surrogate", commit=False)
                     st["merged" if action == "merge" else "rekeyed"] += 1
                     if n % 100 == 0:
                         cat.commit()
@@ -8250,7 +8334,8 @@ class Facade:
             return doc["title"]
         return target
 
-    def backfill_titles(self, *, limit: int = 500, reset_misses: bool = False) -> dict:
+    def backfill_titles(self, *, limit: int = 500, reset_misses: bool = False,
+                        on_progress=None, cancel_check=None) -> dict:
         """Augment already-harvested CJEU judgments/opinions from the authoritative
         EUR-Lex webservice with everything the free CELLAR RDF omits — the official
         **case name** and the **subject-matter / EuroVoc** classification (added as
@@ -8262,6 +8347,7 @@ class Facade:
                                          concise_case_title, eurlex_metadata)
         from .adapters.eu_legislation import _is_generic_title, celex_title
 
+        _progress(on_progress, stage="reading held CJEU cases", done=0, total=0)
         with self._open() as (cat, _rs, _ts):
             if reset_misses:
                 cat.clear_enrichment_misses("cjeu_title")
@@ -8283,10 +8369,14 @@ class Facade:
                         cat.update_document_fields(r["stable_id"], {"title": short}, curate=False)
                         r["title"] = short
                         shortened += 1
+            _progress(on_progress, stage="shortening stored titles", done=shortened,
+                      total=len(rows))
             # And give EU-legislation docs a real name where the source gave a generic
             # one ("EUR-Lex - 12008E267 - EN", "ANNEX", an OJ filename) — derived from
             # the CELEX (e.g. "Article 267 TFEU"). Local, no webservice.
             for r in cat.list_documents(source="eu-legislation", limit=100000):
+                if cancel_check and cancel_check():
+                    break
                 if _is_generic_title(r["title"]):
                     name = celex_title(r["stable_id"])
                     if name:
@@ -8299,6 +8389,11 @@ class Facade:
         if not targets:
             return {"candidates": 0, "updated": 0, "shortened": shortened}
 
+        if cancel_check and cancel_check():
+            return {"candidates": len(targets), "updated": 0, "shortened": shortened,
+                    "cancelled": True}
+        _progress(on_progress, stage="mapping ECLI → CELEX (CELLAR)", done=0,
+                  total=len(targets))
         cellar = EUCellarAdapter()
         eclis = [r["stable_id"] for r in targets if r["stable_id"].startswith("ECLI:")]
         celex_by_ecli = cellar.celex_for_eclis(eclis)  # 1 SPARQL for all
@@ -8309,8 +8404,10 @@ class Facade:
                 sid if re.fullmatch(r"\d{5}[A-Z]{1,2}\d{4}", sid) else None)
             if celex and celex not in missed:
                 want[celex] = sid
+        _progress(on_progress, stage="EUR-Lex webservice", done=0, total=len(want))
         meta = eurlex_metadata(list(want))  # batched: ⌈N/50⌉ credentialed calls
         titled = tagged = 0
+        _progress(on_progress, stage="writing names + subject tags", done=0, total=len(want))
         with self._open() as (cat, _rs, _ts):
             for celex, sid in want.items():
                 m = meta.get(celex) or {}

@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from ..core.text import scrub_surrogates
+
 
 @dataclass(slots=True)
 class Extracted:
@@ -74,8 +76,8 @@ class StructuredPdfExtractor:
             blocks = [b for b in page.get_text("blocks") if b[6] == 0 and (b[4] or "").strip()]
             blocks.sort(key=lambda b: (round(b[1]), b[0]))  # reading order: top-down, then left
             # inside a block, hard newlines are line-wrapping; between blocks, paragraphs
-            page_text = sep.join(
-                re.sub(r"\s*\n\s*", " ", b[4].strip()) for b in blocks)
+            page_text = scrub_surrogates(sep.join(
+                re.sub(r"\s*\n\s*", " ", b[4].strip()) for b in blocks))
             confidences.append(1.0 if page_text else 0.0)
             if not page_text:
                 continue
@@ -116,7 +118,7 @@ class PdfExtractor:
         cursor = 0
         sep = "\n\n"
         for i, page in enumerate(reader.pages):
-            txt = (page.extract_text() or "").strip()
+            txt = scrub_surrogates((page.extract_text() or "").strip())
             confidences.append(1.0 if txt else 0.0)
             if not txt:
                 continue

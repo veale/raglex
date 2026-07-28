@@ -50,7 +50,7 @@ _REPORTERS: dict[str, str] = {
     "F.": "f", "Fed. Appx.": "fedappx", "F. App'x": "fedappx",
     # Regional reporters (National Reporter System)
     "A.3d": "a3d", "A.2d": "a2d", "A.": "a",
-    "P.3d": "p3d", "P.2d": "p2d", "P.": "p",
+    "P.3d": "p3d", "P.2d": "p2d", "P.": "p",  # bare "P." is NEVER matched — see below
     "N.E.3d": "ne3d", "N.E.2d": "ne2d", "N.E.": "ne",
     "N.W.2d": "nw2d", "N.W.": "nw",
     "S.E.2d": "se2d", "S.E.": "se",
@@ -60,10 +60,32 @@ _REPORTERS: dict[str, str] = {
     "N.Y.S.3d": "nys3d", "N.Y.S.2d": "nys2d",
 }
 
+# Reporters whose bare abbreviation is ordinary prose in another language, and which
+# therefore manufacture American cases out of nothing. The first Pacific Reporter is the
+# proven offender: "X p. 100" is French for "X per cent" ("pour cent") and fills the
+# Canadian/French corpora, so every unresolved US reference in the live worklist was a
+# phantom Pacific case — "10 p. 100", "25 p. 100", "100 p. 100" — each cited hundreds of
+# times, and each a routable us-caselaw candidate burning CourtListener lookups on a case
+# that does not exist. It is not matched in prose ANYWHERE; the table keeps the entry so
+# slug/name round-tripping still works for cases the adapter harvests from CourtListener,
+# where the reporter is structured metadata rather than a guess about running text.
+_NEVER_MATCHED = {"P."}
+# …and the candidate slugs they mint, so the classifier can un-route the edges an older
+# extractor already wrote (they are cleared for good by the ``ambiguous_us_reporter`` repair).
+NEVER_MATCHED_SLUGS = {"p"}
+
+# Matched, but only trusted inside US material (see ``_finish_document``). A single-letter
+# series between two numbers collides with page/folio notation — German "S. 12 f. 13",
+# French enumerations — which is tolerable in an American document and pure noise outside
+# one. Real US authority in a foreign judgment is overwhelmingly cited in the modern
+# series (P.2d/P.3d, F.2d/F.3d, A.2d/A.3d), which stay globally matched.
+_AMBIGUOUS_SLUGS = {"a", "f", "so"}
+AMBIGUOUS_METHOD = "us_reporter_ambiguous"
+
 # a dot/space-tolerant alternation over the reporter abbreviations, longest first
 _REP_ALT = "|".join(
     re.escape(rep).replace(r"\ ", r"\ ?").replace(r"\.", r"\.\ ?")
-    for rep in sorted(_REPORTERS, key=len, reverse=True)
+    for rep in sorted(set(_REPORTERS) - _NEVER_MATCHED, key=len, reverse=True)
 )
 # vol REPORTER page. A trailing ", N" pin page is deliberately NOT captured: it is
 # ambiguous with a parallel citation ("519 U.S. 452, 117 S. Ct. 905"), where the
@@ -167,6 +189,8 @@ def us_case_citations(text: str) -> list[Citation]:
             continue
         if not plausible_us_volume(m.group("vol")):
             continue  # a year in the volume slot → a bracket-year misparse, not US
+        slug = _canonical_reporter(m.group("rep"))
+        ambiguous = slug in _AMBIGUOUS_SLUGS
         cand = us_candidate_id(m.group("vol"), m.group("rep"), m.group("page"))
         out.append(Citation(
             raw=m.group(0),
@@ -175,8 +199,9 @@ def us_case_citations(text: str) -> list[Citation]:
             pinpoint=None,
             char_start=m.start(),
             char_end=m.end(),
-            method="us_reporter",
-            confidence=0.85,
+            # the extraction stage keeps the ambiguous ones only in US documents
+            method=AMBIGUOUS_METHOD if ambiguous else "us_reporter",
+            confidence=0.6 if ambiguous else 0.85,
         ))
     return out
 

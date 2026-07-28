@@ -444,6 +444,39 @@ def probe_duplicate_spans(cat) -> ProbeResult:
         "info", n, samples, repairable=True)
 
 
+# The US reporter abbreviations that are ordinary prose elsewhere. ``us/p/…`` (the bare
+# first-series Pacific Reporter) is never a citation any more — "10 p. 100" is French for
+# "10 per cent" — and the single-letter series are trusted only inside US documents.
+# See ``citations.us_cases``; this finds what an older extractor already wrote.
+_AMBIGUOUS_US_PREFIXES = ("us/a/", "us/f/", "us/so/")
+
+
+def _ambiguous_us_where() -> tuple[str, tuple]:
+    """SQL selecting a table's phantom US-reporter rows: every bare-Pacific row, plus the
+    single-letter series wherever the citing document is not US material. Unqualified
+    column names — every user is a single-table SELECT or DELETE (SQLite takes no alias
+    in a DELETE), and both tables carry ``candidate_id``/``src_id``."""
+    return (
+        "(candidate_id LIKE ? OR "
+        f"(({' OR '.join('candidate_id LIKE ?' for _ in _AMBIGUOUS_US_PREFIXES)}) "
+        "AND src_id IN (SELECT stable_id FROM documents WHERE source NOT LIKE ?)))",
+        ("us/p/%", *(p + "%" for p in _AMBIGUOUS_US_PREFIXES), "us-%"),
+    )
+
+
+def probe_ambiguous_us_reporter(cat) -> ProbeResult:
+    where, params = _ambiguous_us_where()
+    n = _one(cat, f"SELECT COUNT(*) AS n FROM citations WHERE {where}", params)
+    samples = _rows(cat, f"SELECT src_id, raw, candidate_id FROM citations "
+                         f"WHERE {where} LIMIT {SAMPLE}", params)
+    return ProbeResult(
+        "ambiguous_us_reporter",
+        "phantom US cases from an ambiguous reporter abbreviation — bare Pacific "
+        "(\"10 p. 100\" is French for \"10 per cent\"), or a single-letter series "
+        "outside US material. Routable, so each one also spends CourtListener quota",
+        "warn", n, samples, repairable=True)
+
+
 PROBES = (
     probe_case_paragraph_carry_forward,
     probe_judgment_paragraph_carry_forward,
@@ -459,6 +492,7 @@ PROBES = (
     probe_misdated_case,
     probe_never_extracted,
     probe_duplicate_spans,
+    probe_ambiguous_us_reporter,
 )
 
 
@@ -568,7 +602,26 @@ def repair_duplicate_spans(cat) -> dict:
     return {"duplicate_citations_deleted": cur.rowcount}
 
 
+def repair_ambiguous_us_reporter(cat) -> dict:
+    """Delete the phantom US-reporter citations the probe counts, and the machine edges
+    they minted. Machine provenance only (``regex``/``inferred``): a hand-made link to a
+    US case is never touched. Bounded to the probe's own predicate and re-runnable — the
+    extractor no longer mints these, so the count stays at zero afterwards.
+
+    After repair, run rebuild-citation-counts (the roll-up still holds the phantom
+    occurrences until rebuilt)."""
+    where, params = _ambiguous_us_where()
+    with cat._atomic():
+        cites = cat.conn.execute(
+            f"DELETE FROM citations WHERE {where}", params).rowcount
+        edges = cat.conn.execute(
+            f"DELETE FROM relations WHERE {where} "
+            "AND extracted_via IN ('regex', 'inferred')", params).rowcount
+    return {"citations_deleted": cites, "edges_deleted": edges}
+
+
 REPAIRS = {
+    "ambiguous_us_reporter": repair_ambiguous_us_reporter,
     "case_paragraph_carry_forward": repair_case_paragraph_carry_forward,
     "judgment_paragraph_carry_forward": repair_judgment_paragraph_carry_forward,
     "anachronistic_eu_citation": repair_anachronistic_eu_citation,

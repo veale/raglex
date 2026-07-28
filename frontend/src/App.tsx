@@ -147,7 +147,7 @@ function AdminView({ open, navigate }:
       <div className="admin-body">
         {section === "overview" && <Dashboard open={open} navigate={navigate} />}
         {section === "unresolved" && <UnresolvedView open={open} navigate={navigate} />}
-        {section === "maintain" && <MaintainView open={open} />}
+        {section === "maintain" && <MaintainView open={open} navigate={navigate} />}
         {section === "import" && <ImportView open={open} />}
       </div>
     </div>

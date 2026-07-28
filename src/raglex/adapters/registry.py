@@ -74,6 +74,7 @@ from .uk_et import UKEmploymentTribunalAdapter
 from .uk_govuk_regulator import GOVUKRegulatorAdapter
 from .uk_fca_notices import FCANoticesAdapter
 from .uk_legislation import UKLegislationAdapter
+from .uk_ftt_ir import InformationRightsAdapter
 from .uk_lawcom import LawCommissionReportsAdapter
 
 
@@ -110,6 +111,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-cpr": UKCivilProcedureRulesAdapter,
     "uk-cps-guidance": CPSProsecutionGuidanceAdapter,
     "uk-lawcom-reports": LawCommissionReportsAdapter,
+    # The Information Rights tribunal's OWN decisions register — the fifteen years of
+    # FOIA/EIR/DPA/PECR appeals that predate Find Case Law's coverage of the chamber.
+    # Keyed by neutral citation where one exists, so the recent overlap with uk-grc
+    # dedups onto one node instead of storing the decision twice.
+    "uk-ftt-ir": InformationRightsAdapter,
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
@@ -366,6 +372,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "revision dates and heading anchors; citation-free outliers are retained as "
         "processed records but excluded from search.",
         (), ("CPS prosecution-guidance URL", "guidance title"),
+    ),
+    "uk-ftt-ir": SourceInfo(
+        "uk-ftt-ir", "UK FTT — Information Rights decisions register", "caselaw", "GB", False,
+        "The Information Rights tribunal's own database (informationrights.decisions."
+        "tribunals.gov.uk): every FOIA, EIR, DPA, PECR and national-security appeal "
+        "decided by the Information Tribunal and the First-tier Tribunal's General "
+        "Regulatory Chamber, as published PDFs with their appeal number, parties, "
+        "outcome and panel. A CLOSED archive: it took its last decision in August 2023, "
+        "when the chamber moved to Find Case Law — so it is a one-off backfill, not a "
+        "watch. Covers the years before Find Case Law carried the chamber; "
+        "a decision printing a neutral citation is keyed by it, so it dedups against the "
+        "same case held from uk-grc. The Commissioner's decision-notice reference is kept "
+        "as the join to the ICO side.",
+        (), ("appeal number (e.g. EA/2022/0273)", "neutral citation"),
     ),
     "uk-lawcom-reports": SourceInfo(
         "uk-lawcom-reports", "Law Commission completed-project documents",
@@ -1174,6 +1194,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "fr-dila-jade": "bulk", "fr-dila-constit": "bulk", "fr-dila-cnil": "bulk",
     # closed archives (no new items ever)
     "a29wp": "closed", "uk-hol": "closed", "uk-ipa-codes": "closed",
+    # the Information Rights register stopped taking new decisions in August 2023, when
+    # the chamber moved to Find Case Law (uk-grc harvests it from there now)
+    "uk-ftt-ir": "closed",
 }
 
 

@@ -275,6 +275,7 @@ RUNNERS: dict[str, Callable] = {
     "import-indian-sci": lambda f, p, cb, cancel: f.import_indian_sci(**p, on_progress=cb, cancel_check=cancel),
     "import-sg-seed": lambda f, p, cb, cancel: f.import_sg_seed(**p, on_progress=cb, cancel_check=cancel),
     "repair-au-cth": lambda f, p, cb, cancel: f.repair_au_cth(**p, on_progress=cb, cancel_check=cancel),
+    "backfill-eu-case-names": lambda f, p, cb, cancel: f.backfill_titles(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-zip": lambda f, p, cb, cancel: f.import_westlaw_zip(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-dir": lambda f, p, cb, cancel: f.import_westlaw_dir(**p, on_progress=cb, cancel_check=cancel),
     "import-caselaw-zip": lambda f, p, cb, cancel: f.import_caselaw_zip(**p, on_progress=cb, cancel_check=cancel),

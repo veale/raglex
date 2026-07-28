@@ -3327,11 +3327,10 @@ function SourceCaps({ info }: { info: any }) {
 // each a Run-now that fires a visible Job. So upkeep is legible, not folklore.
 function KeepCurrentPanel() {
   const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
   const [ppSource, setPpSource] = useState("");
   const runNow = (kind: any, label: string) => fireJob(kind, {}, (m) => setMsg(`${label}: ${m}`));
   const auto = [
-    ["Pull EU case names / subjects (EUR-Lex)", "daily", "Fills missing CJEU case names so their OSCOLA citations read properly."],
+    ["Pull EU case names / subjects (EUR-Lex)", "daily (off by default)", "Fills missing CJEU case names so their OSCOLA citations read properly. Needs EUR-Lex credentials; enable the 'eu-case-names' task to run it daily."],
     ["Re-check outstanding legislation amendments", "hourly", "Re-pulls acts whose legislation.gov.uk effects re-check is due (bounded)."],
     ["Propagate changes an act makes", "hourly", "Flags held acts affected by a change for re-pull."],
     ["Rebuild citation-frequency roll-up", "hourly", "Keeps the worklist ranking fresh."],
@@ -3359,11 +3358,8 @@ function KeepCurrentPanel() {
         <button onClick={() => runNow("rebuild-authority", "rebuild authority")}
           title="Recompute the PageRank authority roll-up over the citation graph — feeds 'most authoritative' sort, search ranking, the citator strip, related documents, and graph node sizing. Run after large imports or resolution sweeps.">◆ Rebuild authority (PageRank)</button>
         <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
-        <button disabled={busy} onClick={async () => {
-          setBusy(true); setMsg("EU case names: running…");
-          try { const r = await api.backfillTitles(); setMsg("EU case names: " + JSON.stringify(r)); }
-          catch (e: any) { setMsg("✗ " + e); } finally { setBusy(false); }
-        }} title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs the daily auto-task now.">⇊ EU case names</button>
+        <button onClick={() => runNow("backfill-eu-case-names", "EU case names")}
+          title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs as a Job — one call per 50 cases — and the scheduler runs the same job daily when the 'eu-case-names' task is enabled.">⇊ EU case names</button>
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"], only_unextracted: true }, (m) => setMsg(`scan unscanned judgments: ${m}`))} title="Extract ONLY judgments that have no citation edges yet — the never-scanned backlog. Never re-touches an already-scanned document, so it's the cheap way to finish an interrupted run.">⟳ Scan unscanned (judgments)</button>
         <button onClick={() => fireJob("rescan", { only_unextracted: true }, (m) => setMsg(`resume extraction (whole corpus): ${m}`))} title="Resume citation extraction for EVERYTHING unextracted across the whole corpus — every text document with no citation edges yet, any source. This is what to run after a bulk/backfill import's Extract-Citations phase was cancelled: it's checkpointed and idempotent, so it processes only what never finished, no matter which source it belonged to.">⟳ Resume extraction (whole corpus)</button>
@@ -3645,7 +3641,7 @@ function AddWatchInline({ source, info, onCreated }: { source: string; info: any
 // The unified keep-current dashboard: every source, grouped by jurisdiction, showing how it
 // stays current and the watches on it. Expand a source to manage its watches inline (edit
 // cadence, enable/disable, run, delete) and add a new one — status and settings in one place.
-function KeepCurrentDashboard() {
+function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, string>) => void }) {
   const [data, err, reload, loading] = useAsync(() => api.keepCurrent(), []);
   const [cat] = useAsync(() => api.sourceCatalog(), []);
   const [allWatches, , reloadWatches] = useAsync(() => api.watches(), []);
@@ -3725,7 +3721,12 @@ function KeepCurrentDashboard() {
                       </td>
                       <td><span className="cap-chip" data-tone={m.tone} title={m.hint}>{m.label}</span>
                         {s.watermark && <div className="muted" style={{ fontSize: 10 }}>cursor {String(s.watermark).slice(0, 19)}</div>}</td>
-                      <td style={{ textAlign: "right" }}>{s.doc_count.toLocaleString()}</td>
+                      <td style={{ textAlign: "right" }}>
+                        {navigate && s.doc_count > 0
+                          ? <a onClick={() => navigate({ source: s.key })} style={{ cursor: "pointer" }}
+                              title={`Browse the ${s.doc_count.toLocaleString()} document(s) held from ${s.label} in Search`}>
+                              {s.doc_count.toLocaleString()}</a>
+                          : s.doc_count.toLocaleString()}</td>
                       <td><RunDots runs={s.recent_runs} /></td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         {ws.length === 0
@@ -3830,7 +3831,8 @@ function CitingWatches({ watches, reload }: { watches: any[]; reload: () => void
   );
 }
 
-export function MaintainView({ open }: { open: (id: string) => void }) {
+export function MaintainView({ open, navigate }:
+  { open: (id: string) => void; navigate?: (f: Record<string, string>) => void }) {
   return (
     <div>
       <div className="panel" style={{ background: "transparent", border: "none", padding: 0, marginBottom: 8 }}>
@@ -3844,7 +3846,7 @@ export function MaintainView({ open }: { open: (id: string) => void }) {
         <DbSizeStat />
       </div>
       <JobsQueuePanel />
-      <KeepCurrentDashboard />
+      <KeepCurrentDashboard navigate={navigate} />
       <KeepCurrentPanel />
       <BackfillPanel />
       <GapFillPanel />

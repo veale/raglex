@@ -10,6 +10,35 @@ import unicodedata
 _ABBREV_DOT_RE = re.compile(r"(?<=[a-z])\.(?!\d)")
 
 
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+_SURROGATE_PAIR_RE = re.compile("[\ud800-\udbff][\udc00-\udfff]")
+
+
+def scrub_surrogates(text: str, *, join_pairs: bool = True) -> str:
+    """Remove the unpaired surrogates a broken PDF ``ToUnicode`` CMap yields.
+
+    A str holding a lone surrogate cannot be encoded as UTF-8 at all, so it blows up
+    at the *last* step — writing the text file, or binding a psycopg parameter —
+    with "surrogates not allowed", aborting the whole harvest rather than the one
+    document (same failure shape as the NUL bytes stripped in the chunk writer).
+
+    A well-formed pair is the astral character the CMap meant, so it is joined back
+    up; anything left over is genuinely undecodable and becomes U+FFFD. Pass
+    ``join_pairs=False`` where char offsets are already fixed (segments, citation
+    spans) — the replacement is then strictly 1:1 and cannot shift them.
+    """
+    if not _SURROGATE_RE.search(text):
+        return text
+    if join_pairs:
+        text = _SURROGATE_PAIR_RE.sub(
+            lambda m: chr(
+                0x10000 + ((ord(m[0][0]) - 0xD800) << 10) + (ord(m[0][1]) - 0xDC00)
+            ),
+            text,
+        )
+    return _SURROGATE_RE.sub("�", text)
+
+
 def fold(text: str) -> str:
     """Case-fold and accent-fold so 'données' matches 'donnees' and 'DSGVO' matches
     'dsgvo'. Used wherever literal matching should ignore case and diacritics — tag

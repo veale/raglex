@@ -174,11 +174,17 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         # reporter reaches volume 1500, so such a candidate can never resolve at CourtListener
         # — keep it OUT of the routable worklist so it doesn't burn the daily API budget on
         # guaranteed 404s (these were minted by an older extractor and persist in the graph).
-        from .us_cases import plausible_us_volume
+        from .us_cases import NEVER_MATCHED_SLUGS, plausible_us_volume
 
         parts = candidate.split("/")
         if len(parts) == 4 and not plausible_us_volume(parts[2]):
             return "US citation (misparsed — year as volume)", "US", None
+        # The bare first-series Pacific Reporter is no longer extracted from prose at all
+        # ("10 p. 100" is French for "10 per cent"), but the graph still holds the edges an
+        # older extractor minted. Un-route them here too, so they neither offer themselves
+        # for harvest nor spend the CourtListener quota until the repair clears them.
+        if len(parts) > 1 and parts[1] in NEVER_MATCHED_SLUGS:
+            return "US citation (ambiguous reporter — not routable)", "US", None
         return "US case (reporter)", "US", "us-caselaw"
     m = _NEUTRAL_RE.match(candidate)
     if m:

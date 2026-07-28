@@ -42,6 +42,7 @@ TASKS: tuple[TaskSpec, ...] = (
     TaskSpec("gazetteer", True, 10080, "top up the statute gazetteer from legislation.gov.uk"),
     TaskSpec("maintenance", False, 1440, "serial DB maintenance + safe repair pass (off by default)"),
     TaskSpec("eu-legislation-enrich", False, 1440, "harvest EU act-to-act relationships (repeals/amends/legal-basis) from CELLAR"),
+    TaskSpec("eu-case-names", False, 1440, "pull CJEU case names + subject tags from the EUR-Lex webservice (needs credentials)"),
 )
 _BY_NAME = {t.name: t for t in TASKS}
 

@@ -92,3 +92,44 @@ def test_federal_and_regional_reporters():
     assert {"us/f3d/347/1200", "us/fsupp2d/550/100", "us/a3d/12/45", "us/p3d/200/9"} <= cands
 def test_official_journal_page_is_not_a_us_pacific_reporter():
     assert us_case_citations("published in OJ L 159 p. 1 and OJ L 143, p. 6") == []
+
+
+# -- ambiguous reporters: never Pacific, and single letters only in US material ----
+
+def test_bare_pacific_reporter_is_never_a_citation():
+    # "X p. 100" is French for "X per cent" — the live worklist's entire US backlog was
+    # phantom Pacific cases ("10 p. 100", "25 p. 100", "100 p. 100"), each routable and
+    # each spending CourtListener quota on a case that does not exist.
+    for phantom in ("une réduction de 10 p. 100 du montant",
+                    "25 p. 100 des voix", "at 163 P. 1002", "2 p. 3"):
+        assert us_case_citations(phantom) == [], phantom
+    # the modern Pacific series is unambiguous and still recognised
+    assert {c.candidate_id for c in us_case_citations("200 P.3d 9; 561 P.2d 1234")} == {
+        "us/p3d/200/9", "us/p2d/561/1234"}
+
+
+def test_bare_pacific_candidate_is_no_longer_routable():
+    from raglex.citations.snowball import _classify
+
+    # the edges an older extractor already wrote must not offer themselves for harvest
+    assert _classify("us/p/10/100", "case")[2] is None
+    assert _classify("us/p3d/200/9", "case")[2] == "us-caselaw"
+
+
+def test_single_letter_series_are_flagged_ambiguous():
+    from raglex.citations.us_cases import AMBIGUOUS_METHOD
+
+    cs = us_case_citations("12 F. 13 and 4 A. 55 and 6 So. 7")
+    assert {c.method for c in cs} == {AMBIGUOUS_METHOD}
+    # …while the numbered series stay first-class
+    assert all(c.method == "us_reporter"
+               for c in us_case_citations("347 F.3d 1200; 12 A.3d 45"))
+
+
+def test_ambiguous_reporters_survive_only_in_us_documents():
+    from raglex.citations.stage import _is_us_source
+
+    assert _is_us_source({"source": "us-caselaw", "doc_type": "judgment"})
+    # a Canadian/UK judgment may cite US authority — but in F.2d/F.3d, not bare "F."
+    assert not _is_us_source({"source": "ca-caselaw", "doc_type": "judgment"})
+    assert not _is_us_source({"source": "uk-caselaw", "doc_type": "judgment"})

@@ -362,6 +362,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_analyze = 0.0
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
         last_eu_enrich = time.time()
+        last_eu_case_names = time.time()  # credentialed webservice — wait a cadence too
         last_backfill = 0.0
         last_effects = 0.0
         last_counts = 0.0
@@ -582,6 +583,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
                                          {"limit": int(os.environ.get("RAGLEX_EU_ENRICH_BATCH") or 300)})
                     if started.get("error"):
                         print(f"[watch] eu-enrich: {started['error']}")
+                # CJEU case names + subject tags from the EUR-Lex webservice. Off by default:
+                # it needs credentials, and without them it is a no-op. As a JOB, not an
+                # inline call — it makes one external call per 50 cases and used to block
+                # whatever triggered it until the whole batch came back.
+                if _sched_on("eu-case-names") and time.time() - last_eu_case_names >= (_sched_min("eu-case-names") or 1440) * 60:
+                    last_eu_case_names = time.time()
+                    started = jobs.start("backfill-eu-case-names", "EU case names + subjects (EUR-Lex)",
+                                         {"limit": int(os.environ.get("RAGLEX_EU_TITLE_BATCH") or 500)})
+                    if started.get("error"):
+                        print(f"[watch] eu-case-names: {started['error']}")
                 # Weekly: top up the statute gazetteer from legislation.gov.uk, so acts
                 # passed after the vendored lists were cut still confirm by name.
                 if _sched_on("gazetteer") and time.time() - last_gazetteer >= (_sched_min("gazetteer") or 10080) * 60:

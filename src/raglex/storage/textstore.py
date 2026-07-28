@@ -16,6 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ..core.models import Segment
+from ..core.text import scrub_surrogates
 
 
 class TextStore:
@@ -33,7 +34,10 @@ class TextStore:
         dest = self.path_for(payload_hash)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".txt.tmp")
-        tmp.write_text(text, encoding="utf-8")
+        # Backstop for any extractor that lets an unencodable surrogate through: this
+        # write is where it would otherwise raise and take the whole harvest with it.
+        # 1:1 replacement only — the record's segment/citation offsets are already fixed.
+        tmp.write_text(scrub_surrogates(text, join_pairs=False), encoding="utf-8")
         tmp.replace(dest)  # atomic publish; re-extraction overwrites cleanly
         return dest
 

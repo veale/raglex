@@ -509,9 +509,25 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Pull the AG Opinion for every held CJEU judgment that lacks one. Background job."""
         return _start_job("pull-ag-opinions", "pull AG opinions for held CJEU cases")
 
+    @app.post("/jobs/backfill-eu-case-names")
+    def job_backfill_eu_case_names_ep(payload: dict = Body(default={})) -> dict:
+        """Pull CJEU case names + subject tags from the EUR-Lex webservice, as a job.
+
+        It walks every held eu-cellar case and makes an external, credentialed call per 50
+        of them, so it belongs in the queue with the other long upkeep — run synchronously
+        it blocked the request until the whole batch finished. The scheduler runs the same
+        job daily when the ``eu-case-names`` task is enabled."""
+        params: dict = {}
+        for key in ("limit", "reset_misses"):
+            if (payload or {}).get(key) is not None:
+                params[key] = payload[key]
+        return _start_job("backfill-eu-case-names", "EU case names + subjects (EUR-Lex)",
+                          params)
+
     @app.post("/backfill-titles")
     def backfill_titles_ep(payload: dict = Body(default={})) -> dict:
-        """Fill missing CJEU case names from CELLAR."""
+        """Fill missing CJEU case names from CELLAR (synchronous; the job endpoint above is
+        the one the UI and scheduler use)."""
         return facade.backfill_titles(**(payload or {}))
 
     @app.post("/jobs/backfill-metadata")
