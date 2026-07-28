@@ -270,6 +270,16 @@ export const api = {
   feedback: (status = "open") => req<any[]>(`/feedback?status=${encodeURIComponent(status)}`),
   setFeedback: (id: number, status = "resolved") =>
     req<any>(`/feedback/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
+  freetext: (p: { q: string; exact?: boolean; limit?: number; offset?: number;
+                  source?: string; doc_type?: string; court?: string; year_from?: number }) =>
+    req<any>(`/freetext?${new URLSearchParams(
+      Object.entries(p).filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => [k, String(v)])).toString()}`),
+  freetextScope: () => req<any>("/freetext/scope"),
+  setFreetextScope: (body: { sources?: string[]; note?: string }) =>
+    req<any>("/freetext/scope", { method: "POST", body: JSON.stringify(body) }),
+  buildFts: (body: { sources?: string[]; reindex?: boolean } = {}) =>
+    req<any>("/jobs/build-fts", { method: "POST", body: JSON.stringify({ ...body, queue: true }) }),
   shorthands: (p: { q?: string; state?: string; candidate_id?: string; limit?: number; offset?: number } = {}) =>
     req<any>(`/shorthands?${new URLSearchParams(
       Object.entries(p).filter(([, v]) => v !== undefined && v !== "")

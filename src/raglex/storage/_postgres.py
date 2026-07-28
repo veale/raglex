@@ -624,6 +624,28 @@ CREATE TABLE IF NOT EXISTS effects_refresh (
     next_check_at TEXT NOT NULL
 );
 
+-- Free-text index (§6c). Deliberately its OWN table rather than a column on
+-- ``embeddings``: the tsvector used to live there, which meant lexical search
+-- required the embedding pass to have run first — and it never had, so free-text
+-- search returned nothing at all. A tsvector needs no model, no GPU and no HPC
+-- queue, and this separation is what stops the cheap half being held hostage by
+-- the expensive one.
+--
+-- One row per document PART. A tsvector is capped at 1 MB and this corpus has
+-- documents that reach it (uk-cma averages 1.13M characters), so a long document
+-- is split. ``char_start``/``char_end`` map a hit back into the source text.
+CREATE TABLE IF NOT EXISTS doc_fts (
+    doc_id      TEXT NOT NULL,
+    part        INTEGER NOT NULL DEFAULT 0,
+    char_start  INTEGER NOT NULL DEFAULT 0,
+    char_end    INTEGER NOT NULL DEFAULT 0,
+    words       INTEGER NOT NULL DEFAULT 0,
+    tsv         tsvector NOT NULL,
+    indexed_at  TEXT NOT NULL,
+    PRIMARY KEY (doc_id, part)
+);
+CREATE INDEX IF NOT EXISTS doc_fts_tsv_idx ON doc_fts USING GIN (tsv);
+
 CREATE TABLE IF NOT EXISTS embeddings (
     doc_id          TEXT NOT NULL,
     chunk_id        INTEGER NOT NULL,

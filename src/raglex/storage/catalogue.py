@@ -375,6 +375,22 @@ CREATE TABLE IF NOT EXISTS effects_refresh (
     next_check_at TEXT NOT NULL
 );
 
+-- Free-text index (§6c). Its own table, not a column on ``embeddings``: the
+-- tsvector used to live there, so lexical search required the embedding pass to
+-- have run — and it never had. On Postgres this is a real tsvector + GIN; here it
+-- records the same spans so the portable backend can answer with FTS5/LIKE and the
+-- job/coverage bookkeeping is identical on both.
+CREATE TABLE IF NOT EXISTS doc_fts (
+    doc_id      TEXT NOT NULL,
+    part        INTEGER NOT NULL DEFAULT 0,
+    char_start  INTEGER NOT NULL DEFAULT 0,
+    char_end    INTEGER NOT NULL DEFAULT 0,
+    words       INTEGER NOT NULL DEFAULT 0,
+    tsv         TEXT NOT NULL DEFAULT '',
+    indexed_at  TEXT NOT NULL,
+    PRIMARY KEY (doc_id, part)
+);
+
 -- Embeddings (§6b/§6d). pgvector in production (§7); here vectors are JSON for a
 -- portable brute-force cosine. provider/model/model_version/dimensions = the
 -- "family"; vectors are ONLY comparable within one family, so a model swap is a
@@ -571,6 +587,26 @@ def _apply_filters(sql: str, params: list, filters: dict | None) -> tuple[str, l
         sql += " AND EXISTS (SELECT 1 FROM document_tags t WHERE t.doc_id = d.stable_id AND t.tag = ?)"
         params.append(filters["tag"])
     return sql, params
+
+
+def _fts_parts(text: str, cap: int) -> list[tuple[int, int]]:
+    """Split a document into indexable spans at most ``cap`` characters long, cutting
+    on a blank line where one is near the boundary so a phrase is only ever broken
+    when a single paragraph is itself over-long."""
+    n = len(text or "")
+    if n <= cap:
+        return [(0, n)]
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while start < n:
+        end = min(start + cap, n)
+        if end < n:
+            window = text.rfind("\n\n", start + cap // 2, end)
+            if window > start:
+                end = window + 2
+        spans.append((start, end))
+        start = end
+    return spans
 
 
 def _isodate(value: date | None) -> str | None:
@@ -3374,6 +3410,108 @@ class Catalogue:
             out.setdefault(r["candidate_id"], []).append(
                 (r["shorthand"], r["entity_kind"], bool(r["is_abbrev"])))
         return out
+
+    # -- free-text index (§6c) -------------------------------------------------
+    # A tsvector is capped at 1 MB. This corpus reaches it: uk-cma averages 1.13M
+    # characters a document and uk-lawcom-reports 468k, so a single-row-per-document
+    # design would silently fail on exactly the documents most worth searching.
+    FTS_PART_CHARS = 400_000
+
+    def put_doc_fts(self, doc_id: str, text: str, *, commit: bool = True) -> int:
+        """(Re)index one document. Returns the number of parts written.
+
+        Splitting is on a paragraph boundary where one is available, so a phrase is
+        only ever broken across parts if a single paragraph exceeds the cap — and the
+        stored ``char_start`` keeps every hit mappable back onto the source text."""
+        parts = _fts_parts(text, self.FTS_PART_CHARS)
+        now = _now()
+        self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
+        for i, (start, end) in enumerate(parts):
+            body = text[start:end]
+            if self.backend == "postgres":
+                self.conn.execute(
+                    "INSERT INTO doc_fts (doc_id, part, char_start, char_end, words,"
+                    " tsv, indexed_at) VALUES (?,?,?,?,?,to_tsvector('english', ?),?)",
+                    (doc_id, i, start, end, len(body.split()), body, now))
+            else:
+                self.conn.execute(
+                    "INSERT INTO doc_fts (doc_id, part, char_start, char_end, words,"
+                    " tsv, indexed_at) VALUES (?,?,?,?,?,?,?)",
+                    (doc_id, i, start, end, len(body.split()), "", now))
+        if commit:
+            self.conn.commit()
+        return len(parts)
+
+    def drop_doc_fts(self, doc_id: str, *, commit: bool = True) -> None:
+        self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
+        if commit:
+            self.conn.commit()
+
+    def fts_indexed_ids(self, source: str | None = None) -> set[str]:
+        sql = ("SELECT DISTINCT f.doc_id FROM doc_fts f "
+               "JOIN documents d ON d.stable_id = f.doc_id")
+        params: list[object] = []
+        if source:
+            sql += " WHERE d.source = ?"
+            params.append(source)
+        return {r["doc_id"] for r in self.conn.execute(sql, params)}
+
+    def fts_coverage(self) -> list[dict]:
+        """Per-source: how many documents have text, and how many are indexed. This is
+        what the settings screen shows so the gate's scope is legible."""
+        rows = self.conn.execute(
+            "SELECT d.source AS source, d.court AS court, d.doc_type AS doc_type,"
+            "       count(*) AS with_text,"
+            "       count(f.doc_id) AS indexed "
+            "FROM documents d "
+            "LEFT JOIN (SELECT DISTINCT doc_id FROM doc_fts) f ON f.doc_id = d.stable_id "
+            "WHERE d.has_text = 1 AND d.search_excluded = 0 "
+            "GROUP BY d.source, d.court, d.doc_type").fetchall()
+        return [dict(r) for r in rows]
+
+    def fts_search(self, tsquery: str, *, filters: dict | None = None,
+                   limit: int = 200) -> list[dict]:
+        """Candidate documents for a compiled tsquery, best-ranked first.
+
+        This is *narrowing*, not the answer: for an exact search the caller then
+        verifies the literal string against each candidate's text. Postgres stems, so
+        a document reading "duties of care" is a candidate for ``"duty of care"`` and
+        the literal check is what decides. ``limit`` is therefore a candidate budget,
+        not a result count."""
+        if self.backend != "postgres":
+            return []
+        sql = ("SELECT f.doc_id, f.part, f.char_start,"
+               "       ts_rank_cd(f.tsv, query) AS rank "
+               "FROM doc_fts f JOIN documents d ON d.stable_id = f.doc_id,"
+               "     to_tsquery('english', ?) AS query "
+               "WHERE f.tsv @@ query")
+        params: list[object] = [tsquery]
+        sql, params = _apply_filters(sql, params, filters)
+        sql += " ORDER BY rank DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            # a malformed tsquery is user input, not a bug — no hits rather than a 500
+            return []
+        return [dict(r) for r in rows]
+
+    def fts_total(self, tsquery: str, *, filters: dict | None = None) -> int:
+        """How many documents match, ignoring the candidate budget. Legal readers ask
+        "how many judgments use this phrase" and expect a real number, so the count is
+        computed rather than inferred from a truncated page."""
+        if self.backend != "postgres":
+            return 0
+        sql = ("SELECT count(DISTINCT f.doc_id) AS n "
+               "FROM doc_fts f JOIN documents d ON d.stable_id = f.doc_id,"
+               "     to_tsquery('english', ?) AS query "
+               "WHERE f.tsv @@ query")
+        params: list[object] = [tsquery]
+        sql, params = _apply_filters(sql, params, filters)
+        try:
+            return self.conn.execute(sql, params).fetchone()["n"]
+        except Exception:
+            return 0
 
     def count_learned_shorthands(self) -> int:
         return self.conn.execute(

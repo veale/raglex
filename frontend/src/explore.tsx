@@ -353,6 +353,149 @@ function _ago(iso?: string | null): string {
   if (s < 172800) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
+// A snippet with the matched words marked. The backend returns offsets rather than
+// HTML so nothing user-supplied is ever interpreted as markup.
+function Marked({ text, spans }: { text: string; spans?: number[][] }) {
+  if (!spans || !spans.length) return <>{text}</>;
+  const out: any[] = [];
+  let at = 0;
+  spans.forEach(([s, e], i) => {
+    if (s > at) out.push(text.slice(at, s));
+    out.push(<mark key={i}>{text.slice(s, e)}</mark>);
+    at = e;
+  });
+  if (at < text.length) out.push(text.slice(at));
+  return <>{out}</>;
+}
+
+// The second search box: the full text of the corpus, rather than its titles and
+// citations. Kept separate from the hero search because it answers a different
+// question and has a different scope — the index only covers the sources chosen in
+// Maintain, and a search box that doesn't say what it covers is worse than none.
+function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
+  const [q, setQ] = useState("");
+  const [exact, setExact] = useState(true);
+  const [res, setRes] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [scope, setScope] = useState<any>(null);
+  const [showScope, setShowScope] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
+
+  useEffect(() => {
+    api.freetextScope().then((s) => {
+      setScope(s);
+      setPicked(s.selected || []);
+    }).catch(() => {});
+  }, []);
+
+  async function run() {
+    if (!q.trim()) return;
+    setBusy(true);
+    try {
+      setRes(await api.freetext({ q, exact, limit: 20, source: picked.join(",") }));
+    } catch (e: any) {
+      setRes({ items: [], notes: [String(e?.message || e)] });
+    } finally { setBusy(false); }
+  }
+
+  const indexed = scope?.indexed_total || 0;
+  const sources: any[] = scope?.sources || [];
+  const chosen = sources.filter((s) => picked.includes(s.source));
+  const coverage = chosen.reduce((a, s) => a + s.indexed, 0);
+
+  return (
+    <div className="ft">
+      <div className="hero-search">
+        <input value={q} placeholder='Free text search — "quoted phrases" match literally'
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") run(); }} />
+        <button className="primary" onClick={run} disabled={busy}>
+          {busy ? "…" : "Search text"}</button>
+      </div>
+      <div className="ft-note muted">
+        {scope?.note}
+        {" "}
+        <button className="linkish" onClick={() => setShowScope(!showScope)}>
+          {chosen.length ? `${chosen.length} source${chosen.length > 1 ? "s" : ""}` : "no sources"}
+          {coverage ? ` · ${FMT(coverage)} indexed` : ""} {showScope ? "▾" : "▸"}
+        </button>
+        {indexed === 0 && <span className="tag" style={{ marginLeft: 6 }}>index not built</span>}
+      </div>
+
+      {showScope && (
+        <div className="ft-scope panel">
+          <p className="muted" style={{ margin: "0 0 6px", fontSize: 12 }}>
+            Tick the sources this box should search. Only ticked sources are indexed —
+            narrowing the scope here does not delete an index, so re-ticking is free.
+          </p>
+          <div className="ft-sources">
+            {sources.slice(0, 40).map((s) => (
+              <label key={s.source} className="ft-src" title={
+                `${s.indexed.toLocaleString()} of ${s.with_text.toLocaleString()} indexed`}>
+                <input type="checkbox" checked={picked.includes(s.source)}
+                  onChange={(e) => setPicked(e.target.checked
+                    ? [...picked, s.source]
+                    : picked.filter((x) => x !== s.source))} />
+                <span>{s.source}</span>
+                <span className="muted"> {FMT(s.with_text)}</span>
+                {s.indexed > 0 && <span className="ok" title="indexed">●</span>}
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+            <button className="mini" onClick={async () => {
+              await api.setFreetextScope({ sources: picked });
+              setScope(await api.freetextScope());
+            }}>save scope</button>
+            <button className="mini" onClick={async () => {
+              await api.setFreetextScope({ sources: picked });
+              await api.buildFts({ sources: picked });
+              setScope(await api.freetextScope());
+            }}>save &amp; build index</button>
+            <span className="muted" style={{ fontSize: 11 }}>
+              building reads every document once — about an hour for UK+EU
+            </span>
+          </div>
+        </div>
+      )}
+
+      {res && (
+        <div className="ft-results">
+          <div className="ft-head muted">
+            {res.notes?.map((n: string, i: number) =>
+              <div key={i} className="ft-warn">{n}</div>)}
+            {res.items?.length
+              ? <>{(res.verified ?? res.total).toLocaleString()} document
+                  {(res.verified ?? res.total) === 1 ? "" : "s"}
+                  {res.truncated ? "+" : ""} · {res.took_ms}ms
+                  <label className="ft-exact" title={exact
+                    ? "quoted phrases match the literal characters"
+                    : "quoted phrases also match stemmed forms — duty of care finds duties of care"}>
+                    <input type="checkbox" checked={exact}
+                      onChange={(e) => { setExact(e.target.checked); }} /> exact quotes
+                  </label>
+                </>
+              : (res.notes?.length ? null : "No documents contain that.")}
+          </div>
+          {(res.items || []).map((it: any) => (
+            <div key={it.stable_id + it.char_start} className="ft-hit">
+              <DocLink id={it.stable_id} anchor={it.anchor}
+                onOpen={() => open(it.stable_id, it.anchor)}>
+                <b><Oscola c={it.oscola} fallback={it.title || it.stable_id} /></b>
+              </DocLink>
+              <span className="muted ft-meta">
+                {" "}· {it.court_label || it.court || it.source}
+                {it.anchor ? ` · ${it.anchor}` : ""}
+              </span>
+              <div className="ft-snip"><Marked text={it.snippet} spans={it.highlights} /></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StatsRefresh({ at }: { at?: string | null }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -407,8 +550,8 @@ export function ExploreView({ open, goSearch }:
     <div className="explore">
       <StatsRefresh at={shape?.stats_refreshed_at} />
       <div className="hero">
-        <h2 className="hero-title">{shape?.total ? `${shape.total.toLocaleString()} documents` : "RagLex"}
-          <span className="muted hero-sub"> — case law, legislation and guidance across {rows.length || "…"} jurisdictions</span></h2>
+        <h2 className="hero-title">RagLex
+          <span className="muted hero-sub"> — find an authority by name or citation</span></h2>
         <div className="hero-search ac">
           <input value={q} autoFocus placeholder="Find a case, act or concept…  (⌘K jumps straight to a citation)"
             onChange={(e) => setQ(e.target.value)}
@@ -435,6 +578,7 @@ export function ExploreView({ open, goSearch }:
             </div>
           )}
         </div>
+        <FreeTextSearch open={open} />
       </div>
 
       <div className="shape panel">

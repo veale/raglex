@@ -109,6 +109,28 @@ from .citations.oscola import cite as _oscola_cite
 from .config import Config
 from .core.models import DocType, RelationshipType
 from .embeddings import EmbedStage
+
+# The line under the free-text box. Editable in settings, because only the operator
+# knows what the index currently covers and a search box that lies about its scope is
+# worse than one that says nothing.
+def _segment_at(ts, doc, char_start: int | None) -> str | None:
+    """The label of the structural unit containing ``char_start`` ("para 42",
+    "Article 6"), so a free-text hit can be linked to the passage it matched."""
+    if char_start is None or not doc["payload_hash"]:
+        return None
+    try:
+        segments = ts.get_segments(doc["payload_hash"]) or []
+    except OSError:
+        return None
+    for seg in segments:
+        if seg.char_start <= char_start < seg.char_end and seg.label:
+            return seg.label
+    return None
+
+
+_DEFAULT_FTS_NOTE = (
+    "Searches the full text of the sources selected below. "
+    "Put a phrase in \"quotation marks\" to match it literally.")
 from .imports import (
     add_note,
     attach_asset,
@@ -9624,6 +9646,124 @@ class Facade:
     def resolve_refinement_flag(self, *, flag_id: int, status: str = "resolved") -> dict:
         with self._open() as (cat, _rs, _ts):
             return {"updated": cat.set_refinement_flag(flag_id, status)}
+
+    # -- free-text search (§6c) -----------------------------------------------
+    def freetext_scope(self) -> dict:
+        """What the free-text index covers, and what it could cover.
+
+        The gate is stored as a list of sources rather than jurisdictions because a
+        source is what the index is built over and what ``_apply_filters`` already
+        filters on; the UI groups them by jurisdiction for the reader."""
+        from .settings import SettingsStore
+
+        store = SettingsStore(self.config.settings_path)
+        raw = (store.resolve("RAGLEX_FTS_SOURCES") or "").strip()
+        chosen = [s for s in re.split(r"[,\s]+", raw) if s]
+        with self._open() as (cat, _rs, _ts):
+            cov = cat.fts_coverage()
+        by_source: dict[str, dict] = {}
+        for row in cov:
+            s = row["source"]
+            e = by_source.setdefault(s, {"source": s, "with_text": 0, "indexed": 0,
+                                         "courts": {}, "doc_types": {}})
+            e["with_text"] += row["with_text"]
+            e["indexed"] += row["indexed"]
+            if row.get("court"):
+                e["courts"][row["court"]] = e["courts"].get(row["court"], 0) + row["with_text"]
+            if row.get("doc_type"):
+                e["doc_types"][row["doc_type"]] = (
+                    e["doc_types"].get(row["doc_type"], 0) + row["with_text"])
+        return {
+            "sources": sorted(by_source.values(), key=lambda r: -r["with_text"]),
+            "selected": chosen,
+            "note": store.resolve("RAGLEX_FTS_NOTE") or _DEFAULT_FTS_NOTE,
+            "indexed_total": sum(e["indexed"] for e in by_source.values()),
+        }
+
+    def set_freetext_scope(self, *, sources: list[str] | None = None,
+                           note: str | None = None) -> dict:
+        """Set the gate. Narrowing it does NOT delete the index — a source dropped
+        from the gate simply stops being searched, so re-adding it costs nothing."""
+        from .settings import SettingsStore
+
+        store = SettingsStore(self.config.settings_path)
+        payload = {}
+        if sources is not None:
+            payload["RAGLEX_FTS_SOURCES"] = ",".join(sorted(set(sources)))
+        if note is not None:
+            payload["RAGLEX_FTS_NOTE"] = note
+        if payload:
+            store.update(payload)
+        return self.freetext_scope()
+
+    def freetext_search(self, query: str, *, exact: bool = True, limit: int = 25,
+                        offset: int = 0, sources: list[str] | None = None,
+                        doc_type: list[str] | None = None,
+                        court: list[str] | None = None,
+                        year_from: int | None = None) -> dict:
+        """Free-text search over the gated scope, with literal quotation support."""
+        from .fulltext import index as fts
+
+        scope = self.freetext_scope()
+        allowed = sources or scope["selected"] or [s["source"] for s in scope["sources"]
+                                                   if s["indexed"]]
+        filters: dict = {"source": allowed}
+        if doc_type:
+            filters["doc_type"] = doc_type
+        if year_from:
+            filters["year_from"] = year_from
+        with self._open() as (cat, _rs, ts):
+            res = fts.search(cat, ts, query, filters=filters, exact=exact,
+                             limit=limit, offset=offset)
+            items = []
+            for h in res.hits:
+                doc = cat.get_document(h.doc_id)
+                if not doc:
+                    continue
+                # which paragraph the match falls in, so the result links to the
+                # passage rather than the top of a 400-paragraph judgment
+                seg_label = _segment_at(ts, doc, h.char_start)
+                # a court sub-gate is applied here rather than in SQL: the tick-list
+                # is per-source and sparse, and the candidate set is already small
+                if court and doc["court"] not in court:
+                    continue
+                items.append({
+                    "stable_id": h.doc_id,
+                    "title": doc["title"],
+                    "court": doc["court"],
+                    "court_label": (self.court_label(doc["court"], doc["source"])
+                                    if doc["court"] else None),
+                    "doc_type": doc["doc_type"],
+                    "source": doc["source"],
+                    "decision_date": doc["decision_date"],
+                    "jurisdiction": self._doc_bucket(doc["source"], doc["court"]),
+                    "oscola": _oscola_cite(doc, _row_meta(doc)),
+                    "snippet": h.snippet,
+                    "highlights": [list(sp) for sp in h.highlights],
+                    "char_start": h.char_start,
+                    "anchor": seg_label,
+                    "rank": h.rank,
+                })
+        return {
+            "items": items, "total": res.total, "verified": res.verified,
+            "candidates": res.candidates, "truncated": res.truncated,
+            "notes": res.notes, "took_ms": res.took_ms, "exact": exact,
+            "tsquery": res.tsquery, "scope": allowed,
+        }
+
+    def build_freetext_index(self, *, sources: list[str] | None = None,
+                             reindex: bool = False, limit: int = 1_000_000,
+                             on_progress=None, cancel_check=None) -> dict:
+        """Build (or extend) the free-text index over the gated scope."""
+        from .fulltext import index as fts
+
+        scope = self.freetext_scope()
+        targets = sources or scope["selected"]
+        if not targets:
+            return {"error": "no sources selected — set the free-text scope first"}
+        with self._open() as (cat, _rs, ts):
+            return fts.build(cat, ts, sources=targets, reindex=reindex, limit=limit,
+                             on_progress=on_progress, cancel_check=cancel_check)
 
     # -- learned shorthands (the corpus-wide store, curated by hand) -----------
     def browse_shorthands(self, *, query: str | None = None,

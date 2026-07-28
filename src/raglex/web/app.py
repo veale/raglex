@@ -420,6 +420,42 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.resolve_refinement_flag(
             flag_id=flag_id, status=(payload or {}).get("status", "resolved"))
 
+    # -- free-text search -----------------------------------------------------
+    @app.get("/freetext")
+    def freetext_ep(q: str, exact: bool = True, limit: int = 25, offset: int = 0,
+                    source: str | None = None, doc_type: str | None = None,
+                    court: str | None = None, year_from: int | None = None) -> dict:
+        """Free-text search over the gated scope.
+
+        ``exact`` (the default) makes a quoted phrase mean the literal characters:
+        the tsvector narrows, then the string is checked against the document's own
+        text. Postgres stems, so without that check "duty of care" also returns
+        "duties of care"."""
+        split = lambda v: [x for x in (v or "").split(",") if x]  # noqa: E731
+        return facade.freetext_search(
+            q, exact=exact, limit=min(limit, 100), offset=max(offset, 0),
+            sources=split(source) or None, doc_type=split(doc_type) or None,
+            court=split(court) or None, year_from=year_from)
+
+    @app.get("/freetext/scope")
+    def freetext_scope_ep() -> dict:
+        """What the free-text index covers, what it could cover, and the note shown
+        under the search box."""
+        return facade.freetext_scope()
+
+    @app.post("/freetext/scope")
+    def set_freetext_scope_ep(payload: dict = Body(default={})) -> dict:
+        return facade.set_freetext_scope(
+            sources=(payload or {}).get("sources"), note=(payload or {}).get("note"))
+
+    @app.post("/jobs/build-fts")
+    def job_build_fts_ep(payload: dict = Body(default={})) -> dict:
+        """Build (or extend) the free-text index. Resumable — an already-indexed
+        document is skipped unless ``reindex``."""
+        params = {k: v for k, v in (payload or {}).items()
+                  if k in ("sources", "reindex", "limit")}
+        return _start_job("build-fts", "build free-text index", params)
+
     # -- learned shorthands ---------------------------------------------------
     @app.get("/shorthands")
     def list_shorthands_ep(q: str | None = None, candidate_id: str | None = None,
