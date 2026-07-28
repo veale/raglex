@@ -1203,7 +1203,13 @@ function paraNumbers(segs: any[]): Set<string> {
 // The leading paragraph number of a segment label ("43." / "[43]" → "43"), when the label
 // is a bare number (not a named header like "Article 17" or "ruling").
 function labelNum(label: string): string | null {
-  const m = /^\[?(\d{1,4})[.\]\)]?$/.exec((label || "").trim());
+  const t = (label || "").trim();
+  // "43." / "[43]" — and "para 43", which is how every Find Case Law judgment labels its
+  // paragraphs. Without the second form the reader printed "para 43" as a heading ABOVE a
+  // paragraph that already opens "43.", which double-spaced the whole judgment and read
+  // nothing like a law report. The number belongs in the rail, once.
+  const m = /^\[?(\d{1,4})[.\]\)]?$/.exec(t)
+    || /^para(?:graph)?\.?\s*(\d{1,4})$/i.exec(t);
   return m ? m[1] : null;
 }
 
@@ -2190,6 +2196,19 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
             onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "statute", label: "Statutory material cited" })}>Statutory material cited <b>{doc.statute_cited_count ?? 0}</b></a>
         </div>
         <CitatorStrip id={d.stable_id} />
+        {/* Who decided it, and who argued it — read off the judgment's own first page
+            (meta.coram / meta.representation) and standardised to the way a lawyer writes
+            a judge's name. Absent for a document whose header we couldn't read. */}
+        {(doc.meta?.coram?.length || doc.meta?.representation?.length) && (
+          <div className="bench-box">
+            {doc.meta?.coram?.length > 0 && (
+              <div><span className="bench-label">Before</span>{" "}
+                {doc.meta.coram.join(" · ")}</div>)}
+            {doc.meta?.representation?.length > 0 && (
+              <div className="bench-rep muted">{doc.meta.representation.map((r: string, i: number) =>
+                <div key={i}>{r}</div>)}</div>)}
+          </div>
+        )}
         {doc.companion && (
           /* The other half of a CJEU case. Reading the judgment you want to know an
              Opinion exists (and vice versa) — it is a different document with a different
@@ -3900,6 +3919,7 @@ export function MaintainView({ open, navigate }:
       <BackfillPanel />
       <GapFillPanel />
       <ExpandCoveragePanel />
+      <FeedbackPanel open={open} />
       <RefinementFlagsPanel open={open} />
       <RulesView open={open} />
     </div>
@@ -3979,16 +3999,25 @@ function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void
       <h3 style={{ marginTop: 0 }}>Flagged for refinement <span className="muted">
         — passages you marked as badly linked, for the next pass over the linking logic</span>
         <span className="tag" style={{ marginLeft: 8 }}>{flags.length}</span></h3>
-      <table className="grid"><thead><tr><th>where</th><th>passage</th><th>links now</th><th>should</th><th /></tr></thead>
+      {/* table-layout: fixed + explicit widths. Without them the first column (a document
+          id, which can be a long unbroken slug) took the whole width and squeezed the
+          passage and the note into a few characters each. Long tokens break mid-string —
+          a URL broken across lines beats a table nothing else fits in. */}
+      <table className="grid break-cells" style={{ tableLayout: "fixed", width: "100%" }}>
+        <thead><tr>
+          <th style={{ width: "22%" }}>where</th><th style={{ width: "30%" }}>passage</th>
+          <th style={{ width: "20%" }}>links now</th><th style={{ width: "20%" }}>should</th>
+          <th style={{ width: "8%" }} />
+        </tr></thead>
         <tbody>{flags.map((f: any) => {
           let links: any[] = [];
           try { links = JSON.parse(f.current_links || "[]"); } catch { /* legacy */ }
           return (
             <tr key={f.flag_id}>
-              <td style={{ whiteSpace: "nowrap" }}>
+              <td>
                 <DocLink id={f.doc_id} anchor={f.anchor || undefined} onOpen={() => open(f.doc_id, f.anchor || undefined)}>{f.doc_id}</DocLink>
                 {f.anchor && <span className="muted"> · {f.anchor}</span>}</td>
-              <td style={{ maxWidth: 320 }}><b>“{f.selected_text}”</b></td>
+              <td><b>“{f.selected_text}”</b></td>
               <td className="muted" style={{ fontSize: 12 }}>
                 {links.length === 0 ? "nothing" : links.slice(0, 4).map((l: any, i: number) => (
                   <span key={i} title={l.title || ""}>{i > 0 && ", "}{l.text} <span className="muted">({l.state})</span></span>
@@ -4001,6 +4030,64 @@ function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void
           );
         })}</tbody>
       </table>
+    </div>
+  );
+}
+
+// Bug reports and feature requests submitted from the app's feedback box. They landed in a
+// table nothing displayed, so the only way to read them was psql — which is a good way to
+// never read them. Each row carries the page it was sent from, so a report about a document
+// opens that document.
+function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
+  const [status, setStatus] = useState("open");
+  const [items, err, reload] = useAsync(() => api.feedback(status), [status]);
+  const [busy, setBusy] = useState<number | null>(null);
+  if (err) return null;
+  const rows: any[] = items || [];
+  const docOf = (page: string) => (page || "").startsWith("document:") ? page.slice(9) : null;
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Feedback <span className="muted">
+        — bug reports and requests sent from the app</span>
+        <span className="tag" style={{ marginLeft: 8 }}>{rows.length}</span>
+        <select value={status} onChange={(e) => setStatus(e.target.value)}
+          className="sort-select" style={{ marginLeft: 10 }} title="which feedback to show">
+          <option value="open">open</option><option value="resolved">resolved</option>
+        </select>
+      </h3>
+      {rows.length === 0
+        ? <p className="muted" style={{ fontSize: 13, margin: 0 }}>Nothing {status}.</p>
+        : (
+        <table className="grid break-cells" style={{ tableLayout: "fixed", width: "100%" }}>
+          <thead><tr>
+            <th style={{ width: "9%" }}>kind</th><th style={{ width: "52%" }}>message</th>
+            <th style={{ width: "23%" }}>where</th><th style={{ width: "16%" }} />
+          </tr></thead>
+          <tbody>{rows.map((f: any) => {
+            const doc = docOf(f.page);
+            return (
+              <tr key={f.feedback_id}>
+                <td><span className="tag">{f.kind}</span>
+                  <div className="muted" style={{ fontSize: 10 }}>{String(f.created_at).slice(0, 16).replace("T", " ")}</div></td>
+                <td style={{ whiteSpace: "pre-wrap" }}>{f.message}</td>
+                <td className="muted" style={{ fontSize: 12 }}>
+                  {doc
+                    ? <DocLink id={doc} onOpen={() => open(doc)}>{doc}</DocLink>
+                    : (f.page || "—")}
+                  {f.url && <div style={{ fontSize: 10 }}>{f.url}</div>}</td>
+                <td style={{ textAlign: "right" }}>
+                  <button className="mini" disabled={busy === f.feedback_id}
+                    title={status === "open" ? "mark handled" : "reopen"}
+                    onClick={async () => {
+                      setBusy(f.feedback_id);
+                      try { await api.setFeedback(f.feedback_id, status === "open" ? "resolved" : "open"); reload(); }
+                      finally { setBusy(null); }
+                    }}>{status === "open" ? "✓ resolve" : "↺ reopen"}</button></td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      )}
     </div>
   );
 }

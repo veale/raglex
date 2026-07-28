@@ -39,6 +39,24 @@ def scrub_surrogates(text: str, *, join_pairs: bool = True) -> str:
     return _SURROGATE_RE.sub("�", text)
 
 
+# Windows-1252 bytes decoded as ISO-8859-1: the punctuation a legal text is full of —
+# en dashes, curly quotes, ellipses — lands in the C1 control block instead, where a
+# browser draws it as an empty rectangle. A single Court of Appeal judgment carried 74 of
+# them ("Home Park House ▯ a fortiori" should read "Home Park House – a fortiori").
+# The mapping is 1:1, so it can be applied to text whose citation offsets are already
+# stored without moving a single character. The five slots cp1252 leaves undefined become
+# a space rather than vanishing, for the same reason.
+_CP1252_C1 = {
+    i: (bytes([i]).decode("cp1252") if bytes([i]).decode("cp1252", "ignore") else " ")
+    for i in range(0x80, 0xA0)
+}
+
+
+def fix_cp1252_c1(text: str) -> str:
+    """Repair Windows-1252 punctuation mis-decoded into the C1 control block."""
+    return text.translate(_CP1252_C1) if text else text
+
+
 def fold(text: str) -> str:
     """Case-fold and accent-fold so 'données' matches 'donnees' and 'DSGVO' matches
     'dsgvo'. Used wherever literal matching should ignore case and diacritics — tag

@@ -465,9 +465,11 @@ tbody tr:hover { background: var(--surface-2); }
   background: var(--line); }
 /* vertical-rl + 180° is the reliable way to set text bottom-to-top (-90°) */
 .reader .rail-label { writing-mode: vertical-rl; transform: rotate(180deg);
-  font-size: .58rem; letter-spacing: .04em; line-height: 1; white-space: nowrap;
-  color: var(--faint); flex: 0 0 auto; }
-.reader .rail-label b { color: var(--info); font-weight: 700; }
+  font-size: .68rem; letter-spacing: .04em; line-height: 1; white-space: nowrap;
+  color: var(--subtext); flex: 0 0 auto; }
+/* the paragraph NUMBER is the thing a reader scans for when following a pinpoint, so it
+   carries the weight in the rail — that is what lets the label above each paragraph go */
+.reader .rail-label b { color: var(--info); font-weight: 700; font-size: .82rem; }
 /* a very short paragraph can't fit the caption — drop the rules, keep the number */
 .reader .seg-rail .rail-line:first-child { min-height: 0; }
 /* subtle options/metadata disclosure on a document page */
@@ -1447,3 +1449,16 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .seg.kind-heading.lvl2 .seg-body { font-size: 1.02rem; color: var(--subtext);
   letter-spacing: .01em; }
 .seg.kind-heading .seg-rail, .seg.kind-heading .seg-plus { display: none; }
+
+/* The bench (and counsel) under a judgment's title: standing metadata, quiet, one line
+   for the judges and the representation beneath. */
+.bench-box { margin: var(--sp-3) 0 0; font-size: .875rem; line-height: 1.5; }
+.bench-label { font-weight: 600; color: var(--subtext); text-transform: uppercase;
+  font-size: .7rem; letter-spacing: .05em; margin-right: var(--sp-1); }
+.bench-rep { margin-top: var(--sp-1); font-size: .8125rem; }
+
+/* Dense admin tables where the CONTENT decides nothing: fixed columns, and any token long
+   enough to overflow (a document slug, a URL) breaks mid-string rather than stretching its
+   column until the others are unreadable. */
+.grid.break-cells td, .grid.break-cells th { overflow-wrap: anywhere; word-break: break-word;
+  vertical-align: top; }

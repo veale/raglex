@@ -25,6 +25,7 @@ from ..core.models import DocType, ExtractedVia, RelationshipType, ResolutionSta
 from ..storage.catalogue import Catalogue
 from ..storage.textstore import TextStore
 from .extractor import CitationExtractor, extract_citations
+from .intituling import parse_intituling
 from .us_cases import AMBIGUOUS_METHOD
 
 log = logging.getLogger(__name__)
@@ -754,6 +755,21 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
                 _SHORTHANDS.note_stored(fresh)
             except Exception as exc:  # noqa: BLE001 — learning is best-effort
                 log.debug("[cite-extract] %s: shorthand store write failed: %s", stable_id, exc)
+
+    # The bench and counsel are printed on a judgment's first page and nowhere in its
+    # metadata, so lift them while we already have the text in hand (the reader shows them
+    # under the title). Only for cases, only when not already known, and never a guess —
+    # parse_intituling returns nothing rather than something wrong.
+    if doc["doc_type"] in _CASE_DOC_TYPES:
+        try:
+            meta_now = catalogue.document_meta(stable_id)
+            if not meta_now.get("coram"):
+                found = parse_intituling(text)
+                if found:
+                    catalogue.set_document_meta(stable_id, {**meta_now, **found},
+                                                commit=commit)
+        except Exception as exc:  # noqa: BLE001 — metadata is a bonus, never the job
+            log.debug("[cite-extract] %s: intituling parse failed: %s", stable_id, exc)
 
     # respect human corrections: drop citations the user has rejected (§1.3a). The
     # suppressed edges are manual, so they survive the clear below and keep their veto.

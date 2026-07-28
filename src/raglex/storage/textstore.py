@@ -16,7 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ..core.models import Segment
-from ..core.text import scrub_surrogates
+from ..core.text import fix_cp1252_c1, scrub_surrogates
 
 
 class TextStore:
@@ -36,8 +36,12 @@ class TextStore:
         tmp = dest.with_suffix(".txt.tmp")
         # Backstop for any extractor that lets an unencodable surrogate through: this
         # write is where it would otherwise raise and take the whole harvest with it.
-        # 1:1 replacement only — the record's segment/citation offsets are already fixed.
-        tmp.write_text(scrub_surrogates(text, join_pairs=False), encoding="utf-8")
+        # The cp1252 repair rides along — the mis-decoded punctuation it fixes reaches
+        # here from several parsers, and this is the one place all of them pass through.
+        # Both replacements are 1:1, so the record's segment/citation offsets, computed
+        # before this call, still point exactly where they did.
+        tmp.write_text(fix_cp1252_c1(scrub_surrogates(text, join_pairs=False)),
+                       encoding="utf-8")
         tmp.replace(dest)  # atomic publish; re-extraction overwrites cleanly
         return dest
 

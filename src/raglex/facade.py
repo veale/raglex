@@ -4423,6 +4423,105 @@ class Facade:
         self._invalidate_caches()
         return out
 
+    def backfill_intituling(self, *, source: str | None = "uk-caselaw", limit: int = 500000,
+                            on_progress=None, cancel_check=None) -> dict:
+        """Record WHO decided each held judgment, and who argued it, from its own first page.
+
+        A Find Case Law document's metadata carries only provenance keys — no bench, no
+        counsel — but the judgment prints both above the word JUDGMENT. Parsed here
+        (:mod:`citations.intituling`) and stored as ``coram`` / ``representation``, which
+        the reader shows under the title. Names are standardised the way a lawyer writes
+        them: "LORD JUSTICE CHADWICK" → "Chadwick LJ". Idempotent — a document that already
+        has a bench is skipped."""
+        from .citations.intituling import parse_intituling
+
+        st = {"scanned": 0, "named": 0, "already": 0, "no_block": 0, "no_text": 0}
+        with self._open() as (cat, _rs, ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, payload_hash, meta_json FROM documents "
+                "WHERE has_text = 1 AND is_latest = 1 AND doc_type IN ('judgment','decision','opinion') "
+                + ("AND source = ? " if source else "")
+                + "ORDER BY stable_id LIMIT ?",
+                ((source, limit) if source else (limit,))).fetchall()
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                try:
+                    meta = json.loads(r["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                if meta.get("coram"):
+                    st["already"] += 1
+                    continue
+                try:
+                    text = ts.get(r["payload_hash"]) if r["payload_hash"] else None
+                except OSError:
+                    text = None
+                if not text:
+                    st["no_text"] += 1
+                    continue
+                found = parse_intituling(text)
+                if not found:
+                    st["no_block"] += 1
+                    continue
+                cat.set_document_meta(r["stable_id"], {**meta, **found}, commit=False)
+                st["named"] += 1
+                if n % 500 == 0:
+                    cat.commit()
+                    _progress(on_progress, stage="reading judgment headers", done=n,
+                              total=len(rows), item=r["stable_id"])
+            cat.commit()
+        self._invalidate_caches()
+        return st
+
+    def repair_mojibake(self, *, source: str | None = None, limit: int = 200000,
+                        on_progress=None, cancel_check=None) -> dict:
+        """Repair Windows-1252 punctuation mis-decoded into the C1 control block, in text
+        that is ALREADY stored.
+
+        A judgment reading "Home Park House ▯ a fortiori" is not a rendering bug: the
+        source bytes were cp1252, something decoded them as ISO-8859-1, and every en dash,
+        curly quote and ellipsis landed in the control range where a browser draws an empty
+        rectangle (74 of them in one Court of Appeal judgment). New text is fixed as it is
+        written; this walks what is held.
+
+        The substitution is **1:1**, so nothing moves: no re-anchoring, no re-extraction,
+        and the payload_hash still describes the same document. Bounded by ``limit`` and
+        scoped by ``source``; re-running it finds nothing to do."""
+        from .core.text import fix_cp1252_c1
+
+        st = {"scanned": 0, "repaired": 0, "chars_fixed": 0, "unreadable": 0}
+        seen_hashes: set[str] = set()
+        with self._open() as (cat, _rs, ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, payload_hash FROM documents WHERE has_text = 1 "
+                + ("AND source = ? " if source else "")
+                + "ORDER BY stable_id LIMIT ?",
+                ((source, limit) if source else (limit,))).fetchall()
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                ph = r["payload_hash"]
+                if not ph or ph in seen_hashes:
+                    continue
+                seen_hashes.add(ph)
+                st["scanned"] += 1
+                try:
+                    text = ts.get(ph)
+                except OSError:
+                    st["unreadable"] += 1
+                    continue
+                fixed = fix_cp1252_c1(text)
+                if fixed != text:
+                    st["chars_fixed"] += sum(1 for a, b in zip(text, fixed) if a != b)
+                    ts.put(ph, fixed)
+                    st["repaired"] += 1
+                if n % 2000 == 0:
+                    _progress(on_progress, stage="repairing mis-decoded text", done=n,
+                              total=len(rows), item=r["stable_id"])
+        return st
+
     def backfill_ag_names(self, *, limit: int = 20000, on_progress=None,
                           cancel_check=None) -> dict:
         """Fill in WHO wrote each held AG Opinion, from the Opinion's own first page.
