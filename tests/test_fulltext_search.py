@@ -181,3 +181,22 @@ def test_what_a_set_of_results_most_often_cites(catalogue):
 
 def test_the_network_view_of_nothing_is_nothing(catalogue):
     assert catalogue.cited_by_documents([]) == []
+
+
+# -- the settings the Search page writes ---------------------------------------
+def test_the_search_settings_are_registered(tmp_path):
+    """SettingsStore.update silently ignores keys it doesn't know, so an
+    unregistered setting saves without error and reads back empty — which is
+    exactly what happened: the scope tick list and the reader-facing note both
+    failed to persist, with nothing reported."""
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=str(tmp_path / "c.sqlite"),
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=tmp_path / "s.json",
+                      embed_provider="local-hashing", embed_model=None))
+    f.set_freetext_scope(sources=["uk-caselaw", "eu-cellar"], note="only the UK and EU")
+    scope = f.freetext_scope()
+    assert sorted(scope["selected"]) == ["eu-cellar", "uk-caselaw"]
+    assert scope["note"] == "only the UK and EU"

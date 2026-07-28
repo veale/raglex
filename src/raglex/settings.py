@@ -32,6 +32,20 @@ class SettingSpec:
 
 # The known settings the UI renders. Adding a credentialed source = one row here.
 KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
+    # Free-text search. These are written by the Search admin page rather than typed,
+    # but they must be registered here: update() silently ignores any key it doesn't
+    # know, so an unregistered setting saves without error and reads back empty.
+    SettingSpec("RAGLEX_FTS_SOURCES", "Free-text index scope", False, "Search",
+                "comma-separated sources the free-text index covers; set from "
+                "Admin > Search rather than by hand"),
+    SettingSpec("RAGLEX_FTS_NOTE", "Free-text note", False, "Search",
+                "the line shown under the free-text box, telling readers what it covers"),
+    SettingSpec("RAGLEX_TEXT_FALLBACK_DIR", "Text store fallback", False, "Search",
+                "a second, usually remote text root read when the primary lacks a "
+                "document; blank = single-root storage"),
+    SettingSpec("RAGLEX_TEXT_LOCAL_SOURCES", "Keep these sources local", False, "Search",
+                "sources whose NEW documents are written to the fast local store; "
+                "everything else goes to the fallback"),
     SettingSpec("RAGLEX_EMBED_PROVIDER", "Embedding provider", False, "Embeddings",
                 "local-hashing | tei (open weights via TEI/vLLM) | openrouter | mcp"),
     SettingSpec("RAGLEX_EMBED_MODEL", "Embedding model", False, "Embeddings",
