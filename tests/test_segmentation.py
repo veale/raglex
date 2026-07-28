@@ -136,3 +136,23 @@ def test_a_judge_named_in_prose_is_not_a_byline():
             "2. LORD JUSTICE TOMLINSON gave the following judgment in that case.\n\n"
             "3. We reject that submission.")
     assert not [s for s in syn(text) if s.kind == "heading"]
+
+
+def test_bylines_can_be_added_without_disturbing_an_existing_segmentation():
+    """A third of uk-caselaw has import-derived segments with MORE paragraphs than flat
+    text yields, so the byline split has to be applied to what is stored rather than
+    replacing it."""
+    from raglex.core.models import Segment
+    from raglex.core.segmentation import _split_author_labels
+
+    text = ("1. First point.\n\n2. Second point.\n\nLORD JUSTICE TOMLINSON\n\n"
+            "3. I agree.")
+    stored = [Segment(label="1.", kind="paragraph", level=1, char_start=0, char_end=17),
+              Segment(label="2.", kind="paragraph", level=1, char_start=17, char_end=59),
+              Segment(label="3.", kind="paragraph", level=1, char_start=59, char_end=len(text))]
+    out = _split_author_labels(text, stored)
+    kinds = [(s.kind, text[s.char_start:s.char_end].strip()) for s in out]
+    assert ("heading", "LORD JUSTICE TOMLINSON") in kinds
+    # the paragraphs either side keep their labels and their starts
+    assert [s.label for s in out if s.kind == "paragraph"] == ["1.", "2.", "3."]
+    assert [s.char_start for s in out if s.kind == "paragraph"] == [0, 17, 59]

@@ -270,6 +270,16 @@ export const api = {
   feedback: (status = "open") => req<any[]>(`/feedback?status=${encodeURIComponent(status)}`),
   setFeedback: (id: number, status = "resolved") =>
     req<any>(`/feedback/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
+  shorthands: (p: { q?: string; state?: string; candidate_id?: string; limit?: number; offset?: number } = {}) =>
+    req<any>(`/shorthands?${new URLSearchParams(
+      Object.entries(p).filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => [k, String(v)])).toString()}`),
+  setShorthand: (body: { shorthand: string; candidate_id: string; blocked?: boolean; is_abbrev?: boolean }) =>
+    req<any>("/shorthands/set", { method: "POST", body: JSON.stringify(body) }),
+  deleteShorthand: (shorthand: string, candidate_id: string) =>
+    req<any>("/shorthands/delete", { method: "POST", body: JSON.stringify({ shorthand, candidate_id }) }),
+  purgeShorthands: (dry_run = true) =>
+    req<any>("/shorthands/purge-invalid", { method: "POST", body: JSON.stringify({ dry_run }) }),
   unfetchable: (limit = 200, min_citing?: number) =>
     req<any>(`/unresolved/unfetchable?limit=${limit}${min_citing ? `&min_citing=${min_citing}` : ""}`),
   discoverCiting: (target: string, via = "auto") =>

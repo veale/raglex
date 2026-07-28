@@ -104,6 +104,7 @@ def _progress(cb, **fields) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+from .citations.extractor import valid_shorthand as _valid_shorthand
 from .citations.oscola import cite as _oscola_cite
 from .config import Config
 from .core.models import DocType, RelationshipType
@@ -4534,14 +4535,19 @@ class Facade:
         imported before ``_split_author_labels`` existed have their first judge's
         byline ("LORD JUSTICE BURNETT:") stranded in the preamble, in no segment at
         all and so never rendered, while the concurrences below appear as trailing
-        text of the paragraph above them. Only documents whose paragraph boundaries
-        come out IDENTICAL are rewritten: if re-deriving structure from flat text
-        would move a paragraph, the stored (import-time, structurally-derived)
-        segmentation is better and is left alone."""
-        from .core.segmentation import synthesise_numbered_segments
+        text of the paragraph above them.
 
-        st = {"scanned": 0, "resegmented": 0, "headings_added": 0, "skipped_differs": 0,
-              "unreadable": 0}
+        Where a document already HAS segments they are improved in place rather than
+        replaced. A third of uk-caselaw has a stored segmentation that differs from
+        what flat text yields, and it differs by having MORE paragraphs — it came from
+        the import's own HTML structure, which sees paragraphs the sequential-number
+        guard has to reject. Throwing that away to gain a byline would be a bad trade,
+        so the byline split is applied to the stored segments; only a document with no
+        segmentation at all is derived from scratch."""
+        from .core.segmentation import _split_author_labels, synthesise_numbered_segments
+
+        st = {"scanned": 0, "improved": 0, "derived": 0, "headings_added": 0,
+              "unchanged": 0, "unreadable": 0}
         seen: set[str] = set()
         with self._open() as (cat, _rs, ts):
             rows = cat.conn.execute(
@@ -4562,24 +4568,18 @@ class Facade:
                 except OSError:
                     st["unreadable"] += 1
                     continue
-                fresh = synthesise_numbered_segments(text)
-                if not fresh:
-                    continue
-                old = ts.get_segments(ph) or []
-                old_paras = [(s.label, s.char_start, s.char_end) for s in old
-                             if s.kind == "paragraph"]
-                new_paras = [(s.label, s.char_start, s.char_end) for s in fresh
-                             if s.kind == "paragraph"]
-                if old_paras and old_paras != new_paras:
-                    st["skipped_differs"] += 1
-                    continue
-                added = (len([s for s in fresh if s.kind == "heading"])
-                         - len([s for s in old if s.kind == "heading"]))
-                if added <= 0 and len(fresh) == len(old):
+                old = list(ts.get_segments(ph) or [])
+                if old:
+                    fresh, derived = _split_author_labels(text, old), False
+                else:
+                    fresh, derived = synthesise_numbered_segments(text), True
+                if not fresh or len(fresh) == len(old):
+                    st["unchanged"] += 1
                     continue
                 ts.put_segments(ph, fresh)
-                st["resegmented"] += 1
-                st["headings_added"] += max(0, added)
+                st["derived" if derived else "improved"] += 1
+                st["headings_added"] += (len([s for s in fresh if s.kind == "heading"])
+                                         - len([s for s in old if s.kind == "heading"]))
                 if n % 2000 == 0:
                     _progress(on_progress, stage="recomputing paragraph structure",
                               done=n, total=len(rows), item=r["stable_id"])
@@ -9624,6 +9624,57 @@ class Facade:
     def resolve_refinement_flag(self, *, flag_id: int, status: str = "resolved") -> dict:
         with self._open() as (cat, _rs, _ts):
             return {"updated": cat.set_refinement_flag(flag_id, status)}
+
+    # -- learned shorthands (the corpus-wide store, curated by hand) -----------
+    def browse_shorthands(self, *, query: str | None = None,
+                          candidate_id: str | None = None, state: str = "all",
+                          limit: int = 100, offset: int = 0) -> dict:
+        """A page of the learned-shorthand store, with the titles of what each points
+        at so a reviewer can judge it without looking anything up."""
+        with self._open() as (cat, _rs, _ts):
+            rows, total = cat.browse_learned_shorthands(
+                query=query, candidate_id=candidate_id, state=state,
+                limit=limit, offset=offset)
+            out = [dict(r) for r in rows]
+            titles = self._titles_for({r["candidate_id"] for r in out})
+            for r in out:
+                r["blocked"] = bool(r.get("blocked"))
+                r["is_abbrev"] = bool(r.get("is_abbrev"))
+                r["target_title"] = titles.get(r["candidate_id"])
+                r["valid"] = _valid_shorthand(r["shorthand"])
+            counts = {
+                "total": cat.count_learned_shorthands(),
+                "blocked": cat.browse_learned_shorthands(state="blocked", limit=1)[1],
+            }
+            return {"rows": out, "total": total, "counts": counts}
+
+    def _titles_for(self, ids: set[str]) -> dict[str, str]:
+        """Best-effort titles for candidate ids — a candidate may name an authority the
+        corpus doesn't hold, which is not an error (that is what the worklist is for)."""
+        if not ids:
+            return {}
+        found: dict[str, str] = {}
+        with self._open() as (cat, _rs, _ts):
+            for cid in ids:
+                try:
+                    doc = cat.get_document(cid)
+                except Exception:  # noqa: BLE001 — a malformed stored id must not 500
+                    doc = None
+                if doc and doc["title"]:
+                    found[cid] = doc["title"]
+        return found
+
+    def set_shorthand(self, *, shorthand: str, candidate_id: str, **fields) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return {"updated": cat.set_learned_shorthand(shorthand, candidate_id, **fields)}
+
+    def delete_shorthand(self, *, shorthand: str, candidate_id: str) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return {"deleted": cat.delete_learned_shorthand(shorthand, candidate_id)}
+
+    def purge_shorthands(self, *, dry_run: bool = True) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            return cat.purge_invalid_learned_shorthands(dry_run=dry_run)
 
     # -- feedback (Bugs / Feature requests from the app's feedback box) --------
     def submit_feedback(self, *, kind: str, message: str, page: str | None = None,

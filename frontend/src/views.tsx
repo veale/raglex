@@ -3921,6 +3921,7 @@ export function MaintainView({ open, navigate }:
       <ExpandCoveragePanel />
       <FeedbackPanel open={open} />
       <RefinementFlagsPanel open={open} />
+      <ShorthandsPanel open={open} />
       <RulesView open={open} />
     </div>
   );
@@ -4087,6 +4088,135 @@ function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
             );
           })}</tbody>
         </table>
+      )}
+    </div>
+  );
+}
+
+// The corpus-wide learned-shorthand store. A document that writes "… [Suncor]" teaches
+// the whole corpus that "Suncor" means that case; the store is what carries it into the
+// NEXT document. That leverage cuts both ways — a bad entry mislinks everywhere at once,
+// which is how "Article 8", "appellant" and "may make" came to render as links to the
+// Convention — so it needs somewhere to be looked at and switched off by hand.
+//
+// Blocking beats deleting: the store is insert-only, so a deleted row is re-learned the
+// next time its defining document is rescanned. A blocked one stays blocked.
+function ShorthandsPanel({ open }: { open: (id: string, a?: string) => void }) {
+  const [state, setState] = useState("invalid");
+  const [q, setQ] = useState("");
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  const PER = 50;
+  const [data, err, reload] = useAsync(
+    () => api.shorthands({ q: query, state, limit: PER, offset: page * PER }),
+    [query, state, page]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [purge, setPurge] = useState<any>(null);
+  if (err) return null;
+  const rows: any[] = data?.rows || [];
+  const total: number = data?.total ?? 0;
+  const counts = data?.counts || {};
+  const key = (r: any) => `${r.shorthand} ${r.candidate_id}`;
+
+  async function act(r: any, fn: () => Promise<any>) {
+    setBusy(key(r));
+    try { await fn(); reload(); } finally { setBusy(null); }
+  }
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Shorthands <span className="muted">
+        — names the corpus has learned stand for an authority</span>
+        <span className="tag" style={{ marginLeft: 8 }}>{counts.total ?? "—"} stored</span>
+        {counts.blocked > 0 && <span className="tag" style={{ marginLeft: 4 }}>{counts.blocked} blocked</span>}
+      </h3>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <select value={state} onChange={(e) => { setState(e.target.value); setPage(0); }}
+          className="sort-select" title="which shorthands to show">
+          <option value="invalid">needs review</option>
+          <option value="all">all</option>
+          <option value="active">active</option>
+          <option value="blocked">blocked</option>
+        </select>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="name or target id…"
+          onKeyDown={(e) => { if (e.key === "Enter") { setQuery(q); setPage(0); } }}
+          style={{ flex: "1 1 220px", minWidth: 160 }} />
+        <button className="mini" onClick={() => { setQuery(q); setPage(0); }}>search</button>
+        <span className="muted" style={{ fontSize: 12 }}>{total} match</span>
+        <span style={{ flex: 1 }} />
+        <button className="mini" disabled={busy === "purge"}
+          title="delete every stored shorthand that would not be learned today"
+          onClick={async () => {
+            setBusy("purge");
+            try {
+              const dry = await api.purgeShorthands(true);
+              if (window.confirm(`Delete ${dry.invalid} of ${dry.scanned} stored shorthands that would not be learned today?`)) {
+                setPurge(await api.purgeShorthands(false)); reload();
+              } else setPurge(dry);
+            } finally { setBusy(null); }
+          }}>purge unlearnable…</button>
+      </div>
+      {purge && <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+        scanned {purge.scanned}, unlearnable {purge.invalid}
+        {purge.dry_run ? " (dry run — nothing deleted)" : `, deleted ${purge.deleted}`}</p>}
+      {state === "invalid" && <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+        Rows the current rules would reject — provision references ("Article 8"), generic
+        role words ("appellant"), sentence fragments. These are already ignored when
+        linking; listing them is how the store gets cleaned up.</p>}
+      {rows.length === 0
+        ? <p className="muted" style={{ fontSize: 13, margin: 0 }}>Nothing here.</p>
+        : (
+        <table className="grid break-cells" style={{ tableLayout: "fixed", width: "100%" }}>
+          <thead><tr>
+            <th style={{ width: "26%" }}>shorthand</th>
+            <th style={{ width: "40%" }}>stands for</th>
+            <th style={{ width: "13%" }}>links on</th>
+            <th style={{ width: "21%" }} />
+          </tr></thead>
+          <tbody>{rows.map((r: any) => (
+            <tr key={key(r)} style={r.blocked ? { opacity: 0.5 } : undefined}>
+              <td>
+                <b>{r.shorthand}</b>
+                {!r.valid && <span className="tag" style={{ marginLeft: 6 }} title="would not be learned today">unlearnable</span>}
+                {r.blocked && <span className="tag" style={{ marginLeft: 6 }}>blocked</span>}
+                {r.first_doc && <div className="muted" style={{ fontSize: 10 }}>
+                  first seen in <DocLink id={r.first_doc} onOpen={() => open(r.first_doc)}>{r.first_doc}</DocLink></div>}
+              </td>
+              <td>
+                <DocLink id={r.candidate_id} onOpen={() => open(r.candidate_id)}>
+                  {r.target_title || r.candidate_id}</DocLink>
+                {r.target_title && <div className="muted" style={{ fontSize: 10 }}>{r.candidate_id}</div>}
+              </td>
+              <td className="muted" style={{ fontSize: 12 }}>
+                {r.is_abbrev ? "any mention" : "with a pincite"}
+              </td>
+              <td style={{ textAlign: "right" }}>
+                <button className="mini" disabled={busy === key(r)}
+                  title={r.blocked ? "let this link again" : "stop this linking anywhere"}
+                  onClick={() => act(r, () => api.setShorthand({
+                    shorthand: r.shorthand, candidate_id: r.candidate_id, blocked: !r.blocked }))}>
+                  {r.blocked ? "↺ unblock" : "⊘ block"}</button>{" "}
+                <button className="mini" disabled={busy === key(r)}
+                  title={r.is_abbrev
+                    ? "require a pincite before linking (safer for an ordinary word)"
+                    : "link on any bare mention (right for a real initialism)"}
+                  onClick={() => act(r, () => api.setShorthand({
+                    shorthand: r.shorthand, candidate_id: r.candidate_id, is_abbrev: !r.is_abbrev }))}>
+                  {r.is_abbrev ? "needs pincite" : "any mention"}</button>{" "}
+                <button className="mini" disabled={busy === key(r)} title="delete (may be re-learned on rescan)"
+                  onClick={() => act(r, () => api.deleteShorthand(r.shorthand, r.candidate_id))}>✕</button>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+      {total > PER && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+          <button className="mini" disabled={page === 0} onClick={() => setPage(page - 1)}>← prev</button>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {page * PER + 1}–{Math.min((page + 1) * PER, total)} of {total}</span>
+          <button className="mini" disabled={(page + 1) * PER >= total} onClick={() => setPage(page + 1)}>next →</button>
+        </div>
       )}
     </div>
   );

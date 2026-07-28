@@ -690,6 +690,11 @@ class Catalogue:
             # by_upstream_status breakdown from the roll-up instead of a full documents scan
             # (four such scans blew the statement timeout after the fr-dila 1.7M import).
             ("corpus_shape_stats", "upstream_status", "TEXT"),
+            # A learned shorthand switched off by hand in the admin panel. Blocking
+            # rather than deleting is what makes the decision stick: the row is
+            # insert-only and the next rescan of any document that defines the name
+            # would simply learn it again.
+            ("learned_shorthands", "blocked", "INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 if self.backend == "postgres":
@@ -3364,7 +3369,8 @@ class Catalogue:
         out: dict[str, list[tuple]] = {}
         for r in self.conn.execute(
                 "SELECT shorthand, candidate_id, entity_kind, is_abbrev "
-                "FROM learned_shorthands LIMIT ?", (limit,)):
+                "FROM learned_shorthands WHERE COALESCE(blocked, 0) = 0 LIMIT ?",
+                (limit,)):
             out.setdefault(r["candidate_id"], []).append(
                 (r["shorthand"], r["entity_kind"], bool(r["is_abbrev"])))
         return out
@@ -3372,6 +3378,95 @@ class Catalogue:
     def count_learned_shorthands(self) -> int:
         return self.conn.execute(
             "SELECT COUNT(*) AS n FROM learned_shorthands").fetchone()["n"]
+
+    def browse_learned_shorthands(
+        self, *, query: str | None = None, candidate_id: str | None = None,
+        state: str = "all", limit: int = 100, offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """A page of the store for the admin panel, with the total matching the filter.
+
+        ``state`` is ``all`` | ``active`` | ``blocked`` | ``invalid`` — the last being
+        rows that would no longer be learned today (see ``valid_shorthand``), which is
+        how the accumulated junk is found without knowing what to search for."""
+        where, params = ["1=1"], []
+        if query:
+            where.append("(lower(shorthand) LIKE ? OR lower(candidate_id) LIKE ?)")
+            like = f"%{query.lower()}%"
+            params += [like, like]
+        if candidate_id:
+            where.append("candidate_id = ?")
+            params.append(candidate_id)
+        if state == "active":
+            where.append("COALESCE(blocked, 0) = 0")
+        elif state == "blocked":
+            where.append("COALESCE(blocked, 0) = 1")
+        sql_where = " AND ".join(where)
+        if state == "invalid":
+            # No SQL predicate can express it, so filter in Python over the matching
+            # rows. Bounded by the same query/candidate filters the caller supplied.
+            from ..citations.extractor import valid_shorthand
+
+            rows = self.conn.execute(
+                f"SELECT * FROM learned_shorthands WHERE {sql_where} "
+                "ORDER BY shorthand LIMIT 20000", params).fetchall()
+            bad = [r for r in rows if not valid_shorthand(r["shorthand"])]
+            return bad[offset:offset + limit], len(bad)
+        total = self.conn.execute(
+            f"SELECT COUNT(*) AS n FROM learned_shorthands WHERE {sql_where}",
+            params).fetchone()["n"]
+        page = self.conn.execute(
+            f"SELECT * FROM learned_shorthands WHERE {sql_where} "
+            "ORDER BY shorthand, candidate_id LIMIT ? OFFSET ?",
+            params + [limit, offset]).fetchall()
+        return page, total
+
+    def set_learned_shorthand(self, shorthand: str, candidate_id: str,
+                              **fields) -> int:
+        """Edit one stored shorthand: ``blocked``, ``is_abbrev``, ``entity_kind``."""
+        allowed = {"blocked", "is_abbrev", "entity_kind"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return 0
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        cur = self.conn.execute(
+            f"UPDATE learned_shorthands SET {cols} "
+            "WHERE shorthand = ? AND candidate_id = ?",
+            list(sets.values()) + [shorthand, candidate_id])
+        self.conn.commit()
+        return max(cur.rowcount, 0)
+
+    def delete_learned_shorthand(self, shorthand: str, candidate_id: str) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM learned_shorthands WHERE shorthand = ? AND candidate_id = ?",
+            (shorthand, candidate_id))
+        self.conn.commit()
+        return max(cur.rowcount, 0)
+
+    def purge_invalid_learned_shorthands(self, *, dry_run: bool = True,
+                                         batch: int = 5000) -> dict:
+        """Delete every stored shorthand that would not be learned today.
+
+        The read path already skips these, so this is housekeeping rather than a fix —
+        but the store had grown to 382,885 rows, most of them unusable, and a smaller
+        store is a faster one (it is loaded whole and cached per rescan)."""
+        from ..citations.extractor import valid_shorthand
+
+        seen = deleted = 0
+        doomed: list[tuple[str, str]] = []
+        for r in self.conn.execute(
+                "SELECT shorthand, candidate_id FROM learned_shorthands"):
+            seen += 1
+            if not valid_shorthand(r["shorthand"]):
+                doomed.append((r["shorthand"], r["candidate_id"]))
+        if not dry_run:
+            for i in range(0, len(doomed), batch):
+                self.conn.executemany(
+                    "DELETE FROM learned_shorthands "
+                    "WHERE shorthand = ? AND candidate_id = ?", doomed[i:i + batch])
+                self.conn.commit()
+            deleted = len(doomed)
+        return {"scanned": seen, "invalid": len(doomed), "deleted": deleted,
+                "dry_run": dry_run}
 
     def list_named_aliases(self) -> list[sqlite3.Row]:
         """User-defined shorthand → document mappings (e.g. "UK GDPR" → its id). These

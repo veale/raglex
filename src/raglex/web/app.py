@@ -420,6 +420,41 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.resolve_refinement_flag(
             flag_id=flag_id, status=(payload or {}).get("status", "resolved"))
 
+    # -- learned shorthands ---------------------------------------------------
+    @app.get("/shorthands")
+    def list_shorthands_ep(q: str | None = None, candidate_id: str | None = None,
+                           state: str = "all", limit: int = 100,
+                           offset: int = 0) -> dict:
+        """The corpus-wide learned-shorthand store, for review. ``state=invalid``
+        lists the rows that would not be learned today — the accumulated junk."""
+        return facade.browse_shorthands(query=q, candidate_id=candidate_id,
+                                        state=state, limit=min(limit, 500),
+                                        offset=max(offset, 0))
+
+    @app.post("/shorthands/set")
+    def set_shorthand_ep(payload: dict = Body(...)) -> dict:
+        """Block/unblock a shorthand, or change whether it links on a bare mention.
+        Blocking (rather than deleting) is what sticks: the store is insert-only, so a
+        deleted name is simply re-learned the next time its document is rescanned."""
+        fields = {k: v for k, v in (payload or {}).items()
+                  if k in ("blocked", "is_abbrev", "entity_kind")}
+        for flag in ("blocked", "is_abbrev"):
+            if flag in fields:
+                fields[flag] = 1 if fields[flag] else 0
+        return facade.set_shorthand(shorthand=payload["shorthand"],
+                                    candidate_id=payload["candidate_id"], **fields)
+
+    @app.post("/shorthands/delete")
+    def delete_shorthand_ep(payload: dict = Body(...)) -> dict:
+        return facade.delete_shorthand(shorthand=payload["shorthand"],
+                                       candidate_id=payload["candidate_id"])
+
+    @app.post("/shorthands/purge-invalid")
+    def purge_shorthands_ep(payload: dict = Body(default={})) -> dict:
+        """Delete every stored shorthand that would not be learned today. Defaults to a
+        dry run — pass ``{"dry_run": false}`` to actually delete."""
+        return facade.purge_shorthands(dry_run=bool((payload or {}).get("dry_run", True)))
+
     @app.post("/feedback")
     def submit_feedback_ep(payload: dict = Body(...)) -> dict:
         """Record a Bug / Feature request from the app's feedback box, with the page context

@@ -217,7 +217,10 @@ _AUTHOR_LABEL_RE = re.compile(
     r"(?:THE\s+)?"
     r"(?:LORD|LADY|MR|MRS|MS|SIR|DAME|HIS\s+HONOUR|HER\s+HONOUR|JUDGE|"
     r"CHIEF\s+JUSTICE|PRESIDENT|MASTER)"
-    r"[A-Z’'.\- ]{2,60}?"
+    # Otherwise upper-case only — a mixed-case line is prose — but Scottish and Irish
+    # surnames keep their lower-case particle even in a caps byline: "HIS HONOUR JUDGE
+    # McMULLEN QC", "LORD JUSTICE MacDERMOTT".
+    r"(?:[A-Z’'.\- ]|M[ac]{1,2}(?=[A-Z])){2,60}?"
     r")[ \t]*:?[ \t]*$")
 # The label has to be a NAME line, not a sentence in small caps or a heading like
 # "LORD JUSTICE BURNETT GAVE THE FOLLOWING JUDGMENT" — those give themselves away by

@@ -149,3 +149,66 @@ def test_kill_switch_disables_both_halves(catalogue, tmp_path, monkeypatch):
     monkeypatch.setenv("RAGLEX_SHORTHAND_GLOBAL", "0")
     _run(catalogue, ts, "fc/2020/1", DEF_A)
     assert catalogue.count_learned_shorthands() == 0
+
+
+# -- curating the store ---------------------------------------------------------
+def _seed(catalogue):
+    catalogue.add_learned_shorthands([
+        {"shorthand": "Suncor", "candidate_id": "fc/2021/138",
+         "entity_kind": "case", "is_abbrev": False},
+        {"shorthand": "FMIOA", "candidate_id": "ukpga/2000/36",
+         "entity_kind": "act", "is_abbrev": True},
+        # the junk the store actually accumulated
+        {"shorthand": "Article 8", "candidate_id": "echr/convention",
+         "entity_kind": "treaty", "is_abbrev": True},
+        {"shorthand": "appellant", "candidate_id": "echr/convention",
+         "entity_kind": "treaty", "is_abbrev": True},
+        {"shorthand": "may make", "candidate_id": "echr/convention",
+         "entity_kind": "treaty", "is_abbrev": True},
+    ], doc_id="seed")
+
+
+def test_the_store_can_be_browsed_and_the_junk_isolated(catalogue):
+    _seed(catalogue)
+    rows, total = catalogue.browse_learned_shorthands(state="all", limit=50)
+    assert total == 5
+    bad, n_bad = catalogue.browse_learned_shorthands(state="invalid", limit=50)
+    assert n_bad == 3
+    assert {r["shorthand"] for r in bad} == {"Article 8", "appellant", "may make"}
+    # search covers both the name and what it points at
+    hit, n = catalogue.browse_learned_shorthands(query="echr", limit=50)
+    assert n == 3 and all(r["candidate_id"] == "echr/convention" for r in hit)
+
+
+def test_blocking_survives_the_document_being_rescanned(catalogue):
+    """The store is insert-only, so deleting a row is undone by the next rescan of the
+    document that defined it. Blocking is the decision that sticks."""
+    _seed(catalogue)
+    assert catalogue.set_learned_shorthand("FMIOA", "ukpga/2000/36", blocked=1) == 1
+    assert "FMIOA" not in [s[0] for s in
+                           catalogue.learned_shorthand_map().get("ukpga/2000/36", [])]
+    # re-learning it (as a rescan would) does not un-block it
+    catalogue.add_learned_shorthands([{"shorthand": "FMIOA", "candidate_id": "ukpga/2000/36",
+                                       "entity_kind": "act", "is_abbrev": True}])
+    assert "FMIOA" not in [s[0] for s in
+                           catalogue.learned_shorthand_map().get("ukpga/2000/36", [])]
+    assert catalogue.set_learned_shorthand("FMIOA", "ukpga/2000/36", blocked=0) == 1
+    assert "FMIOA" in [s[0] for s in
+                       catalogue.learned_shorthand_map().get("ukpga/2000/36", [])]
+
+
+def test_purge_defaults_to_a_dry_run(catalogue):
+    _seed(catalogue)
+    dry = catalogue.purge_invalid_learned_shorthands()
+    assert dry["dry_run"] and dry["invalid"] == 3 and dry["deleted"] == 0
+    assert catalogue.count_learned_shorthands() == 5
+    done = catalogue.purge_invalid_learned_shorthands(dry_run=False)
+    assert done["deleted"] == 3 and catalogue.count_learned_shorthands() == 2
+    assert {r["shorthand"] for r in
+            catalogue.browse_learned_shorthands(limit=50)[0]} == {"Suncor", "FMIOA"}
+
+
+def test_a_deleted_shorthand_is_gone(catalogue):
+    _seed(catalogue)
+    assert catalogue.delete_learned_shorthand("Suncor", "fc/2021/138") == 1
+    assert catalogue.count_learned_shorthands() == 4
