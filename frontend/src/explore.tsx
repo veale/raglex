@@ -618,3 +618,205 @@ export function ExploreView({ open, goSearch }:
     </div>
   );
 }
+
+// --- Admin ▸ Search ---------------------------------------------------------
+// One screen for both retrieval paths. They are independent — a source can be fully
+// free-text indexed and carry no vectors at all — and nothing said so before, which
+// is how the corpus ended up with a free-text feature that silently depended on an
+// embedding pass that had never run. Everything here is per SOURCE, because a source
+// is what an index is actually built over; jurisdiction is the grouping the reader
+// thinks in, so the table is sorted by it.
+export function SearchAdminView() {
+  const [st, setSt] = useState<any>(null);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [openSrc, setOpenSrc] = useState<string | null>(null);
+
+  const load = () => api.searchStatus().then((s) => {
+    setSt(s); setPicked(s.fts_selected || []); setNote(s.note || "");
+  }).catch(() => {});
+  useEffect(() => { load(); }, []);
+  if (!st) return <div className="panel"><p className="muted">Loading…</p></div>;
+
+  const rows: any[] = st.sources || [];
+  const tot = st.totals || {};
+  const chosen = rows.filter((r) => picked.includes(r.source));
+  const inScopeText = chosen.reduce((a, r) => a + r.with_text, 0);
+  const inScopeIndexed = chosen.reduce((a, r) => a + r.fts_indexed, 0);
+  const pct = (a: number, b: number) => b ? Math.round(100 * a / b) : 0;
+
+  async function act(key: string, fn: () => Promise<any>, done: string) {
+    setBusy(key); setMsg(null);
+    try { await fn(); setMsg(done); await load(); }
+    catch (e: any) { setMsg(String(e?.message || e)); }
+    finally { setBusy(null); }
+  }
+
+  const byJurisdiction: Record<string, any[]> = {};
+  rows.forEach((r) => (byJurisdiction[r.jurisdiction] ||= []).push(r));
+
+  return (
+    <div className="search-admin">
+      {/* ---- what each path covers ---- */}
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>Coverage</h3>
+        <div className="cov-grid">
+          <div className="cov-card">
+            <div className="cov-n">{FMT(tot.fts_indexed || 0)}</div>
+            <div className="cov-l">documents in the free-text index</div>
+            <div className="cov-bar"><span style={{ width: `${pct(tot.fts_indexed, tot.with_text)}%` }} /></div>
+            <div className="muted cov-sub">{pct(tot.fts_indexed, tot.with_text)}% of {FMT(tot.with_text || 0)} with text</div>
+          </div>
+          <div className="cov-card">
+            <div className="cov-n">{FMT(tot.embedded || 0)}</div>
+            <div className="cov-l">documents with embeddings</div>
+            <div className="cov-bar emb"><span style={{ width: `${pct(tot.embedded, tot.with_text)}%` }} /></div>
+            <div className="muted cov-sub">
+              {st.embedding.paused
+                ? "embedding scope is set to none — nothing will be embedded"
+                : `${st.embedding.provider}${st.embedding.model ? ` · ${st.embedding.model}` : ""}`}
+            </div>
+          </div>
+          <div className="cov-card">
+            <div className="cov-n">{FMT(inScopeText)}</div>
+            <div className="cov-l">in the current free-text scope</div>
+            <div className="muted cov-sub">
+              {chosen.length} source{chosen.length === 1 ? "" : "s"} ticked ·
+              {" "}{FMT(inScopeText - inScopeIndexed)} still to index
+            </div>
+          </div>
+        </div>
+        {msg && <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>{msg}</p>}
+      </div>
+
+      {/* ---- the note readers see ---- */}
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>The note under the search box <span className="muted">
+          — shown to every reader, so it should say what is actually covered</span></h3>
+        <textarea className="ft-note-edit" rows={3} value={note}
+          onChange={(e) => setNote(e.target.value)} />
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+          <button className="mini" disabled={busy === "note"}
+            onClick={() => act("note", () => api.setFreetextScope({ note }), "note saved")}>
+            save note</button>
+          <button className="mini" disabled={busy === "note"}
+            onClick={() => setNote(
+              "Searches the full text of the sources selected below. " +
+              'Put a phrase in "quotation marks" to match it literally.')}>reset</button>
+          <span className="muted" style={{ fontSize: 11 }}>
+            appears beneath the second box on the home page
+          </span>
+        </div>
+      </div>
+
+      {/* ---- scope + per-source status ---- */}
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>Scope <span className="muted">
+          — tick what the free-text box searches. Un-ticking does not delete an index.</span></h3>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <button className="mini" onClick={() => setPicked(rows.map((r) => r.source))}>all</button>
+          <button className="mini" onClick={() => setPicked([])}>none</button>
+          {Object.keys(byJurisdiction).sort().map((j) => (
+            <button key={j} className="mini" onClick={() => setPicked([...new Set([
+              ...picked, ...byJurisdiction[j].map((r) => r.source)])])}>+ {j}</button>
+          ))}
+          <span style={{ flex: 1 }} />
+          <button className="mini" disabled={busy === "scope"}
+            onClick={() => act("scope", () => api.setFreetextScope({ sources: picked }), "scope saved")}>
+            save scope</button>
+          <button className="primary mini" disabled={busy === "build"}
+            title="reads every document in scope once; no model, no GPU"
+            onClick={() => act("build", async () => {
+              await api.setFreetextScope({ sources: picked });
+              await api.buildFts({ sources: picked });
+            }, "index build queued — watch it in Jobs")}>
+            save &amp; build index</button>
+        </div>
+        <table className="grid search-scope">
+          <thead><tr>
+            <th style={{ width: 28 }} /><th>source</th><th className="num">with text</th>
+            <th className="num">free text</th><th className="num">embedded</th><th />
+          </tr></thead>
+          <tbody>
+            {Object.keys(byJurisdiction).sort().map((j) => (
+              <Fragment key={j}>
+                <tr className="jur-row"><td colSpan={6}>{j}</td></tr>
+                {byJurisdiction[j].map((r) => (
+                  <Fragment key={r.source}>
+                    <tr>
+                      <td><input type="checkbox" checked={picked.includes(r.source)}
+                        onChange={(e) => setPicked(e.target.checked
+                          ? [...picked, r.source]
+                          : picked.filter((x) => x !== r.source))} /></td>
+                      <td>
+                        <button className="linkish" onClick={() =>
+                          setOpenSrc(openSrc === r.source ? null : r.source)}>
+                          {r.source} {openSrc === r.source ? "▾" : "▸"}</button>
+                      </td>
+                      <td className="num">{r.with_text.toLocaleString()}</td>
+                      <td className="num">{r.fts_indexed
+                        ? <span className="ok">{pct(r.fts_indexed, r.with_text)}%</span>
+                        : <span className="muted">—</span>}</td>
+                      <td className="num">{r.embedded
+                        ? <span className="ok">{pct(r.embedded, r.with_text)}%</span>
+                        : <span className="muted">—</span>}</td>
+                      <td className="num">
+                        <button className="mini" disabled={busy === r.source}
+                          title="index just this source"
+                          onClick={() => act(r.source,
+                            () => api.buildFts({ sources: [r.source] }),
+                            `queued ${r.source}`)}>index</button>
+                      </td>
+                    </tr>
+                    {openSrc === r.source && (
+                      <tr className="exp-row"><td colSpan={6}>
+                        <div className="src-facets">
+                          <div><b>types</b>{" "}
+                            {r.doc_types.map(([t, n]: [string, number]) =>
+                              <span key={t} className="tag">{t} {FMT(n)}</span>)}</div>
+                          {r.courts.length > 0 && <div><b>courts / bodies</b>{" "}
+                            {r.courts.map(([c, n]: [string, number]) =>
+                              <span key={c} className="tag">{c} {FMT(n)}</span>)}</div>}
+                        </div>
+                      </td></tr>
+                    )}
+                  </Fragment>
+                ))}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ---- embeddings + HPC ---- */}
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>Semantic index <span className="muted">
+          — separate from the above, and much more expensive</span></h3>
+        <table className="grid kv">
+          <tbody>
+            <tr><td>provider</td><td>{st.embedding.provider}</td></tr>
+            <tr><td>model</td><td>{st.embedding.model || <span className="muted">—</span>}</td></tr>
+            <tr><td>dimensions</td><td>{st.embedding.dimensions || <span className="muted">—</span>}</td></tr>
+            <tr><td>jurisdiction scope</td><td>
+              {st.embedding.paused
+                ? <span className="tag">none — embedding is switched off</span>
+                : (st.embedding.jurisdictions || <span className="muted">all</span>)}</td></tr>
+            <tr><td>HPC relay</td><td>
+              {st.hpc.configured
+                ? <>{st.hpc.host}{st.hpc.model ? ` · ${st.hpc.model}` : ""}
+                    {st.hpc.tasks ? ` · ${st.hpc.tasks} tasks` : ""}</>
+                : <span className="muted">not configured</span>}</td></tr>
+          </tbody>
+        </table>
+        <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
+          Free-text search does not depend on any of this. A tsvector needs no model,
+          no GPU and no HPC queue — which is the point of keeping them apart, so the
+          cheap half is never blocked behind the expensive one. Change these in
+          Settings ▸ Embeddings and HPC embed.
+        </p>
+      </div>
+    </div>
+  );
+}

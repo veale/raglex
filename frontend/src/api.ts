@@ -275,6 +275,7 @@ export const api = {
     req<any>(`/freetext?${new URLSearchParams(
       Object.entries(p).filter(([, v]) => v !== undefined && v !== "")
         .map(([k, v]) => [k, String(v)])).toString()}`),
+  searchStatus: () => req<any>("/search/status"),
   freetextScope: () => req<any>("/freetext/scope"),
   setFreetextScope: (body: { sources?: string[]; note?: string }) =>
     req<any>("/freetext/scope", { method: "POST", body: JSON.stringify(body) }),

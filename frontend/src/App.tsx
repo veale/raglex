@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
-import { ExploreView } from "./explore";
+import { ExploreView, SearchAdminView } from "./explore";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
@@ -114,7 +114,7 @@ function ThemeSwitch() {
 }
 
 type Tab = "explore" | "search" | "admin" | "settings" | "document" | "graph";
-type AdminSection = "overview" | "unresolved" | "maintain" | "import";
+type AdminSection = "overview" | "unresolved" | "maintain" | "search" | "import";
 
 // slug/docHref live in links.tsx — the address bar this file writes and the href every
 // link carries must come from the SAME function, or they disagree.
@@ -136,6 +136,7 @@ function AdminView({ open, navigate }:
     ["overview", "Overview", "source health · queues · corpus map · jobs"],
     ["unresolved", "Unresolved", "hanging references · suggestions · frontiers"],
     ["maintain", "Maintain", "rescans · roll-ups · repairs · watches"],
+    ["search", "Search", "free-text index · embeddings · scope · the note readers see"],
     ["import", "Import", "files · corpora · Zotero · seeds"],
   ];
   return (
@@ -150,6 +151,7 @@ function AdminView({ open, navigate }:
         {section === "overview" && <Dashboard open={open} navigate={navigate} />}
         {section === "unresolved" && <UnresolvedView open={open} navigate={navigate} />}
         {section === "maintain" && <MaintainView open={open} navigate={navigate} />}
+        {section === "search" && <SearchAdminView />}
         {section === "import" && <ImportView open={open} />}
       </div>
     </div>

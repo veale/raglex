@@ -3469,6 +3469,20 @@ class Catalogue:
             "GROUP BY d.source, d.court, d.doc_type").fetchall()
         return [dict(r) for r in rows]
 
+    def embedding_coverage(self) -> list[dict]:
+        """Per-source: documents with text, and how many carry a vector. The mirror of
+        ``fts_coverage`` so one screen can show what each retrieval path actually
+        covers — the two are independent, and until now nothing said so."""
+        rows = self.conn.execute(
+            "SELECT d.source AS source, count(*) AS with_text,"
+            "       count(e.doc_id) AS embedded "
+            "FROM documents d "
+            "LEFT JOIN (SELECT DISTINCT doc_id FROM embeddings) e "
+            "       ON e.doc_id = d.stable_id "
+            "WHERE d.has_text = 1 AND d.search_excluded = 0 "
+            "GROUP BY d.source").fetchall()
+        return [dict(r) for r in rows]
+
     def fts_search(self, tsquery: str, *, filters: dict | None = None,
                    limit: int = 200) -> list[dict]:
         """Candidate documents for a compiled tsquery, best-ranked first.

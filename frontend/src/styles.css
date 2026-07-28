@@ -1488,3 +1488,25 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 @media (prefers-color-scheme: dark) {
   .ft-snip mark { background: #6b5a12; }
 }
+
+/* --- Admin ▸ Search -------------------------------------------------------- */
+.search-admin .panel { margin-bottom: var(--sp-5); }
+.cov-grid { display: flex; gap: var(--sp-5); flex-wrap: wrap; }
+.cov-card { flex: 1 1 190px; }
+.cov-n { font-size: 1.7rem; font-weight: 600; letter-spacing: -.02em; }
+.cov-l { font-size: 13px; }
+.cov-sub { font-size: 11px; margin-top: 2px; }
+.cov-bar { height: 5px; border-radius: 3px; background: var(--rule); margin-top: 6px;
+  overflow: hidden; }
+.cov-bar span { display: block; height: 100%; background: var(--accent); }
+.cov-bar.emb span { background: var(--exp-guid, #8b6fd1); }
+.ft-note-edit { width: 100%; font: inherit; font-size: 13px; padding: var(--sp-3);
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--bg);
+  color: inherit; resize: vertical; }
+.search-scope .jur-row td { font-weight: 600; padding-top: var(--sp-4);
+  text-transform: capitalize; }
+.search-scope .num { text-align: right; }
+.src-facets { font-size: 12px; display: flex; flex-direction: column; gap: 4px;
+  padding: var(--sp-2) 0; }
+.src-facets .tag { margin-right: 4px; }
+.grid.kv td:first-child { width: 160px; color: var(--muted); }

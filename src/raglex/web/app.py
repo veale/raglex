@@ -437,6 +437,12 @@ def create_app(config: Config | None = None) -> FastAPI:
             sources=split(source) or None, doc_type=split(doc_type) or None,
             court=split(court) or None, year_from=year_from)
 
+    @app.get("/search/status")
+    def search_status_ep() -> dict:
+        """Both retrieval paths in one picture: what the free-text index covers, what
+        the embedding pass covers, and the scope settings behind each."""
+        return facade.search_status()
+
     @app.get("/freetext/scope")
     def freetext_scope_ep() -> dict:
         """What the free-text index covers, what it could cover, and the note shown

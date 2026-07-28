@@ -9696,6 +9696,58 @@ class Facade:
             store.update(payload)
         return self.freetext_scope()
 
+    def search_status(self) -> dict:
+        """One picture of both retrieval paths, for the admin Search page.
+
+        Free text and semantics are independent — a source can be fully indexed for
+        one and untouched by the other — and until this existed nothing said so,
+        which is how the corpus ended up with a free-text feature that silently
+        depended on an embedding pass that had never run."""
+        from .settings import SettingsStore
+
+        store = SettingsStore(self.config.settings_path)
+        scope = self.freetext_scope()
+        with self._open() as (cat, _rs, _ts):
+            emb = {r["source"]: r for r in cat.embedding_coverage()}
+        rows = []
+        for s in scope["sources"]:
+            e = emb.get(s["source"], {})
+            rows.append({
+                "source": s["source"],
+                "jurisdiction": self._jurisdiction_of(s["source"]),
+                "with_text": s["with_text"],
+                "fts_indexed": s["indexed"],
+                "embedded": e.get("embedded", 0),
+                "in_fts_scope": s["source"] in scope["selected"],
+                "courts": sorted(s["courts"].items(), key=lambda kv: -kv[1])[:12],
+                "doc_types": sorted(s["doc_types"].items(), key=lambda kv: -kv[1]),
+            })
+        rows.sort(key=lambda r: (r["jurisdiction"], -r["with_text"]))
+        embed_scope = (store.resolve("RAGLEX_EMBED_JURISDICTIONS") or "").strip()
+        return {
+            "sources": rows,
+            "note": scope["note"],
+            "fts_selected": scope["selected"],
+            "totals": {
+                "with_text": sum(r["with_text"] for r in rows),
+                "fts_indexed": sum(r["fts_indexed"] for r in rows),
+                "embedded": sum(r["embedded"] for r in rows),
+            },
+            "embedding": {
+                "provider": store.resolve("RAGLEX_EMBED_PROVIDER") or "local-hashing",
+                "model": store.resolve("RAGLEX_EMBED_MODEL"),
+                "dimensions": store.resolve("RAGLEX_EMBED_DIMENSIONS"),
+                "jurisdictions": embed_scope,
+                "paused": embed_scope == "__none__",
+            },
+            "hpc": {
+                "host": store.resolve("RAGLEX_HPC_HOST"),
+                "model": store.resolve("RAGLEX_HPC_MODEL"),
+                "tasks": store.resolve("RAGLEX_HPC_NTASKS"),
+                "configured": bool(store.resolve("RAGLEX_HPC_HOST")),
+            },
+        }
+
     def freetext_search(self, query: str, *, exact: bool = True, limit: int = 25,
                         offset: int = 0, sources: list[str] | None = None,
                         doc_type: list[str] | None = None,
