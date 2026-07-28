@@ -156,3 +156,26 @@ def test_bylines_can_be_added_without_disturbing_an_existing_segmentation():
     # the paragraphs either side keep their labels and their starts
     assert [s.label for s in out if s.kind == "paragraph"] == ["1.", "2.", "3."]
     assert [s.char_start for s in out if s.kind == "paragraph"] == [0, 17, 59]
+
+
+def test_a_party_on_its_own_line_is_not_mistaken_for_a_judge():
+    """1,159 of 1,409 sampled uk-caselaw intitulings put a party on its own upper-case
+    line — "MR SHAH RAHUL HASAN", "MRS N A K" — which a bare honorific would read as a
+    byline. A plain Mr/Mrs/Ms therefore needs an explicit judicial office after it,
+    while a peer or an office that stands alone does not."""
+    from raglex.core.segmentation import _AUTHOR_LABEL_RE, _NOT_AN_AUTHOR
+
+    def is_byline(s: str) -> bool:
+        m = _AUTHOR_LABEL_RE.match(s)
+        lab = m.group("label").strip() if m else ""
+        return bool(m) and 6 <= len(lab) <= 60 and not _NOT_AN_AUTHOR.search(lab)
+
+    for good in ["LORD JUSTICE BURNETT:", "LORD DYSON MR", "LORD HOFFMANN",
+                 "LADY JUSTICE ARDEN", "MR JUSTICE ANDREW SMITH", "MRS JUSTICE STEYN DBE",
+                 "HIS HONOUR JUDGE McMULLEN QC", "JUDGE ARMSTRONG-HOLMES",
+                 "OPINION OF LORD DOHERTY", "BARONESS HALE OF RICHMOND",
+                 "THE LORD CHIEF JUSTICE OF ENGLAND AND WALES"]:
+        assert is_byline(good), good
+    for bad in ["MR SHAH RAHUL HASAN", "MRS N A K", "MR SMITH", "The Appeal",
+                "THE SECRETARY OF STATE FOR THE HOME DEPARTMENT"]:
+        assert not is_byline(bad), bad

@@ -211,16 +211,24 @@ def _sequential_marks(text: str, rx: "re.Pattern[str]") -> list[tuple[int, int, 
 # all and never displayed; the concurrences sit between numbered paragraphs and were
 # displayed, but as a trailing line of the preceding paragraph. Lifting all of them to
 # their own heading segments makes a judgment read the way it is structured.
+# Upper-case only — a mixed-case line is prose — except that Scottish and Irish
+# surnames keep their lower-case particle even in a caps byline: "HIS HONOUR JUDGE
+# McMULLEN QC", "LORD JUSTICE MacDERMOTT".
+_NAME_CHARS = r"(?:[A-Z’'.\- ]|M[ac]{1,2}(?=[A-Z]))"
 _AUTHOR_LABEL_RE = re.compile(
     r"(?m)^[ \t]*(?P<label>"
-    r"(?:OPINION\s+OF\s+)?"
-    r"(?:THE\s+)?"
-    r"(?:LORD|LADY|MR|MRS|MS|SIR|DAME|HIS\s+HONOUR|HER\s+HONOUR|JUDGE|"
-    r"CHIEF\s+JUSTICE|PRESIDENT|MASTER)"
-    # Otherwise upper-case only — a mixed-case line is prose — but Scottish and Irish
-    # surnames keep their lower-case particle even in a caps byline: "HIS HONOUR JUDGE
-    # McMULLEN QC", "LORD JUSTICE MacDERMOTT".
-    r"(?:[A-Z’'.\- ]|M[ac]{1,2}(?=[A-Z])){2,60}?"
+    r"(?:OPINION\s+OF\s+)?(?:THE\s+)?"
+    r"(?:"
+    # A peer or an office that stands on its own: the title is the office, so the
+    # surname alone completes it ("LORD HOFFMANN", "JUDGE ARMSTRONG-HOLMES").
+    r"(?:LORD|LADY|BARONESS|SIR|DAME|JUDGE|CHIEF\s+JUSTICE|PRESIDENT|MASTER|"
+    r"RECORDER|SHERIFF|HIS\s+HONOUR|HER\s+HONOUR)"
+    # A plain honorific needs an explicit judicial office after it. Without this,
+    # an anonymised appellant on its own line ("MR SHAH RAHUL HASAN", "MRS N A K"
+    # — 1,159 uk-caselaw intitulings look like this) reads as the judge.
+    r"|(?:MR|MRS|MS)\s+(?=JUSTICE|RECORDER)"
+    r")"
+    + _NAME_CHARS + r"{2,60}?"
     r")[ \t]*:?[ \t]*$")
 # The label has to be a NAME line, not a sentence in small caps or a heading like
 # "LORD JUSTICE BURNETT GAVE THE FOLLOWING JUDGMENT" — those give themselves away by
