@@ -477,3 +477,38 @@ def test_ag_opinion_head_gives_the_citation_its_missing_name():
            "stable_id": "ECLI:EU:C:2025:362", "ecli": "ECLI:EU:C:2025:362", "title": None}
     assert cite(doc, {"celex": "62023CC0209", "advocate_general": "Emiliou"})["text"] == (
         "Case C-209/23 EU:C:2025:362, Opinion of AG Emiliou")
+
+
+def test_advocate_general_comes_from_cellar_with_the_page_as_fallback(monkeypatch):
+    """The AG is a real CDM relation (``case-law_delivered_by_advocate-general`` → a person
+    with an ``agent_name``), so ask CELLAR first. The name printed on the Opinion is the
+    fallback for when the endpoint has nothing (older opinions) or is unreachable — and it
+    supplies the delivery date either way, which the metadata does not carry."""
+    from raglex.adapters.eu_cellar import EUCellarAdapter
+
+    a = EUCellarAdapter()
+    text = "OPINION OF ADVOCATE GENERAL\nEMILIOU\ndelivered on 15 May 2025"
+
+    monkeypatch.setattr(a, "advocate_generals", lambda cs: {"62023CC0209": "Emiliou"})
+    assert a._ag_meta("62023CC0209", text) == {
+        "advocate_general": "Emiliou", "advocate_general_source": "cellar",
+        "delivered_on": "15 May 2025"}
+
+    # endpoint silent → the printed heading answers, and says so
+    monkeypatch.setattr(a, "advocate_generals", lambda cs: {})
+    assert a._ag_meta("62023CC0209", text) == {
+        "advocate_general": "Emiliou", "advocate_general_source": "document",
+        "delivered_on": "15 May 2025"}
+
+    # neither → no invented name
+    assert a._ag_meta("62023CC0209", "JUDGMENT OF THE COURT") == {}
+
+
+def test_advocate_general_query_compares_celex_as_a_string():
+    """The stored CELEX is a typed xsd:string, so a plain-literal VALUES block matches
+    nothing on Virtuoso — the batch query must compare with STR(), like the others here."""
+    from raglex.adapters.eu_cellar import EUCellarAdapter
+
+    q = EUCellarAdapter()._advocate_general_query(["62023CC0209", "62005CC0166"])
+    assert 'FILTER(STR(?c) IN ("62023CC0209", "62005CC0166"))' in q
+    assert "case-law_delivered_by_advocate-general" in q and "agent_name" in q

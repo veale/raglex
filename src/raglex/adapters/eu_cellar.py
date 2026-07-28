@@ -840,6 +840,47 @@ SELECT DISTINCT ?njudg ?country WHERE {{
 LIMIT 50
 """
 
+    def _advocate_general_query(self, celexes: list[str]) -> str:
+        """The Advocate General who delivered each of these opinions.
+
+        CELLAR models the AG as a real relation — ``cdm:case-law_delivered_by_advocate-
+        general`` onto a ``cdm:person`` whose ``cdm:agent_name`` is the surname the Court
+        cites ("Emiliou") — so this is structured data, not something to read off the page.
+        Batched: one query answers a whole page of opinions.
+        """
+        # STR()-compared, like every other query here: the stored CELEX is a typed
+        # xsd:string literal, so a plain-literal VALUES block matches nothing on Virtuoso.
+        listed = '", "'.join(celexes)
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex ?name WHERE {{
+  ?w cdm:resource_legal_id_celex ?c .
+  FILTER(STR(?c) IN ("{listed}"))
+  BIND(STR(?c) AS ?celex)
+  ?w cdm:case-law_delivered_by_advocate-general ?ag .
+  ?ag cdm:agent_name ?name .
+}}
+LIMIT {max(50, len(celexes) * 2)}
+"""
+
+    def advocate_generals(self, celexes: list[str]) -> dict[str, str]:
+        """``{celex: AG surname}`` for a batch of opinions — one query for the lot, so a
+        backfill over thousands is ~40 round trips rather than thousands."""
+        wanted = [c for c in dict.fromkeys(celexes) if c]
+        if not wanted:
+            return {}
+        try:
+            rows = self._sparql(self._advocate_general_query(wanted))
+        except Exception:  # noqa: BLE001 — the caller falls back to the printed name
+            return {}
+        return {r["celex"]: " ".join(str(r["name"]).split())
+                for r in rows if r.get("celex") and r.get("name")}
+
+    def advocate_general(self, celex: str) -> str | None:
+        """The AG for one opinion, from CELLAR. None when the endpoint has no answer (or is
+        down) — the caller then falls back to the name printed on the Opinion itself."""
+        return self.advocate_generals([celex]).get(celex)
+
     def _cited_query(self, celex: str) -> str:
         return f"""
 PREFIX cdm: <{CDM}>
@@ -1052,14 +1093,31 @@ LIMIT {self.per_page}
             extracted_via=ExtractedVia.STRUCTURED,
             extra={
                 "celex": celex,
-                # who wrote it — printed on the Opinion's face, absent from the metadata
-                **(parse_ag_opinion_head(text) if doc_type == DocType.OPINION else {}),
+                # Who delivered it. CELLAR models the AG properly, so ask it first; the name
+                # printed on the Opinion's own first page is the fallback for when the
+                # endpoint has no answer (older opinions) or is unreachable — and it carries
+                # the delivery date either way.
+                **(self._ag_meta(celex, text) if doc_type == DocType.OPINION else {}),
                 **({"currency": _eu_currency_meta(celex)} if doc_type == DocType.LEGISLATION else {}),
                 **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {}),
                 **({"origin_country": origin_country} if origin_country else {}),
                 **({"referring_courts": referring_courts} if referring_courts else {}),
             },
         )
+
+    def _ag_meta(self, celex: str, text: str | None) -> dict:
+        """``advocate_general`` (+ ``delivered_on`` where the text gives it) for an Opinion:
+        CELLAR's structured relation first, the Opinion's printed heading as the fallback.
+        ``advocate_general_source`` records which answered, so a later audit can tell a
+        catalogued fact from one read off a page."""
+        printed = parse_ag_opinion_head(text)
+        structured = self.advocate_general(celex)
+        out = {k: v for k, v in printed.items() if k != "advocate_general"}
+        name = structured or printed.get("advocate_general")
+        if name:
+            out["advocate_general"] = name
+            out["advocate_general_source"] = "cellar" if structured else "document"
+        return out
 
     def _fetch_formex(self, url: str) -> bytes | None:
         """Best-effort Formex fetch: a 404/406 (no Formex rendition) is not fatal —

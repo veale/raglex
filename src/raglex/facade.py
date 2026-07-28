@@ -4334,17 +4334,19 @@ class Facade:
         15 May 2025"), so this reads the stored text (no network) and writes
         ``advocate_general`` into the document's metadata, which the OSCOLA formatter
         already knows how to use. Idempotent — skips opinions that already have a name."""
-        from .adapters.eu_cellar import parse_ag_opinion_head
+        from .adapters.eu_cellar import EUCellarAdapter, parse_ag_opinion_head
 
-        st = {"scanned": 0, "named": 0, "already": 0, "unparsed": 0, "no_text": 0}
+        st = {"scanned": 0, "from_cellar": 0, "from_document": 0, "already": 0,
+              "unnamed": 0, "no_text": 0}
+        cellar = EUCellarAdapter()
+        BATCH = 200
         with self._open() as (cat, _rs, ts):
-            rows = cat.conn.execute(
+            rows = [dict(r) for r in cat.conn.execute(
                 "SELECT stable_id, payload_hash, meta_json FROM documents "
                 "WHERE source = 'eu-cellar' AND doc_type = 'opinion' AND is_latest = 1 "
-                "AND has_text = 1 ORDER BY stable_id LIMIT ?", (limit,)).fetchall()
-            for n, r in enumerate(rows, 1):
-                if cancel_check and cancel_check():
-                    break
+                "ORDER BY stable_id LIMIT ?", (limit,)).fetchall()]
+            todo: list[tuple[dict, dict]] = []          # (row, meta) still needing a name
+            for r in rows:
                 st["scanned"] += 1
                 try:
                     meta = json.loads(r["meta_json"] or "{}")
@@ -4353,21 +4355,43 @@ class Facade:
                 if meta.get("advocate_general"):
                     st["already"] += 1
                     continue
-                try:
-                    text = ts.get(r["payload_hash"])
-                except OSError:
-                    st["no_text"] += 1
-                    continue
-                head = parse_ag_opinion_head(text)
-                if not head:
-                    st["unparsed"] += 1     # an Opinion of the COURT, or an unparsed scan
-                    continue
-                cat.set_document_meta(r["stable_id"], {**meta, **head}, commit=False)
-                st["named"] += 1
-                if n % 200 == 0:
-                    cat.commit()
-                    _progress(on_progress, stage="reading AG opinions", done=n,
-                              total=len(rows), item=r["stable_id"])
+                todo.append((r, meta))
+
+            for i in range(0, len(todo), BATCH):
+                if cancel_check and cancel_check():
+                    break
+                chunk = todo[i: i + BATCH]
+                celex_of = {r["stable_id"]: (m.get("celex") or r["stable_id"]) for r, m in chunk}
+                # one SPARQL per 200 opinions — CELLAR models the AG as a relation, so this
+                # is the authoritative answer; the printed heading only fills its gaps.
+                names = cellar.advocate_generals(list(celex_of.values()))
+                for r, meta in chunk:
+                    sid = r["stable_id"]
+                    name = names.get(celex_of[sid])
+                    source = "cellar"
+                    # Read the document either way: it carries the delivery date, which
+                    # the metadata does not, and the name whenever CELLAR has none.
+                    try:
+                        text = ts.get(r["payload_hash"]) if r["payload_hash"] else None
+                    except OSError:
+                        text = None
+                    if text is None and not name:
+                        st["no_text"] += 1
+                        continue
+                    printed = parse_ag_opinion_head(text) if text else {}
+                    extra = {k: v for k, v in printed.items() if k != "advocate_general"}
+                    if not name:
+                        name, source = printed.get("advocate_general"), "document"
+                    if not name:
+                        st["unnamed"] += 1   # an Opinion of the COURT, or an unparsed scan
+                        continue
+                    cat.set_document_meta(
+                        sid, {**meta, **extra, "advocate_general": name,
+                              "advocate_general_source": source}, commit=False)
+                    st["from_cellar" if source == "cellar" else "from_document"] += 1
+                cat.commit()
+                _progress(on_progress, stage="naming AG opinions",
+                          done=min(i + BATCH, len(todo)), total=len(todo))
             cat.commit()
         self._invalidate_caches()
         return st
