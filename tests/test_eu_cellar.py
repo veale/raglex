@@ -595,3 +595,25 @@ def test_a_judgment_without_the_contents_wrapper_still_parses():
         b"<JURISDICTION>The Court rules.</JURISDICTION></JUDGMENT>")
     assert [s.label for s in segs] == ["1", "ruling"]
     assert "Old style paragraph." in text
+
+
+def test_a_judgment_reparsed_through_the_format_registry_is_not_read_as_an_act():
+    """The Formex parser is registered for every Formex instance, and CJEU CASE LAW is
+    Formex too. Run against a judgment, the legislation reader recognises only the recitals
+    the judgment QUOTES and discards the reasoning: a live re-parse cut Dun & Bradstreet
+    (C-203/22) from 57,012 characters to 3,822 — six "recital" segments and no judgment.
+    A judgment must reach the case-law reader, which is what the adapter uses at harvest."""
+    from raglex.formats import parse
+
+    pd = parse("formex-legislation", JUDGMENT_FMX)
+    kinds = {s.kind for s in pd.segments}
+    assert "recital" not in kinds
+    assert {"paragraph", "heading", "ruling"} <= kinds
+    assert "By Question 3(b) and (c), the referring court asks." in (pd.text or "")
+    # …and an ACT still parses as an act
+    act = parse("formex-legislation", b"""<ACT><TITLE><TI>Regulation</TI></TITLE>
+      <PREAMBLE><GR.CONSID><CONSID><NP><NO.P>(1)</NO.P><TXT>Whereas this.</TXT></NP></CONSID></GR.CONSID></PREAMBLE>
+      <ENACTING.TERMS><ARTICLE><TI.ART>Article 1</TI.ART><PARAG><NO.PARAG>1</NO.PARAG>
+      <ALINEA>This Regulation applies.</ALINEA></PARAG></ARTICLE></ENACTING.TERMS></ACT>""")
+    assert any(s.kind == "article" for s in act.segments)
+    assert "This Regulation applies." in (act.text or "")

@@ -23,7 +23,9 @@ from .base import ParsedDoc, register
 def unzip_formex_content(raw: bytes) -> bytes | None:
     """Unpack a CELLAR Formex zip and return the *content* member (root ``ACT`` /
     largest), skipping the ``.doc.xml`` bibliographic notice."""
-    if raw[:5] == b"<?xml":
+    # any XML-looking payload passes through: a stored instance need not carry the
+    # declaration (a judgment whose first bytes are "<JUDGMENT" is still Formex)
+    if raw.lstrip()[:1] == b"<":
         return raw
     if raw[:2] != b"PK":
         return None
@@ -70,6 +72,17 @@ def _recital_blocks(root: ET.Element) -> list[tuple[str, str, str]]:
     return blocks
 
 
+def _is_case_law(root: ET.Element) -> bool:
+    """A judgment/opinion instance rather than an act: it wraps its reasoning in
+    ``CONTENTS.JUDGMENT`` (or its root says so) and has no ``ENACTING.TERMS``."""
+    if any(localname(e.tag) == "ENACTING.TERMS" for e in root.iter()):
+        return False
+    if localname(root.tag).upper() in {"JUDGMENT", "OPINION", "ORDER", "VIEW"}:
+        return True
+    return any(localname(e.tag) in ("CONTENTS.JUDGMENT", "JURISDICTION", "NP.ECR")
+               for e in root.iter())
+
+
 def parse_formex_legislation(raw: bytes) -> ParsedDoc:
     data = unzip_formex_content(raw)
     if not data:
@@ -78,6 +91,22 @@ def parse_formex_legislation(raw: bytes) -> ParsedDoc:
         root = ET.fromstring(data)
     except ET.ParseError:
         return ParsedDoc()
+
+    # CJEU CASE LAW is Formex too, and this parser is registered for every Formex
+    # instance. Run against a judgment it reads only what it recognises — the recitals
+    # the judgment QUOTES — and throws the reasoning away: a re-parse cut Dun &
+    # Bradstreet (C-203/22) from 57,012 characters to 3,822, six "recital" segments and
+    # no judgment at all. A judgment goes to the case-law reader, which is the same
+    # function the CELLAR adapter uses at harvest, so both paths produce the same text.
+    if _is_case_law(root):
+        from ..adapters.eu_cellar import extract_formex
+
+        text, segments = extract_formex(data)
+        title = None
+        ti = next((e for e in root.iter() if localname(e.tag) == "TITLE"), None)
+        if ti is not None:
+            title = " ".join(element_text(ti).split()) or None
+        return ParsedDoc(text=text or None, segments=segments, title=title)
 
     title = None
     ti = next((e for e in root.iter() if localname(e.tag) == "TITLE"), None)
