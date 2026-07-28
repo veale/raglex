@@ -260,8 +260,13 @@ def test_formex_falls_back_to_grseq_grounds_not_ruling_only():
     from raglex.adapters.eu_cellar import extract_formex
     text, segments = extract_formex(_OLD_FORMEX)
     kinds = {s.kind for s in segments}
-    assert "section" in kinds and "ruling" in kinds  # grounds AND ruling, not ruling-only
+    # grounds AND ruling, never ruling-only. An old instance's grounds are plain <NP> inside
+    # GR.SEQ; the reading-order walk splits them per paragraph and keeps the section heading,
+    # where the old flat scan could only take the GR.SEQ whole ("section").
+    assert {"paragraph", "heading", "ruling"} <= kinds
     assert "interpretation of Directive 2004/38" in text  # the grounds body is present
+    # the operative ruling is appended once, not also swept up as a paragraph
+    assert text.count("On those grounds, the Court hereby rules") == 1
 
 
 def test_formex_case_title_from_parties_and_number():
@@ -512,3 +517,81 @@ def test_advocate_general_query_compares_celex_as_a_string():
     q = EUCellarAdapter()._advocate_general_query(["62023CC0209", "62005CC0166"])
     assert 'FILTER(STR(?c) IN ("62023CC0209", "62005CC0166"))' in q
     assert "case-law_delivered_by_advocate-general" in q and "agent_name" in q
+
+
+# A CJEU judgment's reasoning as Formex nests it: GR.SEQ sections, each opening with a
+# TITLE, paragraphs inside. Trimmed from the real C-203/22 (Dun & Bradstreet) instance.
+JUDGMENT_FMX = b"""<JUDGMENT>
+  <TITLE><TI>Judgment of the Court (First Chamber) 27 February 2025</TI></TITLE>
+  <CONTENTS.JUDGMENT>
+    <GR.SEQ>
+      <TITLE><TI>Judgment</TI></TITLE>
+      <NP.ECR><NO.P>1</NO.P><TXT>This request concerns the interpretation of the GDPR.</TXT></NP.ECR>
+    </GR.SEQ>
+    <GR.SEQ>
+      <TITLE><TI>Legal context</TI></TITLE>
+      <GR.SEQ>
+        <TITLE><TI>European Union law</TI></TITLE>
+        <GR.SEQ>
+          <TITLE><TI>The GDPR</TI></TITLE>
+          <NP.ECR><NO.P>3</NO.P><TXT>Recitals 4, 11, 58, 63 and 71 of the GDPR state.</TXT></NP.ECR>
+        </GR.SEQ>
+      </GR.SEQ>
+      <GR.SEQ>
+        <TITLE><TI>Austrian law</TI></TITLE>
+        <NP.ECR><NO.P>15</NO.P><TXT>Paragraph 4(6) of the Datenschutzgesetz provides.</TXT></NP.ECR>
+      </GR.SEQ>
+    </GR.SEQ>
+    <GR.SEQ>
+      <TITLE><TI>Consideration of the questions referred</TI></TITLE>
+      <GR.SEQ>
+        <TITLE><TI>Question 3(b) and (c), Question 4(a) and (b), and Questions 5 and 6</TI></TITLE>
+        <NP.ECR><NO.P>67</NO.P><TXT>By Question 3(b) and (c), the referring court asks.</TXT></NP.ECR>
+      </GR.SEQ>
+    </GR.SEQ>
+  </CONTENTS.JUDGMENT>
+  <JURISDICTION>On those grounds, the Court hereby rules.</JURISDICTION>
+</JUDGMENT>"""
+
+
+def test_judgment_keeps_its_section_headings_with_their_nesting():
+    """EUR-Lex shows a judgment's structure — "Legal context" › "European Union law" › "The
+    GDPR", and the question-by-question headings that say what each block of paragraphs is
+    answering. Taking only <NP.ECR> dropped every one of them, so the judgment read as an
+    unbroken wall of numbered text. Headings are one element type (TITLE); the LEVEL is the
+    GR.SEQ nesting depth, not a different tag."""
+    from raglex.adapters.eu_cellar import extract_formex
+
+    text, segs = extract_formex(JUDGMENT_FMX)
+    heads = [(s.level, s.label) for s in segs if s.kind == "heading"]
+    assert heads == [
+        (1, "Judgment"),
+        (1, "Legal context"),
+        (2, "European Union law"),
+        (3, "The GDPR"),
+        (2, "Austrian law"),
+        (1, "Consideration of the questions referred"),
+        (2, "Question 3(b) and (c), Question 4(a) and (b), and Questions 5 and 6"),
+    ]
+    # the document's OWN title block is not a section heading (it sits outside CONTENTS)
+    assert not any("Judgment of the Court (First Chamber)" in lbl for _lvl, lbl in heads)
+    # headings sit in the text, in reading order, between the paragraphs they introduce
+    assert text.index("Austrian law") < text.index("Paragraph 4(6)")
+    assert text.index("Question 3(b) and (c), Question") < text.index("By Question 3(b)")
+    # paragraphs keep their numbers, the ruling still lands, and every offset is exact
+    assert [s.label for s in segs if s.kind == "paragraph"] == ["1", "3", "15", "67"]
+    assert any(s.kind == "ruling" for s in segs)
+    for s in segs:
+        assert text[s.char_start:s.char_end].strip() == text[s.char_start:s.char_end]
+
+
+def test_a_judgment_without_the_contents_wrapper_still_parses():
+    """Older instances have no <CONTENTS.JUDGMENT>: the flat NP.ECR scan is the fallback,
+    so nothing that parsed before stops parsing."""
+    from raglex.adapters.eu_cellar import extract_formex
+
+    text, segs = extract_formex(
+        b"<JUDGMENT><NP.ECR><NO.P>1</NO.P><TXT>Old style paragraph.</TXT></NP.ECR>"
+        b"<JURISDICTION>The Court rules.</JURISDICTION></JUDGMENT>")
+    assert [s.label for s in segs] == ["1", "ruling"]
+    assert "Old style paragraph." in text

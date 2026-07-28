@@ -543,6 +543,60 @@ def _formex_legislation_blocks(root) -> list[tuple[str, str, str]]:
     return blocks
 
 
+def _formex_judgment_blocks(root) -> list[tuple[str, str, str, int]]:
+    """``(label, kind, text, level)`` blocks for a CJEU judgment, in reading order.
+
+    A judgment's reasoning is not a flat run of numbered paragraphs: Formex groups it into
+    nested ``<GR.SEQ>`` sections, each opening with a ``<TITLE>`` — "Legal context" ›
+    "European Union law" › "The GDPR", then "The dispute in the main proceedings…",
+    "Consideration of the questions referred", and the question-by-question headings that
+    tell a reader what each block of paragraphs is answering. We took only the ``<NP.ECR>``
+    paragraphs, so every one of those headings was dropped: the judgment read as an
+    unbroken wall of numbered text, where EUR-Lex shows its structure.
+
+    Headings are ONE element type — ``TITLE`` (with its ``TI``, plus ``STI`` where a
+    section has a subtitle). The LEVEL is not a different tag but the ``GR.SEQ`` nesting
+    depth, which is what the outline uses. The document's own title block sits outside
+    ``CONTENTS.JUDGMENT`` and is not a section heading, so the walk starts inside it.
+    """
+    contents = next((e for e in root.iter()
+                     if _localname(e.tag) == "CONTENTS.JUDGMENT"), None)
+    if contents is None:
+        return []
+    blocks: list[tuple[str, str, str, int]] = []
+    para_n = 0
+
+    def walk(node, depth: int) -> None:
+        nonlocal para_n
+        for child in node:
+            name = _localname(child.tag)
+            if name == "TITLE":
+                ti = " ".join(element_text(child).split())
+                if ti:
+                    # depth 1 for a top-level section, deeper for its subsections
+                    blocks.append((ti[:80], "heading", ti, max(1, depth)))
+            elif name == "GR.SEQ":
+                walk(child, depth + 1)
+            elif name == "JURISDICTION":
+                continue        # the operative ruling is appended by the caller, once
+            elif name == "NP.ECR":
+                text = element_text(child)
+                if not text.strip():
+                    continue
+                para_n += 1
+                no = next((c for c in child.iter() if _localname(c.tag) == "NO.P"), None)
+                label = (no.text or "").strip() if no is not None and no.text else ""
+                blocks.append((label or f"para {para_n}", "paragraph", text, 0))
+            else:
+                text = element_text(child)
+                if text.strip():
+                    para_n += 1
+                    blocks.append((f"para {para_n}", "paragraph", text, 0))
+
+    walk(contents, 0)
+    return blocks
+
+
 def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
     """Text + structural segments from a Formex 4 instance (pure, §6b).
 
@@ -567,12 +621,16 @@ def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
                 return text, segments
         # structural parse yielded nothing usable → fall through to whole-document text
 
-    # Judgment: modern Formex uses <NP.ECR>; OLDER judgments put the grounds in <GR.SEQ>
-    # sections with plain <NP>/<PARAG> — finding none and appending only the <JURISDICTION>
-    # ruling would leave a ruling-only stub, so fall back to the grounds sections.
-    paras = blocks_by_localname(
-        root, {"NP.ECR"}, kind="paragraph", label_child="NO.P", counter_label="para"
-    )
+    # Judgment: walk CONTENTS.JUDGMENT in reading order so the section HEADINGS survive
+    # alongside the numbered paragraphs (see _formex_judgment_blocks). Older judgments have
+    # no CONTENTS.JUDGMENT wrapper: fall back to the flat <NP.ECR> scan, then to the
+    # <GR.SEQ> grounds sections — finding neither and appending only the <JURISDICTION>
+    # ruling would leave a ruling-only stub.
+    paras: list[tuple] = _formex_judgment_blocks(root)
+    if not paras:
+        paras = blocks_by_localname(
+            root, {"NP.ECR"}, kind="paragraph", label_child="NO.P", counter_label="para"
+        )
     if not paras:
         paras = blocks_by_localname(root, {"GR.SEQ"}, kind="section", counter_label="section")
     blocks = list(paras)

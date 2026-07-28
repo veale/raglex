@@ -1434,3 +1434,16 @@ button.mini { font-size: 11px; padding: 1px 7px; }
   border-radius: var(--radius); font-size: .875rem; }
 .companion-label { font-weight: 600; }
 .companion-box a { margin: 0 var(--sp-2); }
+
+/* CJEU judgments carry their own section headings ("Legal context" › "European Union law"
+   › "The GDPR", "Consideration of the questions referred"); Formex nests them, and the
+   depth is what makes the judgment navigable rather than a wall of numbered paragraphs.
+   Set them as headings, not as another paragraph, and keep the rail off them. */
+.seg.kind-heading { margin: var(--sp-6) 0 var(--sp-2); }
+.seg.kind-heading .seg-body {
+  font-family: var(--serif); font-weight: 600; color: var(--text); display: block;
+}
+.seg.kind-heading.lvl1 .seg-body { font-size: 1.2rem; }
+.seg.kind-heading.lvl2 .seg-body { font-size: 1.02rem; color: var(--subtext);
+  letter-spacing: .01em; }
+.seg.kind-heading .seg-rail, .seg.kind-heading .seg-plus { display: none; }

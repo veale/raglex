@@ -1271,9 +1271,15 @@ function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
   );
 }
 
-function segBody(text: string, s: { label: string; char_start: number; char_end: number; lines?: any[] },
+function segBody(text: string, s: { label: string; char_start: number; char_end: number; kind?: string; lines?: any[] },
                  cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void,
                  idPrefix?: string, lineBadge?: (anchorPath: string) => any) {
+  // A section heading IS its own text ("Legal context"), so printing the label beside the
+  // body would print it twice.
+  if (s.kind === "heading") {
+    return { showLabel: false,
+             body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix) };
+  }
   // drafted hierarchy (legislation): render provision-by-provision, indented
   if (s.lines && s.lines.length > 1) {
     return { showLabel: true, body: segLines(text, s, cites, onCite, paraSet, onPara, idPrefix, lineBadge) };

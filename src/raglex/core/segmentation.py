@@ -60,22 +60,29 @@ def flow_text(
     return "\n".join(ln for ln in lines if ln)
 
 
-def assemble(blocks: Iterable[tuple[str, str, str]]) -> tuple[str, list[Segment]]:
+def assemble(blocks: Iterable[tuple]) -> tuple[str, list[Segment]]:
     """Join ``(label, kind, text)`` blocks into flat text + aligned segments.
+
+    A 4-tuple ``(label, kind, text, level)`` sets the segment's outline level — a
+    judgment's section headings nest ("Legal context" › "European Union law" › "The
+    GDPR"), and the depth is what lets a reader render them as a hierarchy rather than a
+    flat run of bold lines.
 
     Offsets account for the ``SEP`` joiner so ``text[seg.char_start:seg.char_end]``
     is exactly the block's text."""
     parts: list[str] = []
     segments: list[Segment] = []
     cursor = 0
-    for label, kind, raw in blocks:
+    for block_spec in blocks:
+        label, kind, raw = block_spec[0], block_spec[1], block_spec[2]
+        level = block_spec[3] if len(block_spec) > 3 else 0
         block = (raw or "").strip()
         if not block:
             continue
         if parts:
             cursor += len(SEP)
         segments.append(Segment(label=label or kind, char_start=cursor,
-                                char_end=cursor + len(block), kind=kind))
+                                char_end=cursor + len(block), kind=kind, level=level))
         parts.append(block)
         cursor += len(block)
     return SEP.join(parts), segments
