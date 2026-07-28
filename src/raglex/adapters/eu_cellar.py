@@ -703,6 +703,45 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
     return clean_case_display_title(parties)
 
 
+# An AG Opinion prints its author on its face — "OPINION OF ADVOCATE GENERAL / EMILIOU /
+# delivered on 15 May 2025" — and nowhere else we hold: the SPARQL metadata omits it and
+# these documents' titles are empty, so their OSCOLA citation read "…, Opinion of AG" with
+# a blank where the name belongs. The name may sit on the same line as the label or on the
+# next one, is printed in caps, and can be several words ("CAMPOS SÁNCHEZ-BORDONA").
+_AG_HEAD_RE = re.compile(
+    r"(?:OPINION|VIEW)\s+OF\s+(?:MR|MRS|MS)?\s*ADVOCATE\s+GENERAL\s*[\n\s]+"
+    r"(?P<name>[^\n]{2,60}?)\s*[\n\s]+"
+    r"delivered\s+on\s+(?P<date>\d{1,2}\s+[A-Za-zé]+\s+(?:19|20)\d{2})",
+    re.IGNORECASE)
+
+
+def _titlecase_ag(name: str) -> str:
+    """"CAMPOS SÁNCHEZ-BORDONA" → "Campos Sánchez-Bordona"; a name already in mixed case is
+    left alone (the source is inconsistent, and lowercasing a correct name is worse)."""
+    n = " ".join((name or "").split())
+    if not n or n != n.upper():
+        return n
+    return "-".join(w.capitalize() for w in n.split("-")) if "-" in n and " " not in n else \
+        " ".join("-".join(p.capitalize() for p in w.split("-")) for w in n.split())
+
+
+def parse_ag_opinion_head(text: str | None) -> dict:
+    """The Advocate General's name + delivery date from an Opinion's own text.
+
+    Returns ``{}`` when the text isn't an AG Opinion (an Opinion of the Court, a judgment,
+    an unparsed scan), so the caller can treat a miss as "no data" rather than an error.
+    """
+    head = (text or "")[:3000]
+    m = _AG_HEAD_RE.search(head)
+    if not m:
+        return {}
+    name = _titlecase_ag(m.group("name"))
+    # a stray line ("Provisional text", a footnote marker) is not a name
+    if not name or len(name) < 2 or any(ch.isdigit() for ch in name):
+        return {}
+    return {"advocate_general": name, "delivered_on": " ".join(m.group("date").split())}
+
+
 class EUCellarAdapter(BaseAdapter):
     source = "eu-cellar"
     # SPARQL/REST endpoint; no published hard limit, but pace politely (§1.8).
@@ -1013,6 +1052,8 @@ LIMIT {self.per_page}
             extracted_via=ExtractedVia.STRUCTURED,
             extra={
                 "celex": celex,
+                # who wrote it — printed on the Opinion's face, absent from the metadata
+                **(parse_ag_opinion_head(text) if doc_type == DocType.OPINION else {}),
                 **({"currency": _eu_currency_meta(celex)} if doc_type == DocType.LEGISLATION else {}),
                 **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {}),
                 **({"origin_country": origin_country} if origin_country else {}),

@@ -1,6 +1,7 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 import { useAuth } from "./auth";
+import { DocLink, docHref, opensNewTab } from "./links";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -269,12 +270,14 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
   const mentionGroup = (g: any, i: number, prefix: string) => (
     <div className="mgroup" key={`${prefix}-${i}`}>
       <div className="mgroup-head">
-        <a className="mgroup-title" title="Open this document in a new tray, with its linked passages highlighted"
-          onClick={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor,
+        <DocLink className="mgroup-title" id={g.src_id}
+          title="Open this document in a tray, with its linked passages highlighted (⌘-click for a new tab)"
+          onOpen={() => push({ kind: "doc", id: g.src_id, highlightTarget: target, highlightAnchor: anchor,
             occurrenceStart: g.snippets[0]?.start, label: <Oscola c={g.src_oscola} fallback={g.src_id} /> })}>
-          <Oscola c={g.src_oscola} fallback={g.src_id} /></a>
+          <Oscola c={g.src_oscola} fallback={g.src_id} /></DocLink>
         {g.count > 1 && <span className="tag" title={`${g.count} separate mentions in this document`}>↔ {g.count}</span>}
-        <button className="mini" title="Open the full document in the main view" onClick={() => open(g.src_id)}>open ↗</button>
+        <DocLink className="mini" title="Open the full document in the main view (⌘-click for a new tab)"
+          id={g.src_id} onOpen={() => open(g.src_id)}>open ↗</DocLink>
       </div>
       <div className="mgroup-meta muted">
         <FlagIcon jurisdiction={g.src_jurisdiction} />{" "}
@@ -344,12 +347,12 @@ function CitesTray({ target, family, open }: { target: string; family: "cases" |
         <div className="crow" key={i}>
           <div className="crow-cite">
             {it.resolved_id
-              ? <a onClick={() => push({ kind: "doc", id: it.resolved_id, label: <Oscola c={it.oscola} fallback={it.resolved_id} /> })}>
-                  <Oscola c={it.oscola} fallback={it.raw || it.candidate} /></a>
+              ? <DocLink id={it.resolved_id} onOpen={() => push({ kind: "doc", id: it.resolved_id, label: <Oscola c={it.oscola} fallback={it.resolved_id} /> })}>
+                  <Oscola c={it.oscola} fallback={it.raw || it.candidate} /></DocLink>
               : <span><Oscola c={it.oscola} fallback={it.raw || it.candidate} /> <span className="muted">· not held</span></span>}
             {it.pinpoints?.length > 0 && <span className="crow-pins"> {it.pinpoints.join(", ")}</span>}
           </div>
-          {it.resolved_id && <button className="mini" onClick={() => open(it.resolved_id)}>open ↗</button>}
+          {it.resolved_id && <DocLink className="mini" id={it.resolved_id} onOpen={() => open(it.resolved_id)}>open ↗</DocLink>}
         </div>
       ))}
     </div>
@@ -417,7 +420,7 @@ function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, 
     <SelectionShorthand docId={id} onLinked={reloadBody}>
       <div className="tray-doc-head">
         <b><Oscola c={body.oscola} fallback={body.title || id} /></b>
-        <button className="mini" onClick={() => open(id)}>open full ↗</button>
+        <DocLink className="mini" id={id} onOpen={() => open(id)}>open full ↗</DocLink>
       </div>
       {!body.text && <p className="muted">No text (metadata only).</p>}
       <div className="reader">
@@ -1013,7 +1016,7 @@ function ResultsList({ items, group, open }: { items: any[]; group: string; open
   };
   const row = (d: any) => (
     <div className="result-row" key={d.stable_id}>
-      <a className="result-cite" onClick={() => open(d.stable_id)}><Oscola c={d.oscola} fallback={d.title || d.stable_id} /></a>
+      <DocLink className="result-cite" id={d.stable_id} onOpen={() => open(d.stable_id)}><Oscola c={d.oscola} fallback={d.title || d.stable_id} /></DocLink>
       <div className="result-meta muted">
         <span className="tag">{docTypeLabel(d.doc_type)}</span>
         {d.court && <span> · {d.court}</span>}
@@ -1072,8 +1075,9 @@ function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => vo
   return (
     <div className="hit">
       <div>
-        <a className="hit-title" onClick={() => open(h.doc_id, h.structural_unit || undefined)}>
-          <Oscola c={h.oscola} fallback={h.title || h.ecli || h.doc_id} /></a>{" "}
+        <DocLink className="hit-title" id={h.doc_id} anchor={h.structural_unit || undefined}
+          onOpen={() => open(h.doc_id, h.structural_unit || undefined)}>
+          <Oscola c={h.oscola} fallback={h.title || h.ecli || h.doc_id} /></DocLink>{" "}
         <span className="muted">
           {h.court ? h.court : h.source}
           {h.decision_date ? ` · ${String(h.decision_date).slice(0, 10)}` : ""}
@@ -1083,7 +1087,7 @@ function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => vo
       </div>
       {ctx?.path?.length > 0 && (
         <div className="hit-crumb muted">{ctx.path.map((p: string, i: number) => (
-          <Fragment key={i}>{i > 0 && " › "}<a onClick={() => open(h.doc_id, p)}>{p}</a></Fragment>
+          <Fragment key={i}>{i > 0 && " › "}<DocLink id={h.doc_id} anchor={p} onOpen={() => open(h.doc_id, p)}>{p}</DocLink></Fragment>
         ))}{focusLabel ? <> › <b>{focusLabel}</b></> : null}</div>
       )}
       {!ctx && <div className="snippet">{h.chunk_text.slice(0, 320)}{h.chunk_text.length > 320 ? "…" : ""}</div>}
@@ -1099,11 +1103,12 @@ function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => vo
       )}
       <div className="hit-actions">
         <a className="mini-link" onClick={expand}>{busy ? "…" : ctx ? "hide context" : "⌄ show context"}</a>
-        <a className="mini-link" onClick={() => open(h.doc_id, h.structural_unit || undefined)}>open at this passage ↗</a>
+        <DocLink className="mini-link" id={h.doc_id} anchor={h.structural_unit || undefined}
+          onOpen={() => open(h.doc_id, h.structural_unit || undefined)}>open at this passage ↗</DocLink>
         {h.neighbours.length > 0 && (
           <span className="nbr">graph: {h.neighbours.slice(0, 3).map((n, j) =>
             <span key={j}>{n.direction === "out" ? "→" : "←"} {relationLabel(n.relationship_type)}{" "}
-              <a onClick={() => open(n.id)} title={n.title || n.id}>{n.title ? (n.title.length > 40 ? n.title.slice(0, 40) + "…" : n.title) : n.id}</a>; </span>)}</span>
+              <DocLink id={n.id} onOpen={() => open(n.id)} title={n.title || n.id}>{n.title ? (n.title.length > 40 ? n.title.slice(0, 40) + "…" : n.title) : n.id}</DocLink>; </span>)}</span>
         )}
       </div>
     </div>
@@ -1172,11 +1177,16 @@ function renderCited(text: string, segStart: number, segEnd: number, cites: any[
       : state === "pending" ? `${c.entity_kind}: ${c.candidate_id} — not in the corpus yet (click to fetch)`
       : `${c.entity_kind} reference — not resolvable automatically (click to search)`;
     // resolved links get a rich hover card (CiteHoverLayer) instead of the native tooltip
+    // A RESOLVED citation gets the target's real URL, so the reader can ⌘-click a case
+    // cited in a judgment and read it in a new tab with the judgment still open — the
+    // thing a click handler alone could never offer. Unresolved ones stay handler-only:
+    // they trigger a fetch/search, and there is no document to link to yet.
     nodes.push(<a key={k} id={idPrefix ? `${idPrefix}-cite-${c.char_start}` : undefined}
       className={`cite cite-${state}${guess ? " cite-inferred" : ""}`}
       title={state === "resolved" && !guess ? undefined : title}
+      href={state === "resolved" && c.resolved_id ? docHref(c.resolved_id, c.pinpoint) : undefined}
       data-doc={state === "resolved" ? c.resolved_id : undefined} data-pin={c.pinpoint || undefined}
-      onClick={() => onCite(c)}>{label}</a>);
+      onClick={(e) => { if (opensNewTab(e)) return; e.preventDefault(); onCite(c); }}>{label}</a>);
     cursor = c.char_end;
   });
   if (cursor < segEnd) nodes.push(renderRun(text.slice(cursor, segEnd), "tail", paraSet, onPara));
@@ -1760,7 +1770,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
                 this row carries only sub-parts we couldn't pin to a line. */}
             <SubParaMentions byAnchorRaw={mentions?.by_anchor || {}} sectionLabel={s.label} target={id} exclude={placed} />
             {pinned(s.label).map((r, j) => (
-              <div className="pinned" key={j}>💬 {r.relationship_type}: <a onClick={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</a>
+              <div className="pinned" key={j}>💬 {r.relationship_type}: <DocLink id={r.src_id} onOpen={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</DocLink>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
             ))}
             {mb && mb.list.length > 0
@@ -2174,6 +2184,20 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
             onClick={() => tray.push({ kind: "cites", target: d.stable_id, family: "statute", label: "Statutory material cited" })}>Statutory material cited <b>{doc.statute_cited_count ?? 0}</b></a>
         </div>
         <CitatorStrip id={d.stable_id} />
+        {doc.companion && (
+          /* The other half of a CJEU case. Reading the judgment you want to know an
+             Opinion exists (and vice versa) — it is a different document with a different
+             ECLI, so nothing else on the page says so. */
+          <p className="companion-box">
+            <span className="companion-label">
+              {doc.companion.role === "ag_opinion" ? "Opinion of the Advocate General" : "Judgment of the Court"}</span>{" "}
+            <DocLink id={doc.companion.stable_id} onOpen={() => open(doc.companion.stable_id)}
+              title={`Open ${doc.companion.role === "ag_opinion" ? "the AG Opinion" : "the judgment"} (⌘-click for a new tab)`}>
+              {doc.companion.role === "ag_opinion" ? "Read the AG Opinion" : "Read the judgment"} →</DocLink>
+            <span className="muted"> <Oscola c={doc.companion.oscola} fallback={doc.companion.stable_id} />
+              {doc.companion.date ? ` · ${doc.companion.date}` : ""}</span>
+          </p>
+        )}
         {(doc.also_cited_as || []).length > 0 && (
           <p className="also-cited muted" title="Alternative citation forms linked to this document (parallel-citation mining, report matching, your confirmations)">
             Also cited as {doc.also_cited_as.map((a: string, i: number) =>
@@ -2378,7 +2402,8 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
             <tr>
               <td style={{ whiteSpace: "nowrap", color: colour[r.relationship_type] || "var(--subtext)" }}>{treat(r.relationship_type)}</td>
               <td><FlagIcon jurisdiction={r.src_jurisdiction} />{" "}
-                <a onClick={() => open(r.src_id, r.dst_anchor)}><Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></a>
+                <DocLink id={r.src_id} anchor={r.dst_anchor} onOpen={() => open(r.src_id, r.dst_anchor)}>
+                  <Oscola c={r.src_oscola} fallback={r.src_title || r.src_id} /></DocLink>
                 {r.dst_anchor && <span className="muted"> → {r.dst_anchor}</span>}
                 {r.src_cited_by ? <span className="muted" style={{ fontSize: 11 }}>
                   {" "}[cited by {r.src_cited_by.toLocaleString()}]</span> : null}
@@ -2396,8 +2421,13 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
               <tr key={g.key + ":" + j} className="cited-by-passage">
                 <td />
                 <td style={{ paddingLeft: 18 }}>
-                  <a onClick={() => open(o.src_id, o.dst_anchor)} className="muted">
-                    {o.dst_anchor ? `→ ${o.dst_anchor}` : "→ another passage"}</a>
+                  {/* an extra passage belongs to the SAME citing document as the row it
+                      sits under; jump to where that document says it (src_anchor), not to
+                      the anchor of the passage being cited here. */}
+                  <DocLink id={o.src_id || r.src_id} anchor={o.src_anchor || undefined}
+                    title={`Open ${r.src_title || r.src_id} at this passage`}
+                    onOpen={() => open(o.src_id || r.src_id, o.src_anchor || undefined)} className="muted">
+                    {o.dst_anchor ? `→ ${o.dst_anchor}` : "→ another passage"}</DocLink>
                   {o.relationship_type !== r.relationship_type && (
                     <span className="muted" style={{ fontSize: 11 }}> · {treat(o.relationship_type)}</span>)}
                 </td>
@@ -2556,7 +2586,7 @@ function RelationRow({ r, open, onDone }: { r: any; open: (id: string) => void; 
         ) : <span>{r.relationship_type}</span>}
         {r.extracted_via === "manual" && <span className="muted" title="human-corrected"> ✎</span>}
       </td>
-      <td>{r.dst_id ? <a onClick={() => open(r.dst_id)}>{r.dst_id}</a> : <span className="muted">{r.raw_citation_string}</span>}
+      <td>{r.dst_id ? <DocLink id={r.dst_id} onOpen={() => open(r.dst_id)}>{r.dst_id}</DocLink> : <span className="muted">{r.raw_citation_string}</span>}
         {r.dst_anchor && <span className="muted"> ◆ {r.dst_anchor}</span>}</td>
       <td className="muted">{r.resolution_status}</td>
       {canWrite && <td style={{ whiteSpace: "nowrap" }}>
@@ -2845,7 +2875,7 @@ function LegislationAknPanel({ open }: { open?: (id: string) => void }) {
       {msg && (msg.error
         ? <p className="err" style={{ marginTop: 8 }}>{msg.error}</p>
         : <p className="ok" style={{ marginTop: 8 }}>✓ imported <b>{msg.title || msg.stable_id}</b> — {msg.segments} segments, {msg.resolved_edges} edges resolved{" "}
-            {open && msg.stable_id && <a onClick={() => open(msg.stable_id)} style={{ cursor: "pointer" }}>open ↗</a>}</p>)}
+            {open && msg.stable_id && <DocLink id={msg.stable_id} onOpen={() => open(msg.stable_id)}>open ↗</DocLink>}</p>)}
     </div>
   );
 }
@@ -3950,7 +3980,7 @@ function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void
           return (
             <tr key={f.flag_id}>
               <td style={{ whiteSpace: "nowrap" }}>
-                <a onClick={() => open(f.doc_id, f.anchor || undefined)} style={{ cursor: "pointer" }}>{f.doc_id}</a>
+                <DocLink id={f.doc_id} anchor={f.anchor || undefined} onOpen={() => open(f.doc_id, f.anchor || undefined)}>{f.doc_id}</DocLink>
                 {f.anchor && <span className="muted"> · {f.anchor}</span>}</td>
               <td style={{ maxWidth: 320 }}><b>“{f.selected_text}”</b></td>
               <td className="muted" style={{ fontSize: 12 }}>
@@ -4620,8 +4650,8 @@ function RefContext({ refKey }: { refKey: string }) {
     <div className="refctx">
       {data.occurrences.map((o: any, i: number) => (
         <div className="refctx-row" key={i}>
-          <a className="refctx-src" onClick={() => peek.push({ kind: "doc", id: o.src_id })}>
-            <Oscola c={o.src_oscola} fallback={o.src_title || o.src_id} /></a>
+          <DocLink className="refctx-src" id={o.src_id} onOpen={() => peek.push({ kind: "doc", id: o.src_id })}>
+            <Oscola c={o.src_oscola} fallback={o.src_title || o.src_id} /></DocLink>
           {o.snippet
             ? <div className="refctx-snippet">…{highlightSub(o.snippet, o.raw)}…</div>
             : <div className="refctx-snippet muted">(no snippet — cited as “{o.raw}”)</div>}
@@ -5183,7 +5213,7 @@ function ResolveRow({ r, open, active, toggle, onDone }:
           </div>
           {r.citing_documents?.length > 0 && (
             <p className="muted" style={{ marginTop: 4 }}>cited by: {r.citing_documents.map((d: string) => (
-              <a key={d} onClick={() => open(d)} style={{ cursor: "pointer", marginRight: 8 }}>{d}</a>
+              <DocLink key={d} id={d} onOpen={() => open(d)} style={{ marginRight: 8 }}>{d}</DocLink>
             ))}</p>
           )}
           {msg && <p className={msg.startsWith("error") ? "err" : "ok"}>{msg}</p>}
@@ -5244,7 +5274,7 @@ export function RulesView({ open }: { open: (id: string) => void }) {
           {(rules || []).map((r: any) => (
             <tr key={r.phrase}>
               <td><b>{r.phrase}</b></td>
-              <td>→ <a onClick={() => open(r.target_id)} style={{ cursor: "pointer" }}>{r.target_id}</a>
+              <td>→ <DocLink id={r.target_id} onOpen={() => open(r.target_id)}>{r.target_id}</DocLink>
                 {!r.target_present && <span className="err" title="target not yet in the corpus"> · not harvested</span>}</td>
               <td><a onClick={async () => { await api.deleteAlias(r.phrase); reload(); }} style={{ cursor: "pointer" }}>✗ delete</a></td>
             </tr>
@@ -5272,12 +5302,13 @@ function ProvisionRow({ p, open, actId }:
   const window = [p.in_force_from, p.in_force_to].filter(Boolean).join(" → ");
   return (
     <div className="leg-prov">
-      <a className="leg-prov-anchor" onClick={() => open(actId, p.anchor)} title="jump to this provision">{p.anchor}</a>
+      <DocLink className="leg-prov-anchor" id={actId} anchor={p.anchor} onOpen={() => open(actId, p.anchor)}
+      title="jump to this provision">{p.anchor}</DocLink>
       {p.status && <span className={`leg-dot ${tone}`} title={p.native_status || p.status}>{(p.status as string).replace(/_/g, " ")}</span>}
       {window && <span className="muted leg-prov-win">{window}</span>}
       {(p.change_types || []).length > 0 && <span className="muted"> · {(p.change_types as string[]).join(", ")}</span>}
       {(p.changed_by || []).map((c: string) => (
-        <a key={c} className="leg-prov-by" onClick={() => open(c)} title="the instrument that changed it">{c}</a>))}
+        <DocLink key={c} className="leg-prov-by" id={c} onOpen={() => open(c)} title="the instrument that changed it">{c}</DocLink>))}
     </div>
   );
 }
@@ -5291,7 +5322,7 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   const [allProv, setAllProv] = useState(false);
   if (!s) return null;
   const links = (ids: string[]) => ids.map((x, i) => (
-    <Fragment key={x}>{i > 0 && ", "}<a onClick={() => open(x)}>{x}</a></Fragment>));
+    <Fragment key={x}>{i > 0 && ", "}<DocLink id={x} onOpen={() => open(x)}>{x}</DocLink></Fragment>));
   const lines: any[] = [];
   if (s.repealed_by?.length) lines.push(<span key="rep"><b>Repealed / recast</b> by {links(s.repealed_by)}</span>);
   if (s.amended_by?.length) lines.push(<span key="am"><b>Amended</b> by {links(s.amended_by)}</span>);
@@ -5366,7 +5397,7 @@ function EffectsBanner({ id, open }: { id: string; open: (id: string, a?: string
         {(row.affecting || []).map((aff: string) => (
           <span key={aff} className="tag" style={{ marginRight: 6 }}>
             {held.has(aff)
-              ? <a onClick={() => open(aff)} style={{ cursor: "pointer" }}>{aff} ✓</a>
+              ? <DocLink id={aff} onOpen={() => open(aff)}>{aff} ✓</DocLink>
               : <>{aff} <a title="fetch this amending instrument" onClick={() => harvest(aff)}
                   style={{ cursor: "pointer" }}>{busy ? "…" : "⤓"}</a></>}
           </span>
@@ -5398,7 +5429,7 @@ function ChangesPanel({ id, open }: { id: string; open: (id: string, a?: string)
       {(changes || []).length === 0 && <p className="muted">none recorded yet — use “scan changes”.</p>}
       {(changes || []).map((c: any, i: number) => (
         <div key={i} style={{ fontSize: 13 }}>
-          <a onClick={() => open(c.affected_id)} style={{ cursor: "pointer" }}>{c.affected_title || c.affected_id}</a>
+          <DocLink id={c.affected_id} onOpen={() => open(c.affected_id)}>{c.affected_title || c.affected_id}</DocLink>
           {c.affected_provision && <span className="muted"> · {c.affected_provision}</span>}
           {c.effect_type && <span className="tag" style={{ marginLeft: 6 }}>{c.effect_type}</span>}
         </div>
@@ -5431,7 +5462,7 @@ export function VersionPanel({ id, open }: { id: string; open: (id: string, a?: 
         {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</span>}
       </div>
       {versions.length > 0 && <p className="muted" style={{ marginTop: 6 }}>held versions: {versions.map((v: any) => (
-        <a key={v.stable_id} onClick={() => open(v.stable_id)} style={{ cursor: "pointer", marginRight: 10 }}>{v.version_date || v.stable_id}</a>
+        <DocLink key={v.stable_id} id={v.stable_id} onOpen={() => open(v.stable_id)} style={{ marginRight: 10 }}>{v.version_date || v.stable_id}</DocLink>
       ))}</p>}
     </div>
   );
@@ -5684,8 +5715,9 @@ export function CitatorStrip({ id }: { id: string }) {
       {(c.most_significant_citors || []).length > 0 && (
         <span className="cit-stat">
           <span className="muted">most significant citor:</span>{" "}
-          <a onClick={() => peek.push({ kind: "doc", id: c.most_significant_citors[0].id })}>
-            <Oscola c={c.most_significant_citors[0].oscola} fallback={c.most_significant_citors[0].title || c.most_significant_citors[0].id} /></a>
+          <DocLink id={c.most_significant_citors[0].id}
+            onOpen={() => peek.push({ kind: "doc", id: c.most_significant_citors[0].id })}>
+            <Oscola c={c.most_significant_citors[0].oscola} fallback={c.most_significant_citors[0].title || c.most_significant_citors[0].id} /></DocLink>
         </span>
       )}
     </div>
@@ -5702,7 +5734,7 @@ export function RelatedPanel({ id, open }: { id: string; open: (id: string, a?: 
     <ul className="related-list">
       {rows.slice(0, 8).map((r: any, i: number) => (
         <li key={i}>
-          <a onClick={() => open(r.id)}><Oscola c={r.oscola} fallback={r.title || r.id} /></a>
+          <DocLink id={r.id} onOpen={() => open(r.id)}><Oscola c={r.oscola} fallback={r.title || r.id} /></DocLink>
           <span className="muted"> · {why(r)}{r.date ? ` · ${r.date.slice(0, 4)}` : ""}</span>
         </li>
       ))}

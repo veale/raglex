@@ -12,6 +12,7 @@ import { Document, Outline, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/TextLayer.css";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import { api } from "./api";
+import { docHref, opensNewTab } from "./links";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -115,8 +116,15 @@ export function PdfPane({ id, onCite }: { id: string; onCite: (c: any) => void }
       if (c.char_end <= cur || c.char_start >= end) continue;
       const a = Math.max(c.char_start, cur), b = Math.min(c.char_end, end);
       out += esc(s.text.slice(cur, a));
-      out += `<mark class="pdfcite cite-${c.state}" data-page="${pageNo}" data-ci="${ci}"` +
-        ` title="${esc(c.raw)}">${esc(s.text.slice(a, b))}</mark>`;
+      // A RESOLVED citation is emitted as a real <a href>, so a ⌘-click on a citation in
+      // a scanned PDF opens that authority in a new tab exactly as it does in the HTML
+      // reader. Unresolved ones stay <mark>: there is no document to point at yet.
+      const target = c.state === "resolved" && c.resolved_id
+        ? docHref(c.resolved_id, c.pinpoint) : null;
+      const tag = target ? "a" : "mark";
+      out += `<${tag} class="pdfcite cite-${c.state}"${target ? ` href="${esc(target)}"` : ""}` +
+        ` data-page="${pageNo}" data-ci="${ci}"` +
+        ` title="${esc(c.raw)}">${esc(s.text.slice(a, b))}</${tag}>`;
       cur = b;
     }
     out += esc(s.text.slice(cur, end));
@@ -125,8 +133,10 @@ export function PdfPane({ id, onCite }: { id: string; onCite: (c: any) => void }
 
   // the marks are injected HTML, so clicks are delegated from the scroll container
   const clickCapture = (e: React.MouseEvent) => {
-    const m = (e.target as HTMLElement).closest?.("mark.pdfcite") as HTMLElement | null;
+    const m = (e.target as HTMLElement).closest?.(".pdfcite") as HTMLElement | null;
     if (!m) return;
+    // a modified click on a linked citation is a request for a new tab — let it through
+    if (opensNewTab(e) && m.tagName === "A") return;
     e.preventDefault();
     e.stopPropagation();
     const s = scansRef.current[Number(m.dataset.page)];

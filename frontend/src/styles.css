@@ -188,8 +188,16 @@ button.primary {
   background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600;
 }
 button.primary:hover { background: color-mix(in srgb, var(--accent) 86%, var(--text)); }
-button.mini { padding: var(--sp-1) var(--sp-3); font-size: .75rem; color: var(--subtext); flex: 0 0 auto; min-width: 0; white-space: nowrap; }
-button.mini:hover { color: var(--text); }
+button.mini, a.mini { padding: var(--sp-1) var(--sp-3); font-size: .75rem; color: var(--subtext); flex: 0 0 auto; min-width: 0; white-space: nowrap; }
+button.mini:hover, a.mini:hover { color: var(--text); }
+/* "open ↗" is a LINK wearing a button's clothes: it points at a real URL, so ⌘-click and
+   "open in new tab" work, but it must keep the button chrome it has always had. */
+a.mini {
+  font-family: var(--serif); border-radius: var(--radius); background: transparent;
+  border: 1px solid var(--line); text-decoration: none; display: inline-block;
+  transition: background .12s, border-color .12s, color .12s;
+}
+a.mini:hover { background: var(--surface-2); }
 
 .row { display: flex; gap: var(--sp-4); flex-wrap: wrap; align-items: center; }
 .row > * { flex: 1; min-width: 140px; }
@@ -677,12 +685,13 @@ tbody tr:hover { background: var(--surface-2); }
 .pdfoutline a { cursor: pointer; display: inline-block; padding: 1px 0; }
 /* citation highlights over the page image — the text layer's glyphs stay transparent,
    so the mark paints a tint + underline exactly under the printed citation */
-mark.pdfcite { background: transparent; color: transparent; cursor: pointer; }
-mark.pdfcite.cite-resolved { background: color-mix(in srgb, var(--accent) 24%, transparent);
+mark.pdfcite, a.pdfcite { background: transparent; color: transparent; cursor: pointer;
+  text-decoration: none; }
+mark.pdfcite.cite-resolved, a.pdfcite.cite-resolved { background: color-mix(in srgb, var(--accent) 24%, transparent);
   box-shadow: 0 1.5px 0 var(--accent); }
-mark.pdfcite.cite-pending { background: color-mix(in srgb, var(--warn) 22%, transparent); }
-mark.pdfcite.cite-maybe { background: color-mix(in srgb, var(--note) 20%, transparent); }
-mark.pdfcite:hover { filter: brightness(1.25); }
+mark.pdfcite.cite-pending, a.pdfcite.cite-pending { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+mark.pdfcite.cite-maybe, a.pdfcite.cite-maybe { background: color-mix(in srgb, var(--note) 20%, transparent); }
+mark.pdfcite:hover, a.pdfcite:hover { filter: brightness(1.25); }
 .origframe { width: 100%; height: 80vh; border: 1px solid var(--line); background: #fff; }
 
 /* --- guidance classification chips ------------------------------------------ */
@@ -1417,3 +1426,11 @@ table { width: 100%; }
 }
 .add-watch input[type="text"], .add-watch input:not([type]) { font-size: 12px; }
 button.mini { font-size: 11px; padding: 1px 7px; }
+
+/* The judgment ↔ AG Opinion pairing: a quiet standing note under the title, not a banner —
+   it is orientation ("the other half of this case is held"), not an alert. */
+.companion-box { margin: var(--sp-3) 0 0; padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--accent); background: var(--surface-2);
+  border-radius: var(--radius); font-size: .875rem; }
+.companion-label { font-weight: 600; }
+.companion-box a { margin: 0 var(--sp-2); }

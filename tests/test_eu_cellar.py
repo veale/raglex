@@ -450,3 +450,30 @@ def test_formex_legislation_splits_articles_into_paragraphs():
     jxml = b"<JUDGMENT><NP.ECR><NO.P>1</NO.P><TXT>Claim.</TXT></NP.ECR><JURISDICTION>Held.</JURISDICTION></JUDGMENT>"
     _jt, js = extract_formex(jxml)
     assert [s.label for s in js] == ["1", "ruling"]
+
+
+def test_ag_opinion_head_gives_the_citation_its_missing_name():
+    """CELLAR carries no Advocate General and these documents arrive titleless, so their
+    OSCOLA citation rendered as "…, Opinion of AG" with a hole where the name goes. The
+    name is on the face of every Opinion — on the label's line or the next one."""
+    from raglex.adapters.eu_cellar import parse_ag_opinion_head
+    from raglex.citations.oscola import cite
+
+    assert parse_ag_opinion_head(
+        "Provisional text\nOPINION OF ADVOCATE GENERAL\nEMILIOU\ndelivered on 15 May 2025 (\n1\n)"
+    ) == {"advocate_general": "Emiliou", "delivered_on": "15 May 2025"}
+    # same line, multi-word name, accents preserved
+    assert parse_ag_opinion_head(
+        "OPINION OF ADVOCATE GENERAL CAMPOS SÁNCHEZ-BORDONA delivered on 3 March 2020 (1)"
+    )["advocate_general"] == "Campos Sánchez-Bordona"
+    assert parse_ag_opinion_head("VIEW OF ADVOCATE GENERAL\nKOKOTT\ndelivered on 1 April 2011"
+                                 )["advocate_general"] == "Kokott"
+    # a judgment (or an Opinion OF THE COURT) is not an AG opinion — no data, not a guess
+    assert parse_ag_opinion_head("JUDGMENT OF THE COURT (Grand Chamber) 27 February 2025") == {}
+    assert parse_ag_opinion_head(None) == {}
+
+    # …and the name reaches the citation
+    doc = {"source": "eu-cellar", "doc_type": "opinion", "court": "Advocate General",
+           "stable_id": "ECLI:EU:C:2025:362", "ecli": "ECLI:EU:C:2025:362", "title": None}
+    assert cite(doc, {"celex": "62023CC0209", "advocate_general": "Emiliou"})["text"] == (
+        "Case C-209/23 EU:C:2025:362, Opinion of AG Emiliou")

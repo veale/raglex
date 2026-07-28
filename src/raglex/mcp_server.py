@@ -283,6 +283,17 @@ def build_server(config: Config | None = None) -> FastMCP:
         return facade.refix_westlaw_imports(apply=apply, limit=limit)
 
     @admin
+    def backfill_ag_names(limit: int = 20000) -> dict:
+        """Fill in WHO wrote each held AG Opinion, read from the Opinion's own first page
+        ("OPINION OF ADVOCATE GENERAL EMILIOU delivered on 15 May 2025"). CELLAR omits the
+        Advocate General and these documents arrive titleless, so their OSCOLA citation
+        renders as "…, Opinion of AG" with the name missing. Local text only, no network;
+        idempotent."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "backfill-ag-names", "AG names for held Opinions", {"limit": limit})
+
+    @admin
     def rebuild_authority() -> dict:
         """Recompute the citation-network PageRank roll-up (batch; run after large
         imports or resolution sweeps so ranking/citator/related stay current)."""

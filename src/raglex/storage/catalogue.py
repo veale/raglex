@@ -4094,8 +4094,8 @@ class Catalogue:
 
     @staticmethod
     def _doc_filter_clauses(*, source=None, doc_type=None, tag=None, query=None, court=None,
-                            id_prefix=None, id_in=None, year_from=None, year_to=None, cites=None,
-                            cited_by=None, cites_pinpoint=None):
+                            id_prefix=None, id_in=None, id_or=None, year_from=None, year_to=None,
+                            cites=None, cited_by=None, cites_pinpoint=None):
         """Shared WHERE-clause builder for list/count/search/facets (so every surface filters
         with identical semantics). ``court`` matches the stored court token; ``id_prefix``
         matches one or more slug heads (comma-separated). ``query`` is tokenised — each
@@ -4135,11 +4135,30 @@ class Catalogue:
             # IESC 26") don't come through here — the facade resolves them to `id_in` above,
             # because folding a report/neutral cite into this substring OR would either miss
             # (the id slug omits the brackets) or, if unioned in, defeat the bitmap.
+            tok_clauses: list[str] = []
+            tok_params: list[object] = []
             for tok in str(query).split():
-                clauses.append(
+                tok_clauses.append(
                     "(lower(d.title) LIKE ? OR lower(d.stable_id) LIKE ? OR lower(d.ecli) LIKE ?)")
                 like = f"%{tok.lower()}%"
-                params.extend([like, like, like])
+                tok_params.extend([like, like, like])
+            # A case is often known by a name that is NOT its title — "Dun & Bradstreet
+            # Austria" for CK v Magistrat der Stadt Wien, the name the corpus stores under
+            # "also cited as". Those live in citation_aliases, which is 5M rows and must not
+            # be dragged into this bitmap, so the caller resolves the query against it
+            # SEPARATELY (one trigram-indexed lookup) and hands the hits down as ``id_or``:
+            # a document matches if its title/id matches OR it is one of those documents.
+            ids_or = list(dict.fromkeys(i for i in (id_or or []) if i))
+            if tok_clauses and ids_or:
+                qs = ",".join("?" for _ in ids_or)
+                clauses.append("((" + " AND ".join(tok_clauses) + ")"
+                               f" OR d.stable_id IN ({qs}) OR d.ecli IN ({qs}))")
+                params.extend(tok_params)
+                params.extend(ids_or)
+                params.extend(ids_or)
+            else:
+                clauses.extend(tok_clauses)
+                params.extend(tok_params)
         if year_from:
             clauses.append("substr(d.decision_date, 1, 4) >= ?"); params.append(str(year_from))
         if year_to:
@@ -4216,6 +4235,28 @@ class Catalogue:
         params.extend([limit, offset])
         return self.conn.execute(sql, params).fetchall()
 
+    def documents_by_alias_text(self, query: str, *, limit: int = 200) -> list[str]:
+        """Document ids whose "also cited as" forms contain every word of ``query``.
+
+        A case is regularly known by a name that is not its title — "Dun & Bradstreet
+        Austria" is how everyone refers to CK v Magistrat der Stadt Wien, and the corpus
+        already records it, as an alias. Title search alone therefore could not find the
+        case by the only name most people know it by.
+
+        Deliberately a SEPARATE lookup rather than another branch of the title search's OR:
+        citation_aliases is millions of rows, and folding it into that bitmap is exactly the
+        shape that once starved the connection pool. This is one trigram-indexed scan
+        (``citation_aliases_alias_trgm``), bounded, whose ids the caller ORs in.
+        """
+        toks = [t.lower() for t in str(query or "").split() if len(t) > 2]
+        if not toks:
+            return []
+        where = " AND ".join("lower(alias) LIKE ?" for _ in toks)
+        rows = self.conn.execute(
+            f"SELECT DISTINCT dst_id FROM citation_aliases WHERE {where} LIMIT ?",
+            [*(f"%{t}%" for t in toks), limit]).fetchall()
+        return [r["dst_id"] for r in rows if r["dst_id"]]
+
     def search_documents(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
                          **filters) -> list[sqlite3.Row]:
         """Like :meth:`list_documents` but sortable (incl. by citation frequency) and each row
@@ -4247,7 +4288,7 @@ class Catalogue:
     def count_documents(self, *, source: str | None = None, doc_type: str | None = None,
                         tag: str | None = None, query: str | None = None,
                         court: str | None = None, id_prefix: str | None = None,
-                        id_in: list | None = None,
+                        id_in: list | None = None, id_or: list | None = None,
                         year_from: str | None = None, year_to: str | None = None,
                         cites: str | None = None, cited_by: str | None = None,
                         cites_pinpoint: str | None = None, cap: int | None = None) -> int:
@@ -4266,8 +4307,8 @@ class Catalogue:
         params: list[object] = []
         clauses, fparams = self._doc_filter_clauses(
             source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
-            id_in=id_in, year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by,
-            cites_pinpoint=cites_pinpoint)
+            id_in=id_in, id_or=id_or, year_from=year_from, year_to=year_to, cites=cites,
+            cited_by=cited_by, cites_pinpoint=cites_pinpoint)
         if tag:
             clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t "
                               "WHERE t.doc_id = d.stable_id AND t.tag = ?)")

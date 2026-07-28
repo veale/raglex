@@ -1105,9 +1105,42 @@ class Facade:
                     "retrieve_with": "document_mentions",
                 },
                 "inferred_by_count": max(0, inferred_total),
+                # the other half of a CJEU case — judgment ↔ AG Opinion (see _cjeu_companion)
+                "companion": self._cjeu_companion(cat, doc, meta),
                 "assets": [dict(a) for a in cat.assets_for(stable_id)],
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
             }
+
+    # A CJEU case is published as two documents with the SAME case number, differing only
+    # in the CELEX descriptor: the Court's judgment (…CJ…) and the Advocate General's
+    # Opinion (…CC…) or View (…CA…). Reading one, you almost always want to know the other
+    # exists — so pair them deterministically off the CELEX rather than relying on the
+    # opinion_in edge, which only 368 of the 8,553 held opinions actually carry (most were
+    # pulled by a path that never minted it).
+    _CELEX_CASE_RE = re.compile(r"^(6\d{4})(CJ|CC|CA)(\d+)$", re.IGNORECASE)
+
+    def _cjeu_companion(self, cat, doc, meta: dict) -> dict | None:
+        """``{"role": "ag_opinion"|"judgment", …}`` for the counterpart document, when the
+        corpus holds it. None for anything that isn't half of a CJEU pair."""
+        celex = (meta or {}).get("celex") or doc["stable_id"]
+        m = self._CELEX_CASE_RE.match(str(celex).upper())
+        if not m:
+            return None
+        year, kind, num = m.groups()
+        wanted = ([("CC", "ag_opinion"), ("CA", "ag_opinion")] if kind == "CJ"
+                  else [("CJ", "judgment")])
+        for desc, role in wanted:
+            other = cat.find_document_id(f"{year}{desc}{num}")
+            if not other or other == doc["stable_id"]:
+                continue
+            row = cat.get_document(other)
+            if row is None:
+                continue
+            return {"role": role, "stable_id": other,
+                    "title": row["title"], "celex": f"{year}{desc}{num}",
+                    "oscola": _oscola_cite(row, _row_meta(row)),
+                    "date": str(row["decision_date"])[:10] if row["decision_date"] else None}
+        return None
 
     _TREATMENT_RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
                        "considers": 4, "mentions": 5}
@@ -1137,7 +1170,13 @@ class Facade:
             else:
                 demoted = dict(r)
             others.setdefault(sid, []).append(
-                {"dst_anchor": demoted.get("dst_anchor"),
+                # src_id/src_anchor ride along: each extra passage is a link to the CITING
+                # document, and without the id the UI had nothing to open — it pushed a
+                # peek for `undefined` and the reader got "not held, fetch it?" on a
+                # document sitting right there (the "→ para 39 opens item-not-found" bug).
+                {"src_id": sid,
+                 "src_anchor": demoted.get("src_anchor"),
+                 "dst_anchor": demoted.get("dst_anchor"),
                  "relationship_type": demoted.get("relationship_type")})
         incoming: list[dict] = []
         page_ids = list(best.items())[:cap]
@@ -1858,6 +1897,7 @@ class Facade:
     # handled separately, so an unknown key can't leak into the SQL builder)
     _SEARCH_FILTERS = ("source", "doc_type", "tag", "query", "court", "id_prefix",
                        "year_from", "year_to", "cites", "cited_by", "cites_pinpoint")
+    # ``id_or`` is not user-supplied — search_corpus derives it from the query (alias hits).
     # Search result counts stop here; the UI shows "N+" past it (see search_corpus).
     _SEARCH_COUNT_CAP = 1000
 
@@ -1903,6 +1943,14 @@ class Facade:
                 if ids:
                     f = {k: v for k, v in f.items() if k != "query"}
                     f["id_in"] = ids
+                else:
+                    # …and a name the case is known by rather than titled with ("Dun &
+                    # Bradstreet Austria") lives in the alias table: resolve it there and OR
+                    # those documents into the title match, so the "also cited as" line is
+                    # searchable, not just displayable.
+                    alias_ids = cat.documents_by_alias_text(f["query"])
+                    if alias_ids:
+                        f["id_or"] = alias_ids
             rows = cat.search_documents(sort=sort, limit=limit, offset=offset, **f)
             items = []
             for r in rows:
@@ -4274,6 +4322,55 @@ class Facade:
                 source="eu-cellar", on_progress=on_progress, cancel_check=cancel_check)
         self._invalidate_caches()
         return out
+
+    def backfill_ag_names(self, *, limit: int = 20000, on_progress=None,
+                          cancel_check=None) -> dict:
+        """Fill in WHO wrote each held AG Opinion, from the Opinion's own first page.
+
+        CELLAR's metadata doesn't carry the Advocate General, and these documents arrive
+        with an empty title, so their OSCOLA citation rendered as "Case C-526/24
+        EU:C:2025:723, Opinion of AG" — a citation with a hole in it. The name is printed
+        on the face of every Opinion ("OPINION OF ADVOCATE GENERAL EMILIOU delivered on
+        15 May 2025"), so this reads the stored text (no network) and writes
+        ``advocate_general`` into the document's metadata, which the OSCOLA formatter
+        already knows how to use. Idempotent — skips opinions that already have a name."""
+        from .adapters.eu_cellar import parse_ag_opinion_head
+
+        st = {"scanned": 0, "named": 0, "already": 0, "unparsed": 0, "no_text": 0}
+        with self._open() as (cat, _rs, ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, payload_hash, meta_json FROM documents "
+                "WHERE source = 'eu-cellar' AND doc_type = 'opinion' AND is_latest = 1 "
+                "AND has_text = 1 ORDER BY stable_id LIMIT ?", (limit,)).fetchall()
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                try:
+                    meta = json.loads(r["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                if meta.get("advocate_general"):
+                    st["already"] += 1
+                    continue
+                try:
+                    text = ts.get(r["payload_hash"])
+                except OSError:
+                    st["no_text"] += 1
+                    continue
+                head = parse_ag_opinion_head(text)
+                if not head:
+                    st["unparsed"] += 1     # an Opinion of the COURT, or an unparsed scan
+                    continue
+                cat.set_document_meta(r["stable_id"], {**meta, **head}, commit=False)
+                st["named"] += 1
+                if n % 200 == 0:
+                    cat.commit()
+                    _progress(on_progress, stage="reading AG opinions", done=n,
+                              total=len(rows), item=r["stable_id"])
+            cat.commit()
+        self._invalidate_caches()
+        return st
 
     def pull_ag_opinions(self, *, limit: int = 100000, on_progress=None, cancel_check=None) -> dict:
         """Pull the Advocate General's Opinion for every held CJEU judgment that lacks one.

@@ -8,6 +8,7 @@
 // always states exactly what the panel is showing. PageRank ranks throughout.
 import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { DocLink } from "./links";
 import { FlagIcon, Oscola } from "./views";
 
 const FMT = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M"
@@ -244,7 +245,7 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
           <li key={it.id}>
             <span className="drill-rank">{i + 1}</span>
             <div className="drill-doc">
-              <a onClick={() => open(it.id)}><Oscola c={it.oscola} fallback={it.title || it.id} /></a>
+              <DocLink id={it.id} onOpen={() => open(it.id)}><Oscola c={it.oscola} fallback={it.title || it.id} /></DocLink>
               <div className="drill-meta muted">
                 <span className="tag">{it.doc_type}</span>
                 {it.court && <a className="facet-link" title={`focus on ${it.court_label || it.court}`}

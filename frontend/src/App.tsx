@@ -5,6 +5,7 @@ import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
 import { useAuth } from "./auth";
+import { docHref, graphHref } from "./links";
 
 // A compact role badge + sign-out in the header, shown only when auth is enforced. Admins
 // see nothing to elevate; a reader can sign out and back in as admin.
@@ -115,7 +116,8 @@ function ThemeSwitch() {
 type Tab = "explore" | "search" | "admin" | "settings" | "document" | "graph";
 type AdminSection = "overview" | "unresolved" | "maintain" | "import";
 
-const slug = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+// slug/docHref live in links.tsx — the address bar this file writes and the href every
+// link carries must come from the SAME function, or they disagree.
 
 // One dense surface for everything operational: ops overview (source health,
 // queues, corpus map), the unresolved queue, maintenance controls, and imports —
@@ -216,26 +218,34 @@ export function App() {
   const visited = useRef<Set<Tab>>(new Set(["explore"]));
   visited.current.add(tab);
 
-  // Shareable deep links: #/article/{id}[/section/{anchor}] ↔ the open document.
+  // Shareable deep links — every view the app can be IN has a URL, so it survives a
+  // reload, a copied link, and above all being opened in a NEW TAB (which is just a fresh
+  // load of that URL): #/article/{id}[/section/{anchor}], #/graph/{id}, #/{tab}.
   useEffect(() => {
     const apply = () => {
       const h = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
-      const m = h.match(/^article\/(.+?)(?:\/section\/(.+))?$/);
-      if (m) { setDocId(m[1]); setPinpoint(m[2] || null); setTab("document"); }
+      const art = h.match(/^article\/(.+?)(?:\/section\/(.+))?$/);
+      if (art) { setDocId(art[1]); setPinpoint(art[2] || null); setTab("document"); return; }
+      const gr = h.match(/^graph\/(.+)$/);
+      if (gr) { setGraphId(gr[1]); setTab("graph"); return; }
+      if (["explore", "search", "admin", "settings"].includes(h)) setTab(h as Tab);
     };
     apply();
     window.addEventListener("hashchange", apply);
     return () => window.removeEventListener("hashchange", apply);
   }, []);
   useEffect(() => {
-    if (tab === "document" && docId) {
-      const want = `#/article/${encodeURIComponent(docId)}` + (pinpoint ? `/section/${slug(pinpoint)}` : "");
-      if (location.hash !== want) history.replaceState(null, "", want);
-    } else if (location.hash.startsWith("#/article")) {
-      // leaving the document: drop the stale deep link so a reload lands where you are
+    // replaceState, not push: the app keeps its own back stack (which restores scroll
+    // position), and one history entry per view would fight it.
+    const want = tab === "document" && docId ? docHref(docId, pinpoint)
+      : tab === "graph" && graphId ? graphHref(graphId)
+      : (tab === "explore" || tab === "search" || tab === "admin" || tab === "settings")
+        ? `#/${tab}` : null;
+    if (want && location.hash !== want) history.replaceState(null, "", want);
+    else if (!want && location.hash.startsWith("#/")) {
       history.replaceState(null, "", location.pathname + location.search);
     }
-  }, [tab, docId, pinpoint]);
+  }, [tab, docId, graphId, pinpoint]);
 
   // A reader gets a read-only research interface: no admin/maintain, no settings. These are
   // also enforced server-side (src/raglex/web/auth.py) — hiding them is only affordance.

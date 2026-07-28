@@ -469,3 +469,37 @@ def test_incoming_edges_carry_jurisdiction_and_kind_for_faceting(config):
     row = inc[0]
     assert row["src_kind"] == "cases"
     assert row["src_jurisdiction"]
+
+
+def test_cjeu_judgment_and_ag_opinion_point_at_each_other(tmp_path):
+    """A CJEU case is two documents — the Court's judgment (…CJ…) and the AG's Opinion
+    (…CC…) — and reading either, you want to know the other is held. Paired off the CELEX,
+    not the opinion_in edge: only 368 of the corpus's 8,553 opinions carry that edge."""
+    from datetime import date
+
+    from raglex.core.models import DocType, ExtractedVia, Record
+
+    from raglex.config import Config
+    from raglex.facade import Facade
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                      embed_model=None))
+    with f._open() as (cat, _rs, ts):
+        for sid, dt, celex, court in [
+            ("ECLI:EU:C:2025:117", DocType.JUDGMENT, "62022CJ0203", "Court of Justice"),
+            ("ECLI:EU:C:2024:390", DocType.OPINION, "62022CC0203", "Advocate General"),
+        ]:
+            rec = Record(source="eu-cellar", stable_id=sid, ecli=sid, doc_type=dt,
+                         title=None, court=court, decision_date=date(2025, 2, 27),
+                         text="body", raw_bytes=b"x", extracted_via=ExtractedVia.STRUCTURED,
+                         extra={"celex": celex})
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, "body")))
+            cat.put_alias(celex.lower(), sid, source="celex-ecli")
+        cat.commit()
+
+    judgment = f.get_document("ECLI:EU:C:2025:117")["companion"]
+    assert judgment["role"] == "ag_opinion" and judgment["stable_id"] == "ECLI:EU:C:2024:390"
+    opinion = f.get_document("ECLI:EU:C:2024:390")["companion"]
+    assert opinion["role"] == "judgment" and opinion["stable_id"] == "ECLI:EU:C:2025:117"

@@ -5,6 +5,8 @@ predicates index-backed in production)."""
 
 from __future__ import annotations
 
+from datetime import date
+
 from raglex.config import Config
 from raglex.core.models import DocType, ExtractedVia, Record
 from raglex.facade import Facade
@@ -118,3 +120,27 @@ def test_search_engine_runs_vector_when_forced_on(monkeypatch):
     eng.catalogue.authority_for = lambda ids: {}
     eng.search("anything", k=5, semantic=True)
     assert called["vec"] == 1  # explicit override runs it despite no index
+
+
+def test_search_finds_a_case_by_the_name_it_is_known_by_not_titled_with(tmp_path):
+    """"Dun & Bradstreet Austria" is what everyone calls CK v Magistrat der Stadt Wien —
+    it is in the case's "also cited as" line, not its title, so title search alone could
+    never find it by the only name most readers know."""
+    f = Facade(_config(tmp_path))
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source="eu-cellar", stable_id="ECLI:EU:C:2025:117",
+                     ecli="ECLI:EU:C:2025:117", doc_type=DocType.JUDGMENT,
+                     title="CK v Magistrat der Stadt Wien", decision_date=date(2025, 2, 27),
+                     text="Judgment on automated decision-making.",
+                     raw_bytes=b"x", extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        cat.put_alias("dun & bradstreet austria", "ECLI:EU:C:2025:117", source="cellar-alias")
+        cat.commit()
+
+    hits = f.search_corpus(query="Dun & Bradstreet Austria")
+    assert [d["stable_id"] for d in hits["items"]] == ["ECLI:EU:C:2025:117"]
+    # the title route still works, and an unrelated name still finds nothing
+    assert [d["stable_id"] for d in f.search_corpus(query="Magistrat Wien")["items"]] == [
+        "ECLI:EU:C:2025:117"]
+    assert f.search_corpus(query="Bradstreet Norway")["items"] == []
