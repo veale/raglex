@@ -1548,3 +1548,35 @@ button.mini { font-size: 11px; padding: 1px 7px; }
   .ftr-rail { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
   .facet-grp { flex: 1 1 150px; }
 }
+
+/* --- advanced search fields ------------------------------------------------ */
+.adv-fail { border: 1px solid var(--warn, #b06); border-radius: 6px;
+  padding: var(--sp-3); margin-bottom: var(--sp-3); font-size: 13px; }
+.adv-fail .mini { margin-top: 6px; }
+.adv-years input { width: 100%; }
+.pick { position: relative; }
+.pick-open { width: 100%; text-align: left; font: inherit; font-size: 13px;
+  padding: var(--sp-2) var(--sp-3); border: 1px solid var(--rule); border-radius: 6px;
+  background: var(--bg); color: inherit; cursor: pointer; }
+.pick-open:hover { border-color: var(--accent); }
+.pick-chosen { display: flex; align-items: center; gap: 6px; }
+.pick-chosen .tag { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.pick-list { position: absolute; z-index: 30; top: 100%; left: 0; right: 0;
+  max-height: 300px; overflow-y: auto; background: var(--panel, var(--bg));
+  border: 1px solid var(--rule); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
+  padding: 4px; margin-top: 2px; }
+.pick-search { width: 100%; font: inherit; font-size: 12px; padding: 4px 6px;
+  border: 1px solid var(--rule); border-radius: 4px; background: var(--bg);
+  color: inherit; margin-bottom: 4px; }
+.pick-opt { position: relative; display: flex; align-items: center; gap: 6px;
+  width: 100%; background: none; border: 0; padding: 3px 5px; cursor: pointer;
+  font: inherit; font-size: 12px; color: inherit; text-align: left;
+  border-radius: 3px; overflow: hidden; }
+.pick-opt:hover { background: var(--hover, rgba(127,127,127,.12)); }
+.pick-bar { position: absolute; inset: 0 auto 0 0; background: var(--accent);
+  opacity: .12; }
+.pick-opt-label { position: relative; z-index: 1; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.pick-opt-n { position: relative; z-index: 1; font-variant-numeric: tabular-nums;
+  opacity: .7; }
+.pick-empty { font-size: 11px; padding: 4px 6px; margin: 0; }

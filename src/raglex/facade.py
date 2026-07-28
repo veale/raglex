@@ -3031,7 +3031,63 @@ class Facade:
     # administrative decisions = regulator output: OSS register rows (court dpa-xx)
     # or a registered admin source. Must be excluded from "cases" so DPA decisions
     # never masquerade as case law.
-    _ADMIN_CLAUSE = "(d.court LIKE 'dpa-%' OR d.source IN ('edpb-oss', 'ofcom-enforcement', 'ico'))"
+    def _kind_clause(self, kind: str) -> tuple[str, list]:
+        """SQL for a display KIND, derived from the same constants ``_doc_kind`` uses.
+
+        These two had drifted, and silently: the bucket a document displays under is
+        computed in Python by ``_doc_kind``, while the filter behind "show me this
+        slice" was a hand-written SQL string naming three admin sources when
+        ``_ADMIN_SOURCES`` had grown to eleven — and it compared ``doc_type`` directly
+        against the kind, which is simply not what a kind is. The Law Commission's 722
+        reports are stored ``doc_type='preparatory'`` and display as guidance, so
+        narrowing the guidance slice to them returned "nothing in this slice".
+
+        Deriving the clause from the constants is the fix that stays fixed: adding a
+        source to ``_ADMIN_SOURCES`` now moves it in the filter as well as the label."""
+        admin_sources = sorted(self._ADMIN_SOURCES)
+        admin_types = sorted(self._ADMIN_DOC_TYPES)
+        travaux = sorted(self._TRAVAUX_SOURCES)
+        # mirrors _doc_kind's order: a DPA's whole output, then an admin body's
+        # DECIDING documents
+        # COALESCE is load-bearing: court is nullable, and `NULL LIKE 'dpa-%'` is
+        # NULL, so `NOT (…)` is NULL too and the row is silently dropped. Every
+        # judgment with no recorded court would have vanished from the cases slice.
+        admin_sql = ("(COALESCE(lower(d.court), '') LIKE 'dpa-%'"
+                     + (f" OR (d.source IN ({','.join('?' * len(admin_sources))})"
+                        f" AND d.doc_type IN ({','.join('?' * len(admin_types))}))"
+                        if admin_sources and admin_types else "")
+                     + ")")
+        admin_params = (admin_sources + admin_types) if (admin_sources and admin_types) else []
+
+        if kind == "administrative":
+            return admin_sql, list(admin_params)
+        if kind == "guidance":
+            # doc_type 'guidance', plus 'preparatory' from any source that is NOT a
+            # travaux collection — which is where the Law Commission lives
+            sql = "(d.doc_type = 'guidance' OR (d.doc_type = 'preparatory'"
+            params: list = []
+            if travaux:
+                sql += f" AND d.source NOT IN ({','.join('?' * len(travaux))})"
+                params += travaux
+            sql += "))"
+            return sql, params
+        if kind == "preparatory":
+            if not travaux:
+                return "1 = 0", []
+            return (f"(d.doc_type = 'preparatory' AND d.source IN "
+                    f"({','.join('?' * len(travaux))}))"), list(travaux)
+        if kind == "cases":
+            types = sorted(self._CASE_TYPES)
+            return (f"(d.doc_type IN ({','.join('?' * len(types))}) AND NOT {admin_sql})",
+                    list(types) + list(admin_params))
+        if kind == "legislation":
+            return "(d.doc_type = 'legislation')", []
+        if kind == "other":
+            known = sorted({"guidance", "preparatory", "legislation"} | set(self._CASE_TYPES))
+            return (f"(d.doc_type NOT IN ({','.join('?' * len(known))}) AND NOT {admin_sql})",
+                    list(known) + list(admin_params))
+        # an explicit doc_type ("judgment", "notice") rather than a display kind
+        return "(d.doc_type = ?)", [kind]
 
     @staticmethod
     def _drill_key(jurisdiction: str, court: str | None, kind: str | None,
@@ -3141,14 +3197,10 @@ class Facade:
             if court:
                 clauses.append("d.court = ?")
                 params.append(court)
-            if kind == "cases":
-                clauses.append("d.doc_type IN ('judgment', 'decision', 'opinion')")
-                clauses.append(f"NOT {self._ADMIN_CLAUSE}")
-            elif kind == "administrative":
-                clauses.append(self._ADMIN_CLAUSE)
-            elif kind:
-                clauses.append("d.doc_type = ?")
-                params.append(kind)
+            if kind:
+                ksql, kparams = self._kind_clause(kind)
+                clauses.append(ksql)
+                params.extend(kparams)
             if year_from:
                 clauses.append("d.decision_date >= ?")
                 params.append(f"{year_from}-01-01")

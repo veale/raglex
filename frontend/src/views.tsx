@@ -791,36 +791,70 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
 // pinpoint autocomplete for the cited provision).
 function AdvancedForm({ filters, setFilters, onSearch }:
   { filters: Filters; setFilters: (f: (p: Filters) => Filters) => void; onSearch: () => void }) {
-  const [fv] = useAsync(() => api.facetValues(), []);
+  // The error is READ, not discarded. Previously this destructured only the data, so a
+  // failed /facet-values — a 401 during session bootstrap, a transient blip — rendered
+  // exactly like "there are no sources", permanently: the deps array is empty, so it
+  // never retried and nothing on screen said anything was wrong.
+  const [fv, fvErr, reloadFacets, fvLoading] = useAsync(() => api.facetValues(), []);
   const set = (k: keyof Filters, v: string) => setFilters((f) => ({ ...f, [k]: v || undefined }));
-  const opts = (rows: any[]) => (rows || []).map((r) => <option key={r.key} value={r.key}>{r.key} ({r.n.toLocaleString()})</option>);
+  const clear = (k: keyof Filters) => setFilters((f) => ({ ...f, [k]: undefined }));
+
+  if (fvErr) {
+    return (
+      <div className="adv-form">
+        <div className="adv-fail">
+          <b>Couldn’t load the filter options.</b>
+          <div className="muted">{fvErr}</div>
+          <button className="mini" onClick={reloadFacets}>try again</button>
+        </div>
+        <div className="adv-row">
+          <label>Title / id contains</label>
+          <input value={filters.query || ""} placeholder="e.g. unfair dismissal"
+            onChange={(e) => set("query", e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onSearch()} />
+        </div>
+        <button className="primary" onClick={onSearch}>Search</button>
+      </div>
+    );
+  }
+
   return (
     <div className="adv-form">
       <div className="adv-row">
-        <label>Title / id contains <span className="muted">(free text — words in any order)</span></label>
+        <label>Title / id contains <span className="muted">(words in any order; also
+          searches “also cited as”)</span></label>
         <input value={filters.query || ""} placeholder="e.g. unfair dismissal"
-          onChange={(e) => set("query", e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSearch()} />
+          onChange={(e) => set("query", e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onSearch()} />
       </div>
+
       <div className="adv-grid">
-        <div><label>Source</label>
-          <select value={filters.source || ""} onChange={(e) => set("source", e.target.value)}>
-            <option value="">any</option>{opts(fv?.sources)}</select></div>
-        <div><label>Type</label>
-          <select value={filters.doc_type || ""} onChange={(e) => set("doc_type", e.target.value)}>
-            <option value="">any</option>{opts(fv?.doc_types)}</select></div>
-        <div><label>Court</label>
-          <ComboBox value={filters.court || ""} onChange={(v) => set("court", v)}
-            options={(fv?.courts || []).map((c: any) => c.key)} placeholder="any court" /></div>
-        <div><label>Tag / collection</label>
-          <select value={filters.tag || ""} onChange={(e) => set("tag", e.target.value)}>
-            <option value="">any</option>{opts(fv?.tags)}</select></div>
-        <div><label>Year from</label>
-          <input type="number" min={1200} max={2100} value={filters.year_from || ""} placeholder="e.g. 2016"
-            onChange={(e) => set("year_from", e.target.value)} /></div>
-        <div><label>Year to</label>
-          <input type="number" min={1200} max={2100} value={filters.year_to || ""} placeholder="e.g. 2024"
-            onChange={(e) => set("year_to", e.target.value)} /></div>
+        <PickField label="Source" hint="where it came from" value={filters.source}
+          rows={fv?.sources} loading={fvLoading}
+          onPick={(v) => set("source", v)} onClear={() => clear("source")} />
+        <PickField label="Type" hint="judgment, legislation, guidance…" value={filters.doc_type}
+          rows={fv?.doc_types} loading={fvLoading}
+          onPick={(v) => set("doc_type", v)} onClear={() => clear("doc_type")} />
+        <PickField label="Court / body" hint="788 to choose from" value={filters.court}
+          rows={fv?.courts} loading={fvLoading} searchable
+          onPick={(v) => set("court", v)} onClear={() => clear("court")} />
+        <PickField label="Tag" hint="your collections" value={filters.tag}
+          rows={fv?.tags} loading={fvLoading}
+          onPick={(v) => set("tag", v)} onClear={() => clear("tag")} />
+        <div className="adv-years">
+          <label>Years</label>
+          <div className="row" style={{ gap: 6 }}>
+            <input type="number" min={1200} max={2100} value={filters.year_from || ""}
+              placeholder="from" onChange={(e) => set("year_from", e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onSearch()} />
+            <span className="muted">–</span>
+            <input type="number" min={1200} max={2100} value={filters.year_to || ""}
+              placeholder="to" onChange={(e) => set("year_to", e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onSearch()} />
+          </div>
+        </div>
       </div>
+
       <div className="adv-grid">
         <div className="adv-cites"><label>Cites <span className="muted">— documents that cite…</span></label>
           <CiteTargetField value={filters.cites} pinpoint={filters.cites_pinpoint}
@@ -828,9 +862,74 @@ function AdvancedForm({ filters, setFilters, onSearch }:
         <div className="adv-cites"><label>Cited by <span className="muted">— documents cited by…</span></label>
           <CiteTargetField value={filters.cited_by} onChange={(id) => setFilters((f) => ({ ...f, cited_by: id }))} /></div>
       </div>
+
       <div className="row" style={{ marginTop: 10 }}>
         <button className="primary" style={{ flex: "0 0 auto" }} onClick={onSearch}>Search</button>
       </div>
+    </div>
+  );
+}
+
+// One filter field. A <select> was the wrong control here: 788 courts is not a list you
+// scroll, the counts are what tell you whether a value is worth picking, and an empty
+// list looked identical to a broken one. This shows the count beside every value, says
+// so when there are none, and filters as you type once the list is long.
+function PickField({ label, hint, value, rows, loading, searchable, onPick, onClear }:
+  { label: string; hint?: string; value?: string; rows?: any[]; loading?: boolean;
+    searchable?: boolean; onPick: (v: string) => void; onClear: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const all: any[] = rows || [];
+  const shown = q ? all.filter((r) => r.key.toLowerCase().includes(q.toLowerCase())) : all;
+  const total = all.reduce((a, r) => a + (r.n || 0), 0);
+  return (
+    <div className="pick">
+      <label>{label} {hint && <span className="muted">— {hint}</span>}</label>
+      {value ? (
+        <div className="pick-chosen">
+          <span className="tag">{value}</span>
+          <button className="linkish" onClick={onClear}>change</button>
+        </div>
+      ) : (
+        <button className="pick-open" onClick={() => setOpen(!open)}>
+          {loading ? "loading…"
+            : all.length ? `any — ${all.length} to choose from`
+            : "none available"}
+          <span className="muted">{open ? " ▾" : " ▸"}</span>
+        </button>
+      )}
+      {open && !value && (
+        <div className="pick-list">
+          {searchable && all.length > 12 && (
+            <input className="pick-search" autoFocus value={q} placeholder="filter…"
+              onChange={(e) => setQ(e.target.value)} />
+          )}
+          {shown.length === 0 && (
+            <p className="muted pick-empty">
+              {all.length === 0
+                ? "The corpus reports no values for this filter."
+                : `Nothing matches “${q}”.`}
+            </p>
+          )}
+          {shown.slice(0, 60).map((r) => (
+            <button key={r.key} className="pick-opt"
+              onClick={() => { onPick(r.key); setOpen(false); setQ(""); }}>
+              <span className="pick-bar" style={{
+                width: `${Math.max(2, 100 * (r.n || 0) / (all[0]?.n || 1))}%` }} />
+              <span className="pick-opt-label">{r.label || r.key}</span>
+              <span className="pick-opt-n">{(r.n || 0).toLocaleString()}</span>
+            </button>
+          ))}
+          {shown.length > 60 && (
+            <p className="muted pick-empty">
+              {shown.length - 60} more — type to narrow
+            </p>
+          )}
+          {all.length > 0 && (
+            <p className="muted pick-empty">{total.toLocaleString()} documents in total</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -859,30 +958,6 @@ function CiteTargetField({ value, pinpoint, onChange }:
           <input list={`pin-${picked.id}`} defaultValue={pinpoint || ""} placeholder="pinpoint — section / article (optional)"
             onChange={(e) => onChange(picked.id, e.target.value || undefined)} />
           <datalist id={`pin-${picked.id}`}>{labels.map((l, i) => <option key={i} value={l} />)}</datalist>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// A lightweight combobox: type to filter a fixed option list, choose one (for Court).
-function ComboBox({ value, onChange, options, placeholder }:
-  { value: string; onChange: (v: string) => void; options: string[]; placeholder?: string }) {
-  const [q, setQ] = useState(value);
-  const [openL, setOpenL] = useState(false);
-  useEffect(() => { setQ(value); }, [value]);
-  const ql = q.toLowerCase();
-  const matches = q ? options.filter((o) => o.toLowerCase().includes(ql)).slice(0, 12) : options.slice(0, 12);
-  return (
-    <div className="ac" style={{ position: "relative" }}>
-      <input value={q} placeholder={placeholder}
-        onChange={(e) => { setQ(e.target.value); setOpenL(true); if (!e.target.value) onChange(""); }}
-        onFocus={() => setOpenL(true)} onBlur={() => setTimeout(() => setOpenL(false), 150)} />
-      {openL && matches.length > 0 && (
-        <div className="ac-list">
-          {matches.map((o) => (
-            <div key={o} className="ac-opt" onMouseDown={(e) => { e.preventDefault(); onChange(o); setQ(o); setOpenL(false); }}>{o}</div>
-          ))}
         </div>
       )}
     </div>
