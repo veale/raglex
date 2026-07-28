@@ -216,3 +216,28 @@ def test_find_is_citation_first_then_title_and_is_honest_about_semantic():
     # a natural-language legal question finds nothing (no concept search)
     q = f.find("what are the rules on the right of access")
     assert q["results"] == [] and "nothing_found" in q
+
+
+def test_mentions_facets_describe_the_whole_set_not_the_loaded_page():
+    """The reader's mentions tray shows one PAGE of citers but chips that claim to
+    summarise all of them. Counting the page's own rows made the chips describe 40
+    documents under a header saying 912 — and any jurisdiction sorting below the first
+    page vanished. The crossed facet therefore comes from the server, over the whole
+    anchor-scoped set, and is unaffected by paging or by a filter being applied."""
+    f = _gdpr_corpus()
+
+    page = f.document_mentions("32016R0679", anchor="Article 15", limit=1)
+    assert len(page["groups"]) == 1 and page["total"] == 2 and page["has_more"] is True
+    crossed = {(row["jurisdiction"], row["kind"]): row["documents"]
+               for row in page["facets"]["jurisdiction_kind"]}
+    # both citers are counted, though only one of them is on this page
+    assert crossed == {("United Kingdom", "cases"): 1,
+                       ("France", "administrative"): 1}
+
+    # …and selecting a chip narrows at the server, keeping the same whole-set facets
+    fr = f.document_mentions("32016R0679", anchor="Article 15",
+                             jurisdiction="fr", kind="administrative")
+    assert [g["src_id"] for g in fr["groups"]] == ["decFR"]
+    assert fr["total"] == 1 and fr["has_more"] is False
+    assert {(row["jurisdiction"], row["kind"]): row["documents"]
+            for row in fr["facets"]["jurisdiction_kind"]} == crossed

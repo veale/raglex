@@ -192,26 +192,30 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
   const sentinel = useRef<HTMLDivElement | null>(null);
   const norm = (g: any) => ({ ...g, snippets: Array.isArray(g.snippets) ? g.snippets : [] });
 
+  // A selected facet is applied at the SERVER (jurisdiction + kind), so picking
+  // "FR administrative decisions" pages through all of them — sieving the loaded page
+  // instead would show a handful under a chip promising hundreds.
+  const [sliceJur, sliceKind] = (slice || "|").split("|");
   useEffect(() => {
     let live = true;
     setGroups([]); setMeta(null); setNextOffset(0); setFailed(false); setLoading(true);
-    api.mentions(target, anchor, sort, 0, PAGE, exact).then((d) => {
+    api.mentions(target, anchor, sort, 0, PAGE, exact, sliceJur || null, sliceKind || null).then((d) => {
       if (!live) return;
       setGroups((Array.isArray(d.groups) ? d.groups : []).filter((g: any) => g && typeof g === "object").map(norm));
       setMeta(d); setNextOffset(PAGE); setLoading(false);
     }).catch(() => { if (live) { setFailed(true); setLoading(false); } });
     return () => { live = false; };
-  }, [target, anchor, sort]);
+  }, [target, anchor, sort, slice]);
 
   const loadMore = useCallback(() => {
     if (loading || !meta || !meta.has_more) return;
     setLoading(true);
-    api.mentions(target, anchor, sort, nextOffset, PAGE, exact).then((d) => {
+    api.mentions(target, anchor, sort, nextOffset, PAGE, exact, sliceJur || null, sliceKind || null).then((d) => {
       setGroups((prev) => [...prev, ...(Array.isArray(d.groups) ? d.groups : []).filter((g: any) => g && typeof g === "object").map(norm)]);
       setMeta((m: any) => (m ? { ...m, has_more: d.has_more } : m));
       setNextOffset((o) => o + PAGE); setLoading(false);
     }).catch(() => setLoading(false));
-  }, [loading, meta, nextOffset, sort, target, anchor]);
+  }, [loading, meta, nextOffset, sort, target, anchor, slice]);
 
   useEffect(() => {
     const el = sentinel.current;
@@ -240,16 +244,26 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
     preparatory: "preparatory documents",
     administrative: "admin decisions", other: "other",
   };
+  // Counts come from the server's facets, which describe the WHOLE anchor-scoped set —
+  // the tray only holds one page, so counting its own rows summarised 40 documents while
+  // the header said 912, and anything below the first page read as absent. (An older
+  // server without the crossed facet falls back to the loaded rows.)
+  const crossed: any[] = Array.isArray(data.facets?.jurisdiction_kind)
+    ? data.facets.jurisdiction_kind : [];
   const facets = new Map<string, { jur: string; kind: string; n: number }>();
-  for (const g of groups) {
-    if (!g.src_jurisdiction || !g.src_kind) continue;
-    const key = `${g.src_jurisdiction}|${g.src_kind}`;
-    const f = facets.get(key) || { jur: g.src_jurisdiction, kind: g.src_kind, n: 0 };
-    f.n++; facets.set(key, f);
+  if (crossed.length) {
+    for (const f of crossed) facets.set(`${f.jurisdiction}|${f.kind}`,
+      { jur: f.jurisdiction, kind: f.kind, n: f.documents });
+  } else {
+    for (const g of groups) {
+      if (!g.src_jurisdiction || !g.src_kind) continue;
+      const key = `${g.src_jurisdiction}|${g.src_kind}`;
+      const f = facets.get(key) || { jur: g.src_jurisdiction, kind: g.src_kind, n: 0 };
+      f.n++; facets.set(key, f);
+    }
   }
   const tokens = [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
-  const shown = slice
-    ? groups.filter((g) => `${g.src_jurisdiction}|${g.src_kind}` === slice) : groups;
+  const shown = groups;   // the narrowing happens server-side
   const preparatory: any[] = Array.isArray(data.preparatory_groups) ? data.preparatory_groups : [];
 
   const mentionGroup = (g: any, i: number, prefix: string) => (
@@ -297,15 +311,14 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
           )}
         </div>
       )}
-      {data.total > groups.length && <p className="muted" style={{ fontSize: 12 }}>{data.total} citing documents · showing {groups.length}</p>}
+      {data.total > groups.length && (
+        <p className="muted" style={{ fontSize: 12 }}>
+          {data.total} citing document{data.total === 1 ? "" : "s"}
+          {slice ? " in this filter" : ""} · showing {groups.length}</p>)}
       {shown.map((g, i) => mentionGroup(g, i, "mention"))}
       {/* infinite-scroll sentinel: loads the next page of previews as it nears view */}
-      {data.has_more && !slice && <div ref={sentinel} style={{ height: 1 }} />}
+      {data.has_more && <div ref={sentinel} style={{ height: 1 }} />}
       {loading && groups.length > 0 && <p className="muted loading-pulse" style={{ fontSize: 12 }}>Loading more…</p>}
-      {data.has_more && slice && (
-        <button className="mini" style={{ margin: "6px 0" }} onClick={loadMore} disabled={loading}>
-          Load more (filtered view)</button>
-      )}
       {preparatory.length > 0 && (
         <section className="preparatory-documents" style={{ marginTop: 18 }}>
           <h4>Preparatory documents <span className="tag">{data.preparatory_count}</span></h4>

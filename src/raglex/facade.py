@@ -1503,14 +1503,26 @@ class Facade:
             # makes the citing list browsable instead of a wall of rows.
             juris_facets: dict[str, int] = {}
             kind_facets: dict[str, int] = {}
+            crossed: dict[tuple[str, str], int] = {}
             for g in groups:
                 juris_facets[g["src_jurisdiction"]] = juris_facets.get(g["src_jurisdiction"], 0) + 1
                 kind_facets[g["src_kind"]] = kind_facets.get(g["src_kind"], 0) + 1
+                if g["src_jurisdiction"] and g["src_kind"]:
+                    key = (g["src_jurisdiction"], g["src_kind"])
+                    crossed[key] = crossed.get(key, 0) + 1
             facets = {
                 "jurisdiction": [{"jurisdiction": j, "documents": n}
                                  for j, n in sorted(juris_facets.items(), key=lambda kv: -kv[1])],
                 "kind": [{"kind": k, "documents": n}
                          for k, n in sorted(kind_facets.items(), key=lambda kv: -kv[1])],
+                # The crossed bucket ("UK cases 512") is what the reader's mentions tray
+                # puts on its chips. It has to come from here: the tray holds one PAGE of
+                # citers, so counting its own rows described 40 documents while claiming to
+                # summarise 912 — and a jurisdiction that sorts below the first page read
+                # as absent entirely.
+                "jurisdiction_kind": [{"jurisdiction": j, "kind": k, "documents": n}
+                                      for (j, k), n in sorted(crossed.items(),
+                                                              key=lambda kv: -kv[1])],
             }
             # apply the narrowing filters (jurisdiction accepts an ISO code OR a name)
             want_j = self._norm_jurisdiction(jurisdiction)

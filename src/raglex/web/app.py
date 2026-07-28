@@ -862,13 +862,19 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/mentions")
     def mentions(id: str, anchor: str | None = None, sort: str = "pagerank",
-                 exact: bool = False, offset: int = 0, limit: int = 40) -> dict:
+                 exact: bool = False, offset: int = 0, limit: int = 40,
+                 jurisdiction: str | None = None, kind: str | None = None) -> dict:
         """Who mentions this document (optionally one paragraph), grouped by citing document
         and ranked by the citer's own authority — for the "Mentioned by …" line + tray.
         Paginated (``offset``/``limit``) so the tray lazy-loads previews for every citer.
         ``exact`` restricts an anchor to that precise pinpoint (a sub-paragraph badge)
-        rather than the whole provision family."""
+        rather than the whole provision family.
+
+        ``jurisdiction`` / ``kind`` narrow the citing set at the SERVER, so selecting a
+        facet chip pages through that whole slice rather than sieving the loaded page —
+        ``facets`` in the reply always describes the unfiltered set."""
         return facade.document_mentions(id, anchor=anchor, exact=exact, sort=sort,
+                                        jurisdiction=jurisdiction, kind=kind,
                                         offset=max(0, offset), limit=max(1, min(limit, 200)))
 
     @app.get("/cited-by-breakdown")
