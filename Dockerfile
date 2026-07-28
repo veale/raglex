@@ -20,12 +20,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY schema ./schema
 # Install with web + import + postgres + scrape + ocr + bulk extras (FastAPI, MCP, pypdf,
 # psycopg, BeautifulSoup — bs4 is needed by the EUR-Lex HTML and BWB parsers).
-RUN uv pip install --system ".[web,import,postgres,scrape,ocr,bulk]"
+#
+# FROM THE LOCKFILE, not a fresh resolve. Resolving at build time meant the image took
+# whatever each dependency had released that morning: mcp 2.0 landed, moved FastMCP out of
+# `mcp.server.fastmcp`, and the very next build produced an image whose API crash-looped on
+# import — from a commit that changed nothing about MCP. The lock is what the tests run
+# against, so this makes the image the same thing. Updating a dependency now means updating
+# uv.lock, deliberately, in a commit.
+RUN uv export --frozen --no-emit-project \
+        --extra web --extra import --extra postgres --extra scrape --extra ocr --extra bulk \
+        -o /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt \
+    && uv pip install --system --no-deps .
 
 # Bundle the built UI; the API serves it when RAGLEX_FRONTEND_DIST points here.
 COPY --from=ui /ui/dist /app/frontend/dist

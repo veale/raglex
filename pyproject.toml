@@ -30,7 +30,9 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
-    "mcp>=1.2",
+    # FastMCP lives at mcp.server.fastmcp in 1.x; 2.0 moved it (mcp.server.mcpserver)
+    # and the import fails outright, so the major is pinned until that migration is done.
+    "mcp>=1.2,<2",
     # Passkey / WebAuthn admin login (§8 auth). Optional — the password + IP-allow-list
     # paths work without it; if absent the passkey endpoints report 501.
     "webauthn>=2.0",
@@ -70,7 +72,9 @@ dev = [
     "httpx>=0.27",
     "pypdf>=4",
     "python-multipart>=0.0.9",
-    "mcp>=1.2",
+    # FastMCP lives at mcp.server.fastmcp in 1.x; 2.0 moved it (mcp.server.mcpserver)
+    # and the import fails outright, so the major is pinned until that migration is done.
+    "mcp>=1.2,<2",
     "psycopg[binary]>=3.2",
     "psycopg-pool>=3.2",
     "beautifulsoup4>=4.15.0",
