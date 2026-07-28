@@ -279,6 +279,7 @@ RUNNERS: dict[str, Callable] = {
     "backfill-ag-names": lambda f, p, cb, cancel: f.backfill_ag_names(**p, on_progress=cb, cancel_check=cancel),
     "repair-mojibake": lambda f, p, cb, cancel: f.repair_mojibake(**p, on_progress=cb, cancel_check=cancel),
     "backfill-intituling": lambda f, p, cb, cancel: f.backfill_intituling(**p, on_progress=cb, cancel_check=cancel),
+    "resegment-judgments": lambda f, p, cb, cancel: f.resegment_judgments(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-zip": lambda f, p, cb, cancel: f.import_westlaw_zip(**p, on_progress=cb, cancel_check=cancel),
     "import-westlaw-dir": lambda f, p, cb, cancel: f.import_westlaw_dir(**p, on_progress=cb, cancel_check=cancel),
     "import-caselaw-zip": lambda f, p, cb, cancel: f.import_caselaw_zip(**p, on_progress=cb, cancel_check=cancel),

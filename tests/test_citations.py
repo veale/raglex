@@ -183,17 +183,27 @@ def test_self_citation_via_alias_also_dropped(catalogue, tmp_path):
                 if (e["raw_citation_string"] or "").lower().find("qbd") >= 0]
 
 
-def test_carry_forward_suppressed_inside_legislation(catalogue, tmp_path):
+def test_bare_article_inside_legislation_means_that_instrument(catalogue, tmp_path):
     # Inside an act/directive, a bare "Article 3" is the instrument referring to
-    # ITSELF — it must NOT be carried forward onto the directive named earlier
-    # (it used to link to whatever the recitals mentioned last).
+    # ITSELF. It used to link to whatever the recitals mentioned last (a reader
+    # flagged "Article 8" in the GDPR resolving to Article 8 of Directive 2009/22),
+    # and was then suppressed outright; now it resolves home, which is the answer.
     ts = TextStore(tmp_path / "text")
     t = ("This Directive complements Directive 2011/83/EU. "
          "Article 3 shall apply to any contract.")
     _doc(catalogue, ts, "32019L0770", t, doc_type=DocType.LEGISLATION)
     extract_document(catalogue, ts, "32019L0770")
-    assert not [c for c in catalogue.citations_for("32019L0770")
-                if c["method"] == "carry_forward"]
+    cf = [c for c in catalogue.citations_for("32019L0770") if c["method"] == "carry_forward"]
+    assert [(c["candidate_id"], c["pinpoint"]) for c in cf] == [("32019L0770", "Article 3")]
+
+    # …but a cross-reference still governs its own sentence
+    t2 = ("Providers designated under Article 33(4) of Regulation (EU) 2022/2065 "
+          "and Article 35 thereof shall report annually.")
+    _doc(catalogue, ts, "32019L0771", t2, doc_type=DocType.LEGISLATION)
+    extract_document(catalogue, ts, "32019L0771")
+    assert [c["candidate_id"] for c in catalogue.citations_for("32019L0771")
+            if c["method"] == "carry_forward"] == ["32022R2065"]
+
     # the same text in a JUDGMENT keeps the heuristic (it's built for judgments)
     _doc(catalogue, ts, "uksc/2024/9", t)
     extract_document(catalogue, ts, "uksc/2024/9")

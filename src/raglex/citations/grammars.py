@@ -88,6 +88,18 @@ def _eu_celex(kind: str, a: str, b: str) -> str | None:
 
 
 # GDPR and its multilingual short names → its CELEX.
+#
+# This map is what lets the Commission's own drafting form resolve. EU guidance cites
+# an instrument by short name with the pinpoint in FRONT and no "of the" —
+# "Article 50(2) AI Act", "Article 34 DSA" — which the ``eu_named``/``eu_named_full``
+# grammars below match directly. A name that is MISSING here doesn't merely fail to
+# resolve: the bare "Article 50(2)" falls through to the carry-forward pass and is
+# attached to whichever instrument was named most recently, which in a Commission
+# opinion is usually a cross-reference to some other regulation. (Before the AI Act
+# was added, the Commission's Opinion on the Code of Practice on transparency of
+# AI-generated content had 31 of its Articles attributed to the DSA and one to the
+# AI Act.) So: when the corpus takes on a body of guidance about an instrument, the
+# instrument's short name belongs here.
 _NAME_TO_CELEX = {
     "gdpr": "32016R0679", "avg": "32016R0679", "dsgvo": "32016R0679", "rgpd": "32016R0679",
     # the digital-regulation instruments, cited by acronym or full name in guidance/cases
@@ -98,11 +110,36 @@ _NAME_TO_CELEX = {
     # (still-withdrawn) proposal, not Directive 2002/58, so mapping it here would
     # mint a confidently wrong edge to the existing Directive.
     "law enforcement directive": "32016L0680", "led": "32016L0680",
+    # ── the 2022-2024 digital acquis ────────────────────────────────────────
+    # The substance of the Commission's digital-strategy library and of the AI
+    # Office's opinions, codes of practice and guidelines.
+    "ai act": "32024R1689", "artificial intelligence act": "32024R1689",
+    "data act": "32023R2854",
+    "data governance act": "32022R0868",
+    "nis2": "32022L2555", "nis 2": "32022L2555", "nis2 directive": "32022L2555",
+    "nis 2 directive": "32022L2555",
+    "emfa": "32024R1083", "european media freedom act": "32024R1083",
+    "cyber resilience act": "32024R2847",
+    "chips act": "32023R1781",
+    "european accessibility act": "32019L0882",
+    "open data directive": "32019L1024",
+    "dsm directive": "32019L0790", "copyright directive": "32019L0790",
+    "eecc": "32018L1972", "european electronic communications code": "32018L1972",
+    "avmsd": "32010L0013",
+    "interoperable europe act": "32024R0903",
+    "e-commerce directive": "32000L0031", "ecommerce directive": "32000L0031",
 }
 # Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
 # resolves to the Law Enforcement Directive; the spelled-out names match case-
 # insensitively (a separate pattern). Both look up through ``_name_to_celex``.
-_EU_ACRONYMS = r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED"
+#
+# "AI Act" is deliberately NOT in this uppercase-only list — it is written in mixed
+# case ("AI Act", never "AI ACT" outside a heading) and is matched by the full-name
+# pattern instead, which is case-insensitive and requires the whole two-word phrase.
+# A bare uppercase "AIA"/"CRA"/"DGA"/"EAA" is likewise left out: those collide with
+# ordinary initialisms in other corpora (a Canadian "CRA" is the Canada Revenue
+# Agency), and the spelled-out names below carry them.
+_EU_ACRONYMS = r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|EMFA|AVMSD|EECC"
 _EU_FULL_NAMES = "|".join(
     re.escape(k).replace(r"\ ", r"\s+")
     for k in sorted(_NAME_TO_CELEX, key=len, reverse=True) if " " in k)
@@ -597,16 +634,25 @@ def instrument_at(text: str) -> tuple[str | None, str | None]:
 
 # "Article 17 GDPR" / "Art. 22 of the GDPR" / "Article 6 of the DMA" / "Digital
 # Services Act". Acronym form (uppercase) and spelled-out form (any case).
+# Acronyms that are also ordinary words or company-name fragments, and so need the
+# citation-shaped context the real usage always has: an Article pinpoint, or an
+# immediately preceding definite article. "LED" is English prose in ALL-CAPS
+# Commonwealth headnotes ("EVIDENCE LED AT TRIAL") — a bug that once made the Law
+# Enforcement Directive the corpus's top EU authority, cited by 1902 cases. AVG,
+# DSGVO and RGPD are the Dutch, German and French names for the GDPR, and are only
+# ever written that way in those languages; a bare "AVG" in an Ontario judgment is a
+# corporate name ("ASU AVG"), not the GDPR. The determiners therefore span the
+# languages the acronym actually appears in, so "de AVG" and "der DSGVO" still link.
+_NEEDS_DETERMINER = {"LED", "AVG", "DSGVO", "RGPD"}
+_DETERMINER_RE = re.compile(
+    r"(?i)\b(?:the|of|de|het|der|die|das|dem|den|des|la|le|les|du|del|el|il)\s+$")
+
+
 def _eu_acronym(m: "re.Match[str]") -> Normalised:
     name = m.group("name")
-    # "LED" is also an English word — in ALL-CAPS Commonwealth headnotes
-    # ("EVIDENCE LED AT TRIAL") a bare uppercase LED is prose, not the Law
-    # Enforcement Directive. Require the citation-shaped context the real usage
-    # always has: an Article pinpoint, or a preceding "the/of the". (This bug
-    # once made the LED the corpus's top EU authority, cited by 1902 cases.)
-    if name == "LED" and not m.group("art"):
+    if name in _NEEDS_DETERMINER and not m.group("art"):
         pre = m.string[max(0, m.start("name") - 12):m.start("name")]
-        if not re.search(r"(?i)\b(?:the|of)\s+$", pre):
+        if not _DETERMINER_RE.search(pre):
             return None, None, DROP
     return (_name_to_celex(name),
             f"Article {m.group('art')}" if m.group("art") else None, None)

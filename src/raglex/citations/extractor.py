@@ -186,6 +186,85 @@ def _party_short_form(party: str | None) -> str | None:
 
 _STATUTE_KINDS = ("act", "regulation", "directive", "treaty", "eu_instrument")
 
+# --- what may become a shorthand ---------------------------------------------
+# A shorthand links every later bare mention of a name to one authority, and the
+# corpus-wide store then carries that name into OTHER documents. So a name that is
+# not distinctive doesn't mislink once — it mislinks everywhere. The store had
+# accumulated 382,885 entries including "Article 8", "appellant", "the Court",
+# "Analysis" and "Act", all pointing at the ECHR with ``is_abbrev`` set, which is
+# why a Scotland Act 1998 section had "may make" and "the grounds" rendered as
+# links to the Convention. These guards are the gate on both the in-document pass
+# and the store.
+#
+# 1. A PROVISION REFERENCE is never a name. "Article 8" as a shorthand for the
+#    Convention makes every "Article 8" in every document that cites the ECHR into
+#    a Convention link, including "Article 8 of the Charter".
+_PROVISION_NAME_RE = re.compile(
+    r"(?i)^(?:art(?:icle|\.)?|s(?:ec)?(?:tion|\.)?|para(?:graph|\.)?|reg(?:ulation|\.)?|"
+    r"recital|sch(?:edule|\.)?|rule|order|part|chapter|annex|appendix|clause)\b")
+# 2. GENERIC ROLE AND INSTRUMENT NOUNS name a slot, not an authority. Every
+#    judgment has "the appellant"; every statute book has "the Act".
+_GENERIC_SHORTHAND = {
+    "act", "acts", "code", "codes", "regulation", "regulations", "directive",
+    "decision", "convention", "charter", "treaty", "agreement", "protocol",
+    "guidance", "guidelines", "rules", "order", "orders", "scheme", "statute",
+    "bill", "report", "application", "analysis", "judgment", "decision letter",
+    "appellant", "appellants", "respondent", "respondents", "applicant",
+    "applicants", "claimant", "claimants", "defendant", "defendants", "plaintiff",
+    "plaintiffs", "petitioner", "interested party", "intervener", "appeal",
+    "court", "the court", "tribunal", "judge", "the judge", "panel", "board",
+    "committee", "commission", "council", "parliament", "authority", "regulator",
+    "company", "the company", "bank", "the bank", "trust", "the trust",
+    "ground", "grounds", "issue", "issues", "evidence", "witness", "parties",
+    "party", "the parties", "person in question", "the person in question",
+    "information", "the information", "policy", "the policy", "the state",
+}
+# 3. A well-formed name doesn't START or END on a function word. "Code in",
+#    "Code by", "Code. As", "ets of our " and "may make" all came from a lookback
+#    that swept up sentence fragments; requiring both ends to be substantive
+#    discards them without touching "Vienna Convention" or "Suncor Energy".
+_FRAGMENT_EDGE = {
+    "a", "an", "the", "and", "or", "but", "of", "in", "on", "at", "by", "to",
+    "for", "from", "with", "as", "is", "was", "are", "were", "be", "been", "may",
+    "must", "shall", "can", "could", "would", "should", "will", "that", "this",
+    "these", "those", "it", "its", "his", "her", "their", "our", "which", "who",
+    "when", "where", "if", "so", "such", "any", "all", "no", "not", "make",
+    "made", "given", "said", "same", "other", "under", "over", "into", "than",
+}
+
+
+def valid_shorthand(name: str | None) -> bool:
+    """Whether ``name`` is distinctive enough to stand for an authority.
+
+    Applied both when a document DEFINES a shorthand and when a stored one is read
+    back, so tightening it retires bad entries already in the store without waiting
+    for a purge."""
+    n = " ".join((name or "").strip(" '\"“”’.,;:()[]").split())
+    if len(n) < 3 or len(n) > 60:
+        return False
+    if not re.search(r"[A-Za-z]{3}", n):        # initials/numbers only
+        return False
+    if re.search(r"[.!?]\s", n) or "\n" in n:   # a sentence fragment, not a name
+        return False
+    if _PROVISION_NAME_RE.match(n):
+        return False
+    low = n.casefold()
+    if low in _GENERIC_SHORTHAND or low.removeprefix("the ") in _GENERIC_SHORTHAND:
+        return False
+    words = [w.strip(".,'’\"").casefold() for w in n.split()]
+    words = [w for w in words if w]
+    if not words:
+        return False
+    # "the Vienna Convention" is fine; "the Court" was caught above as generic.
+    if words[0] in _FRAGMENT_EDGE and len(words) < 2:
+        return False
+    if words[-1] in _FRAGMENT_EDGE:
+        return False
+    if len(words) > 1 and words[0] in _FRAGMENT_EDGE and words[1] in _FRAGMENT_EDGE:
+        return False
+    # a name has to carry at least one capitalised or all-caps token of its own
+    return any(w[:1].isupper() or w.isupper() for w in n.split() if w)
+
 
 def _is_abbrev(name: str) -> bool:
     """A distinctive short label safe to link on a BARE later mention (no pincite
@@ -208,7 +287,7 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
 
     def _register(name: str, host: Citation, *, abbrev: bool) -> None:
         name = (name or "").strip(" '\"“”’")
-        if len(name) >= 2 and name not in defs:
+        if valid_shorthand(name) and name not in defs:
             defs[name] = (host, abbrev)
 
     for c in kept:
@@ -434,6 +513,11 @@ def attach_stored_shorthands(
             stored, key=lambda r: len(r[0]), reverse=True):
         if not name or not candidate_id or name in exclude:
             continue
+        # The store predates ``valid_shorthand`` and holds hundreds of thousands of
+        # rows that would never be learned now. Gating on READ retires them the
+        # moment this ships, without waiting for the purge and re-scan.
+        if not valid_shorthand(name):
+            continue
         if name.lower() not in lowered:
             continue
         core = name.replace(".", "").replace(" ", "")
@@ -621,20 +705,32 @@ _LEG_KINDS = {"act", "regulation", "directive", "decision", "treaty", "eu_instru
 # carrying forward onto a nearer-but-wrong EU instrument (e.g. Directive 2003/4 in an
 # Environmental-Information case where the Communications Act is the real host).
 _EU_KINDS = {"directive", "decision", "treaty", "eu_instrument"}
+# An EU *regulation* carries entity_kind "regulation", the same label a UK statutory
+# instrument gets, so the set above can't separate them — but its candidate_id can: an
+# EU instrument is keyed by CELEX (32016R0679), a UK SI by path (uksi/2023/1022).
+_CELEX_RE = re.compile(r"^[0-9]{5}[A-Z]{1,2}[0-9]{4}$")
 
 
-def _cue_allows(cue: str, kind: str) -> bool:
+def _is_eu_candidate(candidate_id: str | None, kind: str) -> bool:
+    return kind in _EU_KINDS or bool(_CELEX_RE.match(candidate_id or ""))
+
+
+def _cue_allows(cue: str, kind: str, candidate_id: str | None = None) -> bool:
     """Whether a bare-provision ``cue`` ("section", "Article", …) can attach to an
     antecedent of this ``entity_kind``."""
     c = cue.lower().rstrip(".")
+    eu = _is_eu_candidate(candidate_id, kind)
     if c.startswith(("section", "sub", "ss", "schedule", "sch")) or c == "s":
-        return kind not in _EU_KINDS          # UK statutory provision → not an EU instrument
+        # A UK statutory provision never belongs to an EU instrument. Regulations are
+        # divided into Articles too, so the CELEX test matters here: without it a
+        # "Section 1 of the Code" in a Commission opinion attached itself to the DSA.
+        return not eu
     if c.startswith(("article", "art")):
-        return kind in _EU_KINDS              # Article → EU instrument / treaty, not a UK Act
+        return eu                             # Article → EU instrument / treaty, not a UK Act
     if c.startswith("recital"):
         # Recitals belong to EU instruments (regulations included — the GDPR is one) and
         # never to a UK Act, which has no recitals.
-        return kind in _EU_KINDS or kind in {"regulation", "named"}
+        return eu or kind in {"regulation", "named"}
     return True                                # regulation / paragraph — leave to nearest
 
 
@@ -654,13 +750,43 @@ def _bare_pinpoint(cue: str, num: str) -> str:
     return f"s. {num}"
 
 
-def _attach_carry_forward(text: str, kept: list[Citation]) -> list[Citation]:
+# A provision that names its OWN host is not bare, even when that host didn't resolve.
+# "section 40A of the Road Traffic Act" and "Section 1 of the Code" both say exactly
+# what they belong to; carrying them forward to the last-named instrument produced a
+# confident-looking link to the wrong Act (the Automated and Electric Vehicles Act
+# 2018 for the Road Traffic Act, the DSA for a Code of Practice). Where the text
+# names a host the grammars couldn't resolve, the honest answer is no edge.
+_EXPLICIT_HOST_RE = re.compile(
+    r"\s*(?:,\s*)?of\s+(?:the\s+|that\s+|this\s+|those\s+|each\s+)?"
+    r"(?:[A-Z]|Act\b|Regulations?\b|Code\b|Directive\b|Convention\b|Order\b|Rules\b|"
+    r"Schedule\b|Agreement\b|Treaty\b|Charter\b|Protocol\b)")
+# A URL is not prose. "…/science/article/pii/S2590198220300245" offered up "article"
+# and "para 4"-shaped digits to the bare-provision scan, which then attached them to
+# whatever Act the report was discussing.
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+# The end of the sentence a cross-reference was made in. Deliberately crude — a full
+# stop or semicolon followed by space, or a blank line — because the only judgement it
+# has to make is "are we still talking about the same instrument".
+_SENTENCE_BREAK_RE = re.compile(r"[.;]\s|\n\s*\n")
+
+
+def _attach_carry_forward(text: str, kept: list[Citation], *,
+                          home_id: str | None = None,
+                          home_kind: str | None = None) -> list[Citation]:
     """Heuristic (§5): a bare "section 5" / "Article 6" with no statute named in the
     same breath is taken to refer to the **most recently mentioned legislation**, even
     several paragraphs earlier. Emits a low-confidence ``carry_forward`` citation so
     the resulting edge is flagged uncertain (provenance ``inferred``) for human review.
-    Skips any bare reference already inside a fuller, literal citation."""
+    Skips any bare reference already inside a fuller, literal citation.
+
+    ``home_id`` is the document's OWN instrument, when the document being scanned is
+    itself legislation. Inside the GDPR, "the conditions referred to in Article 8"
+    means Article 8 *of the GDPR* — it is a self-reference, and the last instrument
+    the text happened to cross-refer to (Directive 2009/22, say) is the wrong answer.
+    So within legislation the home instrument wins unless another one is named close
+    enough to be the obvious subject of the sentence."""
     occupied = sorted((c.char_start, c.char_end) for c in kept)
+    urls = [(m.start(), m.end()) for m in _URL_RE.finditer(text)]
     # every citation in document order — used to find what a bare reference FOLLOWS
     all_sorted = sorted(kept, key=lambda c: c.char_start)
     # legislation antecedents in document order, with their candidate + kind
@@ -668,14 +794,25 @@ def _attach_carry_forward(text: str, kept: list[Citation]) -> list[Citation]:
         (c for c in kept if c.candidate_id and c.entity_kind in _LEG_KINDS),
         key=lambda c: c.char_start,
     )
-    if not antecedents:
+    if not antecedents and not home_id:
         return kept
     out = list(kept)
     for m in _BARE_PROVISION.finditer(text):
         s, e = m.start(), m.end()
         if any(os <= s and e <= oe for os, oe in occupied):
             continue  # already part of a literal citation ("s.5 of the FOIA 2000")
+        if any(us <= s < ue for us, ue in urls):
+            continue  # inside a URL — not a provision reference at all
         cue = m.group("cue").lower().rstrip(".")
+        # The text names its own host ("of the Road Traffic Act", "of the Code").
+        # Whatever that host is, it is not the last-named instrument.
+        if _EXPLICIT_HOST_RE.match(text, e):
+            continue
+        # PDF extraction routinely splits "Articles" into "Article s", leaving a
+        # stray "s 50(2)" that reads as a UK section and carried forward to the
+        # wrong instrument. The "s" here is the tail of the cue word before it.
+        if cue in ("s", "ss") and re.search(r"(?i)\barticles?\s*$", text[max(0, s - 12):s]):
+            continue
         # A "paragraph N" whose nearest preceding citation is a CASE is that
         # judgment's pinpoint, not a provision of whatever instrument was last
         # named — the CJEU's own citation form ends every case reference with
@@ -687,12 +824,22 @@ def _attach_carry_forward(text: str, kept: list[Citation]) -> list[Citation]:
             if prev and prev[-1].entity_kind in ("case", "opinion"):
                 continue
         prior = [a for a in antecedents if a.char_end <= s
-                 and _cue_allows(m.group("cue"), a.entity_kind)]
-        if not prior:
+                 and _cue_allows(m.group("cue"), a.entity_kind, a.candidate_id)]
+        host_id, host_kind = (prior[-1].candidate_id, prior[-1].entity_kind) if prior \
+            else (None, None)
+        # Self-reference inside legislation. A cross-reference to another instrument
+        # governs its own SENTENCE — "in accordance with Article 33(4) of Regulation
+        # (EU) 2022/2065 and Article 35 thereof" is all about that regulation. Once
+        # the sentence ends, the instrument is talking about itself again: "Article 8
+        # has the effect of…" in the GDPR means the GDPR's Article 8, not the
+        # Article 8 of the injunctions directive its recitals last cross-referred to.
+        if home_id and _cue_allows(m.group("cue"), home_kind or "", home_id):
+            if not prior or _SENTENCE_BREAK_RE.search(text[prior[-1].char_end:s]):
+                host_id, host_kind = home_id, home_kind
+        if not host_id:
             continue
-        host = prior[-1]  # nearest preceding named instrument of a compatible kind
         out.append(Citation(
-            raw=m.group(0), entity_kind=host.entity_kind, candidate_id=host.candidate_id,
+            raw=m.group(0), entity_kind=host_kind, candidate_id=host_id,
             pinpoint=_bare_pinpoint(m.group("cue"), m.group("num")),
             char_start=s, char_end=e, method="carry_forward", confidence=0.4,
         ))
@@ -833,14 +980,20 @@ def _cpr_list_citations(text: str) -> list[Citation]:
 
 def extract_citations(text: str, *, llm: CitationExtractor | None = None,
                       aliases: dict[str, str] | None = None,
-                      defs_out: list[dict] | None = None) -> list[Citation]:
+                      defs_out: list[dict] | None = None,
+                      home_id: str | None = None,
+                      home_kind: str | None = None) -> list[Citation]:
     """Recognise citations in ``text``. Grammars run first (deterministic, cheap),
     then user-defined shorthand rules (``aliases``), then an optional ``llm`` pass for
     narrative citations. More specific / earlier matches win an overlap.
 
     ``defs_out``, if given, is filled with the in-document shorthand definitions found
     along the way (see ``shorthand_defs``). It's an out-parameter rather than a wider
-    return type because this function has many callers, none of which want it."""
+    return type because this function has many callers, none of which want it.
+
+    ``home_id`` names the instrument the text IS, when it is legislation, so that a
+    bare "Article 8" inside the GDPR resolves to the GDPR (see
+    ``_attach_carry_forward``)."""
     if not text:
         return []
     # User shorthand rules take precedence over the built-in grammars on an overlap: a
@@ -875,8 +1028,11 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     defs = _collect_shorthand_defs(text, base)
     if defs_out is not None:
         defs_out.extend(_def_rows(defs))
-    return _attach_carry_forward(text, _attach_section_lists(text, _attach_article_lists(
-        text, _attach_shorthands(text, base, defs))))
+    return _attach_carry_forward(
+        text,
+        _attach_section_lists(text, _attach_article_lists(
+            text, _attach_shorthands(text, base, defs))),
+        home_id=home_id, home_kind=home_kind)
 
 
 def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:

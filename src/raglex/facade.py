@@ -4522,6 +4522,69 @@ class Facade:
                               total=len(rows), item=r["stable_id"])
         return st
 
+    def resegment_judgments(self, *, source: str | None = None, limit: int = 400000,
+                            on_progress=None, cancel_check=None) -> dict:
+        """Recompute paragraph structure from text that is ALREADY stored.
+
+        The text is not touched — only the segment index beside it — so no character
+        offset moves and every citation stays anchored exactly where it was. That is
+        what makes this safe to run over a live corpus, unlike a reparse.
+
+        Its purpose is to pick up segmentation improvements retroactively: judgments
+        imported before ``_split_author_labels`` existed have their first judge's
+        byline ("LORD JUSTICE BURNETT:") stranded in the preamble, in no segment at
+        all and so never rendered, while the concurrences below appear as trailing
+        text of the paragraph above them. Only documents whose paragraph boundaries
+        come out IDENTICAL are rewritten: if re-deriving structure from flat text
+        would move a paragraph, the stored (import-time, structurally-derived)
+        segmentation is better and is left alone."""
+        from .core.segmentation import synthesise_numbered_segments
+
+        st = {"scanned": 0, "resegmented": 0, "headings_added": 0, "skipped_differs": 0,
+              "unreadable": 0}
+        seen: set[str] = set()
+        with self._open() as (cat, _rs, ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, payload_hash FROM documents WHERE has_text = 1 "
+                + ("AND source = ? " if source else "")
+                + "ORDER BY stable_id LIMIT ?",
+                ((source, limit) if source else (limit,))).fetchall()
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                ph = r["payload_hash"]
+                if not ph or ph in seen:
+                    continue
+                seen.add(ph)
+                st["scanned"] += 1
+                try:
+                    text = ts.get(ph)
+                except OSError:
+                    st["unreadable"] += 1
+                    continue
+                fresh = synthesise_numbered_segments(text)
+                if not fresh:
+                    continue
+                old = ts.get_segments(ph) or []
+                old_paras = [(s.label, s.char_start, s.char_end) for s in old
+                             if s.kind == "paragraph"]
+                new_paras = [(s.label, s.char_start, s.char_end) for s in fresh
+                             if s.kind == "paragraph"]
+                if old_paras and old_paras != new_paras:
+                    st["skipped_differs"] += 1
+                    continue
+                added = (len([s for s in fresh if s.kind == "heading"])
+                         - len([s for s in old if s.kind == "heading"]))
+                if added <= 0 and len(fresh) == len(old):
+                    continue
+                ts.put_segments(ph, fresh)
+                st["resegmented"] += 1
+                st["headings_added"] += max(0, added)
+                if n % 2000 == 0:
+                    _progress(on_progress, stage="recomputing paragraph structure",
+                              done=n, total=len(rows), item=r["stable_id"])
+        return st
+
     def backfill_ag_names(self, *, limit: int = 20000, on_progress=None,
                           cancel_check=None) -> dict:
         """Fill in WHO wrote each held AG Opinion, from the Opinion's own first page.

@@ -11,6 +11,7 @@ citable unit it came from.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import Iterable, Iterator
 from xml.etree import ElementTree as ET
 
@@ -202,6 +203,64 @@ def _sequential_marks(text: str, rx: "re.Pattern[str]") -> list[tuple[int, int, 
     return marks
 
 
+# Who is speaking. An appellate judgment is a stack of separately-authored opinions,
+# each opened by the author's name on its own line — "LORD JUSTICE BURNETT:",
+# "LORD DYSON MR", "MRS JUSTICE STEYN DBE:", "OPINION OF LORD DOHERTY". These labels
+# fall in two different places and used to be rendered inconsistently because of it:
+# the FIRST one sits in the preamble, before paragraph 1, and so was in no segment at
+# all and never displayed; the concurrences sit between numbered paragraphs and were
+# displayed, but as a trailing line of the preceding paragraph. Lifting all of them to
+# their own heading segments makes a judgment read the way it is structured.
+_AUTHOR_LABEL_RE = re.compile(
+    r"(?m)^[ \t]*(?P<label>"
+    r"(?:OPINION\s+OF\s+)?"
+    r"(?:THE\s+)?"
+    r"(?:LORD|LADY|MR|MRS|MS|SIR|DAME|HIS\s+HONOUR|HER\s+HONOUR|JUDGE|"
+    r"CHIEF\s+JUSTICE|PRESIDENT|MASTER)"
+    r"[A-Z’'.\- ]{2,60}?"
+    r")[ \t]*:?[ \t]*$")
+# The label has to be a NAME line, not a sentence in small caps or a heading like
+# "LORD JUSTICE BURNETT GAVE THE FOLLOWING JUDGMENT" — those give themselves away by
+# length and by containing ordinary verbs.
+_NOT_AN_AUTHOR = re.compile(
+    r"(?i)\b(?:gave|said|held|delivered|agreed|dissent|judgment|opinion of the court|"
+    r"following|above|below|and others|as follows)\b")
+
+
+def _author_label_at_end(text: str, start: int, end: int) -> tuple[int, int] | None:
+    """The span of a judgment-author label sitting at the END of ``text[start:end]``,
+    or None. Only the last line or two are considered: a name in the middle of a
+    paragraph is prose about a judge, not a byline."""
+    tail_from = max(start, end - 200)
+    best: tuple[int, int] | None = None
+    for m in _AUTHOR_LABEL_RE.finditer(text, tail_from, end):
+        label = m.group("label").strip()
+        if len(label) < 6 or len(label) > 60 or _NOT_AN_AUTHOR.search(label):
+            continue
+        # nothing but whitespace may follow it inside this span
+        if text[m.end():end].strip():
+            continue
+        best = (m.start("label"), m.end())
+    return best
+
+
+def _split_author_labels(text: str, segs: list[Segment]) -> list[Segment]:
+    """Lift a trailing author label out of each segment into its own heading."""
+    out: list[Segment] = []
+    for s in segs:
+        span = _author_label_at_end(text, s.char_start, s.char_end)
+        if span is None or span[0] <= s.char_start:
+            out.append(s)
+            continue
+        head_start, head_end = span
+        body_end = head_start
+        if text[s.char_start:body_end].strip():
+            out.append(replace(s, char_end=body_end))
+        out.append(Segment(label="", kind="heading", level=0,
+                           char_start=head_start, char_end=head_end))
+    return out
+
+
 def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segment]:
     """Derive ``Segment``s from numbered paragraphs in flat text.
 
@@ -240,4 +299,4 @@ def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segme
         end = marks[i + 1][1] if i + 1 < len(marks) else len(text)
         segs.append(Segment(label=label_fmt.format(n), kind="paragraph", level=1,
                             char_start=start, char_end=end))
-    return segs
+    return _split_author_labels(text, segs)

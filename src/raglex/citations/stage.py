@@ -51,6 +51,27 @@ def _allows_us_reporters(doc) -> bool:
             and source.startswith(_COMMON_LAW_CASE_SOURCES))
 
 
+# A legislative document's own identity, as the carry-forward pass wants it. Inside
+# the GDPR a bare "Article 8" means the GDPR's Article 8 — a self-reference, not a
+# pointer at whichever directive the recitals last cross-referred to (which is what
+# it resolved to before: "Article 8 of 32009L0022", flagged by a reader). Only
+# legislation has a home; a judgment's bare provisions really do belong to whatever
+# statute it was discussing.
+_CELEX_KIND = {"R": "regulation", "L": "directive", "D": "decision", "E": "treaty"}
+
+
+def _home_of(doc) -> tuple[str | None, str | None]:
+    if doc["doc_type"] != str(DocType.LEGISLATION):
+        return None, None
+    sid = str(doc["stable_id"] or "")
+    if not sid:
+        return None, None
+    m = re.match(r"^\d{5}([A-Z])\d{4}$", sid)
+    if m:
+        return sid, _CELEX_KIND.get(m.group(1), "eu_instrument")
+    return sid, "act" if sid.startswith(("ukpga/", "asp/", "nia/", "anaw/")) else "named"
+
+
 def _is_us_source(doc) -> bool:
     """A US document — the only place an AMBIGUOUS reporter abbreviation is trusted.
 
@@ -84,10 +105,11 @@ def _extract_worker(conn) -> None:  # pragma: no cover — exercised via the gua
             return
         if item is None:
             return
-        text, aliases = item
+        text, aliases, home_id, home_kind = item
         try:
             defs: list[dict] = []
-            cites = _extract(text, aliases=aliases, defs_out=defs)
+            cites = _extract(text, aliases=aliases, defs_out=defs,
+                             home_id=home_id, home_kind=home_kind)
             conn.send(("ok", (cites, defs)))
         except Exception as exc:  # surfaced to the caller as RuntimeError
             conn.send(("err", f"{type(exc).__name__}: {exc}"))
@@ -106,20 +128,21 @@ class _ExtractionGuard:
     def timeout_s() -> float:
         return float(os.environ.get("RAGLEX_EXTRACT_TIMEOUT_S") or 90)
 
-    def extract(self, text: str, aliases: dict[str, str] | None):
+    def extract(self, text: str, aliases: dict[str, str] | None,
+                home: tuple[str | None, str | None] = (None, None)):
         """``extract_citations`` under a wall-clock budget, as ``(citations, shorthand
         definitions)``; None = budget blown. The definitions ride back with the result
         because the extractor already collected them — recomputing them in the parent
         cost ~4% of a whole-corpus rescan."""
         if os.environ.get("RAGLEX_EXTRACT_INPROC"):  # tests / debugging escape hatch
-            return self._inproc(text, aliases)
+            return self._inproc(text, aliases, home)
         with self._lock:
             try:
                 self._ensure()
-                self._conn.send((text, aliases))
+                self._conn.send((text, aliases, home[0], home[1]))
             except Exception:  # spawn unavailable / worker torn down mid-send
                 self._kill()
-                return self._inproc(text, aliases)
+                return self._inproc(text, aliases, home)
             if not self._conn.poll(self.timeout_s()):
                 self._kill()
                 return None
@@ -131,15 +154,17 @@ class _ExtractionGuard:
                 # in-process rather than mis-report it as "exceeded budget".
                 self._kill()
                 log.warning("[cite-extract] worker died mid-document — extracting in-process")
-                return self._inproc(text, aliases)
+                return self._inproc(text, aliases, home)
             if status == "err":
                 raise RuntimeError(f"extraction worker: {payload}")
             return payload
 
     @staticmethod
-    def _inproc(text: str, aliases: dict[str, str] | None):
+    def _inproc(text: str, aliases: dict[str, str] | None,
+                home: tuple[str | None, str | None] = (None, None)):
         defs: list[dict] = []
-        return extract_citations(text, aliases=aliases, defs_out=defs), defs
+        return extract_citations(text, aliases=aliases, defs_out=defs,
+                                 home_id=home[0], home_kind=home[1]), defs
 
     def _ensure(self) -> None:
         if self._proc is None or not self._proc.is_alive():
@@ -384,7 +409,9 @@ def extract_documents_parallel(
                         w.kill()
                         pool[pool.index(w)] = w = _PoolWorker()
                         defs: list[dict] = []
-                        cites = extract_citations(text, aliases=aliases, defs_out=defs)
+                        _hid, _hkind = _home_of(doc)
+                        cites = extract_citations(text, aliases=aliases, defs_out=defs,
+                                                  home_id=_hid, home_kind=_hkind)
                         _finish(sid, doc, text, (cites, defs))
                     else:
                         w.item = None
@@ -619,7 +646,7 @@ def extract_document(
     if aliases is None:
         aliases = catalogue.named_alias_map()  # user shorthand rules (propagate)
     if llm is None:
-        guarded = _GUARD.extract(text, aliases)
+        guarded = _GUARD.extract(text, aliases, _home_of(doc))
         cites, raw_defs = guarded if guarded is not None else (None, [])
         if cites is None:
             # budget blown: keep whatever rows a previous run left, stamp so
@@ -630,7 +657,9 @@ def extract_document(
             return 0
     else:  # the llm extractor is not picklable (and may call the network) — unguarded
         raw_defs = []
-        cites = extract_citations(text, llm=llm, aliases=aliases, defs_out=raw_defs)
+        home_id, home_kind = _home_of(doc)
+        cites = extract_citations(text, llm=llm, aliases=aliases, defs_out=raw_defs,
+                                  home_id=home_id, home_kind=home_kind)
 
     return _finish_document(catalogue, doc, text, cites, raw_defs,
                             stable_id=stable_id, run_id=run_id)
@@ -653,11 +682,14 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
         cites = [c for c in cites if c.method != AMBIGUOUS_METHOD]
 
     # Inside LEGISLATION, a bare "Article 3" / "paragraph 2" is almost always the
-    # instrument referring to ITSELF, not to the directive it last named — the
-    # carry-forward heuristic was built for judgments citing statutes, and applied
-    # to an act's own text it mislinks self-references to whatever instrument the
-    # recitals mentioned last. Drop the guesses; literal citations are unaffected.
-    if doc["doc_type"] == str(DocType.LEGISLATION):
+    # instrument referring to ITSELF, not to the directive it last named. The
+    # extractor now resolves that directly, given the document's own id (see
+    # ``_home_of`` and ``_attach_carry_forward``), so the guesses no longer need
+    # dropping wholesale — a self-reference links home and a same-sentence
+    # cross-reference links out. The blanket drop remains only for a legislative
+    # document whose own id isn't in citable form, where there is no home to
+    # attribute to and the heuristic is back to guessing.
+    if doc["doc_type"] == str(DocType.LEGISLATION) and not _home_of(doc)[0]:
         cites = [c for c in cites if c.method != "carry_forward"]
 
     # Inside a JUDGMENT, a bare "paragraph N" refers to the judgment's own

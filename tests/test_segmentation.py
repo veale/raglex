@@ -100,3 +100,39 @@ def test_bare_number_fallback_still_needs_density_and_sequence():
     # paragraphs — no from-1 sequence
     text = "Amounts:\n1000\n2500\n3750\ntotal 7250"
     assert _labels(text) == []
+
+
+# -- judgment author labels ---------------------------------------------------
+JUDGMENT = (
+    "Neutral Citation Number: [2015] EWCA Civ 81\n\n____________________\n\n"
+    "HTML VERSION OF JUDGMENT\n\n____________________\n\nCrown Copyright ©\n\n"
+    "LORD JUSTICE BURNETT:\n\n"
+    "1. This case concerns funding.\n\n2. By virtue of section 21 of the 1948 Act.\n\n"
+    "3. Section 24(1) fixes liability.\n\n4. I would dismiss the claim.\n\n"
+    "LORD JUSTICE TOMLINSON\n\n5. I agree.\n\nLORD DYSON MR\n\n6. I also agree.")
+
+
+def test_every_judgment_author_gets_its_own_heading():
+    """A reader spotted that [2015] EWCA Civ 81 rendered "LORD JUSTICE TOMLINSON" and
+    "LORD DYSON MR" but not "LORD JUSTICE BURNETT:" — the first author's byline sits in
+    the preamble, before paragraph 1, and so belonged to no segment at all, while the
+    concurrences were merely trailing text on the paragraph above them."""
+    segs = syn(JUDGMENT)
+    headings = [JUDGMENT[s.char_start:s.char_end].strip()
+                for s in segs if s.kind == "heading"]
+    assert headings == ["LORD JUSTICE BURNETT:", "LORD JUSTICE TOMLINSON", "LORD DYSON MR"]
+    # the paragraphs are untouched — no offset moves, so citations stay anchored
+    assert [s.label for s in segs if s.kind == "paragraph"] == \
+        ["1.", "2.", "3.", "4.", "5.", "6."]
+    # the boilerplate above the first byline is still the header, not a heading
+    header = next(s for s in segs if s.kind == "header")
+    assert "Crown Copyright" in JUDGMENT[header.char_start:header.char_end]
+    assert "BURNETT" not in JUDGMENT[header.char_start:header.char_end]
+
+
+def test_a_judge_named_in_prose_is_not_a_byline():
+    text = ("1. The appellant relied on the reasoning of LORD JUSTICE BURNETT in the "
+            "court below, which the respondent disputes.\n\n"
+            "2. LORD JUSTICE TOMLINSON gave the following judgment in that case.\n\n"
+            "3. We reject that submission.")
+    assert not [s for s in syn(text) if s.kind == "heading"]

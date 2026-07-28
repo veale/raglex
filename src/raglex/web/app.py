@@ -547,6 +547,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         return _start_job("backfill-intituling", "bench + counsel from judgment headers",
                           params)
 
+    @app.post("/jobs/resegment-judgments")
+    def job_resegment_judgments_ep(payload: dict = Body(default={})) -> dict:
+        """Recompute paragraph structure from already-stored text, so segmentation
+        improvements reach documents imported before them. Rewrites only the segment
+        index, never the text, so no citation offset moves; scope with ``source``."""
+        params = {k: v for k, v in (payload or {}).items() if k in ("source", "limit")}
+        return _start_job("resegment-judgments", "recompute paragraph structure", params)
+
     @app.post("/backfill-titles")
     def backfill_titles_ep(payload: dict = Body(default={})) -> dict:
         """Fill missing CJEU case names from CELLAR (synchronous; the job endpoint above is
