@@ -3469,6 +3469,80 @@ class Catalogue:
             "GROUP BY d.source, d.court, d.doc_type").fetchall()
         return [dict(r) for r in rows]
 
+    def documents_meta(self, ids: list[str]) -> list[dict]:
+        """Facet-bearing metadata for a set of documents, in one round trip.
+
+        The facet counts have to describe the WHOLE result set, not the page being
+        shown — a reader told "912 documents" and then given a breakdown of 40 of
+        them has been misled — so the search path fetches every match's metadata and
+        counts client-side, which also lets a facet click narrow instantly without
+        re-running the query."""
+        if not ids:
+            return []
+        out: list[dict] = []
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            rows = self.conn.execute(
+                "SELECT stable_id, source, court, doc_type, decision_date, title "
+                f"FROM documents WHERE stable_id IN ({','.join('?' * len(chunk))})",
+                chunk).fetchall()
+            out.extend(dict(r) for r in rows)
+        return out
+
+    def documents_citing(self, ids: list[str], dst_id: str) -> set[str]:
+        """Which of ``ids`` cite ``dst_id``. Used by the "cites …" facet for an
+        authority outside the pre-computed top list."""
+        if not ids or not dst_id:
+            return set()
+        found: set[str] = set()
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            rows = self.conn.execute(
+                "SELECT DISTINCT src_id FROM relations "
+                f"WHERE dst_id = ? AND src_id IN ({','.join('?' * len(chunk))})",
+                [dst_id] + chunk).fetchall()
+            found.update(r["src_id"] for r in rows)
+        return found
+
+    def cited_by_documents(self, ids: list[str], *, limit: int = 25,
+                           with_sources: bool = False) -> list[dict]:
+        """What a SET of documents most often cites.
+
+        The doctrinal anchors of a result set: search "duty of care", and this says
+        the 300 matching judgments between them cite Donoghue v Stevenson 89 times
+        and Caparo 54 — which is how the area is actually navigated, and something no
+        per-document view can show."""
+        if not ids:
+            return []
+        counts: dict[str, int] = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            rows = self.conn.execute(
+                "SELECT r.dst_id AS dst, count(DISTINCT r.src_id) AS n "
+                "FROM relations r "
+                f"WHERE r.src_id IN ({','.join('?' * len(chunk))}) "
+                "  AND r.dst_id IS NOT NULL AND r.resolution_status = 'resolved' "
+                "GROUP BY r.dst_id", chunk).fetchall()
+            for r in rows:
+                counts[r["dst"]] = counts.get(r["dst"], 0) + r["n"]
+        top = sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
+        if not top:
+            return []
+        meta = {m["stable_id"]: m for m in self.documents_meta([t[0] for t in top])}
+        out = []
+        for dst, n in top:
+            m = meta.get(dst) or {}
+            row = {"stable_id": dst, "citing": n, "title": m.get("title"),
+                   "court": m.get("court"), "doc_type": m.get("doc_type"),
+                   "source": m.get("source"),
+                   "decision_date": m.get("decision_date")}
+            if with_sources:
+                # the citing ids, so a "cites …" facet click narrows the result set
+                # in the browser instead of asking the server again
+                row["src_ids"] = sorted(self.documents_citing(ids, dst))
+            out.append(row)
+        return out
+
     def embedding_coverage(self) -> list[dict]:
         """Per-source: documents with text, and how many carry a vector. The mirror of
         ``fts_coverage`` so one screen can show what each retrieval path actually

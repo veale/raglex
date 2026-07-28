@@ -48,6 +48,11 @@ class Hit:
 @dataclass(slots=True)
 class SearchResult:
     hits: list[Hit] = field(default_factory=list)
+    #: EVERY matching document id, best-ranked first — not just the page. The facet
+    #: counts have to describe the whole result set (a reader told "912 documents"
+    #: and shown a breakdown of 40 of them has been misled), and holding the full
+    #: set is also what lets a facet click narrow instantly, with no second query.
+    matched: list[str] = field(default_factory=list)
     #: documents matching the tsquery — the real total, not the page size
     total: int = 0
     #: how many survived literal verification, when exact mode was on
@@ -183,53 +188,48 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
 
     out.total = cat.fts_total(tsq, filters=filters)
     want = limit + offset
-    rows = cat.fts_search(tsq, filters=filters,
-                          limit=budget if parsed.literals or parsed.excluded
-                          else want)
+    rows = cat.fts_search(tsq, filters=filters, limit=budget)
     out.candidates = len(rows)
     out.truncated = len(rows) >= budget
 
+    needs_check = bool(parsed.literals or parsed.excluded)
     seen: set[str] = set()
-    hits: list[Hit] = []
-    verified = 0
+    matched: list[tuple[str, float, int | None]] = []
     for r in rows:
         doc_id = r["doc_id"]
         if doc_id in seen:
             continue
         seen.add(doc_id)
-        if not (parsed.literals or parsed.excluded):
-            hits.append(Hit(doc_id=doc_id, rank=float(r.get("rank") or 0)))
-            if len(hits) >= want:
-                break
+        if not needs_check:
+            matched.append((doc_id, float(r.get("rank") or 0), None))
             continue
+        # EVERY candidate is verified, not merely enough of them to fill a page:
+        # the facets and the count must describe the real result set. At 0.046 ms a
+        # document (local store, measured) a full 4,000-candidate budget is ~0.2 s.
         text = _text_of(cat, ts, doc_id)
         if text is None:
             continue
         at = verify(text, parsed)
         if at is None:
             continue
-        verified += 1
-        if len(hits) < want:
-            frag = snippet(text, at)
-            hits.append(Hit(doc_id=doc_id, rank=float(r.get("rank") or 0),
-                            char_start=at, snippet=frag,
-                            highlights=highlight_spans(frag, parsed)))
-    if parsed.literals or parsed.excluded:
-        out.verified = verified
+        matched.append((doc_id, float(r.get("rank") or 0), at))
+    if needs_check:
+        out.verified = len(matched)
         # the honest count is what survived verification; the tsquery total counts
         # the stemmed matches, which for an exact search overstates
-        out.total = verified if not out.truncated else max(verified, out.total)
+        out.total = len(matched) if not out.truncated else max(len(matched), out.total)
+    out.matched = [m[0] for m in matched]
 
-    # snippets for the unverified path, read only for the page being shown
-    for h in hits[offset:want]:
-        if not h.snippet:
-            text = _text_of(cat, ts, h.doc_id)
-            if text:
-                at = _first_term_at(text, parsed)
-                h.char_start = at
-                h.snippet = snippet(text, at)
-                h.highlights = highlight_spans(h.snippet, parsed)
-    out.hits = hits[offset:want]
+    # snippets are built only for the page being shown — the text was read during
+    # verification but 4,000 documents is 124 MB, far too much to hold
+    for doc_id, rank, at in matched[offset:want]:
+        text = _text_of(cat, ts, doc_id)
+        if text is None:
+            continue
+        where = at if at is not None else _first_term_at(text, parsed)
+        frag = snippet(text, where)
+        out.hits.append(Hit(doc_id=doc_id, rank=rank, char_start=where, snippet=frag,
+                            highlights=highlight_spans(frag, parsed)))
     out.took_ms = int(1000 * (time.perf_counter() - t0))
     return out
 

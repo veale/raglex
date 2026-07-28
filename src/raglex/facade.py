@@ -9752,7 +9752,8 @@ class Facade:
                         offset: int = 0, sources: list[str] | None = None,
                         doc_type: list[str] | None = None,
                         court: list[str] | None = None,
-                        year_from: int | None = None) -> dict:
+                        year_from: int | None = None,
+                        with_network: bool = True) -> dict:
         """Free-text search over the gated scope, with literal quotation support."""
         from .fulltext import index as fts
 
@@ -9767,6 +9768,14 @@ class Facade:
         with self._open() as (cat, _rs, ts):
             res = fts.search(cat, ts, query, filters=filters, exact=exact,
                              limit=limit, offset=offset)
+            # Facets over the WHOLE result set, never the page. One metadata read
+            # for every match, which also lets the client narrow a facet instantly
+            # instead of asking the server again.
+            meta = cat.documents_meta(res.matched)
+            facets = self._freetext_facets(meta)
+            network = ({"cites": cat.cited_by_documents(res.matched, limit=20,
+                                                       with_sources=True)}
+                       if with_network and res.matched else {})
             items = []
             for h in res.hits:
                 doc = cat.get_document(h.doc_id)
@@ -9801,6 +9810,56 @@ class Facade:
             "candidates": res.candidates, "truncated": res.truncated,
             "notes": res.notes, "took_ms": res.took_ms, "exact": exact,
             "tsquery": res.tsquery, "scope": allowed,
+            "facets": facets, "network": network,
+            # the matching ids, so the client can narrow a facet without a round trip
+            "matched": res.matched,
+        }
+
+    def _freetext_facets(self, meta: list[dict]) -> dict:
+        """Count the result set along every dimension the metadata supports.
+
+        Years are returned in full rather than bucketed so the client can draw a
+        histogram AND offer a range brush over the same data; decades are a
+        convenience for the collapsed view."""
+        from collections import Counter
+
+        src: Counter[str] = Counter()
+        jur: Counter[str] = Counter()
+        kind: Counter[str] = Counter()
+        court: Counter[str] = Counter()
+        years: Counter[str] = Counter()
+        undated = 0
+        court_labels: dict[str, str] = {}
+        for m in meta:
+            source = m.get("source") or ""
+            src[source] += 1
+            jur[self._doc_bucket(source, m.get("court"))] += 1
+            if m.get("doc_type"):
+                kind[m["doc_type"]] += 1
+            if m.get("court"):
+                key = f"{source}\u241f{m['court']}"
+                court[key] += 1
+                court_labels.setdefault(
+                    key, self.court_label(m["court"], source) or m["court"])
+            d = (m.get("decision_date") or "")[:4]
+            if len(d) == 4 and d.isdigit():
+                years[d] += 1
+            else:
+                undated += 1
+
+        def rows(counter: Counter, labeller=None) -> list[dict]:
+            return [{"value": k.split("\u241f")[-1], "key": k,
+                     "label": (labeller or {}).get(k, k.split("\u241f")[-1]),
+                     "n": n}
+                    for k, n in counter.most_common()]
+
+        return {
+            "source": rows(src),
+            "jurisdiction": rows(jur),
+            "doc_type": rows(kind),
+            "court": rows(court, court_labels)[:40],
+            "years": [{"year": y, "n": n} for y, n in sorted(years.items())],
+            "undated": undated,
         }
 
     def build_freetext_index(self, *, sources: list[str] | None = None,

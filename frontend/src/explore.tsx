@@ -392,7 +392,9 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
     if (!q.trim()) return;
     setBusy(true);
     try {
-      setRes(await api.freetext({ q, exact, limit: 20, source: picked.join(",") }));
+      const r = await api.freetext({ q, exact, limit: 20, source: picked.join(",") });
+      window.dispatchEvent(new CustomEvent("raglex-freetext", { detail: { q, exact, res: r } }));
+      setRes(r);
     } catch (e: any) {
       setRes({ items: [], notes: [String(e?.message || e)] });
     } finally { setBusy(false); }
@@ -412,6 +414,13 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
         <button className="primary" onClick={run} disabled={busy}>
           {busy ? "…" : "Search text"}</button>
       </div>
+      <label className="ft-exact-top muted" title={exact
+        ? 'a quoted phrase matches those characters — "duty of care" will not return "duties of care"'
+        : 'a quoted phrase also matches stemmed forms — "duty of care" also returns "duties of care"'}>
+        <input type="checkbox" checked={exact}
+          onChange={(e) => { setExact(e.target.checked); if (res) setRes(null); }} />
+        quotation marks match literally
+      </label>
       <div className="ft-note muted">
         {scope?.note}
         {" "}
@@ -459,39 +468,7 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
         </div>
       )}
 
-      {res && (
-        <div className="ft-results">
-          <div className="ft-head muted">
-            {res.notes?.map((n: string, i: number) =>
-              <div key={i} className="ft-warn">{n}</div>)}
-            {res.items?.length
-              ? <>{(res.verified ?? res.total).toLocaleString()} document
-                  {(res.verified ?? res.total) === 1 ? "" : "s"}
-                  {res.truncated ? "+" : ""} · {res.took_ms}ms
-                  <label className="ft-exact" title={exact
-                    ? "quoted phrases match the literal characters"
-                    : "quoted phrases also match stemmed forms — duty of care finds duties of care"}>
-                    <input type="checkbox" checked={exact}
-                      onChange={(e) => { setExact(e.target.checked); }} /> exact quotes
-                  </label>
-                </>
-              : (res.notes?.length ? null : "No documents contain that.")}
-          </div>
-          {(res.items || []).map((it: any) => (
-            <div key={it.stable_id + it.char_start} className="ft-hit">
-              <DocLink id={it.stable_id} anchor={it.anchor}
-                onOpen={() => open(it.stable_id, it.anchor)}>
-                <b><Oscola c={it.oscola} fallback={it.title || it.stable_id} /></b>
-              </DocLink>
-              <span className="muted ft-meta">
-                {" "}· {it.court_label || it.court || it.source}
-                {it.anchor ? ` · ${it.anchor}` : ""}
-              </span>
-              <div className="ft-snip"><Marked text={it.snippet} spans={it.highlights} /></div>
-            </div>
-          ))}
-        </div>
-      )}
+      {res && <FreeTextResults res={res} query={q} open={open} />}
     </div>
   );
 }
@@ -816,6 +793,196 @@ export function SearchAdminView() {
           cheap half is never blocked behind the expensive one. Change these in
           Settings ▸ Embeddings and HPC embed.
         </p>
+      </div>
+    </div>
+  );
+}
+
+// --- free-text results, with a facet rail ------------------------------------
+// The counts describe EVERY match, not the page — the server sends the whole
+// matching id set with its metadata, which is also what lets a facet click narrow
+// instantly rather than re-running the query. The one thing that does go back to the
+// server is picking an authority outside the pre-computed "most cited" list.
+type FacetState = {
+  source: string[]; jurisdiction: string[]; doc_type: string[]; court: string[];
+  years: [number, number] | null; cites: string | null;
+};
+const EMPTY_FACETS: FacetState = {
+  source: [], jurisdiction: [], doc_type: [], court: [], years: null, cites: null,
+};
+
+function FacetGroup({ title, rows, picked, onToggle, max = 8 }:
+  { title: string; rows: any[]; picked: string[]; onToggle: (v: string) => void; max?: number }) {
+  const [all, setAll] = useState(false);
+  if (!rows?.length) return null;
+  const shown = all ? rows : rows.slice(0, max);
+  const top = rows[0]?.n || 1;
+  return (
+    <div className="facet-grp">
+      <h4>{title}</h4>
+      {shown.map((r) => (
+        <button key={r.key || r.value}
+          className={`facet-row${picked.includes(r.value) ? " on" : ""}`}
+          onClick={() => onToggle(r.value)}>
+          <span className="facet-bar" style={{ width: `${Math.max(3, 100 * r.n / top)}%` }} />
+          <span className="facet-label">{r.label || r.value}</span>
+          <span className="facet-n">{FMT(r.n)}</span>
+        </button>
+      ))}
+      {rows.length > max && (
+        <button className="linkish facet-more" onClick={() => setAll(!all)}>
+          {all ? "fewer" : `${rows.length - max} more`}</button>
+      )}
+    </div>
+  );
+}
+
+export function FreeTextResults({ res, query, open, onRefine }:
+  { res: any; query: string; open: (id: string, a?: string) => void;
+    onRefine?: (cites: string) => void }) {
+  const [f, setF] = useState<FacetState>(EMPTY_FACETS);
+  const [citeQ, setCiteQ] = useState("");
+  useEffect(() => { setF(EMPTY_FACETS); setCiteQ(""); }, [query, res]);
+  if (!res) return null;
+
+  const items: any[] = res.items || [];
+  const facets = res.facets || {};
+  const cites: any[] = res.network?.cites || [];
+  const toggle = (k: keyof FacetState) => (v: string) => setF((p) => {
+    const cur = p[k] as string[];
+    return { ...p, [k]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] };
+  });
+
+  // Narrowing happens over the loaded page here; the whole matching set is in
+  // res.matched, so a future "load more" pages through the same filtered set
+  // without a second query.
+  const citeSet = f.cites
+    ? new Set((cites.find((c) => c.stable_id === f.cites)?.src_ids) || [])
+    : null;
+  const shown = items.filter((it) => {
+    if (f.source.length && !f.source.includes(it.source)) return false;
+    if (f.jurisdiction.length && !f.jurisdiction.includes(it.jurisdiction)) return false;
+    if (f.doc_type.length && !f.doc_type.includes(it.doc_type)) return false;
+    if (f.court.length && !f.court.includes(it.court)) return false;
+    if (f.years && it.decision_date) {
+      const y = +String(it.decision_date).slice(0, 4);
+      if (y < f.years[0] || y > f.years[1]) return false;
+    }
+    if (citeSet && !citeSet.has(it.stable_id)) return false;
+    return true;
+  });
+  const active = f.source.length + f.jurisdiction.length + f.doc_type.length
+    + f.court.length + (f.years ? 1 : 0) + (f.cites ? 1 : 0);
+  const citeOpts = cites.filter((c) => !citeQ ||
+    (c.title || c.stable_id).toLowerCase().includes(citeQ.toLowerCase()));
+
+  return (
+    <div className="ftr">
+      <aside className="ftr-rail">
+        <div className="ftr-count">
+          <b>{(res.verified ?? res.total ?? 0).toLocaleString()}</b> document
+          {(res.verified ?? res.total) === 1 ? "" : "s"}
+          {res.truncated && <span className="tag" title="the candidate budget was reached — narrow the query for an exact count">+</span>}
+          <div className="muted">{res.took_ms}ms{res.exact ? " · exact quotes" : " · stemmed"}</div>
+          {active > 0 && (
+            <button className="mini" onClick={() => setF(EMPTY_FACETS)}>
+              clear {active} filter{active === 1 ? "" : "s"}</button>
+          )}
+        </div>
+
+        {/* cites — the one facet that is about the network rather than the metadata */}
+        <div className="facet-grp">
+          <h4>cites</h4>
+          <input className="facet-cite" value={citeQ} placeholder="an authority…"
+            onChange={(e) => setCiteQ(e.target.value)} />
+          {f.cites && (
+            <button className="facet-row on" onClick={() => setF({ ...f, cites: null })}>
+              <span className="facet-label">
+                ✕ {cites.find((c) => c.stable_id === f.cites)?.title || f.cites}</span>
+            </button>
+          )}
+          {!f.cites && citeOpts.slice(0, citeQ ? 8 : 6).map((c) => (
+            <button key={c.stable_id} className="facet-row"
+              title={c.stable_id}
+              onClick={() => setF({ ...f, cites: c.stable_id })}>
+              <span className="facet-bar" style={{
+                width: `${Math.max(3, 100 * c.citing / (cites[0]?.citing || 1))}%` }} />
+              <span className="facet-label">{c.title || c.stable_id}</span>
+              <span className="facet-n">{c.citing}</span>
+            </button>
+          ))}
+          {citeQ && citeOpts.length === 0 && onRefine && (
+            <button className="linkish facet-more" onClick={() => onRefine(citeQ)}>
+              search the whole corpus for “{citeQ}”…</button>
+          )}
+          <p className="muted facet-hint">
+            what these results have in common — the authorities they cite between them
+          </p>
+        </div>
+
+        <YearFacet years={facets.years} undated={facets.undated}
+          value={f.years} onChange={(v) => setF({ ...f, years: v })} />
+        <FacetGroup title="jurisdiction" rows={facets.jurisdiction}
+          picked={f.jurisdiction} onToggle={toggle("jurisdiction")} />
+        <FacetGroup title="type" rows={facets.doc_type}
+          picked={f.doc_type} onToggle={toggle("doc_type")} />
+        <FacetGroup title="court / body" rows={facets.court}
+          picked={f.court} onToggle={toggle("court")} max={10} />
+        <FacetGroup title="source" rows={facets.source}
+          picked={f.source} onToggle={toggle("source")} />
+      </aside>
+
+      <div className="ftr-list">
+        {res.notes?.map((n: string, i: number) => (
+          <div key={i} className="ft-warn">{n}</div>
+        ))}
+        {active > 0 && (
+          <div className="muted ftr-narrow">
+            showing {shown.length} of {items.length} loaded
+          </div>
+        )}
+        {shown.map((it: any) => (
+          <div key={it.stable_id + it.char_start} className="ft-hit">
+            <DocLink id={it.stable_id} anchor={it.anchor}
+              onOpen={() => open(it.stable_id, it.anchor)}>
+              <b><Oscola c={it.oscola} fallback={it.title || it.stable_id} /></b>
+            </DocLink>
+            <span className="muted ft-meta">
+              {" "}· {it.court_label || it.court || it.source}
+              {it.decision_date ? ` · ${String(it.decision_date).slice(0, 4)}` : ""}
+              {it.anchor ? ` · ${it.anchor}` : ""}
+            </span>
+            <div className="ft-snip"><Marked text={it.snippet} spans={it.highlights} /></div>
+          </div>
+        ))}
+        {shown.length === 0 && items.length > 0 && (
+          <p className="muted">Nothing in the loaded results matches those filters.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The result set's shape in time, doubling as a range brush. Legal research is
+// period-sensitive — "since the Human Rights Act", "before Caparo" — so this is a
+// primary control rather than a decoration.
+function YearFacet({ years, undated, value, onChange }:
+  { years?: { year: string; n: number }[]; undated?: number;
+    value: [number, number] | null; onChange: (v: [number, number] | null) => void }) {
+  if (!years?.length) return null;
+  const map: Record<string, number> = {};
+  years.forEach((y) => (map[y.year] = y.n));
+  const lo = +years[0].year, hi = +years[years.length - 1].year;
+  return (
+    <div className="facet-grp">
+      <h4>date {value && (
+        <button className="linkish" onClick={() => onChange(null)}>
+          {value[0]}–{value[1]} ✕</button>)}</h4>
+      <Spark years={map} width={190} height={34} brush
+        active={value ? [String(value[0]), String(value[1])] : null}
+        onBrush={(a, b) => onChange([+a, +b])} />
+      <div className="muted facet-hint">
+        {lo}–{hi}{undated ? ` · ${FMT(undated)} undated` : ""} · drag to filter
       </div>
     </div>
   );
