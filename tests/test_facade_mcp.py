@@ -503,3 +503,53 @@ def test_cjeu_judgment_and_ag_opinion_point_at_each_other(tmp_path):
     assert judgment["role"] == "ag_opinion" and judgment["stable_id"] == "ECLI:EU:C:2024:390"
     opinion = f.get_document("ECLI:EU:C:2024:390")["companion"]
     assert opinion["role"] == "judgment" and opinion["stable_id"] == "ECLI:EU:C:2025:117"
+
+
+def test_document_kinds_place_regulator_decisions_and_reports_where_readers_look():
+    """A live audit of every source × doc_type in the corpus found 3,750 documents filed
+    as CASE LAW that are nothing of the kind — ESMA sanctions, Commission antitrust and
+    DMA decisions, CCPC merger determinations, CMA cases, FCA final notices, EDPB binding
+    decisions and Art 64 opinions — and 722 Law Commission reports parked under a
+    "preparatory" category no reader would open."""
+    from raglex.facade import Facade
+
+    f = Facade.__new__(Facade)
+    admin = [("eu-esma-sanctions", "decision"), ("eu-dgcomp-antitrust", "decision"),
+             ("dma-cases", "decision"), ("ie-ccpc-mergers", "decision"),
+             ("uk-cma", "decision"), ("uk-fca-notices", "decision"),
+             ("edpb", "decision"), ("edpb", "opinion"), ("eu-ombudsman", "decision"),
+             ("eu-srb-appeals", "decision"), ("eu-esas-boa", "decision")]
+    for source, dt in admin:
+        assert f._doc_kind(source, dt, None) == "administrative", (source, dt)
+
+    # a regulator's guidance is still guidance, and what it merely WRITES is not a decision
+    assert f._doc_kind("edpb", "guidance", None) == "guidance"
+    assert f._doc_kind("edpb", "commentary", None) == "other"
+    # a DPA's whole output is administrative however it is filed (BAILII's DPC studies)
+    assert f._doc_kind("ie-caselaw", "judgment", "dpa-ie") == "administrative"
+    # law-reform reports go with guidance; EU travaux keep their own category
+    assert f._doc_kind("uk-lawcom-reports", "preparatory", None) == "guidance"
+    assert f._doc_kind("eu-preparatory", "preparatory", None) == "preparatory"
+    # real courts and tribunals are untouched
+    assert f._doc_kind("uk-ftt-ir", "judgment", "ukftt") == "cases"
+    assert f._doc_kind("uk-caselaw", "judgment", "ewca") == "cases"
+
+
+def test_every_body_the_corpus_stores_has_a_name_not_a_code():
+    """The UI never shows a raw court code. The bodies a source stores by ACRONYM never
+    reach the citation registry (it keys on neutral-citation codes), and a French court
+    name arrives in whatever case the register typed it."""
+    from raglex.facade import Facade
+
+    f = Facade.__new__(Facade)
+    assert f.court_label("CNIL", "fr-dila").startswith("Commission nationale")
+    assert f.court_label("CCPC", "ie-ccpc-mergers") == "Competition and Consumer Protection Commission"
+    assert f.court_label("CMA", "uk-cma") == "Competition and Markets Authority"
+    assert f.court_label("EDPS", "eu-edps-opinions") == "European Data Protection Supervisor"
+    assert f.court_label("BGH", "de-neuris").startswith("Bundesgerichtshof")
+    # SHOUTED names are cased for display; only place names keep a capital
+    assert f.court_label("COUR ADMINISTRATIVE D'APPEL DE LYON", "fr-dila") == (
+        "Cour administrative d'appel de Lyon")
+    assert f.court_label("RECHTBANK AMSTERDAM", "nl-rechtspraak") == "Rechtbank Amsterdam"
+    # and the registry still answers for real citation codes
+    assert f.court_label("ukftt", "uk-ftt-ir") == "First-tier Tribunal"

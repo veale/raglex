@@ -242,7 +242,11 @@ def parse_decision_pdf(text: str) -> dict:
 
 class InformationRightsAdapter(BaseAdapter):
     source = "uk-ftt-ir"
-    court = "ukftt/grc"
+    # The bare tribunal code every other UK source stores ("ukftt"), NOT the Find Case Law
+    # path "ukftt/grc": the court registry keys on citation codes, so the path form has no
+    # name and these decisions rendered as "UK court" instead of "First-tier Tribunal".
+    # The chamber is kept in the record's metadata, where it belongs.
+    court = "ukftt"
     min_interval = 2.0
 
     def __init__(self, *, client: RateLimitedClient | None = None) -> None:

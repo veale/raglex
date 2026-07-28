@@ -201,7 +201,7 @@ def test_discover_walks_pages_newest_first(monkeypatch):
         "uk/ftt-ir/ea/2022/0317", "uk/ftt-ir/ea/2023/0042/gdpr"]
     assert stubs[0].hint_date == date(2023, 8, 11)
     assert stubs[0].hints["watermark"] == "2023-08-11"
-    assert stubs[0].court == "ukftt/grc"
+    assert stubs[0].court == "ukftt"   # the code with a NAME, not the FCL path
 
 
 def test_incremental_run_stops_at_the_watermark(monkeypatch):
@@ -219,7 +219,7 @@ def test_fetch_keys_by_appeal_number_and_carries_the_register_metadata(monkeypat
     stub = list(a.discover(None, max_pages=1))[0]
     rec = a.fetch(stub)
     assert rec.stable_id == "uk/ftt-ir/ea/2022/0317"   # the row's number wins for the id
-    assert rec.doc_type.value == "judgment" and rec.court == "ukftt/grc"
+    assert rec.doc_type.value == "judgment" and rec.court == "ukftt"
     assert rec.decision_date == date(2023, 8, 7)       # the PDF's own date, not the row's
     assert rec.extra["ico_decision_notice"] == "IC-130630-R7Y9"
     assert rec.extra["outcome"] == "Dismissed"

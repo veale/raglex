@@ -579,6 +579,43 @@ def _rel_type(value: str | None, default: RelationshipType | None = None) -> Rel
         return default
 
 
+# Words that stay lower-case inside a French/Dutch court name when a SHOUTED one is cased
+# for display, and the particles that keep their own capital.
+_COURT_LOWER = {
+    # connectives + articles
+    "de", "d'", "du", "des", "la", "le", "les", "et", "en", "van", "der", "voor",
+    "bij", "het", "op", "à", "au", "aux",
+    # the generic vocabulary of a court's name — everything left over is a PLACE, which
+    # is the only part that takes a capital ("Cour administrative d'appel de Lyon")
+    "cour", "tribunal", "conseil", "chambre", "administrative", "administratif",
+    "appel", "cassation", "instance", "grande", "commerciale", "sociale", "civile",
+    "criminelle", "correctionnelle", "judiciaire", "prud'hommes", "assises",
+    "rechtbank", "gerechtshof", "raad", "beroep", "college", "bedrijfsleven",
+}
+
+
+def _sentence_case_court(name: str) -> str:
+    """"COUR ADMINISTRATIVE D'APPEL DE LYON" → "Cour administrative d'appel de Lyon".
+
+    Only the first word and proper nouns take a capital; the register's own mixed-case
+    spellings of the same courts are the model. A place name is anything that isn't a
+    connective, which over-capitalises nothing in practice because the connectives are
+    exactly the words that repeat."""
+    words = name.split()
+    out: list[str] = []
+    for i, w in enumerate(words):
+        low = w.lower()
+        if i and (low in _COURT_LOWER or low.rstrip("'") in _COURT_LOWER):
+            out.append(low)
+        elif "'" in low and len(low.split("'", 1)[0]) <= 2:      # d'APPEL → d'appel
+            head, tail = low.split("'", 1)
+            keep = tail in _COURT_LOWER or not i
+            out.append(f"{head}'{tail if keep and i else tail.capitalize()}")
+        else:
+            out.append(low.capitalize() if i else low.capitalize())
+    return " ".join(out)
+
+
 class Facade:
     def __init__(self, config: Config | None = None) -> None:
         self.config = config or Config.from_env()
@@ -1507,6 +1544,7 @@ class Facade:
                     "src_court_label": self.court_label(sdoc["court"], sdoc["source"]) if sdoc["court"] else None,
                     "src_jurisdiction": self._doc_bucket(sdoc["source"], sdoc["court"]),
                     "src_kind": self._doc_kind(sdoc["source"], sdoc["doc_type"], sdoc["court"]),
+                    "src_doc_type": sdoc["doc_type"],
                     "authority": _authority(sid, sdoc), "count": len(rs),
                     "pagerank": _pagerank(sid, sdoc),
                     "anchors": anchors, "_rels": rs,
@@ -1534,8 +1572,12 @@ class Facade:
             # treatment. Keep it in a conditional, separately named section at the foot
             # of the mentions tray (and expose it to MCP clients), rather than intermixing
             # impact assessments and explanatory material with judgments.
-            preparatory_groups = [g for g in groups if g["src_kind"] == "preparatory"]
-            groups = [g for g in groups if g["src_kind"] != "preparatory"]
+            # Split on what the document IS, not on the browse bucket it sits in: a law-
+            # reform report files under Guidance/Reports for browsing (nobody looks for the
+            # Law Commission under "travaux"), but as a CITER of an Act it is still
+            # legislative history and belongs in this section.
+            preparatory_groups = [g for g in groups if g["src_doc_type"] == "preparatory"]
+            groups = [g for g in groups if g["src_doc_type"] != "preparatory"]
 
             # facet counts over the WHOLE anchor-scoped set (before any jurisdiction/kind
             # filter) so the caller sees exactly what it could narrow to — this is what
@@ -2610,6 +2652,17 @@ class Facade:
         low = (code or "").lower()
         if low == "euecj":
             return "Court of Justice (BAILII archive)"
+        # Regulators and apex courts a source stores by ACRONYM rather than a citation
+        # court code. They never reach the citation registry (it keys on neutral-citation
+        # codes), so without this the UI shows the bare acronym — a live audit of all 846
+        # stored court values found exactly these eight.
+        if up_name := self._BODY_NAMES.get((code or "").strip().upper()):
+            return up_name
+        # A French court name arrives in whatever case the register typed it — "COUR
+        # ADMINISTRATIVE D'APPEL DE LYON" beside "Cour administrative d'appel de Lyon".
+        # Shouting is a data artefact, not a name, so it is cased for display.
+        if len(code or "") > 6 and code.isupper():
+            return _sentence_case_court(code)
         if low.startswith("dpa-"):
             cc = low[4:]
             if cc in self._DPA_PROPER_NAME:
@@ -2647,6 +2700,23 @@ class Facade:
                 return label
         return "Other"
 
+    # Bodies stored by acronym rather than a neutral-citation court code (see
+    # court_label). Extend as adapters introduce new ones — the convention is that every
+    # court/body value a document can carry must have a name here or in the citation
+    # registry, because the UI never shows a raw code.
+    _BODY_NAMES = {
+        "CNIL": "Commission nationale de l’informatique et des libertés (CNIL)",
+        "CCPC": "Competition and Consumer Protection Commission",
+        "CMA": "Competition and Markets Authority",
+        "EDPS": "European Data Protection Supervisor",
+        "BGH": "Bundesgerichtshof (Federal Court of Justice)",
+        "BFH": "Bundesfinanzhof (Federal Fiscal Court)",
+        "BAG": "Bundesarbeitsgericht (Federal Labour Court)",
+        "BVerwG": "Bundesverwaltungsgericht (Federal Administrative Court)",
+        "BSG": "Bundessozialgericht (Federal Social Court)",
+        "BVerfG": "Bundesverfassungsgericht (Federal Constitutional Court)",
+    }
+
     # National regulators' decisions (EDPB one-stop-shop, court = dpa-xx) belong to
     # their own COUNTRY, not to "European Union" where the register happens to live.
     _DPA_COUNTRY = {
@@ -2659,10 +2729,34 @@ class Facade:
         "lt": "Lithuania", "lv": "Latvia", "ee": "Estonia", "cy": "Cyprus",
         "mt": "Malta", "is": "Iceland", "li": "Liechtenstein",
     }
-    # Regulators whose output is ADMINISTRATIVE DECISIONS — a kind of its own, not
-    # case law and not guidance. Extend as bodies join (Scottish Information
-    # Commissioner, Irish DPC's pre-GDPR decisions, state privacy commissioners…).
-    _ADMIN_SOURCES = {"edpb-oss", "ofcom-enforcement", "ico"}
+    # Regulators and EU bodies whose output is ADMINISTRATIVE DECISIONS — a kind of its
+    # own, not case law and not guidance. Extend as bodies join (Scottish Information
+    # Commissioner, state privacy commissioners…).
+    #
+    # A regulator's decision carries doc_type "decision", which the case-type check would
+    # otherwise read as case law: before this list grew, a live audit found 3,750 documents
+    # filed as case law that are nothing of the kind — ESMA sanctions, Commission antitrust
+    # and DMA decisions, CCPC merger determinations, CMA cases, FCA final notices, EDPB
+    # binding decisions and Art 64 opinions, and three EU appeal bodies. They now answer the
+    # "administrative decisions" filter, where a lawyer looking for them actually looks.
+    _ADMIN_SOURCES = {
+        "edpb-oss", "ofcom-enforcement", "ico", "ie-dpc",
+        # EU bodies: the Board itself (binding decisions + Art 64 opinions), the
+        # Commission's competition/DMA registers, the sectoral appeal panels, the Ombudsman
+        "edpb", "eu-dgcomp-antitrust", "dma-cases", "eu-esma-sanctions",
+        "eu-esas-boa", "eu-srb-appeals", "eu-ombudsman",
+        # national competition / financial regulators
+        "ie-ccpc-mergers", "uk-cma", "uk-fca-notices",
+    }
+    # The only source whose PREPARATORY documents are legislative travaux (Commission
+    # proposals, impact assessments) rather than reports. Everything else that files as
+    # preparatory — a Law Commission report, a Scottish Law Commission paper — is a REPORT,
+    # and belongs with guidance under "Guidance/Reports" rather than in a category a reader
+    # would never think to open.
+    _TRAVAUX_SOURCES = {"eu-preparatory"}
+    # What a regulator DECIDES (as opposed to writes about): the doc types that make a
+    # document from an admin body an administrative decision.
+    _ADMIN_DOC_TYPES = {"decision", "opinion", "notice"}
 
     # A DPA the corpus knows by its proper name — shown instead of the generic
     # "Data protection authority · <country>". The `iedpc` court code (BAILII's
@@ -2683,10 +2777,16 @@ class Facade:
         if doc_type == "guidance":
             return "guidance"
         if doc_type == "preparatory":
-            return "preparatory"
+            return "preparatory" if source in self._TRAVAUX_SOURCES else "guidance"
         # then an administrative body's DECISIONS (a DPA decision, an enforcement
-        # notice) — before the case-type check, since those carry doc_type "decision"
-        if (court or "").lower().startswith("dpa-") or source in self._ADMIN_SOURCES:
+        # notice) — before the case-type check, since those carry doc_type "decision".
+        # A data-protection authority's whole output is administrative whatever it is
+        # filed as (BAILII's Irish DPC case studies arrive as "judgment"); for the other
+        # regulators only the DECIDING documents count, so an EDPB commentary stays
+        # commentary rather than being announced as a decision.
+        if (court or "").lower().startswith("dpa-"):
+            return "administrative"
+        if source in self._ADMIN_SOURCES and doc_type in self._ADMIN_DOC_TYPES:
             return "administrative"
         if doc_type in self._CASE_TYPES:
             return "cases"

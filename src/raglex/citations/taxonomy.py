@@ -36,7 +36,10 @@ CATEGORY_LABELS: dict[str, str] = {
     "eu-legislation": "EU legislation",
     "eu-preparatory": "EU preparatory & Commission policy documents",
     "echr": "ECHR",
-    "guidance": "Regulatory guidance",
+    # not only REGULATORY guidance: a law-reform commission's reports and other
+    # non-regulator reports live here too, because a reader looking for "the Law
+    # Commission report on X" looks under guidance, not under a travaux category.
+    "guidance": "Guidance & reports",
     "ca-caselaw": "Canadian case-law",
     "au-caselaw": "Australian case-law",
     "nz-caselaw": "New Zealand case-law",
@@ -368,10 +371,23 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
     if source == "ofcom-enforcement":
         return Tax("guidance", CATEGORY_LABELS["guidance"], "ofcom-enforcement",
                    "Ofcom enforcement actions", {"source": "ofcom-enforcement"})
+    # The Information Rights tribunal's own register is UK case law like any other
+    # tribunal's — without this it fell through to "Other / unrouted".
+    if source == "uk-ftt-ir":
+        return Tax("uk-caselaw", CATEGORY_LABELS["uk-caselaw"], "ukftt-ir",
+                   "FTT — Information Rights (register)", {"source": "uk-ftt-ir"})
     if doc_type == "guidance":
         return Tax("guidance", CATEGORY_LABELS["guidance"], source or "other",
                    f"Guidance ({source})" if source else "Guidance",
                    {"doc_type": "guidance", **({"source": source} if source else {})})
+    # Law-reform reports (Law Commission, and the Scottish Law Commission when it lands):
+    # filed as "preparatory" because that is what they are to the legislation that follows,
+    # but they belong with guidance where a reader will look for them — EU travaux keep
+    # their own category above.
+    if doc_type == "preparatory":
+        return Tax("guidance", CATEGORY_LABELS["guidance"], source or "reports",
+                   f"Reports ({source})" if source else "Law-reform reports",
+                   {"doc_type": "preparatory", **({"source": source} if source else {})})
     if source == "echr":
         # "echr" arrives when grouped by slug-prefix (echr/convention → "echr"); a held
         # ECtHR case is an ECLI:CE:… id with no slash, so this only catches the Convention.

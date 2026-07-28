@@ -18,7 +18,7 @@ const FMT = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M"
 const KIND_COLOURS: [string, string, string][] = [
   ["cases", "var(--exp-cases)", "case law"],
   ["legislation", "var(--exp-leg)", "legislation"],
-  ["guidance", "var(--exp-guid)", "guidance"],
+  ["guidance", "var(--exp-guid)", "guidance & reports"],
   ["administrative", "var(--exp-admin)", "admin decisions"],
   ["other", "var(--exp-other)", "other"],
 ];
@@ -162,7 +162,7 @@ const SORT_LABEL: Record<string, string> = {
   newest: "newest first", oldest: "oldest first",
 };
 const KIND_LABEL: Record<string, string> = {
-  "": "documents", cases: "case law", legislation: "legislation", guidance: "guidance",
+  "": "documents", cases: "case law", legislation: "legislation", guidance: "guidance & reports",
   administrative: "administrative decisions",
 };
 
@@ -207,7 +207,7 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
   }, [jurisdiction, f.court, f.kind, f.sort, f.years?.[0], f.years?.[1], f.cites?.id, f.leg?.label]);
 
   const HANG: [string, string][] = [["judgment", "cases"], ["decision", "decisions"],
-    ["opinion", "opinions"], ["guidance", "guidance"], ["legislation", "legislation"]];
+    ["opinion", "opinions"], ["guidance", "guidance & reports"], ["legislation", "legislation"]];
   return (
     <div className="drill">
       <div className="drill-desc">
@@ -230,7 +230,7 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
       <div className="drill-head">
         <div className="seg-toggle mini-toggle">
           {[["", "All"], ["cases", "Cases"], ["legislation", "Legislation"],
-            ["guidance", "Guidance"], ["administrative", "Admin decisions"]].map(([v, l]) => (
+            ["guidance", "Guidance/Reports"], ["administrative", "Admin decisions"]].map(([v, l]) => (
             // switching kind re-scopes the rail, so a court or legislation type
             // picked under another kind may no longer exist — reset for a
             // predictable view

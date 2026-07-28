@@ -241,7 +241,7 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
   // same as the cited-by panel. No relationship-type chips here: the mentions box goes
   // straight to the categories.
   const KIND_LABEL: Record<string, string> = {
-    cases: "cases", legislation: "legislation", guidance: "guidance",
+    cases: "cases", legislation: "legislation", guidance: "guidance & reports",
     preparatory: "preparatory documents",
     administrative: "admin decisions", other: "other",
   };
@@ -2293,7 +2293,7 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
   // with a few jurisdictions' heavyweights — 2,484 French decisions citing the
   // GDPR once read as "no French case law" because none cracked the top page.
   const KIND_LABEL: Record<string, string> = {
-    cases: "cases", legislation: "legislation", guidance: "guidance",
+    cases: "cases", legislation: "legislation", guidance: "guidance & reports",
     preparatory: "preparatory documents",
     administrative: "admin decisions", other: "other",
   };
