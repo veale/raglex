@@ -43,7 +43,39 @@ _CODE_TTL = 600                                                              # 1
 
 
 def mcp_oauth_enabled() -> bool:
-    return bool(os.environ.get("RAGLEX_MCP_PASSWORD"))
+    # The MCP endpoint uses the SAME credentials as the web login rather than a
+    # third password: whichever of the two you type at the consent page decides
+    # whether the token can change the corpus. RAGLEX_MCP_PASSWORD stays supported
+    # (it grants admin) so an existing deployment keeps working.
+    return bool(os.environ.get("RAGLEX_MCP_PASSWORD")
+                or os.environ.get("RAGLEX_ADMIN_PASSWORD")
+                or os.environ.get("RAGLEX_ADMIN_PASSWORD_HASH")
+                or os.environ.get("RAGLEX_READER_PASSWORD")
+                or os.environ.get("RAGLEX_READER_PASSWORD_HASH"))
+
+
+# The two scopes an MCP token can carry, mirroring the web's two roles exactly. A
+# reader token can call every read tool and nothing else; maintenance() — the single
+# door to ~60 mutation ops — requires the admin scope.
+SCOPE_READ = "raglex:read"
+SCOPE_ADMIN = "raglex:admin"
+SCOPE_BY_ROLE = {"admin": SCOPE_ADMIN, "reader": SCOPE_READ}
+
+
+def _role_for(password: str) -> Optional[str]:
+    """"admin" | "reader" | None for a consent-page password.
+
+    Delegates to the web's own resolver so there is one place that decides what a
+    password means; RAGLEX_MCP_PASSWORD remains an admin credential for deployments
+    configured before the split."""
+    from .auth import role_for_password
+
+    if not password:
+        return None
+    mcp_only = os.environ.get("RAGLEX_MCP_PASSWORD")
+    if mcp_only and hmac.compare_digest(password, mcp_only):
+        return "admin"
+    return role_for_password(password)
 
 
 def public_base_url() -> Optional[str]:
@@ -151,13 +183,18 @@ def build_provider(facade):
 
         # completing the flow from the consent page: mint + stash the code, return the
         # client redirect the browser should follow.
-        def complete_authorization(self, req_token: str) -> Optional[str]:
+        def complete_authorization(self, req_token: str,
+                                   scopes: list[str] | None = None) -> Optional[str]:
             payload = _unsign(secret, req_token)
             if payload is None:
                 return None
             code = f"rlx_{secrets.token_urlsafe(32)}"
+            # The scopes GRANTED are the ones the consent page decided from the
+            # password, not the ones the client asked for — a client cannot request
+            # its way to admin.
+            granted = scopes if scopes is not None else payload["scopes"]
             self._auth_codes[code] = AuthorizationCode(
-                code=code, scopes=payload["scopes"], expires_at=time.time() + _CODE_TTL,
+                code=code, scopes=granted, expires_at=time.time() + _CODE_TTL,
                 client_id=payload["client_id"], code_challenge=payload["code_challenge"],
                 redirect_uri=payload["redirect_uri"],
                 redirect_uri_provided_explicitly=payload["redirect_uri_explicit"],
@@ -239,6 +276,11 @@ def auth_settings():
     return AuthSettings(
         issuer_url=AnyHttpUrl(issuer),
         resource_server_url=AnyHttpUrl(issuer),
+        # No scope is REQUIRED to reach the endpoint — a reader token is valid, it
+        # simply cannot call maintenance(); the tool checks. Advertising both lets a
+        # client show what it was granted.
+        valid_scopes=[SCOPE_READ, SCOPE_ADMIN],
+        default_scopes=[SCOPE_READ],
         required_scopes=[],
         client_registration_options=ClientRegistrationOptions(enabled=True),
         revocation_options=RevocationOptions(enabled=True),
@@ -306,13 +348,15 @@ def install_mcp_oauth_routes(app, provider, mcp_app) -> None:
         form = await request.form()
         req = str(form.get("req") or "")
         password = str(form.get("password") or "")
-        expected = os.environ.get("RAGLEX_MCP_PASSWORD") or ""
-        if not (expected and hmac.compare_digest(password, expected)):
+        role = _role_for(password)
+        if role is None:
             return HTMLResponse(
                 _CONSENT_HTML.format(req=_html_escape(req),
                                      error='<div class="err">Incorrect password</div>'),
                 status_code=401)
-        redirect = provider.complete_authorization(req)
+        # the granted scope IS the role: an admin login yields a token that may call
+        # maintenance(), a reader login yields one that may only read
+        redirect = provider.complete_authorization(req, scopes=[SCOPE_BY_ROLE[role]])
         if redirect is None:
             return HTMLResponse(
                 _CONSENT_HTML.format(req=_html_escape(req),

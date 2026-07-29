@@ -68,6 +68,38 @@ _INSTRUCTIONS = (
 )
 
 
+class NotPermitted(Exception):
+    """A reader token reached an admin-only tool."""
+
+
+def _require_admin() -> None:
+    """Admin scope, or refuse.
+
+    Mirrors the web exactly: reads are open to a reader, anything that CHANGES the
+    corpus is admin-only. maintenance() is the single door to ~60 mutation ops, so
+    this is the single place the door is locked — a new op inherits the gate rather
+    than having to remember it.
+
+    With OAuth unconfigured there is no token and no gate, which is the same
+    trade the HTTP API makes: an unauthenticated deployment is trusted, and a local
+    stdio client has the operator's own shell anyway."""
+    from .web.mcp_oauth import SCOPE_ADMIN, mcp_oauth_enabled
+
+    if not mcp_oauth_enabled():
+        return
+    try:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+    except ImportError:  # pragma: no cover — SDK without the auth middleware
+        return
+    token = get_access_token()
+    if token is None:
+        return  # stdio / in-process: no HTTP request, so no bearer token to check
+    if SCOPE_ADMIN not in (token.scopes or []):
+        raise NotPermitted(
+            "This token is read-only. maintenance() changes the corpus and needs the "
+            "admin password at the consent screen; reconnect and authorise as admin.")
+
+
 def build_server(config: Config | None = None) -> MCPServer:
     facade = Facade(config or Config.from_env())
     # OAuth 2.1 for the HTTP transport (opt-in via RAGLEX_MCP_PASSWORD + RAGLEX_PUBLIC_URL).
@@ -883,11 +915,17 @@ def build_server(config: Config | None = None) -> MCPServer:
         ``maintenance("help")`` lists every op with its one-line purpose and argument names;
         then ``maintenance("<op>", {..args..})`` runs it (e.g.
         ``maintenance("harvest", {"source": "uk-caselaw"})``). For everyday research you
-        won't need this — lookup() already fetches silently."""
+        won't need this — lookup() already fetches silently.
+
+        Needs an ADMIN token: the consent screen takes either the admin or the reader
+        password, and only the admin one yields a token that may change anything.
+        help/list is readable by anyone, so a reader can still see what exists."""
         if op in ("help", "", "list", "ops"):
             return {"count": len(_MAINT),
                     "note": "call maintenance('<op>', {..args..}); most research needs none of these",
                     "ops": {name: _op_summary(fn) for name, fn in sorted(_MAINT.items())}}
+        # everything past the help listing changes the corpus
+        _require_admin()
         fn = _MAINT.get(op)
         if fn is None:
             from difflib import get_close_matches
