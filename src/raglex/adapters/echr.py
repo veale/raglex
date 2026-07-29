@@ -67,8 +67,10 @@ def _hudoc_query(value_field: str, value: str) -> str:
             f"&select={_SELECT}&sort={quote('kpdate Descending')}&start=0&length=20")
 
 
-def _pick_judgment(rows: list[dict], appno: str | None) -> dict | None:
-    """Choose the authoritative English Court judgment from HUDOC's result set."""
+def _rank_judgments(rows: list[dict]) -> list[dict]:
+    """HUDOC's result set for one case, best document first: the authoritative English
+    Court judgment, then the other renditions of the same case (the French text, a
+    translation, a legal summary). The tail matters — see :meth:`ECHRAdapter.fetch`."""
     def score(c: dict) -> tuple:
         name = (c.get("docname") or "").upper()
         return (
@@ -79,7 +81,13 @@ def _pick_judgment(rows: list[dict], appno: str | None) -> dict | None:
         )
     cols = [r["columns"] for r in rows if r.get("columns")]
     cols = [c for c in cols if not (c.get("docname") or "").upper().startswith(("[", "INFORMATION NOTE"))]
-    return max(cols, key=score) if cols else None
+    return sorted(cols, key=score, reverse=True)
+
+
+def _pick_judgment(rows: list[dict], appno: str | None) -> dict | None:
+    """Choose the authoritative English Court judgment from HUDOC's result set."""
+    ranked = _rank_judgments(rows)
+    return ranked[0] if ranked else None
 
 
 _PARA_NUM = re.compile(r"^(\d{1,4})\.\s")
@@ -132,6 +140,11 @@ class ECHRAdapter(BaseAdapter):
 
     def _lookup(self, ident: str) -> dict | None:
         """Resolve an ECLI / app-number / itemid to a HUDOC judgment's metadata columns."""
+        ranked = self._lookup_all(ident)
+        return ranked[0] if ranked else None
+
+    def _lookup_all(self, ident: str) -> list[dict]:
+        """Every HUDOC document for this identifier, best first (see _rank_judgments)."""
         ident = ident.strip()
         if ident.lower().startswith("echr:"):  # an "echr:<case name>" candidate from the EHRR grammar
             ident = ident[5:].strip()
@@ -150,16 +163,17 @@ class ECHRAdapter(BaseAdapter):
         try:
             resp = self._client.get(_hudoc_query(field, value))
         except FetchError:
-            return None
+            return []
         try:
             rows = json.loads(resp.content)["results"]
         except (ValueError, KeyError, TypeError):
-            return None
-        return _pick_judgment(rows, appno)
+            return []
+        return _rank_judgments(rows)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         for ident in self.ids:
-            meta = self._lookup(ident)
+            ranked = self._lookup_all(ident)
+            meta = ranked[0] if ranked else None
             if not meta or not meta.get("itemid"):
                 continue
             itemid = meta["itemid"]
@@ -176,9 +190,21 @@ class ECHRAdapter(BaseAdapter):
                 landing_url=f"{BASE}/?i={itemid}",
                 raw_url=f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}",
                 hints={"itemid": itemid, "appno": appnos, "ecli": ecli,
+                       # the other HUDOC documents for this same case, in preference
+                       # order — the renditions fetch() falls back to (see below)
+                       "alt": [{"itemid": c["itemid"],
+                                "lang": (c.get("languageisocode") or "").upper(),
+                                "docname": c.get("docname")}
+                               for c in ranked[1:] if c.get("itemid")],
                        "date": meta.get("judgementdate") or meta.get("kpdate"),
                        "meta": meta_kept},
             )
+
+    def _body(self, itemid: str) -> bytes | None:
+        """One HUDOC rendition's HTML, or None if it converts to nothing. HUDOC answers
+        204 No Content for an item it holds but cannot render — not an error, just empty."""
+        resp = self._client.get(f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}")
+        return resp.content or None
 
     def fetch(self, stub: Stub) -> Record | None:
         try:
@@ -192,11 +218,34 @@ class ECHRAdapter(BaseAdapter):
                 raise
             return None
         raw = resp.content
-        text, segments = parse_body_html(raw)
+        text, segments = parse_body_html(raw) if raw else (None, [])
+        lang = "en"
         if not text:
-            # An empty HUDOC HTML conversion is far likelier a transient upstream hiccup
-            # than a genuinely empty judgment — treat it as transient, not an absence.
-            raise FetchError(f"empty HUDOC conversion for {stub.stable_id}", transient=True)
+            # HUDOC's docx conversion serves 204 No Content for renditions it can't
+            # render, and it does so PERMANENTLY — the English text of Singh v. Belgium
+            # has never converted, while the French text of the same ECLI converts fine.
+            # Retrying the same itemid for ever (it was filed as "transient") harvested
+            # nothing; so walk the other documents HUDOC lists for this case and take the
+            # first that has a body. A judgment in French is the same judgment.
+            for alt in stub.hints.get("alt") or []:
+                try:
+                    raw = self._body(alt["itemid"])
+                except FetchError as exc:
+                    if exc.transient:
+                        raise
+                    continue
+                if not raw:
+                    continue
+                text, segments = parse_body_html(raw)
+                if text:
+                    lang = (alt.get("lang") or "").lower()[:2] or "en"
+                    break
+        if not text:
+            # Nothing HUDOC holds for this case converts. Still transient — the
+            # conversion service does come back — but now it means all renditions.
+            raise FetchError(f"empty HUDOC conversion for {stub.stable_id} "
+                             f"({1 + len(stub.hints.get('alt') or [])} rendition(s) tried)",
+                             transient=True)
         date_raw = (stub.hints.get("date") or "")[:10]
         try:
             from datetime import date as _date
@@ -212,8 +261,8 @@ class ECHRAdapter(BaseAdapter):
             title=stub.title,
             court="echr",
             decision_date=dec_date,
-            language="en",
-            source_language="en",
+            language=lang,
+            source_language=lang,
             landing_url=stub.landing_url,
             raw_bytes=raw,
             raw_ext="html",

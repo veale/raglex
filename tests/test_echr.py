@@ -78,3 +78,65 @@ def test_echr_appno_resilient_to_surface_forms_and_traps():
     assert app("Regulation No 1/2003") == []
     assert app("Council Regulation No 17/62") == []
     assert app("Series A no. 139") == []
+
+
+# -- HUDOC renders some judgments in one language only -------------------------
+
+_TWO_LANGUAGES = json.dumps({"resultcount": 2, "results": [
+    {"columns": {"itemid": "001-113656", "ecli": "ECLI:CE:ECHR:2012:1002JUD003321011",
+                 "appno": "33210/11", "docname": "CASE OF SINGH AND OTHERS v. BELGIUM",
+                 "doctype": "HEJUD", "languageisocode": "ENG"}},
+    {"columns": {"itemid": "001-113660", "ecli": "ECLI:CE:ECHR:2012:1002JUD003321011",
+                 "appno": "33210/11", "docname": "AFFAIRE SINGH ET AUTRES c. BELGIQUE",
+                 "doctype": "HEJUD", "languageisocode": "FRE"}},
+]}).encode()
+
+
+class _EnglishConvertsToNothing:
+    """HUDOC's docx conversion answers 204 No Content for the English text of Singh v.
+    Belgium — permanently — while the French text of the same ECLI converts fine."""
+
+    def __init__(self):
+        self.fetched = []
+
+    def get(self, url, **kw):
+        class R:
+            content = b""
+        if "conversion" not in url:
+            R.content = _TWO_LANGUAGES
+        else:
+            self.fetched.append(url)
+            R.content = b"" if "001-113656" in url else _HTML
+        return R()
+
+
+def test_empty_conversion_falls_back_to_the_other_language_rendition():
+    client = _EnglishConvertsToNothing()
+    ad = ECHRAdapter(ids="ECLI:CE:ECHR:2012:1002JUD003321011", client=client)
+    stub = next(iter(ad.discover(None)))
+    assert stub.hints["itemid"] == "001-113656"          # the English judgment is preferred
+    rec = ad.fetch(stub)
+    assert rec is not None and "violation" in rec.text   # …but the French text is the fetch
+    assert rec.language == "fr" and rec.source_language == "fr"
+    assert len(client.fetched) == 2                      # tried English, then the sibling
+
+
+def test_all_renditions_empty_is_still_transient():
+    """When nothing HUDOC holds converts, the reference must NOT be written off as absent
+    for 90 days — the conversion service does come back."""
+    from raglex.core.errors import FetchError
+
+    class _NothingConverts(_EnglishConvertsToNothing):
+        def get(self, url, **kw):
+            class R:
+                content = _TWO_LANGUAGES if "conversion" not in url else b""
+            return R()
+
+    ad = ECHRAdapter(ids="ECLI:CE:ECHR:2012:1002JUD003321011", client=_NothingConverts())
+    stub = next(iter(ad.discover(None)))
+    try:
+        ad.fetch(stub)
+    except FetchError as exc:
+        assert exc.transient and "2 rendition(s)" in str(exc)
+    else:
+        raise AssertionError("expected a transient FetchError")

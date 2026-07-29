@@ -37,6 +37,9 @@ def text_alias(number: str) -> str:
     return f"fr:text:{normalise_fr_number(number)}"
 
 
+# How each code is CITED — the names a judgment actually prints, which are also the
+# extraction grammar's alternation. The official register titles are separate
+# (``_CODE_TITLES``): nobody writes "Code général des impôts, CGI." in prose.
 _CODE_NAMES = {
     "cciv": ("code civil", "c. civ.", "c.civ."),
     "cprociv": ("code de procédure civile", "code de procedure civile", "c. pr. civ.", "cpc"),
@@ -60,15 +63,134 @@ _CODE_NAMES = {
     "cgi": ("code général des impôts", "code general des impots", "cgi"),
     "crpa": ("code des relations entre le public et l'administration",
              "code des relations entre le public et l’administration", "crpa"),
+    # The rest of the codified law the corpus holds. Without a key here, an article of
+    # these codes is held under its LEGIARTI id and NOTHING resolves to it: the CGI alone
+    # was 3,042 unresolvable references over 145,000 citations while all 22,832 of its
+    # articles sat in the corpus.
+    "cgian1": ("code général des impôts annexe I", "code general des impots annexe i"),
+    "cgian2": ("code général des impôts annexe II", "code general des impots annexe ii"),
+    "cgian3": ("code général des impôts annexe III", "code general des impots annexe iii"),
+    "cgian4": ("code général des impôts annexe IV", "code general des impots annexe iv"),
+    "crural": ("code rural et de la pêche maritime", "code rural et de la peche maritime",
+               "code rural", "c. rur."),
+    "cmf": ("code monétaire et financier", "code monetaire et financier", "cmf",
+            "c. mon. fin."),
+    "cch": ("code de la construction et de l'habitation",
+            "code de la construction et de l’habitation", "cch"),
+    "ctransports": ("code des transports",),
+    "ceduc": ("code de l'éducation", "code de l’éducation", "code de l'education",
+              "c. éduc."),
+    "curb": ("code de l'urbanisme", "code de l’urbanisme", "code de l'urbanisme", "c. urb."),
+    "casf": ("code de l'action sociale et des familles",
+             "code de l’action sociale et des familles", "casf"),
+    "cdef": ("code de la défense", "code de la defense"),
+    "cenergie": ("code de l'énergie", "code de l’énergie", "code de l'energie"),
+    "ccia": ("code du cinéma et de l'image animée",
+             "code du cinema et de l'image animee"),
+    "ctravmayotte": ("code du travail applicable à Mayotte",
+                     "code du travail applicable a mayotte"),
+    "ccommunes": ("code des communes",),
+    "ccommunesnc": ("code des communes de la Nouvelle-Calédonie",
+                    "code des communes de la nouvelle caledonie"),
+    "csport": ("code du sport",),
+    "cjf": ("code des juridictions financières", "code des juridictions financieres", "cjf"),
+    "coj": ("code de l'organisation judiciaire", "code de l’organisation judiciaire", "coj"),
+    "cpmivg": ("code des pensions militaires d'invalidité et des victimes de la guerre",
+               "code des pensions militaires d’invalidité et des victimes de la guerre",
+               "cpmivg"),
+    "celect": ("code électoral", "code electoral"),
+    "cforestier": ("code forestier",),
+    "cgfp": ("code général de la fonction publique", "code general de la fonction publique",
+             "cgfp"),
+    "croute": ("code de la route", "c. route"),
+    "cpatrimoine": ("code du patrimoine",),
+    "cmutualite": ("code de la mutualité", "code de la mutualite"),
+    "cpenitentiaire": ("code pénitentiaire", "code penitentiaire"),
+    "ccp": ("code de la commande publique",),
+    "caviation": ("code de l'aviation civile", "code de l’aviation civile"),
+    "cibs": ("code des impositions sur les biens et services",),
+    "cdouanes": ("code des douanes",),
+    "cdouanesmayotte": ("code des douanes de Mayotte",),
+    "ctourisme": ("code du tourisme",),
+    "cg3p": ("code général de la propriété des personnes publiques",
+             "code general de la propriete des personnes publiques", "cg3p"),
+    "csn": ("code du service national",),
+    "cmp": ("code des marchés publics", "code des marches publics"),
+    "crecherche": ("code de la recherche",),
+    "cportsmaritimes": ("code des ports maritimes",),
+    "cdomaineetat": ("code du domaine de l'Etat", "code du domaine de l’État",
+                     "code du domaine de l'etat"),
+    "cpcex": ("code des procédures civiles d'exécution",
+              "code des procédures civiles d’exécution",
+              "code des procedures civiles d'execution", "cpce"),
+    "cminier": ("code minier",),
+    "cjmil": ("code de justice militaire",),
+    "cexpro": ("code de l'expropriation pour cause d'utilité publique",
+               "code de l’expropriation pour cause d’utilité publique",
+               "code de l'expropriation"),
+    "cvoirie": ("code de la voirie routière", "code de la voirie routiere"),
+    "cjpm": ("code de la justice pénale des mineurs", "code de la justice penale des mineurs",
+             "cjpm"),
+    "cartisanat": ("code de l'artisanat", "code de l’artisanat"),
+    "cpcmr": ("code des pensions civiles et militaires de retraite",),
+    "cfas": ("code de la famille et de l'aide sociale",
+             "code de la famille et de l’aide sociale"),
+    "ctacaa": ("code des tribunaux administratifs et des cours administratives d'appel",
+               "code des tribunaux administratifs et des cours administratives d’appel"),
+    "cdpf": ("code du domaine public fluvial et de la navigation intérieure",
+             "code du domaine public fluvial et de la navigation interieure"),
+    "cnat": ("code de la nationalité française", "code de la nationalite francaise"),
+    "cvin": ("code du vin",),
+    "clegion": ("code de la Légion d'honneur, de la Médaille militaire et de l'ordre "
+                "national du Mérite",
+                "code de la legion d'honneur de la medaille militaire et de l'ordre "
+                "national du merite"),
+    "ctravmaritime": ("code du travail maritime",),
+    "cdebits": ("code des débits de boissons et des mesures contre l'alcoolisme",
+                "code des debits de boissons et des mesures contre l'alcoolisme"),
+}
+
+# The titles the register publishes articles UNDER, where they differ from the cited
+# form: DILA appends the abbreviation (", CGI."), a full stop, or a disambiguator. These
+# only key held articles on ingest — they are not extraction grammar.
+#
+# A superseded or territorial version of a code gets its OWN key, never the current
+# code's: "Code rural ancien" article L. 411-1 is a different text from the same-numbered
+# article of the Code rural et de la pêche maritime, and sharing a key would resolve a
+# citation to whichever of the two happened to be minted last.
+_CODE_TITLES = {
+    "Code général des impôts, CGI.": "cgi",
+    "Code général des impôts annexe I, CGIANI.": "cgian1",
+    "Code général des impôts, annexe II, CGIANII.": "cgian2",
+    "Code général des impôts, annexe III, CGIANIII.": "cgian3",
+    "Code général des impôts, annexe IV, CGIANIV.": "cgian4",
+    "Code forestier (nouveau)": "cforestier",
+    "Code forestier": "cforestieranc",
+    "Code forestier de Mayotte": "cforestiermayotte",
+    "Code minier (nouveau)": "cminier",
+    "Code minier": "cminieranc",
+    "Code rural ancien": "cruralanc",
+    "Code de procédure civile (1807)": "cprociv1807",
+    "Code des pensions militaires d'invalidité et des victimes de guerre.": "cpmivganc",
 }
 
 
+def _norm_title(value: str) -> str:
+    """Fold accents/punctuation/case so a register title and a cited name compare equal
+    ("Code de la sécurité sociale." == "code de la securite sociale")."""
+    return re.sub(r"[^a-z0-9]+", " ", _fold(value)).strip()
+
+
+_CODE_TITLE_INDEX = {_norm_title(t): key for t, key in _CODE_TITLES.items()}
+_CODE_NAME_INDEX = {_norm_title(n): key for key, names in _CODE_NAMES.items() for n in names}
+
+
 def code_key(title: str) -> str | None:
-    folded = re.sub(r"[^a-z0-9]+", " ", _fold(title)).strip()
-    for key, names in _CODE_NAMES.items():
-        if any(folded == re.sub(r"[^a-z0-9]+", " ", _fold(n)).strip() for n in names):
-            return key
-    return None
+    """The stable key for a French code, from either its cited name or its register
+    title. The register title wins: it is the more specific of the two, and it is what
+    distinguishes "Code forestier (nouveau)" from the code it replaced."""
+    folded = _norm_title(title)
+    return _CODE_TITLE_INDEX.get(folded) or _CODE_NAME_INDEX.get(folded)
 
 
 def normalise_article(value: str) -> str:
@@ -81,8 +203,13 @@ def code_article_alias(title: str, article: str) -> str | None:
     return f"fr:code:{key}:{normalise_article(article)}" if key and article else None
 
 
+# Longest name first ACROSS the whole table, not just within one code: the alternation
+# is first-match, so "code des douanes" listed before "code des douanes de Mayotte" would
+# key every Mayotte citation to the metropolitan code.
 _CODE_ALT = "|".join(
-    re.escape(name) for names in _CODE_NAMES.values() for name in sorted(names, key=len, reverse=True)
+    re.escape(name)
+    for name in sorted({n for names in _CODE_NAMES.values() for n in names},
+                       key=len, reverse=True)
 )
 _ARTICLE = r"(?P<article>(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:-\d+)?(?:\s*(?-i:[A-Z]))?)"
 _ARTICLE_TOKEN = r"(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:\s*(?-i:[A-Z]))?"

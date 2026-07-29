@@ -231,3 +231,45 @@ def test_joined_case_already_held_mints_alias_without_refetch(monkeypatch):
         assert res["aliased_to"] == "ECLI:EU:C:1996:79"
         # the joined number now resolves to the held judgment
         assert cat.find_document_id("61993cj0048") == "ECLI:EU:C:1996:79"
+
+
+# -- routability is ONE decision (the worklist and the fetcher agree) ---------
+
+def test_targeted_harvest_and_routable_set_agree():
+    """The worklist offers a reference to the drain iff a one-item fetch can be built
+    for it. These two tables were allowed to drift, and 13,862 German and French
+    references were queued as routable in a single run only to be rejected at the last
+    step with "no targeted adapter" — 69% of that run's attempt budget."""
+    import raglex.facade as fmod
+    from raglex.citations.snowball import TARGETED_ADAPTERS
+
+    assert set(fmod._TARGETED_HARVEST) == set(TARGETED_ADAPTERS)
+
+
+def test_reference_whose_source_has_no_id_fetch_is_not_offered_to_the_drain():
+    """gesetze-im-internet holds the German statute book and NeuRIS the federal
+    judgments — but neither adapter turns a citation into a one-item fetch, so a German
+    reference is reported with its source and kept OUT of the harvest queue."""
+    f = _facade()
+    _doc(f, "de-case-1", "Der Senat verweist auf BGH, Urteil vom 26. Juni 2023 - "
+                         "VIa ZR 335/21.")
+    f.extract_citations(stable_id="de-case-1")
+    rows = {r["candidate"]: r for r in f.unresolved_references(limit=None)}
+    ref = rows["de:case:BGH:VIAZR335/21"]
+    assert ref["suggested_adapter"] == "de-neuris"  # we still say where it lives
+    assert ref["fetchable"] is False                # …but never queue a fetch for it
+    assert ref["confidence"] == "low"
+    assert not [r for r in f.unresolved_references(limit=None)
+                if r.get("fetchable") and r["confidence"] != "low"]
+
+
+def test_no_adapter_is_never_recorded_as_an_absence(monkeypatch):
+    """A gap in OUR routing is not the source saying "no such document" — cooling it as
+    a miss would hide a live reference from the adapter that lands next week."""
+    f = _facade()
+    _hanging_ref(f)
+    res = _drain_with(f, monkeypatch, "no_adapter")
+    assert res["absent"] == 0 and res["retry_later"] == 0
+    with f._open() as (cat, _rs, _ts):
+        assert not cat.enrichment_misses("harvest-miss", max_age_days=90)
+        assert not cat.enrichment_misses("harvest-retry", max_age_days=90)

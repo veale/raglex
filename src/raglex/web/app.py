@@ -652,6 +652,15 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: v for k, v in (payload or {}).items() if k in ("source", "limit")}
         return _start_job("repair-mojibake", "repair mis-decoded text", params)
 
+    @app.post("/jobs/repair-de-citations")
+    def job_repair_de_citations_ep(payload: dict = Body(default={})) -> dict:
+        """Re-validate every German citation against the current German grammar and drop
+        the phantoms it would no longer mint (a law abbreviation read off an ordinary
+        German word, a docket read off a report series or the next court in a header).
+        Pending edges only — a resolved German link is never cut. ``dry_run`` counts."""
+        params = {"dry_run": True} if (payload or {}).get("dry_run") else {}
+        return _start_job("repair-de-citations", "re-validate German citations", params)
+
     @app.post("/jobs/backfill-intituling")
     def job_backfill_intituling_ep(payload: dict = Body(default={})) -> dict:
         """Record who decided each held judgment (and who argued it), read off its own

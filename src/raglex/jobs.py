@@ -37,6 +37,7 @@ log = logging.getLogger("raglex.jobs")
 # keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
+    "repair-de-citations",
     "backfill-eu-stubs",
     "rebuild-citation-counts", "rebuild-authority", "auto-drain", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
@@ -99,6 +100,8 @@ CHAIN_TRIGGER_KINDS = frozenset({
     "import-bailii-corpus", "import-bailii-zip", "import-bailii-dir", "import-bailii-parquet",
     "import-indian-sci", "import-sg-seed", "import-westlaw-zip", "import-westlaw-dir",
     "import-caselaw-zip", "import-caselaw-dir", "reparse-source", "finish-bulk-postprocess",
+    # a phantom prune changes the counts as surely as a harvest does
+    "repair-de-citations",
 })
 # (follow-up kind, min seconds since its last completion before re-running). embed is cheap
 # and incremental; the count roll-up is moderate; PageRank walks the whole graph, so it gets
@@ -278,6 +281,9 @@ RUNNERS: dict[str, Callable] = {
     "backfill-eu-case-names": lambda f, p, cb, cancel: f.backfill_titles(**p, on_progress=cb, cancel_check=cancel),
     "backfill-ag-names": lambda f, p, cb, cancel: f.backfill_ag_names(**p, on_progress=cb, cancel_check=cancel),
     "repair-mojibake": lambda f, p, cb, cancel: f.repair_mojibake(**p, on_progress=cb, cancel_check=cancel),
+    # re-validate German citations against the current grammar (drops what it would no
+    # longer mint) — the standing migration for a German grammar fix
+    "repair-de-citations": lambda f, p, cb, cancel: f.repair_de_citations(**p, on_progress=cb, cancel_check=cancel),
     "backfill-intituling": lambda f, p, cb, cancel: f.backfill_intituling(**p, on_progress=cb, cancel_check=cancel),
     "resegment-judgments": lambda f, p, cb, cancel: f.resegment_judgments(**p, on_progress=cb, cancel_check=cancel),
     "build-fts": lambda f, p, cb, cancel: f.build_freetext_index(**p, on_progress=cb, cancel_check=cancel),

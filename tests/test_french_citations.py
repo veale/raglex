@@ -97,3 +97,54 @@ def test_migration_mints_aliases_for_already_imported_french_nodes(catalogue):
     assert catalogue.find_document_id("JURITEXT000051856547") == \
         "ECLI:FR:CCASS:2023:C100001"
     assert catalogue.find_document_id("fr:code:cciv:L112-1") == "LEGIARTI000006419292"
+
+
+# -- every code the corpus HOLDS must have a key ------------------------------
+
+def test_register_titles_key_to_the_same_code_as_the_cited_name():
+    """DILA publishes articles under a decorated title ("Code général des impôts, CGI.")
+    and judgments cite the plain name. The exact-equality match keyed only the latter, so
+    all 22,832 held CGI articles were unreachable: 3,042 hanging references over 145,000
+    citations, pointing at text the corpus already had."""
+    from raglex.citations.french import code_article_alias, code_key
+
+    assert code_key("Code général des impôts, CGI.") == "cgi"
+    assert code_key("code général des impôts") == "cgi"
+    assert code_key("Code de la sécurité sociale.") == "css"
+    assert code_article_alias("Code général des impôts, CGI.", "1729") == "fr:code:cgi:1729"
+
+
+def test_codes_beyond_the_original_twenty_are_keyed():
+    """The whitelist covered 20 codes; the corpus holds 80-odd."""
+    from raglex.citations.french import code_key
+
+    assert code_key("Code rural et de la pêche maritime") == "crural"
+    assert code_key("Code monétaire et financier") == "cmf"
+    assert code_key("Code de la construction et de l'habitation.") == "cch"
+    assert code_key("Code de l'action sociale et des familles") == "casf"
+
+
+def test_superseded_and_territorial_codes_do_not_share_a_key():
+    """Article L. 411-1 of the Code rural ancien is a different text from the same-numbered
+    article of the current code — one key for both would resolve citations to whichever
+    was minted last."""
+    from raglex.citations.french import code_key
+
+    assert code_key("Code rural ancien") == "cruralanc" != code_key("Code rural et de la pêche maritime")
+    assert code_key("Code forestier (nouveau)") != code_key("Code forestier")
+    assert code_key("Code minier (nouveau)") != code_key("Code minier")
+
+
+def test_longest_code_name_wins_across_the_whole_table():
+    """The alternation is first-match: "code des douanes" listed before "code des douanes
+    de Mayotte" would key every Mayotte citation to the metropolitan code."""
+    cites = [c for c in extract_citations("article 8 du code des douanes de Mayotte")
+             if c.candidate_id]
+    assert [c.candidate_id for c in cites] == ["fr:code:cdouanesmayotte:8"]
+
+
+def test_new_code_names_extract_from_prose():
+    cites = [c for c in extract_citations(
+        "article L. 511-1 du code monétaire et financier et article 1729 du code général "
+        "des impôts") if c.candidate_id]
+    assert {c.candidate_id for c in cites} == {"fr:code:cmf:L511-1", "fr:code:cgi:1729"}

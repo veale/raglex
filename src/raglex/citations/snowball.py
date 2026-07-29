@@ -42,6 +42,22 @@ _NEUTRAL_RE = re.compile(r"^(?P<court>[a-z]+)(?:/[a-z]+)?/(?:19|20)\d{2}/\d+$")
 _ECLI_ADAPTER = {"EU": "eu-cellar", "NL": "nl-rechtspraak", "GB": "uk-caselaw", "CE": "echr",
                  "FR": "fr-judilibre", "DE": "de-neuris"}
 _NL_BWB_RE = re.compile(r"^BWBR\d{7}(?:@\d{4}-\d{2}-\d{2})?$", re.I)
+# The adapters that can fetch ONE item by its id — the mirror of facade's
+# ``_TARGETED_HARVEST`` (a test pins the two together). ``_classify`` answers "which
+# source holds this", which is not the same question: gesetze-im-internet holds a German
+# statute and NeuRIS holds a German judgment, but neither adapter takes a citation and
+# returns that item, so the drain can only ever fail on them. Routability — what the
+# harvest worklist offers and the drain attempts — is THIS set, so a reference is never
+# queued for a fetch that cannot be built.
+TARGETED_ADAPTERS = frozenset({
+    "uk-legislation", "eu-legislation", "eu-preparatory", "uk-caselaw", "uk-hol",
+    "eu-cellar", "echr", "nl-rechtspraak", "nl-legislation", "us-caselaw", "ca-canlii",
+})
+
+
+def is_fetchable(adapter: str | None) -> bool:
+    """Can a single item be fetched from this source by id? (See TARGETED_ADAPTERS.)"""
+    return adapter in TARGETED_ADAPTERS
 # A bare ECHR application number (4451/70, 36022/97) — the resolvable key for an ECtHR
 # case (the HUDOC adapter looks it up). Distinct from a CJEU number, which has a C-/T- prefix.
 ECHR_APPNO_RE = re.compile(r"^\d{1,5}/\d{2}$")  # app-number year is always 2 digits
@@ -233,7 +249,10 @@ def snowball(catalogue: Catalogue, *, limit: int = 50, only_unresolved: bool = T
         if f is None:
             f = buckets[key] = Frontier(
                 form=form, jurisdiction=juris, adapter=adapter, candidates=0,
-                occurrences=0, documents=0, sample=candidate, harvestable=adapter is not None,
+                occurrences=0, documents=0, sample=candidate,
+                # "harvestable" means a fetch can actually be BUILT for one of these —
+                # naming the source that holds them is not enough (TARGETED_ADAPTERS).
+                harvestable=is_fetchable(adapter),
             )
         f.candidates += 1
         f.occurrences += row["occurrences"]

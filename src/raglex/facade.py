@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from typing import Iterator
 
 
+from .citations.snowball import TARGETED_ADAPTERS as _SNOWBALL_TARGETED
+
 log = logging.getLogger("raglex.facade")
 
 
@@ -577,6 +579,11 @@ _TARGETED_HARVEST = {
     "us-caselaw": _targeted_us_caselaw,
     "ca-canlii": _targeted_ca_canlii,
 }
+# The worklist decides what to offer the drain from the same set (a citation whose
+# source has no id-fetch is reported, but never queued) — keep the two in step.
+assert set(_TARGETED_HARVEST) == set(_SNOWBALL_TARGETED), (
+    "TARGETED_ADAPTERS and _TARGETED_HARVEST have drifted: "
+    f"{set(_TARGETED_HARVEST) ^ set(_SNOWBALL_TARGETED)}")
 
 
 # Canonical anchor key — the server-side mirror of the reader's anchorKey() (views.tsx):
@@ -3966,7 +3973,7 @@ class Facade:
         # fetch), as opposed to the frontier's *occurrence* counts (one instrument can
         # be cited hundreds of times) — so the "Harvest all routable (N)" button can
         # show the real total instead of only what a page happens to have loaded.
-        routable = [h for h in hanging if h["suggested_adapter"]
+        routable = [h for h in hanging if h.get("fetchable")
                     and h["confidence"] != "low" and not h["needs_identifier"]]
         # How many routable references a drain would actually attempt right now. The rest
         # are cooling off after an earlier failure — the difference between these two
@@ -4016,7 +4023,8 @@ class Facade:
         The grouping is one SQL GROUP BY over the persisted ``candidate_id``; the
         per-reference citing-document list costs a query each, so it's only filled for
         the rows a human will actually look at (``with_citing``)."""
-        from .citations.snowball import ECHR_APPNO_RE, _classify, uk_leg_category as _uk_leg_category
+        from .citations.snowball import (ECHR_APPNO_RE, _classify, is_fetchable,
+                                         uk_leg_category as _uk_leg_category)
         from .citations.taxonomy import classify_candidate
         from .adapters.bailii import bailii_url as _bailii_url
 
@@ -4056,10 +4064,18 @@ class Facade:
                     adapter == "echr" and cand and ECHR_APPNO_RE.match(cand)
                     and not g["echr_citing"]
                 )
+                # Naming the source that holds a reference is not the same as being able
+                # to FETCH it: gesetze-im-internet holds the German statute book and
+                # NeuRIS the federal judgments, but neither adapter turns a citation into
+                # a one-item fetch. Such a reference is reported with its source (that is
+                # the honest answer to "where does this live?") but must never be offered
+                # to the drain, which would spend an attempt slot to fail with
+                # "no targeted adapter" and then file it as absent.
+                fetchable = is_fetchable(adapter)
                 # low confidence: no candidate, an LLM-surfaced reference, a form we can't
-                # route to an adapter, OR a fuzzy name-based ECHR match (keep these out of
-                # auto-harvest — a HUDOC docname guess wants a human's eye).
-                low = (needs_identifier or "llm" in methods or adapter is None
+                # fetch, OR a fuzzy name-based ECHR match (keep these out of auto-harvest —
+                # a HUDOC docname guess wants a human's eye).
+                low = (needs_identifier or "llm" in methods or not fetchable
                        or misrouted_appno
                        or (cand or "").lower().startswith("echr:"))
                 cooling_reason = ("source reported absent" if cand in absent else
@@ -4069,6 +4085,9 @@ class Facade:
                     "ref": ref, "candidate": cand, "raw": g["raw"],
                     "pinpoint": g["anchor"], "form": form, "jurisdiction": juris,
                     "suggested_adapter": adapter, "needs_identifier": needs_identifier,
+                    # the source that would hold it, vs whether we can ask that source
+                    # for this one item — the "build an id-fetch" worklist is the gap
+                    "fetchable": fetchable,
                     "category": tax.category,
                     "cooling": cooling_reason is not None,
                     "cooling_reason": cooling_reason,
@@ -4132,7 +4151,7 @@ class Facade:
                               scan_limit: int | None = None, enrich: bool = True,
                               offset: int = 0) -> dict:
         from .citations.frontier import classify as _frontier_classify
-        from .citations.snowball import _classify
+        from .citations.snowball import _classify, is_fetchable as _is_fetchable
         from .adapters.bailii import external_link
         from .citations.reporters import report_series, series_jurisdiction
 
@@ -4164,8 +4183,11 @@ class Facade:
                     form, link, is_report = fc["form"], fc["link"], fc["is_report"]
                 elif cand:
                     _form, _juris, adapter = _classify(cand, "case")
-                    if adapter is not None:
+                    if _is_fetchable(adapter):
                         continue  # routable — belongs in the harvest worklist, not here
+                    # Otherwise it lands here even though a source is named for it: the
+                    # source holds it but has no id-fetch, which is exactly the
+                    # "cannot be retrieved without a human" the dead list is for.
                     form, link, is_report = _form, external_link(cand, raw), False
                 else:
                     # a raw we can't specifically classify AND with no candidate: could be a
@@ -4614,6 +4636,94 @@ class Facade:
                     ts.put(ph, fixed)
                     st["repaired"] += 1
         return st
+
+    def repair_de_citations(self, *, dry_run: bool = False,
+                            on_progress=None, cancel_check=None) -> dict:
+        """Re-validate every German citation against the CURRENT German grammar and drop
+        the ones it would no longer mint.
+
+        The German grammars are deliberately open-ended — bundesrecht accepts any
+        abbreviation-shaped tail, and a docket is recognised near a court name — and at
+        corpus scale that let three families of phantom through:
+
+        - an ordinary German word where a law abbreviation belongs, because the pattern
+          must END on a law and German capitalises its nouns ("§ 100 Absatz 1 Satz 1" →
+          de/gesetz/satz1, "§ 100a Rn" → de/gesetz/rn, cited from 7,676 documents);
+        - the next word swallowed as a book numeral ("MarkenG i.V.m." → de/gesetz/markeng1,
+          "BGB v Smith" → de/gesetz/bgb5) — phantom siblings of laws already held;
+        - a docket read off a report series ("BSG SozR 4-1500" → de:case:BSG:ZR4-1500) or
+          off the *next* court in a judgment's header ("BGH … vorgehend KG Berlin … 10 U
+          54/19" → de:case:BGH:10U54/19).
+
+        The test is the grammar itself, not a list: each distinct (candidate, raw string)
+        pair is re-extracted, and a candidate survives if ANY of the strings that minted
+        it still mints it. That makes this the standing migration for a grammar fix — it
+        will keep working after the next one.
+
+        Only PENDING edges are deleted: a German citation that resolved to a held
+        judgment or statute is a real link, and stays even if the grammar has since
+        narrowed (the count of those is reported, never acted on). ``dry_run`` counts
+        without deleting. Re-running finds nothing."""
+        from .citations.german import german_citations
+
+        st = {"pairs_checked": 0, "candidates": 0, "phantom_candidates": 0,
+              "kept_resolved": 0, "citations_deleted": 0, "edges_deleted": 0}
+        with self._open() as (cat, _rs, _ts):
+            valid: set[str] = set()
+            seen: set[str] = set()
+            # One aggregate over the German citation rows: the same raw string repeats
+            # thousands of times, so the distinct (candidate, raw) pairs are a fraction of
+            # the rows (~416k of 2.4M on the live corpus) and each costs one bounded regex.
+            cur = cat.conn.execute(
+                "SELECT candidate_id, raw FROM citations "
+                "WHERE method IN ('de_law_reference', 'de_case_reference') "
+                "AND candidate_id IS NOT NULL GROUP BY candidate_id, raw")
+            for r in cur:
+                if cancel_check and cancel_check():
+                    return {**st, "cancelled": True}
+                st["pairs_checked"] += 1
+                cand = r["candidate_id"]
+                seen.add(cand)
+                if cand in valid:
+                    continue
+                if any(c.candidate_id == cand for c in german_citations(r["raw"] or "")):
+                    valid.add(cand)
+                if st["pairs_checked"] % 5000 == 0:
+                    _progress(on_progress, stage="re-extracting German citations",
+                              done=st["pairs_checked"], total=None, item=cand)
+            st["candidates"] = len(seen)
+            phantom = sorted(seen - valid)
+            # A phantom that nevertheless RESOLVED points at a real document — leave it
+            # alone and say so, rather than cutting a live edge on a grammar change.
+            resolved: set[str] = set()
+            for i in range(0, len(phantom), 500):
+                chunk = phantom[i:i + 500]
+                qs = ",".join("?" for _ in chunk)
+                resolved.update(row["candidate_id"] for row in cat.conn.execute(
+                    f"SELECT DISTINCT candidate_id FROM relations WHERE candidate_id IN ({qs}) "
+                    "AND resolution_status <> 'pending'", chunk).fetchall())
+            drop = [c for c in phantom if c not in resolved]
+            st["phantom_candidates"] = len(drop)
+            st["kept_resolved"] = len(resolved)
+            if dry_run or not drop:
+                return {**st, "sample": drop[:20]}
+            for i in range(0, len(drop), 500):
+                if cancel_check and cancel_check():
+                    break
+                chunk = drop[i:i + 500]
+                qs = ",".join("?" for _ in chunk)
+                with cat._atomic():
+                    st["citations_deleted"] += cat.conn.execute(
+                        f"DELETE FROM citations WHERE candidate_id IN ({qs}) "
+                        "AND method IN ('de_law_reference', 'de_case_reference')",
+                        chunk).rowcount
+                    st["edges_deleted"] += cat.conn.execute(
+                        f"DELETE FROM relations WHERE candidate_id IN ({qs}) "
+                        "AND resolution_status = 'pending'", chunk).rowcount
+                _progress(on_progress, stage="dropping phantom German references",
+                          done=min(i + 500, len(drop)), total=len(drop))
+        self._invalidate_caches()  # worklist/frontier/dashboard all counted the phantoms
+        return {**st, "sample": drop[:20]}
 
     def resegment_judgments(self, *, source: str | None = None, limit: int = 400000,
                             on_progress=None, cancel_check=None) -> dict:
@@ -5443,7 +5553,7 @@ class Facade:
         # all — that's its job, and it runs when the box is idle.
         scan = None if limit is None else max(limit * 60, 2000)
         candidates = [r for r in self.unresolved_references(limit=scan)
-                      if r["suggested_adapter"] and r["confidence"] != "low"
+                      if r.get("fetchable") and r["confidence"] != "low"
                       and r["citing_count"] >= min_citing and not r["needs_identifier"]
                       # optional category filter: harvest just one source, and within UK
                       # legislation just primary / secondary / assimilated
@@ -5521,7 +5631,15 @@ class Facade:
                         else:
                             failed.append({"ref": r["ref"], "outcome": outcome,
                                            **({} if "error" not in res else {"error": res["error"]})})
-                            (absent if outcome in ("absent", "no_adapter") else transient).append(r["candidate"])
+                            # "no_adapter" is OUR gap, not the source's answer — the
+                            # worklist shouldn't have offered it (see TARGETED_ADAPTERS).
+                            # Cooling it as a miss would mark a live document absent for
+                            # three months and keep it away from the adapter that lands
+                            # next week, so it goes on neither list.
+                            if outcome == "absent":
+                                absent.append(r["candidate"])
+                            elif outcome != "no_adapter":
+                                transient.append(r["candidate"])
                         _progress(on_progress, stage="harvesting", done=done_ctr["n"], total=total,
                                   item=res.get("candidate") or r["ref"], ok=ok,
                                   msg=res.get("error") if not ok else None)
