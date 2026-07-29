@@ -81,6 +81,15 @@ def bailii_path_to_slug(path: str | None) -> str | None:
     if comp and comp.group(1) == year and comp.group(2).lower() == rest[0].lower():
         num = comp.group(3)
         rest = [*rest[:-1], num]
+    # A bracketed qualifier is part of the id, not a reason to give up on the judgment:
+    # the NI social-security benefit code ("C9_09_10(DLA)"), an EU order marker
+    # ("C28221P(R)_CO"), a duplicate-number disambiguator ("AA093922007(2)"). Rejecting
+    # them dropped 1,470 real judgments from the corpus — 1,001 of them Northern Irish,
+    # which is most of what NISSCSC has ever decided — for punctuation. Fold the brackets
+    # into the separator the rest of the id already uses.
+    if "(" in num or ")" in num:
+        num = re.sub(r"_+", "_", num.replace("(", "_").replace(")", "_")).strip("_")
+        rest = [*rest[:-1], num]
     # case numbers are usually bare integers but also "B17", "68_2", "J1" — allow any
     # alphanumeric-with-underscore run that carries at least one digit. The long
     # constructed tribunal ids ("LON_LV_NFE_00AY_0100") also pass, which is fine: those

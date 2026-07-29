@@ -31,6 +31,18 @@ def test_path_to_slug_edge_numbers(path, slug):
     assert bailii_path_to_slug(path) == slug
 
 
+@pytest.mark.parametrize("path,slug", [
+    # a bracketed qualifier is part of the id: the NI social-security benefit code, an
+    # EU order marker, a duplicate-number disambiguator. Rejecting the punctuation
+    # dropped 1,470 judgments — 1,001 of them Northern Irish — from the dump import.
+    ("/nie/cases/NISSCSC/2009/C9_09_10(DLA).html", "nisscsc/2009/c9_09_10_dla"),
+    ("/uk/cases/UKAITUR/2008/AA093922007(2).html", "ukaitur/2008/aa093922007_2"),
+    ("/eu/cases/EUECJ/2021/C28221P(R)_CO.html", "euecj/2021/c28221p_r_co"),
+])
+def test_path_to_slug_keeps_bracketed_qualifiers(path, slug):
+    assert bailii_path_to_slug(path) == slug
+
+
 @pytest.mark.parametrize("path", ["", "/uk/legislation/2000/1", "/ew/cases/EWHC/Comm/2015", None])
 def test_path_to_slug_rejects_non_judgments(path):
     assert bailii_path_to_slug(path) is None
