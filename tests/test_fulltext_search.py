@@ -240,3 +240,39 @@ def test_the_candidate_set_is_resolved_in_one_query_not_one_each(catalogue, tmp_
     hashes = _hashes_for(cat, ids)
     assert len(hashes) == 50
     assert calls["n"] == 1, f"{calls['n']} queries for 50 documents — should be batched"
+
+
+# -- every passage, not just the first -----------------------------------------
+def test_all_matching_passages_are_found():
+    """A judgment that uses the phrase eight times is a different hit from one that
+    uses it in passing; showing only the first passage hides that."""
+    from raglex.fulltext.index import match_offsets
+
+    p = parse('"duty of care"')
+    text = ("a duty of care arose. " * 3) + "unrelated. " + "the duty of care again."
+    offs = match_offsets(text, p)
+    assert len(offs) == 4
+    assert offs == sorted(offs)
+    for o in offs:
+        assert text[o:o + 12].lower() == "duty of care"
+
+
+def test_passage_count_is_capped():
+    from raglex.fulltext.index import match_offsets
+
+    p = parse('"duty of care"')
+    assert len(match_offsets("a duty of care. " * 200, p, cap=12)) == 12
+
+
+def test_unquoted_queries_report_passages_from_their_first_term():
+    from raglex.fulltext.index import match_offsets
+
+    p = parse("negligence damages")
+    text = "negligence here, damages there, and negligence again"
+    assert len(match_offsets(text, p)) == 2
+
+
+def test_a_document_matching_once_reports_one_passage():
+    from raglex.fulltext.index import match_offsets
+
+    assert len(match_offsets("only one duty of care here", parse('"duty of care"'))) == 1

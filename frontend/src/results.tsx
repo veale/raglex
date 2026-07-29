@@ -160,8 +160,9 @@ export function FacetRail({ dims, active, onToggle, years, yearFrom, yearTo, onY
 // --- one result --------------------------------------------------------------
 // `snippet`/`highlights` are optional: the metadata search has no matched passage to
 // show, the free-text one always does.
-export function ResultRow({ it, children, link }:
-  { it: any; children?: any; link: (it: any) => any }) {
+export function ResultRow({ it, children, link, onOpen }:
+  { it: any; children?: any; link: (it: any) => any;
+    onOpen?: (id: string, anchor?: string) => void }) {
   return (
     <div className="ft-hit">
       {link(it)}
@@ -176,7 +177,35 @@ export function ResultRow({ it, children, link }:
       {it.snippet && (
         <div className="ft-snip"><Marked text={it.snippet} spans={it.highlights} /></div>
       )}
+      <MorePassages it={it} onOpen={onOpen} />
       {children}
+    </div>
+  );
+}
+
+
+// How many times the document says it, and where. One mention in passing and eight
+// sustained uses are different kinds of hit, and showing only the first passage hides
+// the difference. Collapsed by default — the extra previews are the reason to expand,
+// not something to scroll past.
+function MorePassages({ it, onOpen }:
+  { it: any; onOpen?: (id: string, anchor?: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const rest: any[] = (it.passages || []).slice(1);
+  if (!rest.length) return null;
+  return (
+    <div className="ft-more">
+      <button className="linkish" onClick={() => setOpen(!open)}>
+        {open ? "fewer passages" : `and ${rest.length} more passage${rest.length === 1 ? "" : "s"}`}
+      </button>
+      {open && rest.map((p: any, i: number) => (
+        <div key={i} className="ft-passage"
+          onClick={() => onOpen?.(it.stable_id, p.anchor)}
+          title={p.anchor ? `open at ${p.anchor}` : "open the document here"}>
+          {p.anchor && <span className="ft-passage-anchor">{p.anchor}</span>}
+          <Marked text={p.snippet} spans={p.highlights} />
+        </div>
+      ))}
     </div>
   );
 }

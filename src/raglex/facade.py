@@ -10092,6 +10092,29 @@ class Facade:
                 at = fts.verify(text, parsed) if (parsed.literals or parsed.excluded) \
                     else fts._first_term_at(text, parsed)
                 frag = fts.snippet(text, at)
+                # every passage that matches, so a document using the phrase eight
+                # times reads differently from one using it once. Segments are read
+                # once per document and shared across its passages.
+                try:
+                    segs = ts.get_segments(doc["payload_hash"]) or []
+                except OSError:
+                    segs = []
+
+                def label_at(off: int) -> str | None:
+                    for sg in segs:
+                        if sg.char_start <= off < sg.char_end and sg.label:
+                            return sg.label
+                    return None
+
+                passages = []
+                for off in fts.match_offsets(text, parsed):
+                    pfrag = fts.snippet(text, off)
+                    passages.append({
+                        "char_start": off, "snippet": pfrag,
+                        "highlights": [list(sp) for sp
+                                       in fts.highlight_spans(pfrag, parsed)],
+                        "anchor": label_at(off),
+                    })
                 items.append({
                     "stable_id": doc_id,
                     "title": doc["title"],
@@ -10106,8 +10129,11 @@ class Facade:
                     "snippet": frag,
                     "highlights": [list(sp) for sp in fts.highlight_spans(frag, parsed)],
                     "char_start": at,
-                    "anchor": _segment_at(ts, doc, at),
+                    "anchor": (passages[0]["anchor"] if passages
+                               else _segment_at(ts, doc, at)),
                     "cited_by": cited.get(doc_id, 0),
+                    "passages": passages,
+                    "passage_count": len(passages),
                 })
         return {"items": items}
 

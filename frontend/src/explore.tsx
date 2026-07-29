@@ -951,7 +951,7 @@ export function FreeTextResults({ res, query, open, onRefine }:
             : ""}
         </div>
         {shown.map((it: any) => (
-          <ResultRow key={it.stable_id + it.char_start} it={it} link={(d) => (
+          <ResultRow key={it.stable_id + it.char_start} it={it} onOpen={open} link={(d) => (
             <DocLink id={d.stable_id} anchor={d.anchor}
               onOpen={() => open(d.stable_id, d.anchor)}>
               <b><Oscola c={d.oscola} fallback={d.title || d.stable_id} /></b>

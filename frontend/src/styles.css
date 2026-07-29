@@ -1626,3 +1626,11 @@ button.mini { font-size: 11px; padding: 1px 7px; }
   padding: 1px 5px; border-radius: 3px; white-space: nowrap; }
 .sp-ops-note { font-size: 12px; margin: var(--sp-3) 0 0; line-height: 1.55;
   max-width: 70ch; }
+.ft-more { margin-top: 3px; }
+.ft-more .linkish { font-size: 11.5px; }
+.ft-passage { font-size: 12.5px; line-height: 1.5; margin: 5px 0 0 var(--sp-4);
+  padding-left: var(--sp-3); border-left: 2px solid var(--rule); cursor: pointer;
+  overflow-wrap: anywhere; }
+.ft-passage:hover { border-left-color: var(--accent); }
+.ft-passage-anchor { display: inline-block; font-size: 10.5px; color: var(--muted);
+  margin-right: 5px; }

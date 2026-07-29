@@ -171,6 +171,41 @@ def highlight_spans(fragment: str, parsed: ParsedQuery) -> list[tuple[int, int]]
     return merged
 
 
+def match_offsets(text: str, parsed: ParsedQuery, *, cap: int = 12) -> list[int]:
+    """EVERY place the query matches, not merely the first.
+
+    A judgment that uses the phrase eight times is a different kind of hit from one
+    that uses it in passing, and showing only the first passage hides that. Bounded
+    by ``cap`` because a term of art can appear a hundred times in one judgment and
+    nobody reads a hundred previews."""
+    if parsed.literals:
+        # the first required phrase is the one the reader is looking for; the others
+        # are constraints on the document, not the passage they want to see
+        return [m.start() for m in _literal_re(parsed.literals[0]).finditer(text)][:cap]
+    from .query import And, Near, Not, Or, Term
+
+    def first_word(node) -> str | None:
+        if isinstance(node, Term):
+            return node.word
+        if isinstance(node, Phrase):
+            return node.words[0] if node.words else None
+        if isinstance(node, Not):
+            return None
+        if isinstance(node, Near):
+            return first_word(node.left) or first_word(node.right)
+        if isinstance(node, (And, Or)):
+            for c in node.children:
+                if (w := first_word(c)):
+                    return w
+        return None
+
+    word = first_word(parsed.node)
+    if not word:
+        return []
+    return [m.start() for m in
+            re.finditer(rf"\b{re.escape(word)}", text, re.IGNORECASE)][:cap]
+
+
 def snippet(text: str, at: int | None, *, width: int = 320) -> str:
     """A window of text around the match, cut on word boundaries."""
     if not text:
