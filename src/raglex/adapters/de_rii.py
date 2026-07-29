@@ -90,8 +90,19 @@ class DeRiiAdapter(BaseAdapter):
             if since and modified and modified < since:
                 continue  # incremental: skip decisions unchanged since the watermark
             xml_url = link if link.endswith((".xml", ".zip")) else link.rstrip("/") + ".zip"
+            # The doknr WITHOUT the file extension: that is what a decision is stored under
+            # (the local-clone path uses the zip's stem), and the id is how the pipeline
+            # decides it already holds a document before paying to download it. Yielding
+            # "jb-JURE100054597.zip" against a held "jb-JURE100054597" matched nothing, so
+            # every pass re-fetched and re-parsed all 83,465 decisions to discard them on
+            # the payload hash. It also doubled the extension in the fallback URL below.
+            doknr = link.rstrip("/").rsplit("/", 1)[-1]
+            for ext in (".zip", ".xml"):
+                if doknr.endswith(ext):
+                    doknr = doknr[: -len(ext)]
+                    break
             yield Stub(
-                stable_id=link.rstrip("/").rsplit("/", 1)[-1],  # doknr; real ECLI set at fetch
+                stable_id=doknr,  # real ECLI set at fetch
                 hint_date=_compact_date(item.findtext("entsch-datum")),
                 title=" ".join(x for x in (item.findtext("gericht"),
                                            item.findtext("aktenzeichen")) if x) or None,

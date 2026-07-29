@@ -234,3 +234,30 @@ def test_bulk_harvest_recovers_stored_but_unextracted_backlog(tmp_path):
               options={"path": str(empty), "fond": "CASS"})
     with f._open() as (cat, _rs, _ts):
         assert cat.get_document("ECLI:FR:CCASS:2021:C100400")["last_extracted_at"]
+
+
+def test_de_rii_network_stub_id_matches_the_stored_id():
+    """The pipeline skips an already-held document by ID before downloading it, and a
+    rii decision is stored under the doknr — the local-clone path uses the zip's stem.
+    Yielding "jb-JURE100054597.zip" from the feed matched nothing held, so every pass
+    re-fetched and re-parsed all 83,465 decisions only to drop them on the payload hash."""
+    feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel>
+      <item>
+        <link>https://www.rechtsprechung-im-internet.de/jportal/docs/bsjrs/jb-JURE100054597.zip</link>
+        <entsch-datum>20100108</entsch-datum>
+        <gericht>BGH</gericht><aktenzeichen>VI ZR 100/20</aktenzeichen>
+      </item>
+    </channel></rss>"""
+
+    class _Resp:
+        content = feed
+        status_code = 200
+
+    class _HTTP:
+        def get(self, url, **kw):
+            return _Resp()
+
+    stubs = list(DeRiiAdapter(client=_HTTP()).discover(None))
+    assert [s.stable_id for s in stubs] == ["jb-JURE100054597"]
+    assert stubs[0].hints["url"].endswith("jb-JURE100054597.zip")   # the fetch still gets the zip
