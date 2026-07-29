@@ -9,8 +9,9 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { DocLink } from "./links";
-import { FacetRail, ResultRow, dimsFromFreetext, yearsFromFreetext } from "./results";
-import { FlagIcon, Oscola } from "./views";
+import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, ResultRow, dimsFromFreetext,
+         yearsFromFreetext } from "./results";
+import { DocAutocomplete, FlagIcon, Oscola } from "./views";
 
 const FMT = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M"
   : n >= 10_000 ? Math.round(n / 1000) + "k"
@@ -159,7 +160,7 @@ type Facets = {
 };
 
 const SORT_LABEL: Record<string, string> = {
-  authority: "most authoritative", cited: "most cited",
+  authority: "most influential", cited: "most cited",
   newest: "newest first", oldest: "oldest first",
 };
 const KIND_LABEL: Record<string, string> = {
@@ -216,7 +217,7 @@ function DrillPanel({ jurisdiction, f, setF, open, courtLabel }:
         {busy && <span className="loading-chip">loading…</span>}
         <select className="sort-select" value={f.sort} onChange={(e) => setF({ sort: e.target.value })}
           title="ordering" aria-label="ordering">
-          <option value="authority">most authoritative</option>
+          <option value="authority">most influential</option>
           <option value="cited">most cited</option>
           <option value="newest">newest first</option>
           <option value="oldest">oldest first</option>
@@ -358,8 +359,10 @@ function _ago(iso?: string | null): string {
 // citations. Kept separate from the hero search because it answers a different
 // question and has a different scope — the index only covers the sources chosen in
 // Maintain, and a search box that doesn't say what it covers is worse than none.
-function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
-  const [q, setQ] = useState("");
+export function FreeTextSearch({ open, full, initialQuery, onNavigate }:
+  { open: (id: string, a?: string) => void; full?: boolean; initialQuery?: string;
+    onNavigate?: (q: string) => void }) {
+  const [q, setQ] = useState(initialQuery || "");
   const [exact, setExact] = useState(true);
   const [res, setRes] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -371,9 +374,17 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
   const [only, setOnly] = useState<string[]>([]);
 
   useEffect(() => { api.freetextCoverage().then(setCov).catch(() => {}); }, []);
+  const ranInitial = useRef(false);
+  useEffect(() => {
+    if (full && initialQuery && !ranInitial.current) { ranInitial.current = true; run(); }
+  }, [full, initialQuery]);
 
   async function run() {
     if (!q.trim()) return;
+    // On the home page this box is a way IN to the search page, not a results
+    // surface — appending hits below the corpus-shape table put them somewhere
+    // nobody would look for them.
+    if (onNavigate) { onNavigate(q); return; }
     setBusy(true);
     try {
       const r = await api.freetext({ q, exact, limit: 20,
@@ -389,7 +400,7 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
   const totalIndexed: number = cov?.documents || 0;
 
   return (
-    <div className="ft">
+    <div className={full ? "ft ft-full" : "ft"}>
       <div className="hero-search">
         <input value={q} placeholder='Free text search — "quoted phrases" match literally'
           onChange={(e) => setQ(e.target.value)}
@@ -522,7 +533,7 @@ export function ExploreView({ open, goSearch }:
             </div>
           )}
         </div>
-        <FreeTextSearch open={open} />
+        <FreeTextSearch open={open} onNavigate={goSearch} />
       </div>
 
       <div className="shape panel">
@@ -932,6 +943,7 @@ export function FreeTextResults({ res, query, open, onRefine }:
               <option value="newest">newest first</option>
               <option value="oldest">oldest first</option>
             </select></label>
+          <InfoDot text={INFLUENCE_EXPLAINER} />
           {keep.length.toLocaleString()} document{keep.length === 1 ? "" : "s"}
           {active > 0 ? ` after filtering (of ${matched.length.toLocaleString()})` : ""}
           {keep.length > PER
@@ -963,3 +975,69 @@ export function FreeTextResults({ res, query, open, onRefine }:
   );
 }
 
+
+// --- the Search page ---------------------------------------------------------
+// One page, no modes. The old one had a Simple/Advanced toggle over a metadata query
+// that could not search text at all — two ways of asking the same narrow question,
+// neither of which was the one people wanted. This asks the two questions that exist:
+// WHICH DOCUMENT is this (by name or citation), and WHERE IS THIS SAID (in the text).
+export function SearchPage({ open, initialQuery }:
+  { open: (id: string, a?: string) => void; initialQuery?: string }) {
+  const [showOps, setShowOps] = useState(false);
+  return (
+    <div className="searchpage">
+      <div className="panel sp-find">
+        <h3>Find a document</h3>
+        <p className="muted">By name, citation or id — <b>Donoghue v Stevenson</b>,{" "}
+          <b>[1932] AC 562</b>, <b>Article 15 GDPR</b>. Goes straight to it.</p>
+        <DocAutocomplete onPick={(id: string) => open(id)}
+          placeholder="a case, an act, a regulation…" />
+      </div>
+
+      <div className="panel sp-text">
+        <h3>Search the full text</h3>
+        <FreeTextSearch open={open} full initialQuery={initialQuery} />
+        <button className="linkish sp-ops-toggle" onClick={() => setShowOps(!showOps)}>
+          {showOps ? "hide the operators" : "what can I type here?"}
+        </button>
+        {showOps && <OperatorHelp />}
+      </div>
+    </div>
+  );
+}
+
+// Spelled out rather than hinted at. These are the operators the parser actually
+// implements, and a box that quietly ignores what you typed is worse than one that
+// never offered it — websearch_to_tsquery drops brackets and wildcards in silence,
+// which is why this parser exists.
+function OperatorHelp() {
+  const rows: [string, string][] = [
+    ['"duty of care"', "that exact phrase — those words, in that order"],
+    ["negligence damages", "both words, anywhere in the document"],
+    ["negligence OR nuisance", "either word"],
+    ["negligence -contributory", "the first, excluding documents with the second"],
+    ["(negligence OR nuisance) damages", "grouping — brackets mean what they say"],
+    ["neglig*", "any word starting so — negligence, negligent, negligently"],
+    ["negligence NEAR/3 damages", "the two within three words of each other"],
+    ["negligence /3 damages", "the same, in the Westlaw and Lexis shorthand"],
+    ['"reasonable excuse"~4', "the phrase, allowing up to four words between"],
+  ];
+  return (
+    <div className="sp-ops">
+      <table>
+        <tbody>
+          {rows.map(([syn, mean]) => (
+            <tr key={syn}><td><code>{syn}</code></td><td className="muted">{mean}</td></tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="muted sp-ops-note">
+        Quotation marks are literal by default: <code>"duty of care"</code> will not
+        return <i>duties of care</i>. Untick <b>quotation marks match literally</b> for
+        the looser reading. A phrase of only common words (<code>"in and of itself"</code>)
+        cannot be looked up — the index does not store them — and you are told so
+        rather than shown an empty page.
+      </p>
+    </div>
+  );
+}

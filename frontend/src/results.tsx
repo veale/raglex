@@ -38,6 +38,23 @@ export function Marked({ text, spans }: { text: string; spans?: number[][] }) {
   return <>{out}</>;
 }
 
+// What "influential" means, in one hover. PageRank is not a legal concept and the
+// word "authority" is — a lawyer reading "most authoritative" would reasonably take
+// it to mean binding precedent, which this is not. So the label says influence and
+// the dot says what influence is measured from.
+export const INFLUENCE_EXPLAINER =
+  "Influence is measured from the citation network: a document ranks higher when the "
+  + "documents citing it are themselves widely cited. One citation from a leading "
+  + "Supreme Court judgment therefore counts for more than many from routine "
+  + "decisions. It reflects how much a document is built on, not whether it binds a "
+  + "court.";
+
+export function InfoDot({ text }: { text: string }) {
+  return (
+    <span className="info-dot" title={text} aria-label={text} role="img">i</span>
+  );
+}
+
 // --- one facet dimension -----------------------------------------------------
 function FacetGroup({ dim, picked, onToggle }:
   { dim: FacetDim; picked: string[]; onToggle: (v: string) => void }) {

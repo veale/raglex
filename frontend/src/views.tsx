@@ -2,7 +2,7 @@ import { Component, createContext, Fragment, lazy, Suspense, useCallback, useCon
 import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
-import { FacetRail, dimsFromCorpus } from "./results";
+import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -621,7 +621,7 @@ type Filters = {
 };
 const PAGE = 50;
 const SORTS: [string, string][] = [["date", "Newest"], ["date_asc", "Oldest"], ["title", "Title A–Z"], ["cited", "Most cited"],
-  ["authority", "Most authoritative"], ["authority_recent", "Authority (recent)"]];
+  ["authority", "Most influential"], ["authority_recent", "Most influential (recent)"]];
 const GROUPS: [string, string][] = [["none", "No grouping"], ["source", "Source"], ["doc_type", "Type"], ["court", "Court"], ["decade", "Decade"]];
 
 const activeFilters = (f: Filters): Record<string, string> => {
@@ -736,7 +736,8 @@ export function SearchView({ open, initialFilter }: { open: (id: string, a?: str
                 </p>
                 <div className="row" style={{ flex: "0 0 auto", gap: 8 }}>
                   <label className="mini-label">sort
-                    <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(0); }}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+                    <select value={sort} onChange={(e) => { setSort(e.target.value); setPage(0); }}>{SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+                    <InfoDot text={INFLUENCE_EXPLAINER} /></label>
                   <label className="mini-label">group
                     <select value={group} onChange={(e) => setGroup(e.target.value)}>{GROUPS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
                 </div>
@@ -1013,7 +1014,7 @@ function ActiveChips({ filters, patch }: { filters: Filters; patch: (p: Partial<
 function AuthorityBadge({ pct }: { pct?: number | null }) {
   if (pct == null || pct < 80) return null;
   const top = Math.max(1, Math.round(100 - pct));
-  return <span className="auth-badge" title={`network authority (PageRank): higher than ${pct.toFixed(0)}% of cited documents`}> · top {top}%</span>;
+  return <span className="auth-badge" title={`More influential than ${pct.toFixed(0)}% of cited documents`}> · top {top}%</span>;
 }
 
 // One results list, optionally grouped, each row an OSCOLA citation + metadata.
@@ -1063,7 +1064,7 @@ function WhyChips({ s }: { s: Hit["signals"] }) {
   if (s.lexical_rank != null) chips.push({ t: `keyword #${s.lexical_rank}`, title: "matched the exact words (full-text rank)" });
   if (s.semantic_rank != null) chips.push({ t: `semantic #${s.semantic_rank}`, title: "matched by meaning (vector rank)" });
   if (s.authority_percentile != null && s.authority_percentile >= 80)
-    chips.push({ t: `authority top ${Math.max(1, Math.round(100 - s.authority_percentile))}%`,
+    chips.push({ t: `influence top ${Math.max(1, Math.round(100 - s.authority_percentile))}%`,
       title: "highly cited in the citation network (PageRank)" });
   if (!chips.length) return null;
   return <span className="why-chips">{chips.map((c, i) =>
@@ -1131,7 +1132,7 @@ function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => vo
 function SemanticResults({ hits, open }: { hits: Hit[]; open: (id: string, a?: string) => void }) {
   return (
     <div className="panel">
-      <p className="muted">{hits.length} result{hits.length === 1 ? "" : "s"} · keyword + semantic + authority, fused (RRF), with graph neighbours</p>
+      <p className="muted">{hits.length} result{hits.length === 1 ? "" : "s"} · keyword + semantic + influence, fused (RRF), with graph neighbours</p>
       {hits.length === 0 && <p className="muted">No matches. Try fewer filters, or embed first (Dashboard → Embed pending).</p>}
       {hits.map((h, i) => <SemanticHit key={i} h={h} open={open} />)}
     </div>

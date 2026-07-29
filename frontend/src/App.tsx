@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SearchView, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
-import { ExploreView, SearchAdminView } from "./explore";
+import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
+import { ExploreView, SearchAdminView, SearchPage } from "./explore";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
 import { api } from "./api";
@@ -300,7 +300,7 @@ export function App() {
       )}
       {(tab === "search" || visited.current.has("search")) && (
         <div style={{ display: tab === "search" ? undefined : "none" }}>
-          <SearchView open={open} initialFilter={corpusFilter} />
+          <SearchPage open={open} initialQuery={corpusFilter?.query} />
         </div>
       )}
       {tab === "admin" && isAdmin && <AdminView open={open} navigate={navigateCorpus} />}
