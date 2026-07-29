@@ -458,6 +458,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         the embedding pass covers, and the scope settings behind each."""
         return facade.search_status()
 
+    @app.post("/freetext/hydrate")
+    def freetext_hydrate_ep(payload: dict = Body(...)) -> dict:
+        """Snippets and anchors for one page of an already-narrowed result set."""
+        return facade.freetext_hydrate(
+            ids=(payload or {}).get("ids") or [],
+            query=(payload or {}).get("q") or "",
+            exact=bool((payload or {}).get("exact", True)))
+
     @app.post("/freetext/cites-filter")
     def freetext_cites_filter_ep(payload: dict = Body(...)) -> dict:
         """Which of a result set cite a given authority — on demand, because

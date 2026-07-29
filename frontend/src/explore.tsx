@@ -786,8 +786,12 @@ export function FreeTextResults({ res, query, open, onRefine }:
   useEffect(() => { setF(EMPTY_FACETS); setCiteQ(""); }, [query, res]);
   if (!res) return null;
 
-  const items: any[] = res.items || [];
   const facets = res.facets || {};
+  const PER = 20;
+  const [page, setPage] = useState(0);
+  const [sort, setSort] = useState("relevance");
+  const [rows, setRows] = useState<any[]>(res.items || []);
+  useEffect(() => { setPage(0); }, [query, res, sort]);
   const cites: any[] = res.network?.cites || [];
   const toggle = (k: keyof FacetState) => (v: string) => setF((p) => {
     const cur = p[k] as string[];
@@ -804,24 +808,53 @@ export function FreeTextResults({ res, query, open, onRefine }:
     if (!f.cites) { setCiteIds(null); return; }
     let live = true;
     setCiteIds(new Set());
-    api.freetextCitesFilter(res.matched || [], f.cites)
+    api.freetextCitesFilter((res.matched || []).map((m: any) => m.id), f.cites)
       .then((r) => { if (live) setCiteIds(new Set(r.ids || [])); })
       .catch(() => { if (live) setCiteIds(null); });
     return () => { live = false; };
   }, [f.cites]);
   const citeSet = citeIds;
-  const shown = items.filter((it) => {
-    if (f.source.length && !f.source.includes(it.source)) return false;
-    if (f.jurisdiction.length && !f.jurisdiction.includes(it.jurisdiction)) return false;
-    if (f.doc_type.length && !f.doc_type.includes(it.doc_type)) return false;
-    if (f.court.length && !f.court.includes(it.court)) return false;
-    if (f.years && it.decision_date) {
-      const y = +String(it.decision_date).slice(0, 4);
+  // Narrowing runs over the WHOLE matched set (compact metadata for every hit),
+  // not the page that happens to be loaded — so the counts and the filter agree.
+  const matched: any[] = res.matched || [];
+  const keep0 = matched.filter((m: any) => {
+    if (f.source.length && !f.source.includes(m.s)) return false;
+    if (f.jurisdiction.length && !f.jurisdiction.includes(m.j)) return false;
+    if (f.doc_type.length && !f.doc_type.includes(m.t)) return false;
+    if (f.court.length && !f.court.includes(m.c)) return false;
+    if (f.years && m.y) {
+      const y = +m.y;
       if (y < f.years[0] || y > f.years[1]) return false;
     }
-    if (citeSet && !citeSet.has(it.stable_id)) return false;
+    if (citeSet && !citeSet.has(m.id)) return false;
     return true;
   });
+  // Sorting runs over the whole matched set too, so "most cited" means most cited
+  // of all 79 hits, not of the twenty on screen. "Influential" is PageRank, which
+  // weights a citation by the standing of the judgment making it; "most cited" is
+  // the raw count. They are different questions and both worth asking. Neither is
+  // called "authority" — in law that word means binding precedent, not popularity.
+  const keep = [...keep0].sort((a: any, b: any) => {
+    if (sort === "cited") return (b.n || 0) - (a.n || 0);
+    if (sort === "influential") return (b.p || 0) - (a.p || 0);
+    if (sort === "newest") return String(b.y || "").localeCompare(String(a.y || ""));
+    if (sort === "oldest") return String(a.y || "9999").localeCompare(String(b.y || "9999"));
+    return 0;   // relevance — the order the ranker returned
+  });
+  const pageIds = keep.slice(page * PER, (page + 1) * PER).map((m: any) => m.id);
+
+  // hydrate whatever page is on screen — snippets mean reading the document, so they
+  // are fetched for twenty, never for four thousand
+  useEffect(() => {
+    if (!pageIds.length) { setRows([]); return; }
+    let live = true;
+    api.freetextHydrate(pageIds, query, !!res.exact)
+      .then((r) => { if (live) setRows(r.items || []); })
+      .catch(() => { if (live) setRows([]); });
+    return () => { live = false; };
+  }, [pageIds.join(","), query]);
+
+  const shown = rows;
   const active = f.source.length + f.jurisdiction.length + f.doc_type.length
     + f.court.length + (f.years ? 1 : 0) + (f.cites ? 1 : 0);
   const citeOpts = cites.filter((c) => !citeQ ||
@@ -889,11 +922,21 @@ export function FreeTextResults({ res, query, open, onRefine }:
         {res.notes?.map((n: string, i: number) => (
           <div key={i} className="ft-warn">{n}</div>
         ))}
-        {active > 0 && (
-          <div className="muted ftr-narrow">
-            showing {shown.length} of {items.length} loaded
-          </div>
-        )}
+        <div className="muted ftr-narrow">
+          <label className="ftr-sort">sort
+            <select value={sort} onChange={(e) => setSort(e.target.value)}>
+              <option value="relevance">best match</option>
+              <option value="influential">most influential</option>
+              <option value="cited">most cited</option>
+              <option value="newest">newest first</option>
+              <option value="oldest">oldest first</option>
+            </select></label>
+          {keep.length.toLocaleString()} document{keep.length === 1 ? "" : "s"}
+          {active > 0 ? ` after filtering (of ${matched.length.toLocaleString()})` : ""}
+          {keep.length > PER
+            ? ` · showing ${page * PER + 1}–${Math.min((page + 1) * PER, keep.length)}`
+            : ""}
+        </div>
         {shown.map((it: any) => (
           <ResultRow key={it.stable_id + it.char_start} it={it} link={(d) => (
             <DocLink id={d.stable_id} anchor={d.anchor}
@@ -902,8 +945,17 @@ export function FreeTextResults({ res, query, open, onRefine }:
             </DocLink>
           )} />
         ))}
-        {shown.length === 0 && items.length > 0 && (
-          <p className="muted">Nothing in the loaded results matches those filters.</p>
+        {shown.length === 0 && matched.length > 0 && (
+          <p className="muted">Nothing matches those filters.</p>
+        )}
+        {keep.length > PER && (
+          <div className="ftr-pager">
+            <button className="mini" disabled={page === 0}
+              onClick={() => setPage(page - 1)}>‹ prev</button>
+            <span className="muted">page {page + 1} of {Math.ceil(keep.length / PER)}</span>
+            <button className="mini" disabled={(page + 1) * PER >= keep.length}
+              onClick={() => setPage(page + 1)}>next ›</button>
+          </div>
         )}
       </div>
     </div>

@@ -9904,8 +9904,19 @@ class Facade:
             "notes": res.notes, "took_ms": res.took_ms, "exact": exact,
             "tsquery": res.tsquery, "scope": allowed,
             "facets": facets, "network": network,
-            # the matching ids, so the client can narrow a facet without a round trip
-            "matched": res.matched,
+            # Compact metadata for EVERY match, not just the page. The client narrows
+            # over this and pages through what survives — without it the facet counts
+            # describe 79 documents while the filter applies to the 20 that happened
+            # to be hydrated, which is the same defect as "912 citing · showing 40".
+            "matched": [
+                {"id": m["stable_id"], "s": m.get("source"), "c": m.get("court"),
+                 "t": m.get("doc_type"),
+                 "j": self._doc_bucket(m.get("source") or "", m.get("court")),
+                 "y": (m.get("decision_date") or "")[:4] or None,
+                 # how many documents cite it, and PageRank — so the whole result set
+                 # can be re-sorted in the browser rather than re-queried
+                 "n": m.get("cited_by") or 0, "p": m.get("pagerank") or 0}
+                for m in meta],
         }
 
     def _freetext_facets(self, meta: list[dict]) -> dict:
@@ -10053,6 +10064,52 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             return {"ids": sorted(cat.documents_citing(ids[:20000], target)),
                     "target": target}
+
+    def freetext_hydrate(self, *, ids: list[str], query: str,
+                         exact: bool = True) -> dict:
+        """Full result rows — snippet, highlights, paragraph anchor — for a specific
+        page of ids the client has already narrowed to.
+
+        Searching returns metadata for every match but a snippet for none of them:
+        building a snippet means reading the document, and reading four thousand to
+        show twenty is the cost this split avoids."""
+        from .fulltext import index as fts
+        from .fulltext.query import parse
+
+        parsed = parse(query or "", exact=exact)
+        items: list[dict] = []
+        with self._open() as (cat, _rs, ts):
+            cited = {m["stable_id"]: (m.get("cited_by") or 0)
+                     for m in cat.documents_meta(list(ids[:100]))}
+            for doc_id in ids[:100]:
+                doc = cat.get_document(doc_id)
+                if not doc or not doc["payload_hash"]:
+                    continue
+                try:
+                    text = ts.get(doc["payload_hash"])
+                except OSError:
+                    continue
+                at = fts.verify(text, parsed) if (parsed.literals or parsed.excluded) \
+                    else fts._first_term_at(text, parsed)
+                frag = fts.snippet(text, at)
+                items.append({
+                    "stable_id": doc_id,
+                    "title": doc["title"],
+                    "court": doc["court"],
+                    "court_label": (self.court_label(doc["court"], doc["source"])
+                                    if doc["court"] else None),
+                    "doc_type": doc["doc_type"],
+                    "source": doc["source"],
+                    "decision_date": doc["decision_date"],
+                    "jurisdiction": self._doc_bucket(doc["source"], doc["court"]),
+                    "oscola": _oscola_cite(doc, _row_meta(doc)),
+                    "snippet": frag,
+                    "highlights": [list(sp) for sp in fts.highlight_spans(frag, parsed)],
+                    "char_start": at,
+                    "anchor": _segment_at(ts, doc, at),
+                    "cited_by": cited.get(doc_id, 0),
+                })
+        return {"items": items}
 
     def build_freetext_index(self, *, sources: list[str] | None = None,
                              reindex: bool = False, limit: int = 1_000_000,

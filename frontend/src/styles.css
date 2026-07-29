@@ -1598,3 +1598,8 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .ft-jur:hover { border-color: var(--rule); }
 .ft-jur.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 .ft-jur.on .muted { color: rgba(255,255,255,.75); }
+.ftr-pager { display: flex; gap: var(--sp-3); align-items: center; justify-content: center;
+  margin-top: var(--sp-4); font-size: 12px; }
+.ftr-sort { margin-right: var(--sp-3); }
+.ftr-sort select { font: inherit; font-size: 11px; margin-left: 3px; }
+.ft-cited { font-variant-numeric: tabular-nums; }

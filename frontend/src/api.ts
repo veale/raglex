@@ -277,6 +277,9 @@ export const api = {
       Object.entries(p).filter(([, v]) => v !== undefined && v !== "")
         .map(([k, v]) => [k, String(v)])).toString()}`),
   searchStatus: () => req<any>("/search/status"),
+  freetextHydrate: (ids: string[], q: string, exact: boolean) =>
+    req<{ items: any[] }>("/freetext/hydrate",
+      { method: "POST", body: JSON.stringify({ ids, q, exact }) }),
   freetextCitesFilter: (ids: string[], target: string) =>
     req<{ ids: string[] }>("/freetext/cites-filter",
       { method: "POST", body: JSON.stringify({ ids, target }) }),

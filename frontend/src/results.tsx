@@ -150,6 +150,9 @@ export function ResultRow({ it, children, link }:
         {" "}· {it.court_label || it.court || it.source}
         {it.decision_date ? ` · ${String(it.decision_date).slice(0, 4)}` : ""}
         {it.anchor ? ` · ${it.anchor}` : ""}
+        {it.cited_by ? <span className="ft-cited" title={
+          `${it.cited_by.toLocaleString()} documents in the corpus cite this`}>
+          {" "}· cited by {FMT(it.cited_by)}</span> : null}
       </span>
       {it.snippet && (
         <div className="ft-snip"><Marked text={it.snippet} spans={it.highlights} /></div>

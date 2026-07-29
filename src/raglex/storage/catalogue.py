@@ -3483,8 +3483,15 @@ class Catalogue:
         for i in range(0, len(ids), 900):
             chunk = ids[i:i + 900]
             rows = self.conn.execute(
-                "SELECT stable_id, source, court, doc_type, decision_date, title "
-                f"FROM documents WHERE stable_id IN ({','.join('?' * len(chunk))})",
+                "SELECT d.stable_id, d.source, d.court, d.doc_type, d.decision_date,"
+                "       d.title, COALESCE(a.pagerank, 0) AS pagerank,"
+                # cited_by on the resolved graph, falling back to the string roll-up
+                # for documents outside the authority table
+                "       COALESCE(a.in_degree, (SELECT MAX(cc.occurrences)"
+                "           FROM citation_counts cc"
+                "           WHERE cc.candidate_id IN (d.stable_id, d.ecli)), 0) AS cited_by "
+                "FROM documents d LEFT JOIN doc_authority a ON a.doc_id = d.stable_id "
+                f"WHERE d.stable_id IN ({','.join('?' * len(chunk))})",
                 chunk).fetchall()
             out.extend(dict(r) for r in rows)
         return out
