@@ -351,6 +351,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
         from .jobs import MAX_CONCURRENT_JOBS, JobManager
 
+        def _harvest_ran_today(facade) -> bool:
+            """Did a full routable drain already start today? Read off the durable jobs
+            table so a scheduler restart doesn't re-trigger the night's harvest."""
+            today = time.strftime("%Y-%m-%d", time.localtime())
+            try:
+                with facade._open() as (cat, _rs, _ts):
+                    rows = list(cat.recent_jobs("harvest-all", limit=5))
+            except Exception:  # noqa: BLE001 — never let this kill the tick
+                return False
+            for r in rows:
+                started = (r["started_at"] or "")[:10]
+                if started >= today:
+                    return True
+            return False
+
         print(f"[watch] scheduler up; ticking every {args.interval}s")
         # The scheduler's own work is recorded as jobs, in the same table the API reads —
         # so a scheduled harvest appears in the jobs panel with its outcome. A drain
@@ -426,11 +441,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # run today", so a busy 02:00 becomes 02:15 rather than a skipped night.
                 # Singleton + resumable, so a multi-hour drain continues the next night if
                 # it doesn't finish. Disable with RAGLEX_NIGHTLY_HARVEST=0.
+                #
+                # "Has it run today" is answered from the JOBS TABLE, not from a variable
+                # in this process: the marker has to survive a restart, or every deploy
+                # after 02:00 kicks off a fresh full drain (the first one did exactly that).
                 now_local = time.localtime()
                 if (now_local.tm_hour >= 2
                         and last_night_harvest_day != now_local.tm_yday
                         and _sched_on("nightly-harvest")
-                        and int(os.environ.get("RAGLEX_NIGHTLY_HARVEST", "1") or 0)):
+                        and int(os.environ.get("RAGLEX_NIGHTLY_HARVEST", "1") or 0)
+                        and not _harvest_ran_today(f)):
                     busy = [j for j in jobs.list(limit=MAX_CONCURRENT_JOBS * 2)
                             if j["status"] == "running" and j["origin"] != "scheduler"]
                     if busy:

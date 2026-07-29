@@ -69,3 +69,23 @@ def test_system_key_persistence_fix(facade):
     session secret / passkeys / OAuth clients never persisted."""
     facade.update_settings({"RAGLEX_SESSION_SECRET": "abc123"})
     assert facade.settings.resolve("RAGLEX_SESSION_SECRET") == "abc123"
+
+
+def test_nightly_harvest_marker_survives_a_restart(tmp_path, monkeypatch):
+    """"Has it run today" must be read off the jobs table, not a variable in the
+    scheduler process: with an in-process marker, every deploy after 02:00 kicked off a
+    fresh full drain of the whole routable worklist."""
+    import os
+    import time
+
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config.from_env())
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    with f._open() as (cat, _rs, _ts):
+        assert not [r for r in cat.recent_jobs("harvest-all", limit=5)]
+        cat.create_job("j1", "harvest-all", "overnight harvest", {})
+        rows = cat.recent_jobs("harvest-all", limit=5)
+    assert [r["started_at"][:10] for r in rows] == [today]

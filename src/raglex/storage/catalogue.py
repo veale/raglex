@@ -5032,9 +5032,19 @@ class Catalogue:
             self.conn.commit()
         return rows
 
+    def recent_jobs(self, kind: str, *, limit: int = 20) -> list[sqlite3.Row]:
+        """The last N jobs of one kind whatever their status — the durable answer to
+        "has this already run today?", which an in-process variable cannot give across a
+        restart."""
+        return self.conn.execute(
+            "SELECT * FROM jobs WHERE kind = ? ORDER BY started_at DESC LIMIT ?",
+            (kind, limit),
+        ).fetchall()
+
     def recent_job_results(self, kind: str, *, limit: int = 20) -> list[sqlite3.Row]:
-        """The last N outcomes for one job kind — the substrate for "auto-drain has stored
-        nothing for three days", the alert that would have caught the poisoned skip-list."""
+        """The last N outcomes for one job kind — the substrate for "the nightly harvest
+        has stored nothing for three days", the alert that would have caught the poisoned
+        skip-list."""
         return self.conn.execute(
             "SELECT * FROM jobs WHERE kind = ? AND status = 'done' "
             "ORDER BY started_at DESC LIMIT ?",
