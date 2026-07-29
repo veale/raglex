@@ -34,6 +34,10 @@ def _facade() -> Facade:
      "[cite-extract] worker died on us/f/43/208 — in-process"),
     ("no targeted adapter for 'de:case:BGH:VZR187/02' (form: German federal decision)",
      "no targeted adapter for 'de/gesetz/bdsg1' (form: German federal decision)"),
+    # the court token inside an identifier is alphabetic, so digit-masking alone left
+    # one dead source looking like six separate problems
+    ("fetch failed for ECLI:NL:HR:1996:AD250: nl-rechtspraak: HTTP 404 for https://x/a",
+     "fetch failed for ECLI:NL:GHDH:2013:3388: nl-rechtspraak: HTTP 404 for https://x/b"),
 ])
 def test_occurrences_of_one_problem_share_a_fingerprint(a, b):
     assert fingerprint("raglex.x", a) == fingerprint("raglex.x", b)

@@ -39,6 +39,10 @@ import time
 # fingerprint and count as one issue rather than opening two.
 _MASKS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"https?://\S+"), "<url>"),
+    # a structured identifier is the varying part too, and its court/registry token is
+    # alphabetic — "ECLI:NL:HR:1996:AD250" and "ECLI:NL:GHDH:2013:3388" are one problem
+    # (rechtspraak has no such judgment), not six.
+    (re.compile(r"\b[A-Z]{2,6}:[A-Za-z0-9.:_-]{3,}"), "<id>"),
     (re.compile(r"'[^']{1,120}'"), "<v>"),
     (re.compile(r'"[^"]{1,120}"'), "<v>"),
     (re.compile(r"\b[0-9a-f]{8,}\b", re.I), "<hash>"),
