@@ -93,6 +93,14 @@ class RelationshipType(StrEnum):
     # (recast-vs-codification is a classification on top — see eu_law.classify_change).
     REPEALS = "repeals"
     REPEALED_BY = "repealed_by"
+    # CELLAR's OTHER repeal predicate, kept separate because it does not mean what its
+    # name says. ``implicitly_repeals`` marks an act that supersedes some reference to or
+    # provision of another — 2009/22, 2011/83, 2006/114, 2017/2394 and 2023/2673 all
+    # "implicitly repeal" the Unfair Commercial Practices Directive, which is in force and
+    # amended as recently as 2024. Read as a repeal it retires half the EU statute book;
+    # so it is recorded as its own, weaker edge and never drives the currency banner.
+    IMPLICITLY_REPEALS = "implicitly_repeals"
+    IMPLICITLY_REPEALED_BY = "implicitly_repealed_by"
     # A corrigendum — which, unlike a citation, ALTERS the corrected act's text and must be
     # folded into the authoritative text. Easy to miss; modelled explicitly.
     CORRECTS = "corrects"

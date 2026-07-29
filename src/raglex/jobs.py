@@ -37,7 +37,7 @@ log = logging.getLogger("raglex.jobs")
 # keyed to a specific input and may run simultaneously.
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
-    "repair-de-citations", "repair-de-renditions",
+    "repair-de-citations", "repair-de-renditions", "repair-eu-repeals",
     "backfill-eu-stubs",
     "rebuild-citation-counts", "rebuild-authority", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
@@ -285,6 +285,8 @@ RUNNERS: dict[str, Callable] = {
     "repair-de-citations": lambda f, p, cb, cancel: f.repair_de_citations(**p, on_progress=cb, cancel_check=cancel),
     # fold a second register's copies of judgments we already hold back into the originals
     "repair-de-renditions": lambda f, p, cb, cancel: f.repair_de_duplicate_renditions(**p, on_progress=cb, cancel_check=cancel),
+    # re-ask CELLAR which "repeals" edges were only implicit ones
+    "repair-eu-repeals": lambda f, p, cb, cancel: f.repair_eu_implicit_repeals(**p, on_progress=cb, cancel_check=cancel),
     "backfill-intituling": lambda f, p, cb, cancel: f.backfill_intituling(**p, on_progress=cb, cancel_check=cancel),
     "resegment-judgments": lambda f, p, cb, cancel: f.resegment_judgments(**p, on_progress=cb, cancel_check=cancel),
     "build-fts": lambda f, p, cb, cancel: f.build_freetext_index(**p, on_progress=cb, cancel_check=cancel),

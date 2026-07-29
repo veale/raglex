@@ -53,7 +53,12 @@ CELEX_SECTORS: dict[str, str] = {
 # ``None`` = that direction isn't a currency signal for this act.
 CDM_ACT_TO_ACT_LINKS: dict[str, tuple[str, str | None]] = {
     "resource_legal_repeals_resource_legal": ("REPEALS", "REPEALED_BY"),
-    "resource_legal_implicitly_repeals_resource_legal": ("REPEALS", "REPEALED_BY"),
+    # NOT a repeal. CELLAR marks an act that supersedes a REFERENCE to, or a provision of,
+    # another act as "implicitly repealing" it — by that predicate Directive 2005/29 is
+    # implicitly repealed by five acts while being in force and amended in 2024. Mapped to
+    # its own edge so the fact is kept without the currency layer reading it as a repeal.
+    "resource_legal_implicitly_repeals_resource_legal": ("IMPLICITLY_REPEALS",
+                                                         "IMPLICITLY_REPEALED_BY"),
     "resource_legal_amends_resource_legal": ("AMENDS", "AMENDED_BY"),
     "resource_legal_corrects_resource_legal": ("CORRECTS", "CORRECTED_BY"),
     "resource_legal_consolidates_resource_legal": ("CONSOLIDATES", None),  # in: 0-prefix handles it

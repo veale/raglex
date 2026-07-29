@@ -1211,6 +1211,20 @@ class Catalogue:
             f"SELECT citation_id, src_id, raw, char_start, char_end FROM citations "
             f"WHERE src_id IN ({qs}) ORDER BY src_id, char_start", list(src_ids)).fetchall()
 
+    def relation_spans_for_many(self, src_ids: "list[str]") -> list[sqlite3.Row]:
+        """The offset-bearing EDGE rows for a batch of documents, shaped like
+        ``citations_for_many`` so one re-anchor pass can walk either table. A citation's
+        position is stored twice — here and on ``citations`` — and both have to move when
+        the text is regenerated."""
+        if not src_ids:
+            return []
+        qs = ",".join("?" * len(src_ids))
+        return self.conn.execute(
+            f"SELECT relation_id AS citation_id, src_id, raw_citation_string AS raw, "
+            f"context_start AS char_start, context_end AS char_end FROM relations "
+            f"WHERE src_id IN ({qs}) AND context_start IS NOT NULL "
+            f"ORDER BY src_id, context_start", list(src_ids)).fetchall()
+
     def reanchor_citation_offsets(self, updates: "list[tuple[int, int, int]]", *,
                                   commit: bool = True) -> int:
         """Rewrite ``(citation_id, char_start, char_end)`` offsets in one batched
@@ -1222,6 +1236,26 @@ class Catalogue:
         self.conn.executemany(
             "UPDATE citations SET char_start = ?, char_end = ? WHERE citation_id = ?",
             [(s, e, cid) for cid, s, e in updates])
+        if commit:
+            self.conn.commit()
+        return len(updates)
+
+    def reanchor_relation_offsets(self, updates: "list[tuple[int, int, int]]", *,
+                                  commit: bool = True) -> int:
+        """The OTHER copy of every citation's span.
+
+        A citation's position is stored twice: ``citations.char_start/char_end``, which the
+        reader highlights from, and ``relations.context_start/context_end``, which the
+        "all mentions" previews mark from. Re-anchoring only the first left the two 52
+        characters apart on reparsed eu-cellar judgments — the judgment page highlighted
+        the citation and the preview of the same citation highlighted the words before it.
+
+        Each update is ``(relation_id, new_start, new_end)``."""
+        if not updates:
+            return 0
+        self.conn.executemany(
+            "UPDATE relations SET context_start = ?, context_end = ? WHERE relation_id = ?",
+            [(s, e, rid) for rid, s, e in updates])
         if commit:
             self.conn.commit()
         return len(updates)

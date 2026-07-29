@@ -90,3 +90,41 @@ def test_legislative_status_marks_repealed_from_incoming_edge(tmp_path):
     assert gdpr["by_article"]["Article 17"] == ["corrects"]
     cons = f.legislative_status("02016R0679-20180525")
     assert cons["is_consolidation"] and cons["consolidation_of"] == "32016R0679" and cons["as_at"] == "2018-05-25"
+
+
+def test_implicit_repeal_is_not_a_repeal():
+    """CELLAR marks an act that supersedes a REFERENCE to another as "implicitly
+    repealing" it. By that predicate Directive 2005/29 is implicitly repealed by five
+    acts — 2009/22, 2011/83, 2006/114, 2017/2394, 2023/2673 — while being in force and
+    amended as recently as 2024. Read as a repeal, it retires half the statute book."""
+    from raglex.eu_law import CDM_ACT_TO_ACT_LINKS
+
+    assert CDM_ACT_TO_ACT_LINKS["resource_legal_repeals_resource_legal"] == \
+        ("REPEALS", "REPEALED_BY")
+    assert CDM_ACT_TO_ACT_LINKS["resource_legal_implicitly_repeals_resource_legal"] == \
+        ("IMPLICITLY_REPEALS", "IMPLICITLY_REPEALED_BY")
+
+
+def test_implicit_repeal_edges_do_not_flip_the_status_banner(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record, RelationshipType, \
+        ResolutionStatus, TypedRelation
+    from raglex.facade import Facade
+
+    f = Facade(Config.from_env())
+    with f._open() as (cat, _rs, _ts):
+        cat.upsert_document(Record(
+            source="eu-legislation", stable_id="32005L0029", doc_type=DocType.LEGISLATION,
+            title="Unfair Commercial Practices Directive",
+            extracted_via=ExtractedVia.STRUCTURED))
+        cat.add_relations("32005L0029", [TypedRelation(
+            relationship_type=RelationshipType.IMPLICITLY_REPEALED_BY,
+            raw_citation_string="32011L0083", dst_id="32011L0083",
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED)])
+
+    st = f.legislative_status(stable_id="32005L0029")
+    assert st["status"] != "repealed"
+    assert st["repealed_by"] == []
+    assert st["implicitly_affected_by"] == ["32011L0083"]

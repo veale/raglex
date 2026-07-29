@@ -907,9 +907,14 @@ class Facade:
     _LEG_OUTGOING_AMEND = ("amended_by",)
     _LEG_INCOMING_CORRECT = ("corrects",)
     _LEG_OUTGOING_CORRECT = ("corrected_by",)
+    # Carried in the status payload as a weaker "also affected by" signal, never as a
+    # repeal: CELLAR's implicitly_repeals marks an act superseding a REFERENCE to another.
+    _LEG_INCOMING_IMPLICIT = ("implicitly_repeals",)
+    _LEG_OUTGOING_IMPLICIT = ("implicitly_repealed_by",)
     _LEG_CHANGE_TYPES = tuple({
         "repeals", "recasts", "repealed_by", "amends", "amended_by", "corrects",
         "corrected_by", "consolidates", "legal_basis", "supersedes", "point_in_time_of",
+        "implicitly_repeals", "implicitly_repealed_by",
     })
 
     def enrich_eu_legislation(self, *, limit: int = 100000, workers: int = 8,
@@ -967,6 +972,79 @@ class Facade:
         self._invalidate_caches()
         return {"scanned": total, "enriched": enriched, "edges": edges}
 
+    def repair_eu_implicit_repeals(self, *, limit: int = 100000, workers: int = 8,
+                                   dry_run: bool = False,
+                                   on_progress=None, cancel_check=None) -> dict:
+        """Re-type the EU repeal edges that were never repeals.
+
+        CELLAR exposes two predicates, and we mapped both to ``repeals``. The second,
+        ``implicitly_repeals``, marks an act that supersedes a REFERENCE to another — five
+        acts "implicitly repeal" the Unfair Commercial Practices Directive, which is in
+        force and was amended in 2024. 14,294 held EU acts currently read as repealed on
+        the strength of it.
+
+        The two are indistinguishable once stored, so this re-asks CELLAR per act and
+        replaces that act's structured repeal edges with the freshly-typed ones. An act
+        whose CELLAR lookup fails or returns nothing is left exactly as it was — a network
+        blip must never delete a repeal."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from .adapters.eu_cellar import harvest_act_relations
+
+        repeal_types = ("repeals", "repealed_by", "implicitly_repeals",
+                        "implicitly_repealed_by")
+        qs = ",".join("?" * len(repeal_types))
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                f"SELECT DISTINCT src_id FROM relations WHERE relationship_type IN ({qs}) "
+                f"AND extracted_via = 'structured' ORDER BY src_id LIMIT ?",
+                (*repeal_types, limit)).fetchall()
+        ids = [r["src_id"] for r in rows]
+        st = {"scanned": len(ids), "rechecked": 0, "edges_replaced": 0,
+              "acts_no_longer_repealed": 0, "unreachable": 0}
+        if dry_run:
+            return st
+        done = 0
+        with self._open() as (cat, _rs, _ts):
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+                futures = {ex.submit(harvest_act_relations, sid): sid for sid in ids}
+                for fut in as_completed(futures):
+                    if cancel_check and cancel_check():
+                        for f in futures:
+                            f.cancel()
+                        break
+                    sid = futures[fut]
+                    done += 1
+                    _progress(on_progress, stage="re-typing EU repeal edges",
+                              done=done, total=len(ids), item=sid)
+                    try:
+                        rels = fut.result()
+                    except Exception:  # noqa: BLE001
+                        rels = None
+                    if not rels:
+                        st["unreachable"] += 1
+                        continue
+                    fresh = [r for r in rels
+                             if str(r.relationship_type) in repeal_types]
+                    had_repeal = cat.conn.execute(
+                        "SELECT 1 FROM relations WHERE src_id = ? AND relationship_type "
+                        "IN ('repeals','repealed_by') AND extracted_via = 'structured' LIMIT 1",
+                        (sid,)).fetchone() is not None
+                    with cat._atomic():
+                        st["edges_replaced"] += cat.conn.execute(
+                            f"DELETE FROM relations WHERE src_id = ? AND extracted_via = "
+                            f"'structured' AND relationship_type IN ({qs})",
+                            (sid, *repeal_types)).rowcount
+                    if fresh:
+                        cat.add_relations(sid, fresh)
+                    st["rechecked"] += 1
+                    if had_repeal and not any(
+                            str(r.relationship_type) in ("repeals", "repealed_by")
+                            for r in fresh):
+                        st["acts_no_longer_repealed"] += 1
+        self._invalidate_caches()
+        return st
+
     def legislative_status(self, stable_id: str) -> dict:
         """Currency of a piece of legislation, from its change-edges (source-agnostic — UK
         legislation.gov.uk amendments, CELLAR/CDM repeals/corrigenda, and consolidation
@@ -1007,6 +1085,10 @@ class Facade:
         consolidations = [r["src_id"] for r in inc if r["relationship_type"] == "consolidates"]
         legal_basis = [_tgt(r) for r in out if r["relationship_type"] == "legal_basis"]
         repeals = [_tgt(r) for r in out if r["relationship_type"] in self._LEG_INCOMING_REPEAL]
+        # Recorded, shown, and deliberately NOT part of the status calculation.
+        implicitly_affected_by = (
+            [r["src_id"] for r in inc if r["relationship_type"] in self._LEG_INCOMING_IMPLICIT]
+            + [_tgt(r) for r in out if r["relationship_type"] in self._LEG_OUTGOING_IMPLICIT])
 
         edge_status = ("repealed" if repealed_by else
                        "amended" if amended_by else
@@ -1065,6 +1147,9 @@ class Facade:
             "consolidations": sorted(set(filter(None, consolidations))),
             "legal_basis": sorted(set(filter(None, legal_basis))),
             "repeals": sorted(set(filter(None, repeals))),
+            # CELLAR's implicitly_repeals — an act superseding a REFERENCE to this one.
+            # Reported so the fact isn't lost, but it never moves the status.
+            "implicitly_affected_by": sorted(set(filter(None, implicitly_affected_by))),
             # this doc IS a dated consolidation snapshot → its base + as-at date
             "is_consolidation": is_cons,
             "consolidation_of": cons_base,
@@ -5343,26 +5428,46 @@ class Facade:
 
         if not id_to_hash:
             return 0, 0, 0
+        # A citation's position is stored TWICE — citations.char_start/end, which the
+        # reader highlights from, and relations.context_start/end, which the "all
+        # mentions" previews mark from. Re-anchoring only the first left the two 52
+        # characters apart on reparsed eu-cellar judgments: the judgment page highlighted
+        # the citation, and the preview of that same citation highlighted the words before
+        # it. Both tables are walked here, by the same in-order sweep.
         by_src: dict[str, list] = {}
         for r in cat.citations_for_many(list(id_to_hash)):
             by_src.setdefault(r["src_id"], []).append(r)
+        rel_by_src: dict[str, list] = {}
+        for r in cat.relation_spans_for_many(list(id_to_hash)):
+            rel_by_src.setdefault(r["src_id"], []).append(r)
+
         updates: list[tuple[int, int, int]] = []
+        rel_updates: list[tuple[int, int, int]] = []
         docs_changed = unlocatable = 0
-        for sid, rows in by_src.items():
-            ph = id_to_hash.get(sid)
-            if not ph:
-                continue
+        texts: dict[str, str] = {}
+        for sid, ph in id_to_hash.items():
             try:
-                text = ts.get(ph)
+                texts[sid] = ts.get(ph) or ""
             except OSError:
                 continue
-            ups, miss = reanchor(text or "", rows)
+        for sid, rows in by_src.items():
+            text = texts.get(sid)
+            if text is None:
+                continue
+            ups, miss = reanchor(text, rows)
             unlocatable += miss
             if ups:
                 updates.extend(ups)
                 docs_changed += 1
+        for sid, rows in rel_by_src.items():
+            text = texts.get(sid)
+            if text is None:
+                continue
+            ups, _miss = reanchor(text, rows)
+            rel_updates.extend(ups)
         cat.reanchor_citation_offsets(updates, commit=False)
-        return len(updates), docs_changed, unlocatable
+        cat.reanchor_relation_offsets(rel_updates, commit=False)
+        return len(updates) + len(rel_updates), docs_changed, unlocatable
 
     def reanchor_source(self, *, source: str, after_stable_id: str = "",
                         on_progress=None, cancel_check=None) -> dict:

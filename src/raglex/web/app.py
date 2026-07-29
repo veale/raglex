@@ -683,6 +683,15 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: (payload or {})[k] for k in ("source", "dry_run") if k in (payload or {})}
         return _start_job("repair-de-renditions", "fold duplicate German renditions", params)
 
+    @app.post("/jobs/repair-eu-repeals")
+    def job_repair_eu_repeals_ep(payload: dict = Body(default={})) -> dict:
+        """Re-ask CELLAR which of an EU act's stored "repeals" edges were only
+        ``implicitly_repeals`` — the predicate that marks an act superseding a REFERENCE
+        to another, and that currently has 14,294 held acts reading as repealed."""
+        params = {k: (payload or {})[k] for k in ("limit", "workers", "dry_run")
+                  if k in (payload or {})}
+        return _start_job("repair-eu-repeals", "re-type EU repeal edges", params)
+
     @app.post("/jobs/backfill-intituling")
     def job_backfill_intituling_ep(payload: dict = Body(default={})) -> dict:
         """Record who decided each held judgment (and who argued it), read off its own
