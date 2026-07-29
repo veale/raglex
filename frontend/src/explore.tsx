@@ -9,6 +9,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { DocLink } from "./links";
+import { FacetRail, ResultRow, dimsFromFreetext, yearsFromFreetext } from "./results";
 import { FlagIcon, Oscola } from "./views";
 
 const FMT = (n: number) => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + "M"
@@ -353,21 +354,6 @@ function _ago(iso?: string | null): string {
   if (s < 172800) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
-// A snippet with the matched words marked. The backend returns offsets rather than
-// HTML so nothing user-supplied is ever interpreted as markup.
-function Marked({ text, spans }: { text: string; spans?: number[][] }) {
-  if (!spans || !spans.length) return <>{text}</>;
-  const out: any[] = [];
-  let at = 0;
-  spans.forEach(([s, e], i) => {
-    if (s > at) out.push(text.slice(at, s));
-    out.push(<mark key={i}>{text.slice(s, e)}</mark>);
-    at = e;
-  });
-  if (at < text.length) out.push(text.slice(at));
-  return <>{out}</>;
-}
-
 // The second search box: the full text of the corpus, rather than its titles and
 // citations. Kept separate from the hero search because it answers a different
 // question and has a different scope — the index only covers the sources chosen in
@@ -811,32 +797,6 @@ const EMPTY_FACETS: FacetState = {
   source: [], jurisdiction: [], doc_type: [], court: [], years: null, cites: null,
 };
 
-function FacetGroup({ title, rows, picked, onToggle, max = 8 }:
-  { title: string; rows: any[]; picked: string[]; onToggle: (v: string) => void; max?: number }) {
-  const [all, setAll] = useState(false);
-  if (!rows?.length) return null;
-  const shown = all ? rows : rows.slice(0, max);
-  const top = rows[0]?.n || 1;
-  return (
-    <div className="facet-grp">
-      <h4>{title}</h4>
-      {shown.map((r) => (
-        <button key={r.key || r.value}
-          className={`facet-row${picked.includes(r.value) ? " on" : ""}`}
-          onClick={() => onToggle(r.value)}>
-          <span className="facet-bar" style={{ width: `${Math.max(3, 100 * r.n / top)}%` }} />
-          <span className="facet-label">{r.label || r.value}</span>
-          <span className="facet-n">{FMT(r.n)}</span>
-        </button>
-      ))}
-      {rows.length > max && (
-        <button className="linkish facet-more" onClick={() => setAll(!all)}>
-          {all ? "fewer" : `${rows.length - max} more`}</button>
-      )}
-    </div>
-  );
-}
-
 export function FreeTextResults({ res, query, open, onRefine }:
   { res: any; query: string; open: (id: string, a?: string) => void;
     onRefine?: (cites: string) => void }) {
@@ -876,9 +836,7 @@ export function FreeTextResults({ res, query, open, onRefine }:
   const citeOpts = cites.filter((c) => !citeQ ||
     (c.title || c.stable_id).toLowerCase().includes(citeQ.toLowerCase()));
 
-  return (
-    <div className="ftr">
-      <aside className="ftr-rail">
+  const railHeader = (
         <div className="ftr-count">
           <b>{(res.verified ?? res.total ?? 0).toLocaleString()}</b> document
           {(res.verified ?? res.total) === 1 ? "" : "s"}
@@ -889,7 +847,10 @@ export function FreeTextResults({ res, query, open, onRefine }:
               clear {active} filter{active === 1 ? "" : "s"}</button>
           )}
         </div>
+  );
 
+  const citesFacet = (
+    <>
         {/* cites — the one facet that is about the network rather than the metadata */}
         <div className="facet-grp">
           <h4>cites</h4>
@@ -919,18 +880,19 @@ export function FreeTextResults({ res, query, open, onRefine }:
             what these results have in common — the authorities they cite between them
           </p>
         </div>
+    </>
+  );
 
-        <YearFacet years={facets.years} undated={facets.undated}
-          value={f.years} onChange={(v) => setF({ ...f, years: v })} />
-        <FacetGroup title="jurisdiction" rows={facets.jurisdiction}
-          picked={f.jurisdiction} onToggle={toggle("jurisdiction")} />
-        <FacetGroup title="type" rows={facets.doc_type}
-          picked={f.doc_type} onToggle={toggle("doc_type")} />
-        <FacetGroup title="court / body" rows={facets.court}
-          picked={f.court} onToggle={toggle("court")} max={10} />
-        <FacetGroup title="source" rows={facets.source}
-          picked={f.source} onToggle={toggle("source")} />
-      </aside>
+  return (
+    <div className="ftr">
+        <FacetRail dims={dimsFromFreetext(facets)} active={f as any}
+          onToggle={(dim, v) => toggle(dim as keyof FacetState)(v)}
+          years={yearsFromFreetext(facets)} undated={facets.undated}
+          yearFrom={f.years ? String(f.years[0]) : undefined}
+          yearTo={f.years ? String(f.years[1]) : undefined}
+          onYearRange={(a, b) => setF({ ...f, years: [+a, +b] })}
+          onYearClear={() => setF({ ...f, years: null })}
+          header={railHeader} extra={citesFacet} />
 
       <div className="ftr-list">
         {res.notes?.map((n: string, i: number) => (
@@ -942,18 +904,12 @@ export function FreeTextResults({ res, query, open, onRefine }:
           </div>
         )}
         {shown.map((it: any) => (
-          <div key={it.stable_id + it.char_start} className="ft-hit">
-            <DocLink id={it.stable_id} anchor={it.anchor}
-              onOpen={() => open(it.stable_id, it.anchor)}>
-              <b><Oscola c={it.oscola} fallback={it.title || it.stable_id} /></b>
+          <ResultRow key={it.stable_id + it.char_start} it={it} link={(d) => (
+            <DocLink id={d.stable_id} anchor={d.anchor}
+              onOpen={() => open(d.stable_id, d.anchor)}>
+              <b><Oscola c={d.oscola} fallback={d.title || d.stable_id} /></b>
             </DocLink>
-            <span className="muted ft-meta">
-              {" "}· {it.court_label || it.court || it.source}
-              {it.decision_date ? ` · ${String(it.decision_date).slice(0, 4)}` : ""}
-              {it.anchor ? ` · ${it.anchor}` : ""}
-            </span>
-            <div className="ft-snip"><Marked text={it.snippet} spans={it.highlights} /></div>
-          </div>
+          )} />
         ))}
         {shown.length === 0 && items.length > 0 && (
           <p className="muted">Nothing in the loaded results matches those filters.</p>
@@ -963,27 +919,3 @@ export function FreeTextResults({ res, query, open, onRefine }:
   );
 }
 
-// The result set's shape in time, doubling as a range brush. Legal research is
-// period-sensitive — "since the Human Rights Act", "before Caparo" — so this is a
-// primary control rather than a decoration.
-function YearFacet({ years, undated, value, onChange }:
-  { years?: { year: string; n: number }[]; undated?: number;
-    value: [number, number] | null; onChange: (v: [number, number] | null) => void }) {
-  if (!years?.length) return null;
-  const map: Record<string, number> = {};
-  years.forEach((y) => (map[y.year] = y.n));
-  const lo = +years[0].year, hi = +years[years.length - 1].year;
-  return (
-    <div className="facet-grp">
-      <h4>date {value && (
-        <button className="linkish" onClick={() => onChange(null)}>
-          {value[0]}–{value[1]} ✕</button>)}</h4>
-      <Spark years={map} width={190} height={34} brush
-        active={value ? [String(value[0]), String(value[1])] : null}
-        onBrush={(a, b) => onChange([+a, +b])} />
-      <div className="muted facet-hint">
-        {lo}–{hi}{undated ? ` · ${FMT(undated)} undated` : ""} · drag to filter
-      </div>
-    </div>
-  );
-}

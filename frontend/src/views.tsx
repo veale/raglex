@@ -2,6 +2,7 @@ import { Component, createContext, Fragment, lazy, Suspense, useCallback, useCon
 import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
+import { FacetRail, dimsFromCorpus } from "./results";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -619,7 +620,6 @@ type Filters = {
   id_prefix?: string;
 };
 const PAGE = 50;
-const FACET_LABEL: Record<string, string> = { source: "Source", doc_type: "Type", court: "Court" };
 const SORTS: [string, string][] = [["date", "Newest"], ["date_asc", "Oldest"], ["title", "Title A–Z"], ["cited", "Most cited"],
   ["authority", "Most authoritative"], ["authority_recent", "Authority (recent)"]];
 const GROUPS: [string, string][] = [["none", "No grouping"], ["source", "Source"], ["doc_type", "Type"], ["court", "Court"], ["decade", "Decade"]];
@@ -629,6 +629,34 @@ const activeFilters = (f: Filters): Record<string, string> => {
   Object.entries(f).forEach(([k, v]) => v && !k.startsWith("_") && (o[k] = String(v)));
   return o;
 };
+
+// The metadata search's rail — the same component the free-text surface renders,
+// given this search's data. Its facets are single-select and a click re-queries,
+// because the filtering and the counts are both computed server-side; free text is
+// multi-select and narrows in the browser. That difference is the `active`/`onToggle`
+// contract, not a second implementation.
+function FacetSidebar({ facets, filters, patch }:
+  { facets: any; filters: Filters; patch: (p: Partial<Filters>) => void }) {
+  if (!facets) return null;
+  const active: Record<string, string[]> = {};
+  (["source", "doc_type", "court"] as const).forEach((d) => {
+    const v = (filters as any)[d];
+    active[d] = v ? [v] : [];
+  });
+  return (
+    <FacetRail
+      dims={dimsFromCorpus(facets)}
+      active={active}
+      onToggle={(dim, value) =>
+        patch({ [dim]: (filters as any)[dim] === value ? undefined : value } as any)}
+      years={facets.year || {}}
+      yearFrom={filters.year_from}
+      yearTo={filters.year_to}
+      onYearRange={(a, b) => patch({ year_from: a, year_to: b })}
+      onYearClear={() => patch({ year_from: undefined, year_to: undefined })}
+    />
+  );
+}
 
 export function SearchView({ open, initialFilter }: { open: (id: string, a?: string) => void; initialFilter?: Record<string, string> }) {
   const [mode, setMode] = useState<"simple" | "advanced">(
@@ -976,97 +1004,6 @@ function ActiveChips({ filters, patch }: { filters: Filters; patch: (p: Partial<
         <span className="filter-chip" key={k}>{label[k] || k}: {v}
           <a onClick={() => patch({ [k]: undefined } as any)} title="remove"> ✕</a></span>
       ))}
-    </div>
-  );
-}
-
-// Left refine sidebar: a year histogram + tick-box facet groups, each value with its count.
-function FacetSidebar({ facets, filters, patch }:
-  { facets: any; filters: Filters; patch: (p: Partial<Filters>) => void }) {
-  if (!facets) return null;
-  return (
-    <aside className="facets panel">
-      <YearHistogram year={facets.year || {}} from={filters.year_from} to={filters.year_to}
-        onRange={(a, b) => patch({ year_from: a, year_to: b })}
-        onClear={() => patch({ year_from: undefined, year_to: undefined })} />
-      {(["source", "doc_type", "court"] as const).map((dim) => (
-        <FacetGroup key={dim} title={FACET_LABEL[dim]} values={facets[dim] || []}
-          active={(filters as any)[dim]} onPick={(k) => patch({ [dim]: (filters as any)[dim] === k ? undefined : k } as any)} />
-      ))}
-    </aside>
-  );
-}
-
-function FacetGroup({ title, values, active, onPick }:
-  { title: string; values: any[]; active?: string; onPick: (k: string) => void }) {
-  const [all, setAll] = useState(false);
-  if (!values.length) return null;
-  const shown = all ? values : values.slice(0, 8);
-  return (
-    <div className="facet-group">
-      <div className="facet-title">{title}</div>
-      {shown.map((v) => (
-        <label key={v.key} className={`facet-row${active === v.key ? " on" : ""}`}>
-          <input type="checkbox" checked={active === v.key} onChange={() => onPick(v.key)} />
-          <span className="facet-name" title={v.key}>{v.key}</span>
-          <span className="facet-count">{v.n.toLocaleString()}</span>
-        </label>
-      ))}
-      {values.length > 8 && <a className="facet-more" onClick={() => setAll((a) => !a)}>{all ? "less" : `+${values.length - 8} more`}</a>}
-    </div>
-  );
-}
-
-// A compact, brushable year-distribution histogram: click a bar for one year, or
-// drag across bars to select a range (the "filter to 2016–2021 with one gesture"
-// interaction). Bars inside the active filter render highlighted; a live label
-// shows the range while dragging.
-function YearHistogram({ year, from, to, onRange, onClear }:
-  { year: Record<string, number>; from?: string; to?: string;
-    onRange: (from: string, to: string) => void; onClear: () => void }) {
-  const [drag, setDrag] = useState<{ a: string; b: string } | null>(null);
-  const dragRef = useRef<typeof drag>(null);
-  dragRef.current = drag;
-  const years = Object.keys(year).filter((y) => /^\d{4}$/.test(y)).sort();
-  // release outside the histogram still commits the brush
-  useEffect(() => {
-    if (!drag) return;
-    const up = () => {
-      const d = dragRef.current;
-      if (d) {
-        const [a, b] = [d.a, d.b].sort();
-        onRange(a, b);
-      }
-      setDrag(null);
-    };
-    window.addEventListener("mouseup", up);
-    return () => window.removeEventListener("mouseup", up);
-  }, [!drag]);
-  if (years.length < 2) return null;
-  const max = Math.max(...years.map((y) => year[y]));
-  const lo = years[0], hi = years[years.length - 1];
-  const inSel = (y: string) => {
-    if (drag) { const [a, b] = [drag.a, drag.b].sort(); return y >= a && y <= b; }
-    return !!(from || to) && y >= (from || "0000") && y <= (to || "9999");
-  };
-  const label = drag ? [drag.a, drag.b].sort().join("–")
-    : (from || to) ? `${from || lo}–${to || hi}` : null;
-  return (
-    <div className="facet-group">
-      <div className="facet-title">Year
-        {label && <span className="histo-range">{label}</span>}
-        {(from || to) && !drag && <a className="facet-more" onClick={onClear}>clear</a>}
-      </div>
-      <div className="histo" title="click a year, or drag to select a range">
-        {years.map((y) => (
-          <div key={y} className={`histo-bar${inSel(y) ? " on" : ""}`}
-            style={{ height: `${Math.max(3, (year[y] / max) * 40)}px` }}
-            title={`${y}: ${year[y].toLocaleString()}`}
-            onMouseDown={(e) => { e.preventDefault(); setDrag({ a: y, b: y }); }}
-            onMouseEnter={() => setDrag((d) => (d ? { ...d, b: y } : d))} />
-        ))}
-      </div>
-      <div className="histo-axis"><span>{lo}</span><span>{hi}</span></div>
     </div>
   );
 }

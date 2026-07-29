@@ -1580,3 +1580,12 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .pick-opt-n { position: relative; z-index: 1; font-variant-numeric: tabular-nums;
   opacity: .7; }
 .pick-empty { font-size: 11px; padding: 4px 6px; margin: 0; }
+
+/* The shared rail is used inside the metadata search's flex layout as well as the
+   free-text grid, so it needs the sticky sidebar behaviour the old .facets had. */
+.search-layout .ftr-rail { flex: 0 0 210px; position: sticky; top: var(--sp-4);
+  align-self: flex-start; max-height: calc(100vh - 32px); overflow-y: auto;
+  padding: var(--sp-4); }
+.facet-grp .histo-range { font-weight: 400; margin-left: 6px; color: var(--muted); }
+.facet-grp .linkish { background: none; border: 0; padding: 0 0 0 6px; font: inherit;
+  font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
