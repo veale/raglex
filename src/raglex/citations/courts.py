@@ -584,3 +584,25 @@ def classify(code: str, *, bracketed: bool | None = None) -> Court | None:
 # Generic buckets are excluded: they are classifications, not fetchable court slugs.
 IRISH_COURTS: frozenset[str] = frozenset(
     c.code.lower() for c in COURTS if c.jurisdiction == "IE")
+
+
+# BAILII files every Northern Irish High Court division under one ``nihc/<division>``
+# slug head, but the judgments are CITED by division — ``[2016] NIFam 6``, not
+# "[2016] NIHC Fam 6". The two are the same document; without this mapping ~1,500 held
+# NI judgments were reachable only by their BAILII path, and every citation of them (and
+# every lookup) fell through to a fetch that 404s.
+NI_HIGH_COURT_DIVISIONS = {
+    "qb": "niqb", "kb": "nikb", "ch": "nich", "fam": "nifam", "master": "nimaster",
+    "com": "nicom",
+}
+
+
+def ni_division_alias(stable_id: str) -> str | None:
+    """``nihc/fam/2016/6`` → ``nifam/2016/6`` (the neutral-citation key); else None."""
+    parts = (stable_id or "").casefold().split("/")
+    if len(parts) != 4 or parts[0] != "nihc":
+        return None
+    court = NI_HIGH_COURT_DIVISIONS.get(parts[1])
+    if not court or not parts[2].isdigit() or not parts[3]:
+        return None
+    return f"{court}/{parts[2]}/{parts[3]}"

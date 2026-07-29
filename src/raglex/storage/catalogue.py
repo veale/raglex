@@ -2223,7 +2223,7 @@ class Catalogue:
         else:
             appno_expr = "json_extract(meta_json, '$.appno')"
         minted = {"echr_appno": 0, "fr_number": 0, "fr_code_article": 0,
-                  "de_case": 0, "de_law": 0, "ca_french_neutral": 0}
+                  "de_case": 0, "de_law": 0, "ca_french_neutral": 0, "ni_division": 0}
         rows = self.conn.execute(
             f"SELECT ecli, {appno_expr} AS appno FROM documents "
             "WHERE source = 'echr' AND ecli IS NOT NULL AND meta_json IS NOT NULL"
@@ -2326,6 +2326,26 @@ class Catalogue:
                     (alias, r["stable_id"], "ca-french-neutral"),
                 )
                 minted["ca_french_neutral"] += max(cur.rowcount, 0)
+            # BAILII files every NI High Court division under one ``nihc/<division>``
+            # slug head while the judgments are CITED by division ("[2016] NIFam 6").
+            # Rebuild the citation-form key from stable_id alone, the same way the
+            # Canadian French-neutral aliases above are rebuilt — otherwise a Northern
+            # Irish Chancery, Family, Master or Coroner's judgment is reachable only by
+            # its BAILII path, and every citation of it hangs.
+            from ..citations.courts import ni_division_alias
+
+            ni_rows = self.conn.execute(
+                "SELECT stable_id FROM documents WHERE stable_id LIKE 'nihc/%'")
+            for r in ni_rows:
+                alias = ni_division_alias(r["stable_id"])
+                if not alias:
+                    continue
+                cur = self.conn.execute(
+                    "INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?) "
+                    "ON CONFLICT(alias) DO NOTHING",
+                    (alias, r["stable_id"], "ni-division-alias"),
+                )
+                minted["ni_division"] += max(cur.rowcount, 0)
         return minted
 
     def backfill_dutch_aliases(self) -> dict:

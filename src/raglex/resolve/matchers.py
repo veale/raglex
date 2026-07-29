@@ -29,7 +29,7 @@ _CELEX_RE = re.compile(r"\b\d{5}[A-Z]{1,2}\d{4}\b", re.IGNORECASE)
 # UK neutral citation: [2024] UKSC 12, [2024] EWHC 99 (Admin),
 # [2026] UKFTT 904 (GRC). Optional bracketed division becomes a path segment.
 _UK_NCN_RE = re.compile(
-    r"\[(?P<year>\d{4})\]\s+(?P<court>[A-Z]{2,8})\s+(?P<num>\d+)"
+    r"\[(?P<year>\d{4})\]\s+(?P<court>[A-Z][A-Za-z]{1,9})\s+(?P<num>\d+)"
     r"(?:\s+\((?P<sub>[A-Za-z]+)\))?"
 )
 
@@ -87,16 +87,25 @@ def match_uk_ncn(raw: str) -> Candidate | None:
     ``[year] TOKEN number`` shape; only the token tells them apart. A report token (AC,
     WLR, All ER, …) has no Find Case Law URI, so minting one produces a slug that 404s and
     hides the report from the unfetchable frontier — reject it (the report grammars record
-    these as the candidate-less authorities they are)."""
+    these as the candidate-less authorities they are).
+
+    The court token is matched as the EXTRACTOR matches it — a capital followed by mixed
+    case — not as all-caps. Northern Ireland is where that mattered: NIQB and NICA are
+    shouted, but the Chancery, Family, Master and Coroner's courts are not (NICh, NIFam,
+    NIMaster, NICoroner), so ~1,500 held NI judgments got no citation-shaped alias on
+    import and nothing that cited them — or looked them up — could reach them."""
     m = _UK_NCN_RE.search(raw)
     if not m:
         return None
-    court = m.group("court").lower()
-    from ..citations.grammars import REPORT_SERIES
+    from ..citations.grammars import REPORT_SERIES, STATUTE_ABBREVS, NON_CITATION_TOKENS
 
-    if court.upper() in REPORT_SERIES:
+    court = m.group("court")
+    cu = court.upper()
+    # Same rejections as the extractor's normaliser: a report series, a statute
+    # abbreviation and a structure word all share the "[year] TOKEN number" shape.
+    if cu in REPORT_SERIES or cu in STATUTE_ABBREVS or cu in NON_CITATION_TOKENS:
         return None
-    parts = [court]
+    parts = [court.lower()]
     if m.group("sub"):
         parts.append(m.group("sub").lower())
     parts.extend([m.group("year"), m.group("num")])

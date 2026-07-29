@@ -6021,6 +6021,7 @@ class Facade:
         from .core.models import AddedBy, DocType, ExtractedVia, Record, Segment, sha256_bytes
         from .extraction import extract_bytes
         from .pipeline.runner import _chamberless_alias
+        from .citations.courts import ni_division_alias as _ni_division_alias
         from .resolve.matchers import first_candidate
         from .core.text import fold
 
@@ -6085,6 +6086,10 @@ class Facade:
             if bare and bare != stable_id.lower():
                 cat.put_alias(bare, stable_id, source="chamber-alias", commit=False)
                 aliased += 1
+            ni = _ni_division_alias(stable_id)
+            if ni and ni != stable_id.lower():
+                cat.put_alias(ni, stable_id, source="ni-division-alias", commit=False)
+                aliased += 1
             cat.commit()
             # extract the judgment's own outgoing citations, then resolve the whole graph
             from .citations import extract_document
@@ -6125,6 +6130,7 @@ class Facade:
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
+        from .citations.courts import ni_division_alias as _ni_division_alias
         from .resolve.matchers import first_candidate
         from .core.text import fold
 
@@ -6192,6 +6198,9 @@ class Facade:
                         bare = _chamberless_alias(slug)
                         if bare and bare != slug:
                             alias_pairs.append((bare, "chamber-alias"))
+                        ni = _ni_division_alias(slug)
+                        if ni and ni != slug:
+                            alias_pairs.append((ni, "ni-division-alias"))
 
                         data = text.encode("utf-8")
                         payload_hash = sha256_bytes(data)
@@ -6423,6 +6432,7 @@ class Facade:
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
+        from .citations.courts import ni_division_alias as _ni_division_alias
         from .resolve.matchers import first_candidate
         from .core.text import fold
 
@@ -6467,6 +6477,9 @@ class Facade:
                 bare = _chamberless_alias(slug)
                 if bare and bare != slug:
                     alias_pairs.append((bare, "chamber-alias"))
+                ni = _ni_division_alias(slug)
+                if ni and ni != slug:
+                    alias_pairs.append((ni, "ni-division-alias"))
 
                 # No transcript on the page — either a PDF-only stub (keep its good
                 # metadata as a placeholder) or a genuinely empty/unreadable page.
@@ -7353,6 +7366,7 @@ class Facade:
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .core.text import fold
         from .pipeline.runner import _chamberless_alias
+        from .citations.courts import ni_division_alias as _ni_division_alias
         from .resolve.matchers import first_candidate
 
         slug, title = parsed.slug, parsed.title
@@ -7400,6 +7414,9 @@ class Facade:
         bare = _chamberless_alias(slug)
         if bare and bare != slug and bare != target:
             alias_pairs.append((bare, "chamber-alias"))
+        ni = _ni_division_alias(slug)
+        if ni and ni != slug and ni != target:
+            alias_pairs.append((ni, "ni-division-alias"))
 
         def _mint(dst_id: str) -> None:
             for key, source in alias_pairs:
@@ -7605,6 +7622,7 @@ class Facade:
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
         from .pipeline.runner import _chamberless_alias
+        from .citations.courts import ni_division_alias as _ni_division_alias
         from .resolve.matchers import first_candidate
         from .core.text import fold
 
@@ -7667,6 +7685,9 @@ class Facade:
                     bare = _chamberless_alias(stable_id)
                     if bare and bare != stable_id:
                         alias_pairs.append((bare, "chamber-alias"))
+                    ni = _ni_division_alias(stable_id)
+                    if ni and ni != stable_id:
+                        alias_pairs.append((ni, "ni-division-alias"))
 
                 # A pre-neutral case has only a surrogate id to key by (a Westlaw id, a
                 # slugged report citation, or a content hash) — but if any of its PRECISE

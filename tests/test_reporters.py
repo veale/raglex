@@ -55,6 +55,29 @@ def test_report_is_not_mis_keyed_as_a_caselaw_slug():
     assert first_candidate("[2015] EWHC 100 (Ch)").value == "ewhc/ch/2015/100"
 
 
+@pytest.mark.parametrize("cite,slug", [
+    ("[2013] NIQB 45", "niqb/2013/45"),
+    ("[2019] NICh 12", "nich/2019/12"),
+    ("[2016] NIFam 6", "nifam/2016/6"),
+    ("[2020] NIMaster 1", "nimaster/2020/1"),
+    ("[2018] NICoroner 1", "nicoroner/2018/1"),
+])
+def test_mixed_case_court_token_resolves(cite, slug):
+    """The resolver matched an ALL-CAPS court token, so it saw NIQB and NICA but not the
+    NI courts that aren't shouted — NICh, NIFam, NIMaster, NICoroner. ~1,500 held Northern
+    Irish judgments therefore got no citation-shaped alias on import, and neither a
+    citation nor a lookup could reach the copy the corpus already had."""
+    assert first_candidate(cite).value == slug
+
+
+@pytest.mark.parametrize("cite", ["[2019] Ch 12", "[2019] Fam 1", "[2019] QB 1",
+                                  "[2019] WLR 3", "[1932] A C 562"])
+def test_mixed_case_does_not_admit_report_series(cite):
+    """…without letting the mixed-case token in through the report series it collides
+    with: the Chancery and Family LAW REPORTS are "Ch" and "Fam"."""
+    assert first_candidate(cite) is None
+
+
 def _facade() -> Facade:
     import os
 
@@ -242,3 +265,16 @@ def test_oscola_cleans_parenthetical_spacing_in_legislation_titles():
     got = cite({"stable_id": "32017R1939", "source": "eu-legislation",
                 "doc_type": "legislation", "title": "Council Regulation ( the EPPO)"})
     assert got["text"] == "Council Regulation (the EPPO)"
+
+
+def test_ni_high_court_division_alias_is_minted_from_the_slug(catalogue):
+    """BAILII files every NI High Court division under one nihc/<division> slug head,
+    but the judgments are cited by division. Without the mapping, "[2016] NIFam 6"
+    hangs while the judgment sits in the corpus as nihc/fam/2016/6."""
+    from raglex.core.models import DocType, ExtractedVia, Record
+
+    catalogue.upsert_document(Record(
+        source="uk-caselaw", stable_id="nihc/fam/2016/6", doc_type=DocType.JUDGMENT,
+        title="ZH v MR and Mrs H", court="nihc", extracted_via=ExtractedVia.STRUCTURED))
+    catalogue.backfill_alias_from_meta()
+    assert catalogue.find_document_id("nifam/2016/6") == "nihc/fam/2016/6"
