@@ -137,3 +137,66 @@ def test_conseil_etat_parse_hit():
     assert rec.court == "Conseil d'État"
     assert rec.decision_date == date(2021, 4, 21)
     assert rec.text
+
+
+# -- NeuRIS's two ceilings: 10,000 hits and pageIndex 99 ----------------------
+
+class _WindowedHTTP:
+    """A register that answers like NeuRIS: any query reports totalItems capped at
+    10,000, pageIndex 100 is a 422, and a dated window reports its true count."""
+
+    def __init__(self, per_year: dict[int, int]) -> None:
+        self.per_year = per_year
+        self.windows: list[tuple[str, str]] = []
+
+    def get(self, url, params=None, headers=None, raise_for_4xx=True):
+        p = params or {}
+        if p.get("pageIndex", 0) > 99:
+            return _Resp(status=422)
+        lo, hi = p.get("dateFrom"), p.get("dateTo")
+        if lo and hi and p.get("size") == 1:
+            self.windows.append((lo, hi))
+            total = self.per_year.get(int(lo[:4]), 0) if lo[:4] == hi[:4] else 10000
+            return _Resp({"member": [], "totalItems": total, "view": {}})
+        if not (lo and hi):
+            return _Resp({"member": [], "totalItems": 10000, "view": {}})
+        year = int(lo[:4])
+        n = self.per_year.get(year, 0)
+        if not n:
+            return _Resp({"member": [], "totalItems": 0, "view": {}})
+        members = [{"item": {"documentNumber": f"K{year}{i}", "decisionDate": f"{year}-06-01"}}
+                   for i in range(n)]
+        return _Resp({"member": members, "totalItems": n, "view": {}})
+
+
+def test_backfill_windows_by_date_instead_of_running_into_the_cap(monkeypatch):
+    """One unbounded walk can only ever see 10,000 decisions — the newest ~2 years and
+    nothing before them, however long it runs. A backfill therefore asks year by year,
+    where the register reports a true count and the page ceiling can't truncate it."""
+    import raglex.adapters.de_neuris as mod
+
+    monkeypatch.setattr(mod, "_EARLIEST_YEAR", 2023)
+    http = _WindowedHTTP({2026: 2, 2025: 3, 2024: 1, 2023: 0})
+    stubs = list(DeNeurisAdapter(mode="caselaw", client=http).discover(None))
+    assert len(stubs) == 6                       # every year, not just the newest
+    assert {w[0][:4] for w in http.windows} == {"2026", "2025", "2024", "2023"}
+
+
+def test_a_year_over_the_cap_is_split(monkeypatch):
+    """A window that saturates is halved — the count is not a count, it is the ceiling."""
+    import raglex.adapters.de_neuris as mod
+
+    monkeypatch.setattr(mod, "_EARLIEST_YEAR", 2025)
+    http = _WindowedHTTP({2026: 10000, 2025: 1})
+    list(DeNeurisAdapter(mode="caselaw", client=http).discover(None))
+    spans_2026 = [w for w in http.windows if w[0].startswith("2026")]
+    assert len(spans_2026) > 1                   # split, not silently truncated
+
+
+def test_incremental_run_keeps_the_simple_path():
+    """"Everything since the watermark" is small by construction — no windowing."""
+    listing = {"member": [{"item": {"documentNumber": "KVRE1", "decisionDate": "2026-07-01"}}],
+               "view": {}}
+    http = _FakeHTTP({"case-law": _Resp(listing)})
+    stubs = list(DeNeurisAdapter(mode="caselaw", client=http).discover("2026-06-30"))
+    assert [s.stable_id for s in stubs] == ["KVRE1"]

@@ -36,6 +36,12 @@ from ..formats.ldml_de import parse_ldml_de
 from ..citations.german import case_alias, law_id
 
 BASE = "https://testphase.rechtsinformationen.bund.de/v1"
+# The register's own limits, measured against the live API (2026-07): a query never
+# reports more than 10,000 hits and pageIndex 100 is a 422 — so one unbounded walk can
+# only ever see 10,000 decisions. Case law starts 2010-01-04.
+_RESULT_CAP = 10000
+_MAX_PAGE_INDEX = 99
+_EARLIEST_YEAR = 2010
 
 # CaseLawSchema text fields in the order a German judgment lays them out → segments.
 _CASELAW_ZONES = (
@@ -50,6 +56,23 @@ _CASELAW_ZONES = (
     ("otherLongText", "Sonstiger Langtext"),
     ("dissentingOpinion", "Abweichende Meinung"),
 )
+
+
+def _midpoint(lo: str, hi: str) -> str | None:
+    """The ISO date halfway between two ISO dates, or None if they are adjacent."""
+    try:
+        a, b = date.fromisoformat(lo), date.fromisoformat(hi)
+    except (TypeError, ValueError):
+        return None
+    if (b - a).days < 2:
+        return None
+    return (a + (b - a) / 2).isoformat()
+
+
+def _next_day(value: str) -> str:
+    from datetime import timedelta
+
+    return (date.fromisoformat(value) + timedelta(days=1)).isoformat()
 
 
 def _iso_date(value) -> date | None:
@@ -185,12 +208,59 @@ class DeNeurisAdapter(BaseAdapter):
                 yield Stub(stable_id=ident, hints={"id": ident})
             return
         collection = "case-law" if self.mode == "caselaw" else "legislation"
+        # A BACKFILL walks date windows, not one long page run. The API answers 422 past
+        # pageIndex 99 and reports a flat totalItems of 10,000 for any unbounded query, so
+        # a plain walk stops dead at 10,000 items — for case law that is the newest ~2
+        # years and nothing before it, however long you let it run. Windowed, each slice
+        # reports a TRUE count (2015: 4,723) and stays under the ceiling, so the whole
+        # 2010-onwards corpus is reachable. An incremental run keeps the simple path:
+        # "everything since the watermark" is small by construction.
+        if self.mode == "caselaw" and not since:
+            yield from self._discover_windows(collection, max_pages=max_pages)
+            return
+        yield from self._discover_pages(collection, since=since, max_pages=max_pages)
+
+    def _discover_windows(self, collection: str, *, max_pages: int | None = None) -> Iterator[Stub]:
+        """Newest year first, back to the register's start; a year that hits the cap is
+        halved until it fits."""
+        budget = {"pages": max_pages}
+        today = date.today()
+        year = today.year
+        while year >= _EARLIEST_YEAR:
+            lo, hi = f"{year}-01-01", f"{year}-12-31"
+            yield from self._discover_span(collection, lo, hi, budget)
+            if budget["pages"] is not None and budget["pages"] <= 0:
+                return
+            year -= 1
+
+    def _discover_span(self, collection: str, lo: str, hi: str, budget: dict,
+                       depth: int = 0) -> Iterator[Stub]:
+        probe = self._get_json(collection, {"size": 1, "pageIndex": 0,
+                                            "dateFrom": lo, "dateTo": hi})
+        total = probe.get("totalItems") or 0
+        # totalItems saturates at the cap; split the span rather than lose the remainder
+        if total >= _RESULT_CAP and depth < 4:
+            mid = _midpoint(lo, hi)
+            if mid:
+                yield from self._discover_span(collection, lo, mid, budget, depth + 1)
+                yield from self._discover_span(collection, _next_day(mid), hi, budget, depth + 1)
+                return
+        if not total:
+            return
+        yield from self._discover_pages(collection, since=lo, until=hi,
+                                        max_pages=budget["pages"], budget=budget)
+
+    def _discover_pages(self, collection: str, *, since: str | None = None,
+                        until: str | None = None, max_pages: int | None = None,
+                        budget: dict | None = None) -> Iterator[Stub]:
         page = 0
         pages = 0
         while True:
             params = {"size": self.per_page, "pageIndex": page}
             if since:
                 params["dateFrom"] = since
+            if until:
+                params["dateTo"] = until
             body = self._get_json(collection, params)
             members = _members(body)
             if not members:
@@ -211,7 +281,14 @@ class DeNeurisAdapter(BaseAdapter):
                 yield Stub(stable_id=sid, hint_date=d, hints=hints)
             page += 1
             pages += 1
-            if max_pages is not None and pages >= max_pages:
+            if budget is not None and budget["pages"] is not None:
+                budget["pages"] -= 1
+                if budget["pages"] <= 0:
+                    return
+            elif max_pages is not None and pages >= max_pages:
+                return
+            # The window's own ceiling: pageIndex 100 is a 422, so never ask for it.
+            if page > _MAX_PAGE_INDEX:
                 return
             # stop when the Hydra view exposes no further page
             if not (body.get("view") or {}).get("next"):
