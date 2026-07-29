@@ -878,17 +878,18 @@ export function FreeTextResults({ res, query, open, onRefine }:
         {/* cites — the one facet that is about the network rather than the metadata */}
         <div className="facet-grp">
           <h4>cites</h4>
-          <input className="facet-cite" value={citeQ} placeholder="an authority…"
+          <input className="facet-cite" value={citeQ} placeholder="type an authority here"
             onChange={(e) => setCiteQ(e.target.value)} />
           {f.cites && (
-            <button className="facet-row on" onClick={() => setF({ ...f, cites: null })}>
+            <button className="facet-row on" onClick={() => setF({ ...f, cites: null })}
+              title={cites.find((c) => c.stable_id === f.cites)?.title || f.cites}>
               <span className="facet-label">
                 ✕ {cites.find((c) => c.stable_id === f.cites)?.title || f.cites}</span>
             </button>
           )}
           {!f.cites && citeOpts.slice(0, citeQ ? 8 : 6).map((c) => (
             <button key={c.stable_id} className="facet-row"
-              title={c.stable_id}
+              title={`${c.title || c.stable_id} — cited by ${c.citing} of these results`}
               onClick={() => setF({ ...f, cites: c.stable_id })}>
               <span className="facet-bar" style={{
                 width: `${Math.max(3, 100 * c.citing / (cites[0]?.citing || 1))}%` }} />

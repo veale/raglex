@@ -51,7 +51,9 @@ function FacetGroup({ dim, picked, onToggle }:
       <h4>{dim.title}</h4>
       {shown.map((r) => (
         <button key={r.value} className={`facet-row${picked.includes(r.value) ? " on" : ""}`}
-          title={r.value} onClick={() => onToggle(r.value)}>
+          // the label is ellipsised to fit the rail, so the full name belongs on hover
+          title={r.label && r.label !== r.value ? `${r.label} (${r.value})` : r.value}
+          onClick={() => onToggle(r.value)}>
           <span className="facet-bar" style={{ width: `${Math.max(3, 100 * r.n / top)}%` }} />
           <span className="facet-label">{r.label || r.value}</span>
           <span className="facet-n">{FMT(r.n)}</span>

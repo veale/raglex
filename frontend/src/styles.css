@@ -1503,8 +1503,7 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .ft-note-edit { width: 100%; font: inherit; font-size: 13px; padding: var(--sp-3);
   border: 1px solid var(--rule); border-radius: 6px; background: var(--bg);
   color: inherit; resize: vertical; }
-.search-scope .jur-row td { font-weight: 600; padding-top: var(--sp-4);
-  text-transform: capitalize; }
+.search-scope .jur-row td { font-weight: 600; padding-top: var(--sp-4); }
 .search-scope .num { text-align: right; }
 .src-facets { font-size: 12px; display: flex; flex-direction: column; gap: 4px;
   padding: var(--sp-2) 0; }
@@ -1522,8 +1521,8 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .ftr-count b { font-size: 1.25rem; }
 .ftr-count .mini { margin-top: 4px; }
 .facet-grp { margin-bottom: var(--sp-5); }
-.facet-grp h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase;
-  letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.facet-grp h4 { margin: 0 0 4px; font-size: 11.5px;
+  color: var(--muted); font-weight: 600; }
 .facet-row { position: relative; display: flex; align-items: center; gap: 6px;
   width: 100%; background: none; border: 0; padding: 2px 4px; cursor: pointer;
   font: inherit; font-size: 12px; color: inherit; text-align: left;
