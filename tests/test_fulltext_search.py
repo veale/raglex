@@ -276,3 +276,58 @@ def test_a_document_matching_once_reports_one_passage():
     from raglex.fulltext.index import match_offsets
 
     assert len(match_offsets("only one duty of care here", parse('"duty of care"'))) == 1
+
+
+# -- the agent-facing shape ----------------------------------------------------
+def test_the_agent_response_omits_what_an_agent_cannot_use(tmp_path, monkeypatch):
+    """The browser response carries compact metadata for every match — up to four
+    thousand rows — because the page narrows locally. An agent pays for that in
+    tokens and cannot act on it."""
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=str(tmp_path / "c.sqlite"),
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=tmp_path / "s.json",
+                      embed_provider="local-hashing", embed_model=None))
+    monkeypatch.setattr(f, "freetext_search", lambda *a, **k: {
+        "items": [{"stable_id": "d1", "title": "A v B", "court": "ewca",
+                   "court_label": "Court of Appeal", "jurisdiction": "United Kingdom",
+                   "decision_date": "2015-01-01", "oscola": None}],
+        "verified": 1, "total": 1, "truncated": False, "notes": [],
+        "facets": {"jurisdiction": [{"value": "United Kingdom", "label": None, "n": 1}],
+                   "doc_type": [], "court": [], "years": [{"year": "2015", "n": 1}]},
+        "network": {"cites": [{"stable_id": "donoghue", "title": "Donoghue", "citing": 1}]},
+        "matched": [{"id": "d1"}] * 4000,
+    })
+    monkeypatch.setattr(f, "freetext_hydrate", lambda **k: {"items": [
+        {"stable_id": "d1", "cited_by": 12, "passage_count": 3,
+         "passages": [{"anchor": "para 4", "snippet": "one"},
+                      {"anchor": "para 9", "snippet": "two"},
+                      {"anchor": "para 11", "snippet": "three"}]}]})
+
+    out = f.freetext_for_agent("duty", passages=2)
+    assert "matched" not in out, "the 4,000-row narrowing array must not reach an agent"
+    assert out["total"] == 1 and out["shown"] == 1
+    it = out["items"][0]
+    assert it["passage_count"] == 3 and len(it["passages"]) == 2, "passages are capped"
+    assert it["cited_by"] == 12
+    # years roll to decades — an agent wants the shape, not 120 rows
+    assert out["facets"]["decade"] == {"2010s": 1}
+    assert out["commonly_cited"][0]["id"] == "donoghue"
+
+
+def test_a_truncated_agent_result_says_the_total_is_a_lower_bound(tmp_path, monkeypatch):
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=str(tmp_path / "c.sqlite"),
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=tmp_path / "s.json",
+                      embed_provider="local-hashing", embed_model=None))
+    monkeypatch.setattr(f, "freetext_search", lambda *a, **k: {
+        "items": [], "verified": 4000, "total": 9000, "truncated": True,
+        "notes": [], "facets": {}, "network": {}, "matched": []})
+    monkeypatch.setattr(f, "freetext_hydrate", lambda **k: {"items": []})
+    out = f.freetext_for_agent("common words")
+    assert "lower bound" in out["note"]

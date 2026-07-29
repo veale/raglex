@@ -113,6 +113,19 @@ from .embeddings import EmbedStage
 # The line under the free-text box. Editable in settings, because only the operator
 # knows what the index currently covers and a search box that lies about its scope is
 # worse than one that says nothing.
+def _decades(years: list[dict] | None) -> dict:
+    """Year counts rolled to decades — an agent wants the shape of the result set in
+    time, not 120 individual years."""
+    out: dict[str, int] = {}
+    for y in years or []:
+        try:
+            d = f"{int(y['year']) // 10 * 10}s"
+        except (ValueError, TypeError, KeyError):
+            continue
+        out[d] = out.get(d, 0) + y["n"]
+    return dict(sorted(out.items()))
+
+
 def _segment_at(ts, doc, char_start: int | None) -> str | None:
     """The label of the structural unit containing ``char_start`` ("para 42",
     "Article 6"), so a free-text hit can be linked to the passage it matched."""
@@ -10145,6 +10158,79 @@ class Facade:
                     "passage_count": len(passages),
                 })
         return {"items": items}
+
+    def freetext_for_agent(self, query: str, *, limit: int = 10, exact: bool = True,
+                           jurisdictions: list[str] | None = None,
+                           sources: list[str] | None = None,
+                           doc_type: list[str] | None = None,
+                           court: list[str] | None = None,
+                           year_from: int | None = None,
+                           passages: int = 3) -> dict:
+        """Free-text search shaped for an agent rather than a browser.
+
+        The web response carries compact metadata for every match — up to four
+        thousand rows — because the page narrows and sorts locally. An agent pays for
+        that in tokens and cannot use it, so this returns the page, the counts, the
+        top of each facet, and the authorities the results have in common: the things
+        that change what an agent does next.
+
+        Passages are the part worth spending tokens on. A judgment that uses the
+        phrase eight times is a different answer from one that mentions it once, and
+        an agent cannot see that from a single snippet."""
+        res = self.freetext_search(
+            query, exact=exact, limit=limit, sources=sources, doc_type=doc_type,
+            court=court, jurisdictions=jurisdictions, year_from=year_from)
+        ids = [it["stable_id"] for it in res.get("items", [])]
+        hydrated = {h["stable_id"]: h
+                    for h in self.freetext_hydrate(ids=ids, query=query,
+                                                   exact=exact).get("items", [])}
+        items = []
+        for it in res.get("items", []):
+            h = hydrated.get(it["stable_id"], {})
+            ps = (h.get("passages") or [])[:max(0, passages)]
+            items.append({k: v for k, v in {
+                "id": it["stable_id"],
+                "title": it.get("title"),
+                "citation": (it.get("oscola") or {}).get("plain") if isinstance(
+                    it.get("oscola"), dict) else None,
+                "court": it.get("court_label") or it.get("court"),
+                "jurisdiction": it.get("jurisdiction"),
+                "date": it.get("decision_date"),
+                "cited_by": h.get("cited_by") or None,
+                "passage_count": h.get("passage_count"),
+                "passages": [{"at": p["anchor"], "text": p["snippet"]} for p in ps]
+                            or None,
+            }.items() if v not in (None, [], "")})
+
+        def top(rows, n=8):
+            return {r["label"] or r["value"]: r["n"] for r in (rows or [])[:n]}
+
+        fac = res.get("facets") or {}
+        out = {
+            "query": query,
+            "exact": exact,
+            "total": res.get("verified") if res.get("verified") is not None
+                     else res.get("total"),
+            "shown": len(items),
+            "items": items,
+            "facets": {k: v for k, v in {
+                "jurisdiction": top(fac.get("jurisdiction")),
+                "type": top(fac.get("doc_type")),
+                "court": top(fac.get("court")),
+                "decade": _decades(fac.get("years")),
+            }.items() if v},
+            # what the matching documents cite between them — the doctrinal anchors of
+            # a result set, which no per-document view can show
+            "commonly_cited": [
+                {"id": c["stable_id"], "title": c.get("title"), "by": c["citing"]}
+                for c in ((res.get("network") or {}).get("cites") or [])[:8]],
+        }
+        if res.get("truncated"):
+            out["note"] = ("more than the candidate budget matched — the total is a "
+                           "lower bound; narrow the query for an exact count")
+        if res.get("notes"):
+            out["warnings"] = res["notes"]
+        return out
 
     def build_freetext_index(self, *, sources: list[str] | None = None,
                              reindex: bool = False, limit: int = 1_000_000,

@@ -50,10 +50,18 @@ _INSTRUCTIONS = (
     "• SILENT FETCH. An authority merely new to the corpus is fetched from its source "
     "(CourtListener, Find Case Law, legislation.gov.uk, CELLAR, HUDOC…); if unfetchable you "
     "get an external URL to read yourself.\n\n"
-    "FINDING things: use find(query) / lookup(citation) — they match CITATIONS and TITLES "
-    "(and party/act names). There is NO working concept/semantic search (embeddings are "
-    "incomplete); a natural-language legal question returns nothing, so don't search that "
-    "way — search by the NAME of a case or act, or by a citation.\n\n"
+    "FINDING things — two different questions:\n"
+    "• WHICH DOCUMENT is this → search(query) / lookup(citation). They match CITATIONS "
+    "and TITLES (and party/act names), so give them a case name, an act, or a citation.\n"
+    "• WHERE IS THIS SAID → search_text(query). Full text of the indexed jurisdictions "
+    "(call search_coverage() for which, and how many documents). A quoted phrase is "
+    "LITERAL — \"duty of care\" will not return \"duties of care\" — and it supports OR, "
+    "-exclusion, (grouping), wildcard*, and NEAR/3 proximity. It reports how many "
+    "PASSAGES each document matches, which distinguishes a judgment that turns on a "
+    "phrase from one that mentions it, and what the matching documents cite in common.\n"
+    "There is still NO concept/semantic search: the embedding index is empty, so a "
+    "natural-language question ('cases about fairness') matches nothing. Search for words "
+    "that would actually appear in the text, or for a name or citation.\n\n"
     "Everything that CHANGES the corpus — harvesting, imports, watches, aliases, settings, "
     "repairs — is behind the single maintenance(op, args) tool. Call maintenance('help') "
     "only when you actually need to modify the corpus."
@@ -97,15 +105,55 @@ def build_server(config: Config | None = None) -> FastMCP:
         It reads the query as a citation first (and hands you to lookup() if it resolves),
         then matches your words against document TITLES and ids.
 
-        NOT a concept/semantic search: a natural-language legal question ("cases on the
-        right of access") returns nothing here, because it matches titles, not meaning
-        (the embedding index is incomplete). Search by the NAME of a case or act, or by a
-        citation. For a specific provision and who cites it, use lookup(citation,
+        NOT a text search: it matches titles and citations, not what documents SAY. For
+        words in the body — a phrase, a term of art, a statutory formula — use
+        search_text(), which searches the full text of the indexed jurisdictions and
+        supports literal quoted phrases. Neither is a concept/semantic search: the
+        embedding index is empty, so a natural-language question matches nothing. For a specific provision and who cites it, use lookup(citation,
         pincite=…) → citing_documents(). Scope with ``jurisdiction`` (ISO code like "fr"
         or a name), ``kind`` ("cases" | "administrative" | "legislation" | "guidance"),
         or source/doc_type/tag/year_from."""
         return facade.find(query, k=k, jurisdiction=jurisdiction, kind=kind, source=source,
                            doc_type=doc_type, tag=tag, year_from=year_from)
+
+    @mcp.tool(annotations=_READ_ONLY)
+    def search_text(query: str, limit: int = 10, exact: bool = True,
+                    jurisdiction: Optional[str] = None, source: Optional[str] = None,
+                    doc_type: Optional[str] = None, court: Optional[str] = None,
+                    year_from: Optional[int] = None, passages: int = 3) -> dict:
+        """Search the FULL TEXT of the corpus — where something is said, rather than
+        which document it is.
+
+        A quoted phrase means those characters: ``"duty of care"`` will not return
+        "duties of care" (set exact=False for the looser, stemmed reading). Operators:
+        ``a OR b``, ``-excluded``, ``-"excluded phrase"``, ``(a OR b) c``, ``neglig*``,
+        ``a NEAR/3 b`` (also ``/3`` and ``~3``), and ``"phrase"~4`` for slop.
+
+        Returns per document how many PASSAGES matched and previews of the first few —
+        a judgment using a phrase eight times is a different answer from one mentioning
+        it once, and a single snippet hides that. Also returns facet counts over the
+        WHOLE result set (not the page) and the authorities the matching documents cite
+        in common, which is often the fastest route to the leading case.
+
+        Scope it with jurisdiction / source / doc_type / court / year_from (comma-
+        separated where several). Call search_coverage() for what is indexed: a
+        jurisdiction that is not indexed returns nothing, which is not the same as the
+        corpus not holding it."""
+        split = lambda v: [x for x in (v or "").split(",") if x]  # noqa: E731
+        return facade.freetext_for_agent(
+            query, limit=min(limit, 50), exact=exact,
+            jurisdictions=split(jurisdiction) or None, sources=split(source) or None,
+            doc_type=split(doc_type) or None, court=split(court) or None,
+            year_from=year_from, passages=max(0, min(passages, 10)))
+
+    @mcp.tool(annotations=_READ_ONLY)
+    def search_coverage() -> dict:
+        """Which jurisdictions search_text() actually covers, and how many documents.
+
+        Worth checking before concluding the corpus lacks something: a jurisdiction
+        that is held but not indexed is searchable by citation and title, and invisible
+        to full-text search."""
+        return facade.freetext_index_summary()
 
     @mcp.tool(annotations=_READ_ONLY)
     def overview() -> dict:
