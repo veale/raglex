@@ -456,6 +456,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         the embedding pass covers, and the scope settings behind each."""
         return facade.search_status()
 
+    @app.post("/freetext/cites-filter")
+    def freetext_cites_filter_ep(payload: dict = Body(...)) -> dict:
+        """Which of a result set cite a given authority — on demand, because
+        pre-computing it for every candidate target dominated the search."""
+        return facade.freetext_cites_filter(ids=(payload or {}).get("ids") or [],
+                                            target=(payload or {}).get("target") or "")
+
     @app.get("/freetext/scope")
     def freetext_scope_ep() -> dict:
         """What the free-text index covers, what it could cover, and the note shown

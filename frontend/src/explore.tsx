@@ -816,9 +816,19 @@ export function FreeTextResults({ res, query, open, onRefine }:
   // Narrowing happens over the loaded page here; the whole matching set is in
   // res.matched, so a future "load more" pages through the same filtered set
   // without a second query.
-  const citeSet = f.cites
-    ? new Set((cites.find((c) => c.stable_id === f.cites)?.src_ids) || [])
-    : null;
+  // Which results cite the picked authority is fetched WHEN IT IS PICKED. Computing
+  // it for all twenty candidate targets up front cost 10.6s of a 12s search.
+  const [citeIds, setCiteIds] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    if (!f.cites) { setCiteIds(null); return; }
+    let live = true;
+    setCiteIds(new Set());
+    api.freetextCitesFilter(res.matched || [], f.cites)
+      .then((r) => { if (live) setCiteIds(new Set(r.ids || [])); })
+      .catch(() => { if (live) setCiteIds(null); });
+    return () => { live = false; };
+  }, [f.cites]);
+  const citeSet = citeIds;
   const shown = items.filter((it) => {
     if (f.source.length && !f.source.includes(it.source)) return false;
     if (f.jurisdiction.length && !f.jurisdiction.includes(it.jurisdiction)) return false;

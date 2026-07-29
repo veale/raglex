@@ -9825,8 +9825,11 @@ class Facade:
             # instead of asking the server again.
             meta = cat.documents_meta(res.matched)
             facets = self._freetext_facets(meta)
-            network = ({"cites": cat.cited_by_documents(res.matched, limit=20,
-                                                       with_sources=True)}
+            # Without the citing-id lists: fetching those cost 10.6 seconds of a
+            # 12-second search — 60 queries over `relations` with 900-element IN
+            # lists — to pre-compute an answer for a facet click that usually never
+            # comes. The lists are fetched on demand instead (freetext_cites_filter).
+            network = ({"cites": cat.cited_by_documents(res.matched, limit=20)}
                        if with_network and res.matched else {})
             items = []
             for h in res.hits:
@@ -10003,6 +10006,15 @@ class Facade:
                   else "remote" if where == "fallback" else "missing"] += 1
             return {"split": True, "root": str(ts.root), "fallback": str(ts.fallback),
                     "sources": sorted(per.values(), key=lambda x: -(x["local"] + x["remote"]))}
+
+    def freetext_cites_filter(self, *, ids: list[str], target: str) -> dict:
+        """Which of these results cite ``target``.
+
+        Called when a reader clicks the "cites" facet, rather than pre-computed for
+        every possible target on every search — see the comment in freetext_search."""
+        with self._open() as (cat, _rs, _ts):
+            return {"ids": sorted(cat.documents_citing(ids[:20000], target)),
+                    "target": target}
 
     def build_freetext_index(self, *, sources: list[str] | None = None,
                              reindex: bool = False, limit: int = 1_000_000,
