@@ -273,3 +273,21 @@ def test_no_adapter_is_never_recorded_as_an_absence(monkeypatch):
     with f._open() as (cat, _rs, _ts):
         assert not cat.enrichment_misses("harvest-miss", max_age_days=90)
         assert not cat.enrichment_misses("harvest-retry", max_age_days=90)
+
+
+def test_harvest_all_endpoints_ignore_arguments_that_are_not_the_drains(tmp_path, monkeypatch):
+    """"queue" is how every other job endpoint is asked for a queued job; passing it to
+    this one handed it to harvest_all_references as a keyword, and the job died on
+    `unexpected keyword argument 'queue'` before fetching a single reference."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from raglex.web.app import create_app
+
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    c = TestClient(create_app(Config.from_env()))
+    r = c.post("/jobs/harvest-all", json={"limit": 1, "min_citing": 1, "queue": True})
+    assert r.status_code == 200 and "job_id" in r.json()
+    r2 = c.post("/unresolved/harvest-all", json={"limit": 1, "queue": True})
+    assert r2.status_code == 200 and "error" not in r2.json()

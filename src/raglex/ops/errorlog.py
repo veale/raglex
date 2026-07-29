@@ -109,9 +109,13 @@ def install(facade, *, logger_name: str = "raglex", level: int = logging.WARNING
     if not int(os.environ.get("RAGLEX_ERRORLOG", "1") or 0):
         return None
     root = logging.getLogger(logger_name)
-    for h in root.handlers:
+    for h in list(root.handlers):
         if isinstance(h, IssueHandler):
-            return h
+            if h._facade is facade:
+                return h
+            # a NEW facade (a second app in-process) must not keep filing its errors into
+            # the old one's database — re-point rather than stack a second handler
+            root.removeHandler(h)
     handler = IssueHandler(facade, level=level)
     root.addHandler(handler)
     return handler

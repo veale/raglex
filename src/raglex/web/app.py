@@ -566,8 +566,14 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/unresolved/harvest-all")
     def harvest_all_ep(payload: dict = Body(default={})) -> dict:
-        """Drain every routable, high-confidence hanging reference, then resolve once."""
-        return facade.harvest_all_references(**(payload or {}))
+        """Drain every routable, high-confidence hanging reference, then resolve once.
+
+        Arguments are whitelisted rather than splatted: an unrecognised key used to reach
+        the facade as a keyword and blow the whole drain up before it fetched anything."""
+        p = payload or {}
+        kw = {k: p[k] for k in ("limit", "min_citing", "adapter", "leg_kind",
+                                "retry_cooled") if k in p}
+        return facade.harvest_all_references(**kw)
 
     @app.post("/discover-citing")
     def discover_citing_ep(payload: dict = Body(...)) -> dict:
@@ -700,7 +706,18 @@ def create_app(config: Config | None = None) -> FastAPI:
     # -- background jobs (so long ops report progress instead of blocking) --
     @app.post("/jobs/harvest-all")
     def job_harvest_all_ep(payload: dict = Body(default={})) -> dict:
-        return _start_job("harvest-all", "harvest all routable references", dict(payload or {}))
+        """Drain the routable hanging-reference worklist as a background job.
+
+        Only the drain's OWN arguments become job params: the whole payload used to be
+        passed through, so a caller that also said ``queue: true`` (the ordinary way to
+        ask for a queued job) had "queue" handed to harvest_all_references as a keyword
+        and the job died on `unexpected keyword argument 'queue'` before fetching
+        anything."""
+        p = payload or {}
+        params = {k: p[k] for k in ("limit", "min_citing", "adapter", "leg_kind",
+                                    "retry_cooled") if k in p}
+        return _start_job("harvest-all", "harvest all routable references", params,
+                          queue=bool(p.get("queue")))
 
     @app.get("/jobs")
     def jobs_list_ep(limit: int = 60) -> list[dict]:
