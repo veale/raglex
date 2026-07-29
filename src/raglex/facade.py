@@ -9732,6 +9732,14 @@ class Facade:
             "indexed_total": sum(e["indexed"] for e in by_source.values()),
         }
 
+    def _freetext_selected(self) -> list[str]:
+        """The gated sources, read from the setting alone — no coverage query."""
+        from .settings import SettingsStore
+
+        raw = (SettingsStore(self.config.settings_path).resolve("RAGLEX_FTS_SOURCES")
+               or "").strip()
+        return [s for s in re.split(r"[,\s]+", raw) if s]
+
     def set_freetext_scope(self, *, sources: list[str] | None = None,
                            note: str | None = None) -> dict:
         """Set the gate. Narrowing it does NOT delete the index — a source dropped
@@ -9809,10 +9817,12 @@ class Facade:
         """Free-text search over the gated scope, with literal quotation support."""
         from .fulltext import index as fts
 
-        scope = self.freetext_scope()
-        allowed = sources or scope["selected"] or [s["source"] for s in scope["sources"]
-                                                   if s["indexed"]]
-        filters: dict = {"source": allowed}
+        # NOT freetext_scope(): that computes per-source coverage, which is a GROUP BY
+        # over all 4.97M documents joined against a DISTINCT over the index — a
+        # reporting query, run here on every keystroke-speed search. The search only
+        # needs the list of selected sources, which is a setting.
+        allowed = sources or self._freetext_selected() or None
+        filters: dict = {"source": allowed} if allowed else {}
         if doc_type:
             filters["doc_type"] = doc_type
         if year_from:
