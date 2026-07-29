@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from .config import Config
@@ -68,7 +68,7 @@ _INSTRUCTIONS = (
 )
 
 
-def build_server(config: Config | None = None) -> FastMCP:
+def build_server(config: Config | None = None) -> MCPServer:
     facade = Facade(config or Config.from_env())
     # OAuth 2.1 for the HTTP transport (opt-in via RAGLEX_MCP_PASSWORD + RAGLEX_PUBLIC_URL).
     # The SDK wires the whole AS/RS surface from these; we only supply the provider (storage
@@ -78,11 +78,11 @@ def build_server(config: Config | None = None) -> FastMCP:
     _auth = auth_settings()
     if _auth is not None:
         _provider = build_provider(facade)
-        mcp = FastMCP("raglex", instructions=_INSTRUCTIONS,
+        mcp = MCPServer("raglex", instructions=_INSTRUCTIONS,
                       auth_server_provider=_provider, auth=_auth)
         mcp._raglex_oauth_provider = _provider  # retrieved by serve_app for the consent page
     else:
-        mcp = FastMCP("raglex", instructions=_INSTRUCTIONS)
+        mcp = MCPServer("raglex", instructions=_INSTRUCTIONS)
         mcp._raglex_oauth_provider = None
 
     # Maintenance/mutation operations are NOT registered as individual tools (their schemas

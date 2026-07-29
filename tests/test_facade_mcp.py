@@ -208,6 +208,30 @@ def test_facade_embed_and_search(config):
     assert hits and "erasure" in hits[0]["chunk_text"].lower()
 
 
+def _unwrap(res):
+    """The tool's result, whatever envelope the SDK put it in.
+
+    SDK v2 returns a CallToolResult carrying structured_content and content blocks;
+    v1 returned a tuple, or a bare list of content. A test should assert on what the
+    tool SAYS, not on the wrapper of the day — this one broke on the upgrade for no
+    reason other than the wrapper changing."""
+    import json
+
+    if hasattr(res, "content") or hasattr(res, "structured_content"):
+        structured = getattr(res, "structured_content", None)
+        if isinstance(structured, dict):
+            return structured.get("result", structured)
+        blocks = getattr(res, "content", None) or []
+        if blocks and getattr(blocks[0], "text", None):
+            return json.loads(blocks[0].text)
+        return res
+    if isinstance(res, tuple):
+        res = res[1] if isinstance(res[1], dict) else res[0]
+    if isinstance(res, list) and res and hasattr(res[0], "text"):
+        return json.loads(res[0].text)
+    return res
+
+
 # -- MCP server: lean retrieval surface, mutations gated -------------------
 def test_mcp_core_tools_first_class_mutations_gated(config):
     """The research surface is first-class and small; the ~60 mutation/admin ops are NOT
@@ -227,12 +251,7 @@ def test_mcp_core_tools_first_class_mutations_gated(config):
                   "import_zotero", "embed_pending", "resolve_citations", "corpus_stats"}:
         assert gated not in names, f"{gated} leaked as a top-level tool"
     # …but every one is still reachable and documented via maintenance('help')
-    import json
-    help_res = asyncio.run(server.call_tool("maintenance", {"op": "help"}))
-    if isinstance(help_res, tuple):
-        help_res = help_res[1] if isinstance(help_res[1], dict) else help_res[0]
-    if isinstance(help_res, list):
-        help_res = json.loads(help_res[0].text)
+    help_res = _unwrap(asyncio.run(server.call_tool("maintenance", {"op": "help"})))
     ops = help_res["ops"]
     for gated in {"import_pdf_base64", "add_note", "corpus_stats", "resolve_citations"}:
         assert gated in ops

@@ -1650,12 +1650,11 @@ def serve_app(config: Config | None = None) -> FastAPI:
     dist = _frontend_dist()
 
     # Serve the MCP server at /mcp on this same origin (instead of a second process/port):
-    # FastMCP hands back a mountable ASGI app. Its streamable-HTTP endpoint defaults to
+    # the SDK hands back a mountable ASGI app. Its streamable-HTTP endpoint defaults to
     # "/mcp", so point it at "/" and mount the app at "/mcp" → the endpoint lands exactly
     # at /mcp. The sub-app's lifespan (the MCP session manager) doesn't run on its own when
     # mounted, so we thread it into the parent app's lifespan.
     mcp = build_server(config)
-    mcp.settings.streamable_http_path = "/"
     # The MCP SDK's DNS-rebinding guard trusts only localhost by default, so a request
     # arriving with the public Host header (behind the reverse proxy) is rejected 421 —
     # even after OAuth succeeds. Trust the RAGLEX_PUBLIC_URL host (+ localhost) so remote
@@ -1672,9 +1671,19 @@ def serve_app(config: Config | None = None) -> FastAPI:
         if _host:
             _hosts += [_host, f"{_host}:*"]
             _origins += [_pub, f"{_pub}:*"]
-    mcp.settings.transport_security = TransportSecuritySettings(
-        allowed_hosts=_hosts, allowed_origins=_origins)
-    mcp_app = mcp.streamable_http_app()
+    # SDK v2 configures the transport on the call rather than through a settings
+    # object (pydantic-settings is gone). stateless_http is the 2026-07-28 protocol's
+    # own shape and it suits this server exactly: every tool is a request/response
+    # call into the facade, there is no Context, no progress reporting, no
+    # elicitation or sampling, and citing_documents was already documented as
+    # stateless and re-callable. Nothing here needs a session to survive between
+    # requests, so nothing has to be kept alive between them.
+    mcp_app = mcp.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(
+            allowed_hosts=_hosts, allowed_origins=_origins),
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
