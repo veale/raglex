@@ -195,6 +195,8 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
     needs_check = bool(parsed.literals or parsed.excluded)
     seen: set[str] = set()
     matched: list[tuple[str, float, int | None]] = []
+    # one batched lookup for the whole candidate set, not one query per document
+    hashes = _hashes_for(cat, list({r["doc_id"] for r in rows})) if needs_check else {}
     for r in rows:
         doc_id = r["doc_id"]
         if doc_id in seen:
@@ -206,8 +208,12 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
         # EVERY candidate is verified, not merely enough of them to fill a page:
         # the facets and the count must describe the real result set. At 0.046 ms a
         # document (local store, measured) a full 4,000-candidate budget is ~0.2 s.
-        text = _text_of(cat, ts, doc_id)
-        if text is None:
+        ph = hashes.get(doc_id)
+        if not ph:
+            continue
+        try:
+            text = ts.get(ph)
+        except OSError:
             continue
         at = verify(text, parsed)
         if at is None:
@@ -257,6 +263,25 @@ def _first_term_at(text: str, parsed: ParsedQuery) -> int | None:
         return None
     m = re.search(rf"\b{re.escape(word)}", text, re.IGNORECASE)
     return m.start() if m else None
+
+
+def _hashes_for(cat, doc_ids: list[str]) -> dict[str, str]:
+    """doc_id → payload_hash for a whole candidate set, in batched queries.
+
+    This used to be one ``get_document`` per candidate, which is what made the first
+    real search take 34 seconds: reading the text is 0.046 ms but asking Postgres
+    where it lives, four thousand times over, is not. Verification is now bounded by
+    the file reads it was supposed to be bounded by."""
+    out: dict[str, str] = {}
+    for i in range(0, len(doc_ids), 900):
+        chunk = doc_ids[i:i + 900]
+        rows = cat.conn.execute(
+            "SELECT stable_id, payload_hash FROM documents "
+            f"WHERE stable_id IN ({','.join('?' * len(chunk))})", chunk).fetchall()
+        for r in rows:
+            if r["payload_hash"]:
+                out[r["stable_id"]] = r["payload_hash"]
+    return out
 
 
 def _text_of(cat, ts, doc_id: str) -> str | None:

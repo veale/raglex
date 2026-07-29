@@ -9949,16 +9949,27 @@ class Facade:
                 st["scanned"] += 1
                 if ts.locate(ph) == "local":
                     st["already"] += 1
+                    # a re-run repairs a missing sidecar without re-copying the text
+                    if not ts.get_segments(ph):
+                        remote = ts.fallback / ts._rel(ph)
+                        alt = remote.with_suffix(".seg.json")
+                        if alt.exists():
+                            (ts.root / ts._rel(ph)).with_suffix(".seg.json").write_text(
+                                alt.read_text(encoding="utf-8"), encoding="utf-8")
+                            st["segments_repaired"] = st.get("segments_repaired", 0) + 1
                     continue
                 try:
                     text = ts.get(ph)
                 except OSError:
                     st["missing"] += 1
                     continue
-                ts.put_local(ph, text)
-                # the sidecar follows the text: put_segments writes beside whichever
-                # copy path_for now resolves to, which is the local one
+                # READ the sidecar first: put_local makes path_for resolve to the
+                # new local copy, and get_segments would then look for a sidecar that
+                # is not there yet and return nothing. That ordering silently copied
+                # 483,000 documents without their paragraph structure, so every
+                # free-text hit came back with no paragraph to link to.
                 segs = ts.get_segments(ph)
+                ts.put_local(ph, text)
                 if segs:
                     ts.put_segments(ph, segs)
                 st["copied"] += 1

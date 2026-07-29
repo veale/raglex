@@ -200,3 +200,43 @@ def test_the_search_settings_are_registered(tmp_path):
     scope = f.freetext_scope()
     assert sorted(scope["selected"]) == ["eu-cellar", "uk-caselaw"]
     assert scope["note"] == "only the UK and EU"
+
+
+def test_the_candidate_set_is_resolved_in_one_query_not_one_each(catalogue, tmp_path):
+    """The first real search took 34 seconds. Reading a document is 0.046 ms; asking
+    Postgres where it lives, once per candidate, is not — and there were 4,000 of
+    them. The lookup is batched."""
+    from datetime import date
+
+    from raglex.core.models import DocType, ExtractedVia, Record
+    from raglex.fulltext.index import _hashes_for
+    from raglex.storage import TextStore
+
+    ts = TextStore(tmp_path / "text")
+    ids = []
+    for i in range(50):
+        rec = Record(source="uk-caselaw", stable_id=f"d{i}", doc_type=DocType.JUDGMENT,
+                     title=f"doc {i}", decision_date=date(2020, 1, 1), text=f"body {i}",
+                     raw_bytes=b"x", extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        catalogue.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, f"body {i}")))
+        ids.append(f"d{i}")
+
+    calls = {"n": 0}
+
+    class CountingConn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *a, **k):
+            calls["n"] += 1
+            return self._conn.execute(sql, *a, **k)
+
+    class CountingCat:
+        conn = None
+
+    cat = CountingCat()
+    cat.conn = CountingConn(catalogue.conn)
+    hashes = _hashes_for(cat, ids)
+    assert len(hashes) == 50
+    assert calls["n"] == 1, f"{calls['n']} queries for 50 documents — should be batched"
