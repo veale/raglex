@@ -432,7 +432,7 @@ export function FreeTextSearch({ open, full, initialQuery, onNavigate }:
                 onClick={() => setOnly(only.includes(j.jurisdiction)
                   ? only.filter((x) => x !== j.jurisdiction)
                   : [...only, j.jurisdiction])}>
-                <FlagIcon jurisdiction={j.jurisdiction} opacity={0.9} />
+                <FlagIcon jurisdiction={j.jurisdiction} opacity={0.9} placeholder />
                 {j.jurisdiction} <span className="muted">{FMT(j.documents)}</span>
               </button>
             ))}
@@ -856,12 +856,20 @@ export function FreeTextResults({ res, query, open, onRefine }:
 
   // hydrate whatever page is on screen — snippets mean reading the document, so they
   // are fetched for twenty, never for four thousand
+  // A failed hydrate is NOT an empty result set. Swallowing the error and rendering
+  // "nothing matches those filters" under a count of 3,000 is how a reader-role 403 on
+  // this endpoint looked for months like a broken search — say what actually happened.
+  const [hydrateErr, setHydrateErr] = useState<string | null>(null);
   useEffect(() => {
-    if (!pageIds.length) { setRows([]); return; }
+    if (!pageIds.length) { setRows([]); setHydrateErr(null); return; }
     let live = true;
     api.freetextHydrate(pageIds, query, !!res.exact)
-      .then((r) => { if (live) setRows(r.items || []); })
-      .catch(() => { if (live) setRows([]); });
+      .then((r) => { if (live) { setRows(r.items || []); setHydrateErr(null); } })
+      .catch((e) => {
+        if (!live) return;
+        setRows([]);
+        setHydrateErr(String(e?.message || e) || "the request failed");
+      });
     return () => { live = false; };
   }, [pageIds.join(","), query]);
 
@@ -958,7 +966,13 @@ export function FreeTextResults({ res, query, open, onRefine }:
             </DocLink>
           )} />
         ))}
-        {shown.length === 0 && matched.length > 0 && (
+        {shown.length === 0 && hydrateErr && (
+          <div className="ft-warn">
+            These {keep.length.toLocaleString()} results matched, but the page of
+            snippets could not be loaded — {hydrateErr}.
+          </div>
+        )}
+        {shown.length === 0 && !hydrateErr && matched.length > 0 && keep.length === 0 && (
           <p className="muted">Nothing matches those filters.</p>
         )}
         {keep.length > PER && (

@@ -15,6 +15,8 @@
 /* --- Catppuccin palettes → one set of semantic tokens ---------------------- */
 :root, [data-theme="latte"] {
   color-scheme: light;
+  /* highlight wash + the ink to read on it (contrast ≥ 5:1 in every theme) */
+  --mark-bg:#f5d780; --mark-fg:#4c4f69;
   --ctp-base:#eff1f5; --ctp-mantle:#e6e9ef; --ctp-crust:#dce0e8;
   --ctp-text:#4c4f69; --ctp-subtext1:#5c5f77; --ctp-subtext0:#6c6f85;
   --ctp-surface0:#ccd0da; --ctp-surface1:#bcc0cc; --ctp-surface2:#acb0be;
@@ -28,6 +30,7 @@
 }
 [data-theme="frappe"] {
   color-scheme: dark;
+  --mark-bg:#5c5230; --mark-fg:#f4e8c1;
   --ctp-base:#303446; --ctp-mantle:#292c3c; --ctp-crust:#232634;
   --ctp-text:#c6d0f5; --ctp-subtext1:#b5bfe2; --ctp-subtext0:#a5adce;
   --ctp-surface0:#414559; --ctp-surface1:#51576d; --ctp-surface2:#626880;
@@ -41,6 +44,7 @@
 }
 [data-theme="macchiato"] {
   color-scheme: dark;
+  --mark-bg:#584f2f; --mark-fg:#f6e7c0;
   --ctp-base:#24273a; --ctp-mantle:#1e2030; --ctp-crust:#181926;
   --ctp-text:#cad3f5; --ctp-subtext1:#b8c0e0; --ctp-subtext0:#a5adcb;
   --ctp-surface0:#363a4f; --ctp-surface1:#494d64; --ctp-surface2:#5b6078;
@@ -54,6 +58,7 @@
 }
 [data-theme="mocha"] {
   color-scheme: dark;
+  --mark-bg:#544a2b; --mark-fg:#f9e8be;
   --ctp-base:#1e1e2e; --ctp-mantle:#181825; --ctp-crust:#11111b;
   --ctp-text:#cdd6f4; --ctp-subtext1:#bac2de; --ctp-subtext0:#a6adc8;
   --ctp-surface0:#313244; --ctp-surface1:#45475a; --ctp-surface2:#585b70;
@@ -268,8 +273,11 @@ tbody tr:hover { background: var(--surface-2); }
 .facet-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .facet-count { flex: 0 0 auto; color: var(--faint); font-variant-numeric: tabular-nums; font-size: .75rem; }
 .facet-more { display: inline-block; margin-top: 2px; font-size: .72rem; color: var(--accent); cursor: pointer; }
-.histo { display: flex; align-items: flex-end; gap: 1px; height: 44px; margin: 2px 0; }
-.histo-bar { flex: 1 1 0; min-width: 2px; background: color-mix(in srgb, var(--accent) 45%, var(--surface-2)); cursor: pointer; transition: background .1s; }
+/* Bucketed to a bounded number of bars in results.tsx; these two rules are the
+   backstop that keeps the rail's width authoritative whatever it is handed. */
+.histo { display: flex; align-items: flex-end; gap: 1px; height: 44px; margin: 2px 0;
+  min-width: 0; max-width: 100%; overflow: hidden; }
+.histo-bar { flex: 1 1 0; min-width: 1px; background: color-mix(in srgb, var(--accent) 45%, var(--surface-2)); cursor: pointer; transition: background .1s; }
 .histo-bar:hover { background: var(--accent); }
 .histo-bar.on { background: var(--accent); }
 .histo-axis { display: flex; justify-content: space-between; font-size: .68rem; color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -1483,11 +1491,14 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .ft-meta { font-size: 12px; }
 .ft-snip { font-size: 13px; line-height: 1.55; margin-top: 2px;
   overflow-wrap: anywhere; }
-.ft-snip mark { background: var(--mark-bg, #fde68a); color: inherit;
+/* The matched words. Both colours come from the THEME, never from the OS: keying the
+   dark highlight to prefers-color-scheme meant a mocha user on a light OS got pale
+   yellow behind pale text, and a latte user on a dark OS got dark olive behind dark
+   text — the highlight was invisible in exactly the mixed combinations. Painting the
+   foreground too is the other half: `color: inherit` inherited whatever the theme's
+   body colour was, which is the colour the tint was chosen against. */
+.ft-snip mark { background: var(--mark-bg); color: var(--mark-fg);
   border-radius: 2px; padding: 0 1px; }
-@media (prefers-color-scheme: dark) {
-  .ft-snip mark { background: #6b5a12; }
-}
 
 /* --- Admin ▸ Search -------------------------------------------------------- */
 .search-admin .panel { margin-bottom: var(--sp-5); }
@@ -1593,7 +1604,11 @@ button.mini { font-size: 11px; padding: 1px 7px; }
    narrow this search. They never change what is indexed — that is Admin ▸ Search. */
 .ft-jur { background: none; border: 1px solid transparent; border-radius: 999px;
   padding: 1px 7px 1px 4px; margin: 0 3px 3px 0; font: inherit; font-size: 11.5px;
-  color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+  color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;
+  /* an inline-flex chip takes its baseline from its first item, so a chip WITH a flag
+     image and one without ("Other") sat on different baselines — align them as boxes */
+  vertical-align: middle; }
+.flag-none { display: inline-block; flex: 0 0 auto; }
 .ft-jur:hover { border-color: var(--rule); }
 .ft-jur.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 .ft-jur.on .muted { color: rgba(255,255,255,.75); }

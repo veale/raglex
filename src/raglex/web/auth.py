@@ -76,6 +76,12 @@ class Principal:
 READER_WRITE_ALLOW = frozenset({
     "/citations/scan",       # read-only grammar recognition (PDF text-layer linkify)
     "/detect-citations",     # read-only preview, no fetching
+    # The second half of a free-text search. The search itself is a GET, so a reader saw
+    # the result COUNT and then an empty list ("nothing matches those filters") — these
+    # two POST nothing: they are a page of snippets, and which of a result set cite a
+    # given authority. They are POSTs only because a page of ids is too long for a URL.
+    "/freetext/hydrate",
+    "/freetext/cites-filter",
     "/refinement-flags",     # a reader flags a passage for an admin to action
     "/feedback",             # a reader submits a bug / feature request
     "/unresolved/harvest",   # trigger ONE on-demand fetch+process of a missing authority

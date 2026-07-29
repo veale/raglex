@@ -93,6 +93,9 @@ export function YearHistogram({ years, from, to, onRange, onClear, undated }:
   const [drag, setDrag] = useState<{ a: string; b: string } | null>(null);
   const dragRef = useRef<typeof drag>(null);
   dragRef.current = drag;
+  // where the brush started, so dragging back the other way SHRINKS the selection
+  // instead of growing it (each move recomputes the range from the anchor)
+  const anchor = useRef<{ a: string; b: string } | null>(null);
   const ys = Object.keys(years).filter((y) => /^\d{4}$/.test(y)).sort();
   // a release outside the bars still commits the brush
   useEffect(() => {
@@ -106,11 +109,27 @@ export function YearHistogram({ years, from, to, onRange, onClear, undated }:
     return () => window.removeEventListener("mouseup", up);
   }, [!drag]);
   if (ys.length < 2) return null;
-  const max = Math.max(...ys.map((y) => years[y]));
   const lo = ys[0], hi = ys[ys.length - 1];
-  const inSel = (y: string) => {
-    if (drag) { const [a, b] = [drag.a, drag.b].sort(); return y >= a && y <= b; }
-    return !!(from || to) && y >= (from || "0000") && y <= (to || "9999");
+  // The rail is ~190px wide and the corpus runs from the 13th century to this year, so
+  // one bar per year (min-width 2px + a 1px gap) ran to several thousand pixels and
+  // spilled out of the rail. Bucket the span into at most MAX_BARS columns — a bar is
+  // then a run of years, and brushing still yields a year range, so the filter is
+  // unchanged; only the granularity of a single click is.
+  const MAX_BARS = 44;
+  const span = +hi - +lo + 1;
+  const per = Math.max(1, Math.ceil(span / MAX_BARS));
+  const bins: { a: string; b: string; n: number }[] = [];
+  for (let y = +lo; y <= +hi; y += per) {
+    const end = Math.min(y + per - 1, +hi);
+    let n = 0;
+    for (let k = y; k <= end; k++) n += years[String(k)] || 0;
+    bins.push({ a: String(y), b: String(end), n });
+  }
+  const max = Math.max(...bins.map((b) => b.n), 1);
+  const inSel = (bin: { a: string; b: string }) => {
+    // a bucket is selected when the selection overlaps ANY of its years
+    if (drag) { const [a, b] = [drag.a, drag.b].sort(); return bin.b >= a && bin.a <= b; }
+    return !!(from || to) && bin.b >= (from || "0000") && bin.a <= (to || "9999");
   };
   const label = drag ? [drag.a, drag.b].sort().join("–")
     : (from || to) ? `${from || lo}–${to || hi}` : null;
@@ -119,13 +138,23 @@ export function YearHistogram({ years, from, to, onRange, onClear, undated }:
       <h4>date {label && <span className="histo-range">{label}</span>}
         {(from || to) && !drag && (
           <button className="linkish" onClick={onClear}>clear</button>)}</h4>
-      <div className="histo" title="click a year, or drag to select a range">
-        {ys.map((y) => (
-          <div key={y} className={`histo-bar${inSel(y) ? " on" : ""}`}
-            style={{ height: `${Math.max(3, (years[y] / max) * 40)}px` }}
-            title={`${y}: ${years[y].toLocaleString()}`}
-            onMouseDown={(e) => { e.preventDefault(); setDrag({ a: y, b: y }); }}
-            onMouseEnter={() => setDrag((d) => (d ? { ...d, b: y } : d))} />
+      <div className="histo" title={per > 1
+        ? `click a ${per}-year period, or drag to select a range`
+        : "click a year, or drag to select a range"}>
+        {bins.map((bin) => (
+          <div key={bin.a} className={`histo-bar${inSel(bin) ? " on" : ""}`}
+            style={{ height: `${Math.max(3, (bin.n / max) * 40)}px` }}
+            title={`${bin.a === bin.b ? bin.a : `${bin.a}–${bin.b}`}: ${bin.n.toLocaleString()}`}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              anchor.current = { a: bin.a, b: bin.b };
+              setDrag({ a: bin.a, b: bin.b });
+            }}
+            onMouseEnter={() => setDrag((d) => {
+              const an = anchor.current;
+              if (!d || !an) return d;
+              return { a: an.a < bin.a ? an.a : bin.a, b: an.b > bin.b ? an.b : bin.b };
+            })} />
         ))}
       </div>
       <div className="histo-axis"><span>{lo}</span><span>{hi}</span></div>

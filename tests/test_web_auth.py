@@ -77,6 +77,12 @@ def test_reader_is_read_only(build):
     # allowed reader writes reach the handler (not a 403); may 4xx/5xx on payload, that's fine
     assert c.post("/refinement-flags", json={}, headers=h).status_code != 403
     assert c.post("/detect-citations", json={"text": "x"}, headers=h).status_code != 403
+    # the second half of a free-text search: the search itself is a GET, so blocking
+    # these two POSTs showed a reader the result COUNT over an empty list of results
+    assert c.post("/freetext/hydrate", json={"ids": [], "q": "x"},
+                  headers=h).status_code != 403
+    assert c.post("/freetext/cites-filter", json={"ids": [], "target": "x"},
+                  headers=h).status_code != 403
 
 
 def test_admin_full_access(build):

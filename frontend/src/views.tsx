@@ -162,9 +162,16 @@ function flagCode(jurisdiction?: string | null): string | null {
 // jurisdiction so mixed/unknown buckets simply carry no flag.
 // `size` is in em, so the flag scales with the surrounding text (a header flag grows
 // with the header). Bundled locally (frontend/public/flags, HatScripts/circle-flags).
-export function FlagIcon({ jurisdiction, size = 1, opacity }: { jurisdiction?: string | null; size?: number; opacity?: number }) {
+export function FlagIcon({ jurisdiction, size = 1, opacity, placeholder }:
+  { jurisdiction?: string | null; size?: number; opacity?: number; placeholder?: boolean }) {
   const cc = flagCode(jurisdiction);
-  if (!cc) return null;
+  // In a ROW of flagged labels ("Other" beside four flagged jurisdictions), the one
+  // without a flag has a different baseline from the ones with an image and sits lower.
+  // `placeholder` keeps its space so every chip in the row lines up.
+  if (!cc) return placeholder
+    ? <span className="flag-icon flag-none" aria-hidden="true"
+        style={{ width: `${size}em`, height: `${size}em` }} />
+    : null;
   return (
     <img className="flag-icon" loading="lazy"
       src={`${import.meta.env.BASE_URL}flags/${cc}.svg`}
