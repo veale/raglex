@@ -675,6 +675,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {"dry_run": True} if (payload or {}).get("dry_run") else {}
         return _start_job("repair-de-citations", "re-validate German citations", params)
 
+    @app.post("/jobs/repair-de-renditions")
+    def job_repair_de_renditions_ep(payload: dict = Body(default={})) -> dict:
+        """Fold a second German register's copies of judgments the corpus already holds
+        back into the originals: re-point the docket alias, move resolved edges, record
+        the copy as a rendition, delete the duplicate. ``dry_run`` counts."""
+        params = {k: (payload or {})[k] for k in ("source", "dry_run") if k in (payload or {})}
+        return _start_job("repair-de-renditions", "fold duplicate German renditions", params)
+
     @app.post("/jobs/backfill-intituling")
     def job_backfill_intituling_ep(payload: dict = Body(default={})) -> dict:
         """Record who decided each held judgment (and who argued it), read off its own

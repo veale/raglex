@@ -4637,6 +4637,110 @@ class Facade:
                     st["repaired"] += 1
         return st
 
+    def repair_de_duplicate_renditions(self, *, source: str = "de-neuris",
+                                       dry_run: bool = False,
+                                       on_progress=None, cancel_check=None) -> dict:
+        """Fold a second register's copies of judgments the corpus already holds back into
+        the originals.
+
+        NeuRIS and Rechtsprechung im Internet publish the SAME federal decisions — 83,515
+        and 83,465 of them — but NeuRIS answers ``ecli: null``, so its copies were stored
+        as ``de/<documentNumber>`` while the held ones are keyed by ECLI. Nothing linked
+        the two, and because the adapter declares the docket alias, each copy also
+        RE-POINTED that docket key away from the ECLI-keyed judgment: a citation to
+        "BGH AnwZ (Brfg) 40/25" resolved to a rendition with no ECLI and none of the edges
+        the original had.
+
+        For every document of ``source`` whose declared docket alias names a decision held
+        from another register, this: re-points the alias to the original, moves any edges
+        resolved to the copy onto the original, records the copy as a *rendition* in the
+        original's metadata, and deletes the copy. What it never does is merge two
+        documents that only look alike — the match is the docket key the adapters
+        themselves mint, not a heuristic."""
+        from .citations.german import case_alias as _case_alias
+
+        st = {"scanned": 0, "duplicates": 0, "aliases_repointed": 0, "edges_moved": 0,
+              "documents_deleted": 0}
+        samples: list[dict] = []
+
+        def _dockets(meta: dict, court: str | None) -> list[str]:
+            """Every docket key a German document answers to. Adapters state them in
+            ``extra["aliases"]``; the bulk register states court + Aktenzeichen instead."""
+            keys = [str(a) for a in (meta.get("aliases") or []) if a]
+            raw = meta.get("file_numbers") or meta.get("aktenzeichen") or []
+            if isinstance(raw, str):
+                raw = [raw]
+            for docket in raw:
+                if docket and court:
+                    keys.append(_case_alias(str(court), str(docket)))
+            return keys
+
+        with self._open() as (cat, _rs, _ts):
+            # The originals, keyed by docket: every German document from ANOTHER register.
+            # The alias TABLE can't answer this — it holds one row per key, and the copy
+            # has already taken it; the question is which document also *claims* the key.
+            origins: dict[str, str] = {}
+            for o in cat.conn.execute(
+                    "SELECT stable_id, source, court, meta_json, ecli FROM documents "
+                    "WHERE source LIKE 'de-%' AND source <> ?", (source,)).fetchall():
+                try:
+                    ometa = json.loads(o["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    ometa = {}
+                for key in _dockets(ometa, o["court"]):
+                    k = key.casefold()
+                    # an ECLI-keyed original wins any tie — it is the better identity
+                    if k not in origins or (o["ecli"] and not origins[k].startswith("de/")):
+                        origins.setdefault(k, o["stable_id"])
+                        if o["ecli"]:
+                            origins[k] = o["stable_id"]
+
+            rows = cat.conn.execute(
+                "SELECT stable_id, court, meta_json FROM documents WHERE source = ?",
+                (source,)).fetchall()
+            for r in rows:
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                try:
+                    meta = json.loads(r["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                held = None
+                for key in _dockets(meta, r["court"]):
+                    cand = origins.get(key.casefold())
+                    if cand and cand != r["stable_id"]:
+                        held = cand
+                        break
+                if held is None:
+                    continue
+                st["duplicates"] += 1
+                if len(samples) < 20:
+                    samples.append({"copy": r["stable_id"], "original": held})
+                if dry_run:
+                    continue
+                with cat._atomic():
+                    for key in _dockets(meta, r["court"]):
+                        cat.put_alias(key.casefold(), held, source="de-rendition",
+                                      commit=False)
+                        st["aliases_repointed"] += 1
+                    st["edges_moved"] += cat.conn.execute(
+                        "UPDATE relations SET dst_id = ? WHERE dst_id = ?",
+                        (held, r["stable_id"])).rowcount
+                    cat.record_rendition(held, source, r["stable_id"], commit=False)
+                    cat.conn.execute("DELETE FROM citations WHERE src_id = ?", (r["stable_id"],))
+                    cat.conn.execute("DELETE FROM relations WHERE src_id = ?", (r["stable_id"],))
+                    cat.conn.execute("DELETE FROM citation_aliases WHERE dst_id = ?",
+                                     (r["stable_id"],))
+                    cat.conn.execute("DELETE FROM documents WHERE stable_id = ?",
+                                     (r["stable_id"],))
+                    st["documents_deleted"] += 1
+                if st["duplicates"] % 200 == 0:
+                    _progress(on_progress, stage="folding duplicate renditions",
+                              done=st["duplicates"], total=len(rows))
+        self._invalidate_caches()
+        return {**st, "sample": samples}
+
     def repair_de_citations(self, *, dry_run: bool = False,
                             on_progress=None, cancel_check=None) -> dict:
         """Re-validate every German citation against the CURRENT German grammar and drop

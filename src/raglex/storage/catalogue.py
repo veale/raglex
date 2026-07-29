@@ -922,6 +922,19 @@ class Catalogue:
         ("learned_shorthands", "candidate_id"): ("shorthand",),
     }
 
+    def record_rendition(self, stable_id: str, source: str, foreign_id: str, *,
+                         commit: bool = True) -> None:
+        """Note that another register also publishes this authority, WITHOUT minting a
+        second document for it (see Pipeline._reconcile_identity). The corpus keeps one
+        node per judgment; this records where else it can be read."""
+        meta = self.document_meta(stable_id)
+        rends = [r for r in (meta.get("renditions") or []) if isinstance(r, dict)]
+        if any(r.get("source") == source and r.get("id") == foreign_id for r in rends):
+            return
+        rends.append({"source": source, "id": foreign_id})
+        meta["renditions"] = rends
+        self.set_document_meta(stable_id, meta, commit=commit)
+
     def set_document_meta(self, stable_id: str, meta: dict, *, title_if_empty: str | None = None,
                           commit: bool = True) -> None:
         """Overwrite a document's ``meta_json`` bag (and, only when the row's title is
@@ -3422,16 +3435,26 @@ class Catalogue:
             self.conn.commit()
         return cur.rowcount
 
-    def put_alias(self, alias: str, dst_id: str, source: str | None = None, *, commit: bool = True) -> None:
+    def put_alias(self, alias: str, dst_id: str, source: str | None = None, *,
+                  commit: bool = True, overwrite: bool = True) -> None:
+        """Point a citation key at a document. ``overwrite=False`` keeps an existing
+        mapping — first writer wins.
+
+        That matters where two registers publish the same judgment: NeuRIS re-pointed
+        2,960 German docket keys away from the ECLI-keyed copies of the same decisions,
+        so a citation resolved to a rendition with no ECLI and none of the edges the
+        original had."""
         # Store on the de-dotted key so "K.B." and "KB" citations converge on one row
         # rather than each minting its own (and only one of them resolving).
         from ..core.text import fold_citation
 
         alias = fold_citation(alias) or alias
+        conflict = ("DO UPDATE SET dst_id = excluded.dst_id, source = excluded.source"
+                    if overwrite else "DO NOTHING")
         self.conn.execute(
-            """
+            f"""
             INSERT INTO citation_aliases (alias, dst_id, source) VALUES (?,?,?)
-            ON CONFLICT(alias) DO UPDATE SET dst_id = excluded.dst_id, source = excluded.source
+            ON CONFLICT(alias) {conflict}
             """,
             (alias, dst_id, source),
         )

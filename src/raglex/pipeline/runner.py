@@ -506,6 +506,18 @@ class Pipeline:
         # already-held case (a CJEU case cited by a guessed …CJ… descriptor that we already
         # hold under its real …CO…/ECLI) dedups here — so minting only on the store path
         # would leave those edges pending forever even though the target is present.
+        # …but first: is this the SAME authority the corpus already holds from another
+        # register, under a better identifier? A record with no identifier of its own,
+        # whose declared alias already names a held document, is another rendition — not
+        # a new one. Minting it anyway forks the corpus: the NeuRIS backfill was on its
+        # way to a second copy of all 83,465 German federal decisions, keyed so that
+        # nothing could ever link the two.
+        held = self._reconcile_identity(record)
+        if held is not None:
+            stats.deduped += 1
+            self.catalogue.record_rendition(held, record.source, record.stable_id)
+            return False
+
         self._mint_aliases(record)
 
         # Content-hash dedup (§5): identical bytes → skip the expensive downstream
@@ -530,6 +542,25 @@ class Pipeline:
 
         self.catalogue.upsert_document(record, raw_path=raw_path, text_path=text_path)
         return True
+
+    def _reconcile_identity(self, record: Record) -> str | None:
+        """The held document this record is another rendition OF, or None if it is new.
+
+        Deliberately narrow, because merging two documents wrongly is worse than holding
+        two: only a record with NO identifier of its own (no ECLI), whose adapter-declared
+        alias resolves to a document from a DIFFERENT source that already has text."""
+        if record.ecli:
+            return None
+        for alias in (record.extra.get("aliases") if record.extra else None) or ():
+            if not alias:
+                continue
+            held = self.catalogue.find_document_id(str(alias))
+            if not held or held == record.stable_id:
+                continue
+            doc = self.catalogue.get_document(held)
+            if doc is not None and doc["source"] != record.source and doc["has_text"]:
+                return held
+        return None
 
     def _mint_aliases(self, record: Record) -> None:
         """Register the resolution aliases a document's citing edges key off (§5b).
@@ -563,10 +594,15 @@ class Pipeline:
         # by that aren't ECLI/CELEX-shaped — e.g. an EDPB register decision's EDPBI
         # identifier. The adapter states them in extra["aliases"]; they resolve to the
         # document's stable_id.
+        # First writer wins: an adapter-declared alias must not RE-POINT a key that
+        # already names another held document. Two registers publish the same German
+        # judgment, and the second one through re-pointed 2,960 docket keys away from the
+        # ECLI-keyed copies — so a citation resolved to a rendition with no ECLI and none
+        # of the edges the original had.
         for alias in (record.extra.get("aliases") if record.extra else None) or ():
             if alias:
                 self.catalogue.put_alias(str(alias).casefold(), record.stable_id,
-                                         source="adapter-alias")
+                                         source="adapter-alias", overwrite=False)
         # Tribunal/court chamber recovery (§5b): a UK Find Case Law id carries the
         # chamber as a path segment (ukut/aac/2012/440), but a citation may omit it
         # ("[2012] UKUT 440" → ukut/2012/440). Mint the chamber-less alias so the

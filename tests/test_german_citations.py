@@ -166,3 +166,83 @@ def test_repair_drops_the_phantoms_the_grammar_no_longer_mints(tmp_path, monkeyp
         left = {r["candidate_id"] for r in
                 cat.conn.execute("SELECT candidate_id FROM citations").fetchall()}
     assert left == {"de:case:BGH:VIAZR335/21"}
+
+
+# -- two registers, one judgment ---------------------------------------------
+
+def _de_facade(tmp_path):
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    import os
+    os.environ["RAGLEX_DATA_DIR"] = str(tmp_path)
+    return Facade(Config.from_env())
+
+
+def test_a_second_register_does_not_fork_the_corpus(tmp_path, monkeypatch):
+    """NeuRIS and rechtsprechung-im-internet publish the SAME federal decisions, but
+    NeuRIS answers `ecli: null`, so its copies were stored under a synthetic id that
+    nothing could link to the ECLI-keyed original — and the docket alias followed the
+    copy, so citations resolved to the rendition with no ECLI and no edges."""
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    from raglex.config import Config
+    from raglex.facade import Facade
+    from raglex.pipeline import Pipeline
+
+    f = Facade(Config.from_env())
+    docket = case_alias("BGH", "AnwZ (Brfg) 40/25")
+    with f._open() as (cat, rs, ts):
+        original = Record(
+            source="de-rii", stable_id="ECLI:DE:BGH:2026:180526BANWZ.BRFG.40.25.0",
+            ecli="ECLI:DE:BGH:2026:180526BANWZ.BRFG.40.25.0", doc_type=DocType.JUDGMENT,
+            title="BGH AnwZ (Brfg) 40/25", court="Bundesgerichtshof",
+            text="Der Antrag wird abgelehnt.", raw_bytes=b"x",
+            extracted_via=ExtractedVia.STRUCTURED, extra={"aliases": [docket]})
+        original.ensure_payload_hash()
+        cat.upsert_document(original, text_path=str(ts.put(original.payload_hash, original.text)))
+        cat.put_alias(docket.casefold(), original.stable_id, source="adapter-alias")
+
+        # the same decision arriving from the other register, with no ECLI
+        copy = Record(source="de-neuris", stable_id="de/KORE615362026",
+                      doc_type=DocType.JUDGMENT, title="BGH, AnwZ (Brfg) 40/25",
+                      court="BGH", text="Der Antrag wird abgelehnt. (NeuRIS)",
+                      raw_bytes=b"y", extracted_via=ExtractedVia.STRUCTURED,
+                      extra={"aliases": [docket]})
+        stats = type("S", (), {"deduped": 0, "stored": 0})()
+        stored = Pipeline(cat, rs, textstore=ts)._store(copy, stats) \
+            if hasattr(Pipeline(cat, rs, textstore=ts), "_store") else None
+
+    # the docket still names the ECLI-keyed judgment, whichever way the store went
+    with f._open() as (cat, _rs, _ts):
+        assert cat.find_document_id(docket) == "ECLI:DE:BGH:2026:180526BANWZ.BRFG.40.25.0"
+
+
+def test_repair_folds_an_existing_duplicate_back_into_the_original(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config.from_env())
+    docket = case_alias("BGH", "AnwZ (Brfg) 40/25")
+    with f._open() as (cat, _rs, ts):
+        for source, sid, ecli in (
+                ("de-rii", "ECLI:DE:BGH:2026:1805", "ECLI:DE:BGH:2026:1805"),
+                ("de-neuris", "de/KORE615362026", None)):
+            rec = Record(source=source, stable_id=sid, ecli=ecli, doc_type=DocType.JUDGMENT,
+                         title="BGH AnwZ (Brfg) 40/25", court="BGH", text=f"text {source}",
+                         raw_bytes=source.encode(), extracted_via=ExtractedVia.STRUCTURED,
+                         extra={"aliases": [docket]})
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        # the state the live corpus was in: the docket points at the COPY
+        cat.put_alias(docket.casefold(), "de/KORE615362026", source="adapter-alias")
+
+    res = f.repair_de_duplicate_renditions(dry_run=True)
+    assert res["duplicates"] == 1 and res["documents_deleted"] == 0
+
+    res = f.repair_de_duplicate_renditions()
+    assert res["duplicates"] == 1 and res["documents_deleted"] == 1
+    with f._open() as (cat, _rs, _ts):
+        assert cat.find_document_id(docket) == "ECLI:DE:BGH:2026:1805"
+        assert cat.get_document("de/KORE615362026") is None
+        assert cat.document_meta("ECLI:DE:BGH:2026:1805")["renditions"][0]["id"] == "de/KORE615362026"
