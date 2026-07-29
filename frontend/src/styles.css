@@ -1589,3 +1589,12 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .facet-grp .histo-range { font-weight: 400; margin-left: 6px; color: var(--muted); }
 .facet-grp .linkish { background: none; border: 0; padding: 0 0 0 6px; font: inherit;
   font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+
+/* Jurisdiction chips under the free-text box: what the index covers, and a way to
+   narrow this search. They never change what is indexed — that is Admin ▸ Search. */
+.ft-jur { background: none; border: 1px solid transparent; border-radius: 999px;
+  padding: 1px 7px 1px 4px; margin: 0 3px 3px 0; font: inherit; font-size: 11.5px;
+  color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+.ft-jur:hover { border-color: var(--rule); }
+.ft-jur.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.ft-jur.on .muted { color: rgba(255,255,255,.75); }

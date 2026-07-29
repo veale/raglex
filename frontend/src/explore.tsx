@@ -363,22 +363,21 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
   const [exact, setExact] = useState(true);
   const [res, setRes] = useState<any>(null);
   const [busy, setBusy] = useState(false);
-  const [scope, setScope] = useState<any>(null);
-  const [showScope, setShowScope] = useState(false);
-  const [picked, setPicked] = useState<string[]>([]);
+  // What the index HOLDS, not how it is configured. The front page was showing the
+  // scope setting, which was empty while 483,055 documents sat indexed — so the box
+  // announced "no sources" and searched all of them. Its job here is to manage
+  // expectations, so it states the jurisdictions actually searchable.
+  const [cov, setCov] = useState<any>(null);
+  const [only, setOnly] = useState<string[]>([]);
 
-  useEffect(() => {
-    api.freetextScope().then((s) => {
-      setScope(s);
-      setPicked(s.selected || []);
-    }).catch(() => {});
-  }, []);
+  useEffect(() => { api.freetextCoverage().then(setCov).catch(() => {}); }, []);
 
   async function run() {
     if (!q.trim()) return;
     setBusy(true);
     try {
-      const r = await api.freetext({ q, exact, limit: 20, source: picked.join(",") });
+      const r = await api.freetext({ q, exact, limit: 20,
+                                     jurisdiction: only.join(",") });
       window.dispatchEvent(new CustomEvent("raglex-freetext", { detail: { q, exact, res: r } }));
       setRes(r);
     } catch (e: any) {
@@ -386,10 +385,8 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
     } finally { setBusy(false); }
   }
 
-  const indexed = scope?.indexed_total || 0;
-  const sources: any[] = scope?.sources || [];
-  const chosen = sources.filter((s) => picked.includes(s.source));
-  const coverage = chosen.reduce((a, s) => a + s.indexed, 0);
+  const jurs: any[] = cov?.jurisdictions || [];
+  const totalIndexed: number = cov?.documents || 0;
 
   return (
     <div className="ft">
@@ -407,52 +404,36 @@ function FreeTextSearch({ open }: { open: (id: string, a?: string) => void }) {
           onChange={(e) => { setExact(e.target.checked); if (res) setRes(null); }} />
         quotation marks match literally
       </label>
-      <div className="ft-note muted">
-        {scope?.note}
-        {" "}
-        <button className="linkish" onClick={() => setShowScope(!showScope)}>
-          {chosen.length ? `${chosen.length} source${chosen.length > 1 ? "s" : ""}` : "no sources"}
-          {coverage ? ` · ${FMT(coverage)} indexed` : ""} {showScope ? "▾" : "▸"}
-        </button>
-        {indexed === 0 && <span className="tag" style={{ marginLeft: 6 }}>index not built</span>}
-      </div>
 
-      {showScope && (
-        <div className="ft-scope panel">
-          <p className="muted" style={{ margin: "0 0 6px", fontSize: 12 }}>
-            Tick the sources this box should search. Only ticked sources are indexed —
-            narrowing the scope here does not delete an index, so re-ticking is free.
-          </p>
-          <div className="ft-sources">
-            {sources.slice(0, 40).map((s) => (
-              <label key={s.source} className="ft-src" title={
-                `${s.indexed.toLocaleString()} of ${s.with_text.toLocaleString()} indexed`}>
-                <input type="checkbox" checked={picked.includes(s.source)}
-                  onChange={(e) => setPicked(e.target.checked
-                    ? [...picked, s.source]
-                    : picked.filter((x) => x !== s.source))} />
-                <span>{s.source}</span>
-                <span className="muted"> {FMT(s.with_text)}</span>
-                {s.indexed > 0 && <span className="ok" title="indexed">●</span>}
-              </label>
+      {/* What is searchable, stated plainly. Everything indexed is searched by
+          default; clicking a jurisdiction narrows THIS SEARCH, and never the index —
+          building the index lives in Admin > Search. */}
+      <div className="ft-note muted">
+        {totalIndexed > 0 ? (
+          <>
+            Searching the full text of {FMT(totalIndexed)} documents —{" "}
+            {jurs.map((j: any) => (
+              <button key={j.jurisdiction}
+                className={`ft-jur${only.includes(j.jurisdiction) ? " on" : ""}`}
+                title={only.includes(j.jurisdiction)
+                  ? `searching ${j.jurisdiction} only — click to clear`
+                  : `narrow this search to ${j.jurisdiction}`}
+                onClick={() => setOnly(only.includes(j.jurisdiction)
+                  ? only.filter((x) => x !== j.jurisdiction)
+                  : [...only, j.jurisdiction])}>
+                <FlagIcon jurisdiction={j.jurisdiction} opacity={0.9} />
+                {j.jurisdiction} <span className="muted">{FMT(j.documents)}</span>
+              </button>
             ))}
-          </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
-            <button className="mini" onClick={async () => {
-              await api.setFreetextScope({ sources: picked });
-              setScope(await api.freetextScope());
-            }}>save scope</button>
-            <button className="mini" onClick={async () => {
-              await api.setFreetextScope({ sources: picked });
-              await api.buildFts({ sources: picked });
-              setScope(await api.freetextScope());
-            }}>save &amp; build index</button>
-            <span className="muted" style={{ fontSize: 11 }}>
-              building reads every document once — about an hour for UK+EU
-            </span>
-          </div>
-        </div>
-      )}
+            {only.length > 0 && (
+              <button className="linkish" onClick={() => setOnly([])}>search all again</button>
+            )}
+          </>
+        ) : (
+          <>No full-text index has been built yet — an admin can build one in
+            {" "}Maintain ▸ Search.</>
+        )}
+      </div>
 
       {res && <FreeTextResults res={res} query={q} open={open} />}
     </div>

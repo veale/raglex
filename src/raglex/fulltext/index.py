@@ -78,10 +78,30 @@ def _literal_re(phrase: Phrase) -> "re.Pattern[str]":
     return re.compile(rf"\b{body}\b", re.IGNORECASE)
 
 
+def _boundaried(text: str, at: int, length: int) -> bool:
+    before = text[at - 1] if at else " "
+    after = text[at + length] if at + length < len(text) else " "
+    return not (before.isalnum() or after.isalnum())
+
+
 def find_literal(text: str, phrase: Phrase) -> int | None:
     """Offset of the phrase in ``text``, or None. Case-insensitive: a reader quoting
-    a sentence should not have to reproduce its capitalisation."""
-    m = _literal_re(phrase).search(text or "")
+    a sentence should not have to reproduce its capitalisation.
+
+    A plain substring search runs first. Verification scans the full text of every
+    candidate — 74 MB across a 2,500-document result set — and the overwhelming
+    majority of real matches are the phrase written normally, with single spaces,
+    which ``find`` locates far faster than a backtracking pattern. The regex is still
+    what decides a miss, so line-wrapped and punctuation-damaged matches are found
+    exactly as before; it just is not paid for every document."""
+    if not text:
+        return None
+    if phrase.distance <= 1:
+        needle = " ".join(phrase.words).casefold()
+        at = text.casefold().find(needle)
+        if at != -1 and _boundaried(text, at, len(needle)):
+            return at
+    m = _literal_re(phrase).search(text)
     return m.start() if m else None
 
 

@@ -9740,6 +9740,28 @@ class Facade:
                or "").strip()
         return [s for s in re.split(r"[,\s]+", raw) if s]
 
+    def freetext_index_summary(self) -> dict:
+        """What the free-text box actually searches, by jurisdiction.
+
+        The front page's job here is to manage expectations — a search box that does
+        not say what it covers invites the reader to conclude the corpus lacks
+        something it simply has not indexed — so this is the *jurisdictions in the
+        index*, not the configuration behind them. Configuring belongs in
+        Admin > Search."""
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.fts_indexed_by_source()
+        by_jur: dict[str, int] = {}
+        for r in rows:
+            if not r["n"]:
+                continue
+            by_jur[self._jurisdiction_of(r["source"])] = (
+                by_jur.get(self._jurisdiction_of(r["source"]), 0) + r["n"])
+        out = [{"jurisdiction": j, "documents": n} for j, n in by_jur.items()]
+        out.sort(key=lambda x: -x["documents"])
+        return {"jurisdictions": out,
+                "documents": sum(x["documents"] for x in out),
+                "sources": len([r for r in rows if r["n"]])}
+
     def set_freetext_scope(self, *, sources: list[str] | None = None,
                            note: str | None = None) -> dict:
         """Set the gate. Narrowing it does NOT delete the index — a source dropped
@@ -9812,6 +9834,7 @@ class Facade:
                         offset: int = 0, sources: list[str] | None = None,
                         doc_type: list[str] | None = None,
                         court: list[str] | None = None,
+                        jurisdictions: list[str] | None = None,
                         year_from: int | None = None,
                         with_network: bool = True) -> dict:
         """Free-text search over the gated scope, with literal quotation support."""
@@ -9822,6 +9845,11 @@ class Facade:
         # reporting query, run here on every keystroke-speed search. The search only
         # needs the list of selected sources, which is a setting.
         allowed = sources or self._freetext_selected() or None
+        if jurisdictions:
+            # narrowing THIS search, not the index — the front page's flags
+            want = {j.casefold() for j in jurisdictions}
+            pool = allowed or self._all_sources()
+            allowed = [s for s in pool if self._jurisdiction_of(s).casefold() in want]
         filters: dict = {"source": allowed} if allowed else {}
         if doc_type:
             filters["doc_type"] = doc_type

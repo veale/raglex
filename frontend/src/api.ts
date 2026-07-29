@@ -271,7 +271,8 @@ export const api = {
   setFeedback: (id: number, status = "resolved") =>
     req<any>(`/feedback/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
   freetext: (p: { q: string; exact?: boolean; limit?: number; offset?: number;
-                  source?: string; doc_type?: string; court?: string; year_from?: number }) =>
+                  source?: string; doc_type?: string; court?: string;
+                  jurisdiction?: string; year_from?: number }) =>
     req<any>(`/freetext?${new URLSearchParams(
       Object.entries(p).filter(([, v]) => v !== undefined && v !== "")
         .map(([k, v]) => [k, String(v)])).toString()}`),
@@ -279,6 +280,7 @@ export const api = {
   freetextCitesFilter: (ids: string[], target: string) =>
     req<{ ids: string[] }>("/freetext/cites-filter",
       { method: "POST", body: JSON.stringify({ ids, target }) }),
+  freetextCoverage: () => req<any>("/freetext/coverage"),
   freetextScope: () => req<any>("/freetext/scope"),
   setFreetextScope: (body: { sources?: string[]; note?: string }) =>
     req<any>("/freetext/scope", { method: "POST", body: JSON.stringify(body) }),

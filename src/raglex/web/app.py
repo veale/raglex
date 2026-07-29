@@ -424,7 +424,8 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.get("/freetext")
     def freetext_ep(q: str, exact: bool = True, limit: int = 25, offset: int = 0,
                     source: str | None = None, doc_type: str | None = None,
-                    court: str | None = None, year_from: int | None = None) -> dict:
+                    court: str | None = None, jurisdiction: str | None = None,
+                    year_from: int | None = None) -> dict:
         """Free-text search over the gated scope.
 
         ``exact`` (the default) makes a quoted phrase mean the literal characters:
@@ -435,7 +436,8 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.freetext_search(
             q, exact=exact, limit=min(limit, 100), offset=max(offset, 0),
             sources=split(source) or None, doc_type=split(doc_type) or None,
-            court=split(court) or None, year_from=year_from)
+            court=split(court) or None, jurisdictions=split(jurisdiction) or None,
+            year_from=year_from)
 
     @app.get("/system/text-storage")
     def text_storage_ep() -> dict:
@@ -462,6 +464,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         pre-computing it for every candidate target dominated the search."""
         return facade.freetext_cites_filter(ids=(payload or {}).get("ids") or [],
                                             target=(payload or {}).get("target") or "")
+
+    @app.get("/freetext/coverage")
+    def freetext_coverage_ep() -> dict:
+        """What the free-text index currently covers, by jurisdiction — for the note
+        under the search box. Cheap: it walks the index, not the corpus."""
+        return facade.freetext_index_summary()
 
     @app.get("/freetext/scope")
     def freetext_scope_ep() -> dict:

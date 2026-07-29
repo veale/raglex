@@ -3543,6 +3543,19 @@ class Catalogue:
             out.append(row)
         return out
 
+    def fts_indexed_by_source(self) -> list[dict]:
+        """How many documents each source has IN the index.
+
+        Deliberately not ``fts_coverage``: that reports what could be indexed as well
+        as what is, which means a GROUP BY over all 4.97M documents and takes two
+        seconds. This walks the index itself — a twentieth the size — because the
+        front page only needs to say what is searchable."""
+        rows = self.conn.execute(
+            "SELECT d.source AS source, count(DISTINCT f.doc_id) AS n "
+            "FROM doc_fts f JOIN documents d ON d.stable_id = f.doc_id "
+            "GROUP BY d.source").fetchall()
+        return [dict(r) for r in rows]
+
     def embedding_coverage(self) -> list[dict]:
         """Per-source: documents with text, and how many carry a vector. The mirror of
         ``fts_coverage`` so one screen can show what each retrieval path actually
