@@ -4521,6 +4521,10 @@ class Facade:
             for n, r in enumerate(rows, 1):
                 if cancel_check and cancel_check():
                     break
+                if n % 500 == 0:
+                    cat.commit()
+                    _progress(on_progress, stage="reading judgment headers", done=n,
+                              total=len(rows), item=r["stable_id"])
                 st["scanned"] += 1
                 try:
                     meta = json.loads(r["meta_json"] or "{}")
@@ -4542,10 +4546,6 @@ class Facade:
                     continue
                 cat.set_document_meta(r["stable_id"], {**meta, **found}, commit=False)
                 st["named"] += 1
-                if n % 500 == 0:
-                    cat.commit()
-                    _progress(on_progress, stage="reading judgment headers", done=n,
-                              total=len(rows), item=r["stable_id"])
             cat.commit()
         self._invalidate_caches()
         return st
@@ -4577,6 +4577,14 @@ class Facade:
             for n, r in enumerate(rows, 1):
                 if cancel_check and cancel_check():
                     break
+                # Progress is reported on documents SEEN, not documents changed, and
+                # before the skips. Keyed on work done, a resumed pass that correctly
+                # skips everything reports nothing, and the cross-process reaper —
+                # which decides a job has died from an idle heartbeat — eventually
+                # kills a job that is working perfectly well.
+                if n % 2000 == 0:
+                    _progress(on_progress, stage="repairing mis-decoded text", done=n,
+                              total=len(rows), item=r["stable_id"])
                 ph = r["payload_hash"]
                 if not ph or ph in seen_hashes:
                     continue
@@ -4592,9 +4600,6 @@ class Facade:
                     st["chars_fixed"] += sum(1 for a, b in zip(text, fixed) if a != b)
                     ts.put(ph, fixed)
                     st["repaired"] += 1
-                if n % 2000 == 0:
-                    _progress(on_progress, stage="repairing mis-decoded text", done=n,
-                              total=len(rows), item=r["stable_id"])
         return st
 
     def resegment_judgments(self, *, source: str | None = None, limit: int = 400000,
@@ -4632,6 +4637,9 @@ class Facade:
             for n, r in enumerate(rows, 1):
                 if cancel_check and cancel_check():
                     break
+                if n % 2000 == 0:
+                    _progress(on_progress, stage="recomputing paragraph structure",
+                              done=n, total=len(rows), item=r["stable_id"])
                 ph = r["payload_hash"]
                 if not ph or ph in seen:
                     continue
@@ -4654,9 +4662,6 @@ class Facade:
                 st["derived" if derived else "improved"] += 1
                 st["headings_added"] += (len([s for s in fresh if s.kind == "heading"])
                                          - len([s for s in old if s.kind == "heading"]))
-                if n % 2000 == 0:
-                    _progress(on_progress, stage="recomputing paragraph structure",
-                              done=n, total=len(rows), item=r["stable_id"])
         return st
 
     def backfill_ag_names(self, *, limit: int = 20000, on_progress=None,
@@ -9991,12 +9996,20 @@ class Facade:
                 where += f" AND source IN ({','.join('?' * len(sources))})"
                 params.extend(sources)
             rows = cat.conn.execute(
-                f"SELECT DISTINCT payload_hash FROM documents {where} LIMIT ?",
+                # ORDERED, so an interrupted run resumes through the same sequence
+                # instead of re-walking an arbitrary permutation. Four interruptions
+                # each cost a fresh walk of everything already done.
+                f"SELECT DISTINCT payload_hash FROM documents {where} "
+                "ORDER BY payload_hash LIMIT ?",
                 params + [limit]).fetchall()
             total = len(rows)
             for n, r in enumerate(rows, 1):
                 if cancel_check and cancel_check():
                     break
+                if n % 500 == 0:
+                    _progress(on_progress, stage="copying text to local storage",
+                              done=n, total=total,
+                              item=f"{st['bytes'] / 1e9:.2f} GB copied")
                 ph = r["payload_hash"]
                 st["scanned"] += 1
                 if ts.locate(ph) == "local":
@@ -10026,10 +10039,6 @@ class Facade:
                     ts.put_segments(ph, segs)
                 st["copied"] += 1
                 st["bytes"] += len(text.encode("utf-8"))
-                if n % 500 == 0:
-                    _progress(on_progress, stage="copying text to local storage",
-                              done=n, total=total,
-                              item=f"{st['bytes'] / 1e9:.2f} GB copied")
         return st
 
     def text_storage(self) -> dict:

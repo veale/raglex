@@ -371,6 +371,10 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
             break
         sid = r["stable_id"]
         st["scanned"] += 1
+        if n % 500 == 0 and on_progress:
+            # on documents SEEN: a resumed build skips everything already indexed,
+            # and reporting only on new work makes a healthy job look dead
+            on_progress(stage="building free-text index", done=n, total=total, item=sid)
         if sid in done:
             st["skipped"] += 1
             continue
@@ -392,8 +396,5 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
         st["chars"] += len(text)
         if st["indexed"] % 500 == 0:
             cat.conn.commit()
-            if on_progress:
-                on_progress(stage="building free-text index", done=n, total=total,
-                            item=sid)
     cat.conn.commit()
     return st
