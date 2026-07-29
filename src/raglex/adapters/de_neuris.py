@@ -267,8 +267,13 @@ class DeNeurisAdapter(BaseAdapter):
                 return
             for item in members:
                 if self.mode == "caselaw":
-                    sid = _field(item, "ecli", "documentNumber", "@id")
                     ident = _field(item, "documentNumber", "@id")
+                    # The stub must carry the id the RECORD will carry, or the pipeline's
+                    # "already held?" check can never match and every backfill re-downloads
+                    # the whole register — paying a fetch per document only to drop it on
+                    # the payload hash. Most NeuRIS decisions have no ECLI, and those are
+                    # stored as "de/<documentNumber>" (see parse_caselaw).
+                    sid = _field(item, "ecli") or (f"de/{ident}" if ident else None)
                     d = _iso_date(_field(item, "decisionDate", "date"))
                     hints = {"id": ident}
                 else:

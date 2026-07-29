@@ -193,10 +193,25 @@ def test_a_year_over_the_cap_is_split(monkeypatch):
     assert len(spans_2026) > 1                   # split, not silently truncated
 
 
+def test_stub_id_matches_the_id_the_record_will_carry():
+    """Otherwise the pipeline's "already held?" check never matches and a backfill
+    re-downloads the entire register, paying a fetch per document to discard it on the
+    payload hash — which is what "done=344, stored=0" looked like on the live box."""
+    from raglex.adapters.de_neuris import parse_caselaw
+
+    listing = {"member": [{"item": {"documentNumber": "KORE615362026", "ecli": None,
+                                    "decisionDate": "2026-05-18"}}], "view": {}}
+    http = _FakeHTTP({"case-law": _Resp(listing)})
+    stub = next(iter(DeNeurisAdapter(mode="caselaw", client=http).discover("2026-01-01")))
+    record = parse_caselaw({"documentNumber": "KORE615362026", "decisionDate": "2026-05-18"})
+    assert stub.stable_id == record.stable_id == "de/KORE615362026"
+    assert stub.hints["id"] == "KORE615362026"      # …while the fetch still uses the raw id
+
+
 def test_incremental_run_keeps_the_simple_path():
     """"Everything since the watermark" is small by construction — no windowing."""
     listing = {"member": [{"item": {"documentNumber": "KVRE1", "decisionDate": "2026-07-01"}}],
                "view": {}}
     http = _FakeHTTP({"case-law": _Resp(listing)})
     stubs = list(DeNeurisAdapter(mode="caselaw", client=http).discover("2026-06-30"))
-    assert [s.stable_id for s in stubs] == ["KVRE1"]
+    assert [s.stable_id for s in stubs] == ["de/KVRE1"]
