@@ -407,11 +407,17 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.resolve_refinement_flag(flag_id=flag_id, status=status)
 
     @admin
-    def feedback(status: str = "open", limit: int = 200) -> list[dict]:
-        """User-submitted Bugs / Feature requests from the app's feedback box — each with the
-        message, kind, the page/route it came from, and the captured page metadata (doc id,
-        query, role, user-agent). The review queue; pair with resolve_feedback."""
-        return facade.list_feedback(status=status or None, limit=limit)
+    def feedback(status: str = "open", limit: int = 200, kind: str | None = None) -> list[dict]:
+        """The review queue, newest-seen first — user-submitted Bugs / Feature requests
+        from the app's feedback box AND the system's own errors (``kind='error'``: a failed
+        job, a warning RagLex logged about itself), each with the message, the page/route
+        or logger it came from, and its captured metadata.
+
+        A systemic error is ONE row carrying ``seen_count`` / ``last_seen_at``, not one row
+        per occurrence — so "13,862 failures" reads as a single item to fix. Filter with
+        ``kind`` (bug | feature | error); close with resolve_feedback once the underlying
+        cause is fixed, and the next occurrence opens a fresh row."""
+        return facade.list_feedback(status=status or None, limit=limit, kind=kind or None)
 
     @admin
     def resolve_feedback(feedback_id: int, status: str = "resolved") -> dict:

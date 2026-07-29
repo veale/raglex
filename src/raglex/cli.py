@@ -353,9 +353,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
         print(f"[watch] scheduler up; ticking every {args.interval}s")
         # The scheduler's own work is recorded as jobs, in the same table the API reads —
-        # so the auto-drain finally appears in the jobs panel, with its per-tick outcome.
-        # An auto-drain quietly storing zero documents for a fortnight was invisible before.
+        # so a scheduled harvest appears in the jobs panel with its outcome. A drain
+        # quietly storing zero documents for a fortnight was invisible before.
         jobs = JobManager(f, origin="scheduler")
+        # the scheduler runs in its OWN container, so its warnings would otherwise never
+        # reach the review queue the API's do (§8, ops/errorlog)
+        from .ops.errorlog import install as _install_errorlog
+        _install_errorlog(f)
         jobs.reap_orphans()
         from .schedule import is_enabled as _sched_on, every_minutes as _sched_min
         last_hygiene = 0.0
@@ -370,7 +374,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
         # start the daily authority rebuild ~1h in, not at boot (it scans the whole
         # relations table; let the restart settle first)
         last_authority = time.time() - 86400 + 3600
-        last_au_repair = 0.0
         last_resolve = 0.0
         last_canlii = 0.0
         eurlex_broken_until = 0.0
@@ -411,22 +414,27 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         print(f"[watch] watch {wid} still running; skipping")
                 if due:
                     print(f"[watch] started {len(due)} due watch job(s)")
-                # Overnight idle harvest: once per night, around 01:00 local, drain the WHOLE
-                # routable hanging-reference queue — but ONLY when the box is otherwise idle,
-                # i.e. no user-initiated job is running (the scheduler's own recurring jobs
-                # don't count). So it never competes with an import or a manual harvest the
-                # operator kicked off. Singleton + resumable, so a multi-hour drain simply
-                # continues the next night if it doesn't finish. Disable with
-                # RAGLEX_NIGHTLY_HARVEST=0.
+                # Overnight harvest: once per night, from 02:00 local, drain the WHOLE
+                # routable hanging-reference queue. This is now the ONLY scheduled harvest —
+                # the every-tick auto-drain is gone, because a drain that runs four times an
+                # hour drags the whole post-process chain (counts, then a corpus-wide
+                # PageRank rebuild) behind it, and the box spent its day rebuilding the
+                # authority graph over a handful of newly-fetched documents.
+                #
+                # It still yields to user work: if an import or a manual harvest is running
+                # it defers to a later tick — the window is "02:00 or later, if it hasn't
+                # run today", so a busy 02:00 becomes 02:15 rather than a skipped night.
+                # Singleton + resumable, so a multi-hour drain continues the next night if
+                # it doesn't finish. Disable with RAGLEX_NIGHTLY_HARVEST=0.
                 now_local = time.localtime()
-                if (now_local.tm_hour == 1
+                if (now_local.tm_hour >= 2
                         and last_night_harvest_day != now_local.tm_yday
                         and _sched_on("nightly-harvest")
                         and int(os.environ.get("RAGLEX_NIGHTLY_HARVEST", "1") or 0)):
                     busy = [j for j in jobs.list(limit=MAX_CONCURRENT_JOBS * 2)
                             if j["status"] == "running" and j["origin"] != "scheduler"]
                     if busy:
-                        print(f"[watch] 01:00 idle-harvest: {len(busy)} user job(s) "
+                        print(f"[watch] 02:00 nightly harvest: {len(busy)} user job(s) "
                               f"running ({', '.join(sorted({j['kind'] for j in busy}))}); deferring")
                     else:
                         last_night_harvest_day = now_local.tm_yday
@@ -435,22 +443,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
                             {"limit": int(os.environ.get("RAGLEX_NIGHTLY_HARVEST_LIMIT") or 100000),
                              "min_citing": 1})
                         if started.get("already_running"):
-                            print("[watch] 01:00 idle-harvest: a harvest-all is still running; skipping")
+                            print("[watch] 02:00 nightly harvest: a harvest-all is still running; skipping")
                         elif started.get("error"):
-                            print(f"[watch] 01:00 idle-harvest: {started['error']}")
+                            print(f"[watch] 02:00 nightly harvest: {started['error']}")
                         else:
-                            print("[watch] 01:00 idle-harvest: draining all routable references")
-                # Slow worklist drain: fetch a bounded batch of routable references
-                # each tick (survives restarts; the scheduler service is persistent).
-                Config.from_env()  # refresh settings → env (RAGLEX_AUTOHARVEST)
-                batch = int(os.environ.get("RAGLEX_AUTOHARVEST") or 0)
-                if batch > 0 and _sched_on("auto-drain"):
-                    started = jobs.start("auto-drain", f"auto-drain worklist ({batch}/tick)",
-                                         {"limit": batch})
-                    if started.get("already_running"):
-                        print("[watch] auto-drain: previous tick still running; skipping")
-                    elif started.get("error"):
-                        print(f"[watch] auto-drain: {started['error']}")
+                            print("[watch] 02:00 nightly harvest: draining all routable references")
+                Config.from_env()  # refresh settings → env
                 # Slow index drain: embed a bounded batch each tick so search coverage grows
                 # on its own instead of waiting for someone to press the button. Same shape as
                 # the worklist drain — bounded, resumable, and a singleton, so a long tick
@@ -492,22 +490,6 @@ def cmd_watch(args: argparse.Namespace) -> int:
                             print(f"[watch] resolve: linked {res['resolved']} edge(s)")
                     except Exception as exc:  # noqa: BLE001 — never kill the tick loop
                         print(f"[watch] resolve failed: {exc}")
-                # Self-healing repair drain for the Commonwealth register: re-fetch bodies
-                # an older adapter's route couldn't reach, and mint canonical year/number
-                # citation aliases. Deliberately a recurring bounded drain rather than a
-                # deploy-time migration — after pulling a version whose adapter can reach
-                # more, the backlog converges on its own with nobody remembering to run
-                # anything, and it costs nothing on the ticks where there's nothing to fix.
-                repair_batch = int(os.environ.get("RAGLEX_AUCTH_REPAIR") or 25)
-                if repair_batch > 0 and _sched_on("au-cth-repair") and time.time() - last_au_repair >= 900:
-                    last_au_repair = time.time()
-                    started = jobs.start("repair-au-cth",
-                                         f"repair au-cth ({repair_batch}/tick)",
-                                         {"limit": repair_batch})
-                    if started.get("already_running"):
-                        print("[watch] au-cth repair: previous tick still running; skipping")
-                    elif started.get("error"):
-                        print(f"[watch] au-cth repair: {started['error']}")
                 # Once a day: pull EU case names/subjects from the EUR-Lex webservice
                 # (batched, skipping known-empty CELEXes). No-op without creds. The service
                 # 500s for days at a time; when it does, stop asking until tomorrow rather

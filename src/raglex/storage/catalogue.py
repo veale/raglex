@@ -476,13 +476,17 @@ CREATE TABLE IF NOT EXISTS refinement_flags (
 -- alongside refinement_flags. metadata carries whatever page context the client sent.
 CREATE TABLE IF NOT EXISTS feedback (
     feedback_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind         TEXT NOT NULL DEFAULT 'bug',    -- bug | feature
+    kind         TEXT NOT NULL DEFAULT 'bug',    -- bug | feature | error
     message      TEXT NOT NULL,
     page         TEXT,                           -- the view/route label the user was on
     url          TEXT,                           -- full in-app (hash) URL
     metadata     TEXT,                           -- JSON: doc_id, query, role, user-agent, …
     status       TEXT NOT NULL DEFAULT 'open',   -- open | resolved
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    -- system-reported issues (kind='error') are deduplicated on this, and counted
+    fingerprint  TEXT,
+    seen_count   INTEGER NOT NULL DEFAULT 1,
+    last_seen_at TEXT
 );
 
 -- FTS5 keyword index over chunk text — the lexical half of hybrid search (§6c).
@@ -731,6 +735,13 @@ class Catalogue:
             # insert-only and the next rescan of any document that defines the name
             # would simply learn it again.
             ("learned_shorthands", "blocked", "INTEGER NOT NULL DEFAULT 0"),
+            # System-reported problems land in the same queue as user feedback and
+            # refinement flags (kind='error'), so one review surface covers all three.
+            # A systemic failure repeats — 13,862 identical harvest failures in one run —
+            # so an issue is identified by a FINGERPRINT and counted, never re-inserted.
+            ("feedback", "fingerprint", "TEXT"),
+            ("feedback", "seen_count", "INTEGER NOT NULL DEFAULT 1"),
+            ("feedback", "last_seen_at", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -3346,13 +3357,53 @@ class Catalogue:
         # lastrowid is SQLite-only; on Postgres the caller doesn't need the id back
         return int(cur.lastrowid) if getattr(cur, "lastrowid", None) is not None else 0
 
-    def feedback(self, *, status: str | None = "open", limit: int = 500) -> list[sqlite3.Row]:
+    def record_issue(self, *, fingerprint: str, message: str, page: str | None = None,
+                     metadata: str | None = None, kind: str = "error") -> int:
+        """Record a SYSTEM-reported problem in the same queue as user feedback, counting
+        repeats instead of re-inserting them.
+
+        A systemic failure does not happen once: one harvest run produced 13,862 identical
+        "no targeted adapter" failures, and an extraction protocol mismatch killed a worker
+        on every document for a day. Inserting a row per occurrence would bury the review
+        queue in copies of one problem, so an issue is keyed on its ``fingerprint`` (the
+        shape of the error, with ids and numbers masked out): the first occurrence opens a
+        row, the rest bump ``seen_count`` and ``last_seen_at``. Resolving the row lets the
+        NEXT occurrence open a fresh one — which is what makes "did that fix hold?"
+        answerable."""
+        now = _now()
+        row = self.conn.execute(
+            "SELECT feedback_id FROM feedback WHERE fingerprint = ? AND status = 'open' "
+            "ORDER BY created_at LIMIT 1", (fingerprint,)).fetchone()
+        if row is not None:
+            self.conn.execute(
+                "UPDATE feedback SET seen_count = seen_count + 1, last_seen_at = ? "
+                "WHERE feedback_id = ?", (now, row["feedback_id"]))
+            self.conn.commit()
+            return int(row["feedback_id"])
+        cur = self.conn.execute(
+            "INSERT INTO feedback (kind, message, page, url, metadata, status, created_at, "
+            "fingerprint, seen_count, last_seen_at) VALUES (?,?,?,NULL,?,'open',?,?,1,?)",
+            (kind, message, page, metadata, now, fingerprint, now))
+        self.conn.commit()
+        return int(cur.lastrowid) if getattr(cur, "lastrowid", None) is not None else 0
+
+    def feedback(self, *, status: str | None = "open", limit: int = 500,
+                 kind: str | None = None) -> list[sqlite3.Row]:
+        where, params = [], []
         if status:
-            return self.conn.execute(
-                "SELECT * FROM feedback WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                (status, limit)).fetchall()
-        return self.conn.execute(
-            "SELECT * FROM feedback ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            where.append("status = ?")
+            params.append(status)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        sql = "SELECT * FROM feedback"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        # most-recently-SEEN first, so a repeating system error stays at the top of the
+        # queue rather than sinking under newer one-off reports
+        sql += " ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?"
+        params.append(limit)
+        return self.conn.execute(sql, params).fetchall()
 
     def set_feedback_status(self, feedback_id: int, status: str) -> int:
         cur = self.conn.execute(

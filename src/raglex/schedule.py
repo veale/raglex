@@ -2,8 +2,8 @@
 
 The scheduler used to be all-or-nothing: one ``RAGLEX_SCHEDULER_PAUSED`` flag stopped
 *everything* (watches, harvests, embed, roll-ups). That's too blunt — you often want, say,
-auto-embed OFF (after dropping embeddings, so it doesn't refill) while auto-drain and the
-daily roll-ups keep running. So each recurring task is now individually **enable/disable +
+auto-embed OFF (after dropping embeddings, so it doesn't refill) while the nightly harvest
+and the daily roll-ups keep running. So each recurring task is now individually **enable/disable +
 cadence**-controllable, persisted in one settings row (``RAGLEX_SCHEDULE``, a JSON map of
 overrides), and the scheduler consults it before each task.
 
@@ -30,11 +30,9 @@ class TaskSpec:
 # tick when enabled (the fast, self-throttling drains); a number = a minimum interval.
 TASKS: tuple[TaskSpec, ...] = (
     TaskSpec("watches", True, None, "run due saved keyword watches"),
-    TaskSpec("nightly-harvest", True, None, "overnight idle full drain of the routable worklist"),
-    TaskSpec("auto-drain", True, None, "drain the routable hanging-reference worklist each tick"),
+    TaskSpec("nightly-harvest", True, None, "02:00 full drain of the routable worklist"),
     TaskSpec("auto-embed", True, None, "index newly-texted documents into the embedding family each tick"),
     TaskSpec("canlii-enrich", True, None, "drain the rate-limited CanLII enrichment queue"),
-    TaskSpec("au-cth-repair", True, None, "trickle-repair Australian Cth citations"),
     TaskSpec("effects", True, 720, "re-check legislation.gov.uk unapplied-effects queue"),
     TaskSpec("counts", True, 10080, "citation-count roll-up (the snowball aggregate)"),
     TaskSpec("authority", True, 1440, "PageRank authority rebuild"),

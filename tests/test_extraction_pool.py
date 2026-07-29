@@ -62,6 +62,39 @@ def test_pool_matches_the_serial_stage(tmp_path):
             assert doc["last_extracted_at"]  # stamped (commit batching flushed)
 
 
+def test_pool_workers_actually_do_the_work(tmp_path, caplog):
+    """The pool's fallback is silent and CORRECT — a worker that dies mid-document is
+    re-run in the parent — so a protocol mismatch between the parent's send and the
+    worker's unpack passed every parity test while the pool did nothing: no
+    parallelism, a spawn burnt per document, and the runaway-regex budget (which lives
+    in the worker) no longer covering the pass. The log line is the only symptom, so
+    the test asserts on it."""
+    import logging
+
+    facade = Facade(_config(tmp_path))
+    ids = _seed_corpus(facade, 40)
+    with facade._open() as (cat, _rs, ts):
+        for sid in ids:
+            cat.conn.execute(
+                "UPDATE documents SET last_extracted_at = NULL WHERE stable_id = ?", (sid,))
+        cat.commit()
+        with caplog.at_level(logging.WARNING, logger="raglex.citations.stage"):
+            stats = extract_documents_parallel(cat, ts, ids, workers=2)
+    assert stats.processed == 40
+    assert "worker died" not in caplog.text
+
+
+def test_pool_carries_the_home_instrument_to_the_worker(tmp_path):
+    """A bare "Article 17" inside an instrument resolves to that instrument — the
+    home_id the worker needs travels with the document, as it does on the serial path."""
+    from raglex.citations.stage import _home_of
+
+    facade = Facade(_config(tmp_path))
+    with facade._open() as (cat, _rs, _ts):
+        doc = cat.get_document(_seed_corpus(facade, 1)[0])
+    assert len(_home_of(doc)) == 2      # the shape the worker unpacks
+
+
 def test_small_batches_stay_serial(tmp_path, monkeypatch):
     """Below the threshold no pool is spawned — a watch tick must not pay 7 spawns."""
     import raglex.citations.stage as stage

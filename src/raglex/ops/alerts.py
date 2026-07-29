@@ -49,7 +49,7 @@ class AlertThresholds:
     stale_days: int = 14  # default "no new docs in X days"; tune per source
     queue_backlog: int = 1000
     llm_extract_ratio: float = 0.5
-    drain_window: int = 5  # consecutive auto-drains that stored nothing before alerting
+    drain_window: int = 3  # consecutive harvests that stored nothing before alerting
 
 
 def _days_since(iso: str | None) -> float | None:
@@ -102,13 +102,13 @@ def check_alerts(catalogue: Catalogue, thresholds: AlertThresholds | None = None
 
 
 def _drain_alerts(catalogue: Catalogue, t: AlertThresholds) -> list[Alert]:
-    """The auto-drain is the only thing that shrinks the worklist unattended, and it fails
-    *quietly*: every reference it tries can be skipped, or fail, and the tick still reports
-    success. A drain that has stored nothing across its last N runs is either finished or
-    broken — and "broken" once went unnoticed for seventeen days, because nothing watched
-    this number. Also flag a drain whose candidates are all cooling off after failures,
-    which is the specific shape that bug took."""
-    runs = catalogue.recent_job_results("auto-drain", limit=t.drain_window)
+    """The nightly harvest is the only thing that shrinks the worklist unattended, and it
+    fails *quietly*: every reference it tries can be skipped, or fail, and the run still
+    reports success. A drain that has stored nothing across its last N runs is either
+    finished or broken — and "broken" once went unnoticed for seventeen days, because
+    nothing watched this number. Also flag a drain whose candidates are all cooling off
+    after failures, which is the specific shape that bug took."""
+    runs = catalogue.recent_job_results("harvest-all", limit=t.drain_window)
     if len(runs) < t.drain_window:
         return []  # not enough history to judge
     import json
@@ -126,15 +126,15 @@ def _drain_alerts(catalogue: Catalogue, t: AlertThresholds) -> list[Alert]:
         return []
     if attempted == 0 and skipped > 0:
         return [Alert(
-            "drain_all_cooling_off", CRITICAL, "auto-drain",
-            f"the last {len(runs)} auto-drains attempted nothing: all {skipped} routable "
+            "drain_all_cooling_off", CRITICAL, "harvest-all",
+            f"the last {len(runs)} harvests attempted nothing: all {skipped} routable "
             f"references are cooling off after earlier failures. Clear the cool-down "
             f"(Unresolved → retry failed) if a source was merely unavailable.",
         )]
     if attempted:
         return [Alert(
-            "drain_storing_nothing", WARNING, "auto-drain",
-            f"the last {len(runs)} auto-drains attempted {attempted} references and stored "
+            "drain_storing_nothing", WARNING, "harvest-all",
+            f"the last {len(runs)} harvests attempted {attempted} references and stored "
             f"none — the worklist may be exhausted, or every fetch is failing",
         )]
     return []

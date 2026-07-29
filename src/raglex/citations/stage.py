@@ -105,8 +105,14 @@ def _extract_worker(conn) -> None:  # pragma: no cover — exercised via the gua
             return
         if item is None:
             return
-        text, aliases, home_id, home_kind = item
         try:
+            # Unpack INSIDE the guard. A caller that sends the wrong shape used to kill
+            # the worker on this line, and the parent read that as "the worker crashed
+            # (OOM?), extract this one in the parent" — a silent, correct-but-serial
+            # fallback that hid a protocol mismatch for a day: no parallelism, a spawn
+            # burnt per document, and the runaway-regex budget (which only the worker
+            # has) no longer covering the pass.
+            text, aliases, home_id, home_kind = item
             defs: list[dict] = []
             cites = _extract(text, aliases=aliases, defs_out=defs,
                              home_id=home_id, home_kind=home_kind)
@@ -349,7 +355,9 @@ def extract_documents_parallel(
                 _count_done(sid, 0)
                 continue
             try:
-                worker.conn.send((text, aliases))
+                # the worker's protocol is (text, aliases, home_id, home_kind) — the
+                # instrument a bare "Article 50(2)" belongs to travels with the document
+                worker.conn.send((text, aliases, *_home_of(doc)))
             except (OSError, ValueError):
                 return False        # worker torn down — caller respawns
             worker.item = (sid, doc, text)

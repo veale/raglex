@@ -38,6 +38,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     facade = Facade(config or Config.from_env())
     facade.warm_caches()  # pre-compute heavy dashboard aggregates so first load is instant
     facade.start_daily_refresh()  # nightly 01:00 UK full recompute + re-warm of those caches
+    # Everything RagLex logs about itself at WARNING+ also lands in the review queue, beside
+    # user feedback and refinement flags, deduplicated by fingerprint (§8, ops/errorlog).
+    from ..ops.errorlog import install as _install_errorlog
+    _install_errorlog(facade)
     jobs = JobManager(facade, origin="api")
     # A deploy kills in-process workers. Durable/checkpointed API jobs resume under a
     # new attempt automatically; conservative job kinds remain visibly interrupted.
@@ -543,8 +547,12 @@ def create_app(config: Config | None = None) -> FastAPI:
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None)
 
     @app.get("/feedback")
-    def list_feedback_ep(status: str | None = "open", limit: int = 500) -> list[dict]:
-        return facade.list_feedback(status=status or None, limit=limit)
+    def list_feedback_ep(status: str | None = "open", limit: int = 500,
+                         kind: str | None = None) -> list[dict]:
+        """The review queue: user Bugs / Feature requests and the system's own errors
+        (``kind=error``), newest-seen first. A repeating system error is ONE row with a
+        ``seen_count``, not one row per occurrence."""
+        return facade.list_feedback(status=status or None, limit=limit, kind=kind or None)
 
     @app.post("/feedback/{feedback_id}/status")
     def set_feedback_ep(feedback_id: int, payload: dict = Body(default={})) -> dict:

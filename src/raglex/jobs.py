@@ -8,8 +8,8 @@ things worth having:
 - **durability** — a deploy or crash erased a running job's history mid-run;
 - **restartability** — a frozen job (its socket died when the host slept) could only be
   relaunched from the closure held in memory, which died with the process;
-- **visibility** — the scheduler runs in a *different container*, so its auto-drain never
-  appeared in the jobs panel at all. That is precisely why an auto-drain silently storing
+- **visibility** — the scheduler runs in a *different container*, so its own work never
+  appeared in the jobs panel at all. That is precisely why a drain silently storing
   zero documents for seventeen days went unnoticed.
 
 So a job is a **row**. Its work is named by ``kind`` and parameterised by ``params``.
@@ -39,7 +39,7 @@ SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "repair-de-citations",
     "backfill-eu-stubs",
-    "rebuild-citation-counts", "rebuild-authority", "auto-drain", "match-reports",
+    "rebuild-citation-counts", "rebuild-authority", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
     "suggest-matches", "classify-guidance",
     # one relation-range cursor over the whole graph — two would double-resolve ranges
@@ -70,7 +70,7 @@ DEDUP_KINDS = frozenset({"run-watch", "gap-scan", "harvest-source", "harvest-all
 RESUME_POLICIES = {
     "rescan-citations": "checkpoint", "rescan": "checkpoint",
     "harvest-source": "deduplicate", "harvest-all": "deduplicate",
-    "auto-drain": "deduplicate", "embed": "deduplicate",
+    "embed": "deduplicate",
     "import-bailii-corpus": "deduplicate", "import-bailii-zip": "deduplicate",
     "import-bailii-dir": "deduplicate", "import-bailii-parquet": "deduplicate",
     "import-indian-sci": "deduplicate", "import-sg-seed": "deduplicate",
@@ -95,7 +95,7 @@ _SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations"})
 # one of these finishes, ``_chain_postprocess`` refreshes those layers. The follow-ups
 # themselves are excluded, so there is no rebuild→rebuild loop.
 CHAIN_TRIGGER_KINDS = frozenset({
-    "harvest-source", "harvest-all", "auto-drain", "expand-citing",
+    "harvest-source", "harvest-all", "expand-citing",
     "refresh-category", "pull-ag-opinions", "harvest-echr", "canlii-enrich",
     "import-bailii-corpus", "import-bailii-zip", "import-bailii-dir", "import-bailii-parquet",
     "import-indian-sci", "import-sg-seed", "import-westlaw-zip", "import-westlaw-dir",
@@ -267,7 +267,6 @@ RUNNERS: dict[str, Callable] = {
     "rebuild-authority": lambda f, p, cb, cancel: f.rebuild_authority(on_progress=cb, cancel_check=cancel),
     "pull-ag-opinions": lambda f, p, cb, cancel: f.pull_ag_opinions(on_progress=cb, cancel_check=cancel),
     "harvest-all": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),
-    "auto-drain": lambda f, p, cb, cancel: f.harvest_all_references(**p, on_progress=cb, cancel_check=cancel),
     "expand-citing": lambda f, p, cb, cancel: f.expand_citing_cases(**p, on_progress=cb, cancel_check=cancel),
     "refresh-category": lambda f, p, cb, cancel: f.refresh_category(**p, on_progress=cb, cancel_check=cancel),
     "match-reports": lambda f, p, cb, cancel: f.match_report_citations(on_progress=cb, cancel_check=cancel),
@@ -576,6 +575,10 @@ class JobManager:
             result, status = {"error": str(exc)}, "error"
             state["log"].append(f"✗ error: {exc}")
             log.exception("job %s (%s) failed", job_id, kind)
+            # …and into the review queue, where user feedback and refinement flags go, so
+            # a job that fails every night is a work item rather than a log line (§8).
+            from .ops.errorlog import report_job_failure
+            report_job_failure(self.facade, kind=kind, error=str(exc), job_id=job_id)
         finally:
             stopped.set()
         try:

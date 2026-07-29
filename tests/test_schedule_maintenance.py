@@ -23,7 +23,7 @@ def test_task_toggle_persists_and_is_scoped(facade):
     assert schedule.is_enabled("auto-embed") is True          # default on
     facade.set_scheduled_task("auto-embed", enabled=False)
     assert schedule.is_enabled("auto-embed") is False          # turned off
-    assert schedule.is_enabled("auto-drain") is True           # others unaffected
+    assert schedule.is_enabled("nightly-harvest") is True      # others unaffected
     # persisted to the settings file (survives a fresh process reading env)
     import json
     assert "auto-embed" in json.loads((facade.config.settings_path).read_text())["RAGLEX_SCHEDULE"] \

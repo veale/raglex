@@ -2,7 +2,7 @@
 
 The registry is a table, not a process-memory dict, for three reasons this file pins:
 history survives a restart, a job started by one process is visible to another (the
-scheduler's auto-drain in the API's panel), and cancellation crosses that boundary. The
+scheduler's nightly harvest in the API's panel), and cancellation crosses that boundary. The
 drain-stall alert is the safeguard that would have caught the poisoned-skip-list bug in a
 day instead of seventeen days.
 """
@@ -37,11 +37,11 @@ def _finished_job(f: Facade, kind: str, result: dict) -> str:
 
 def test_job_row_is_visible_across_managers():
     # Two managers = two "processes" over one DB. What one records, the other sees — this
-    # is exactly how the scheduler's auto-drain shows up in the API's jobs panel.
+    # is exactly how the scheduler's nightly harvest shows up in the API's jobs panel.
     f = _facade()
-    _finished_job(f, "auto-drain", {"harvested": 3})
+    _finished_job(f, "harvest-all", {"harvested": 3})
     api_view = JobManager(f, origin="api").list()
-    assert len(api_view) == 1 and api_view[0]["kind"] == "auto-drain"
+    assert len(api_view) == 1 and api_view[0]["kind"] == "harvest-all"
     assert api_view[0]["result"] == {"harvested": 3}
 
 
@@ -323,7 +323,7 @@ def test_drain_stall_alert_fires_when_every_reference_is_cooling_off():
     f = _facade()
     t = AlertThresholds(drain_window=3)
     for _ in range(3):
-        _finished_job(f, "auto-drain", {"attempted": 0, "harvested": 0, "skipped_recent_fail": 5000})
+        _finished_job(f, "harvest-all", {"attempted": 0, "harvested": 0, "skipped_recent_fail": 5000})
     with f._open() as (cat, _rs, _ts):
         alerts = check_alerts(cat, t)
     codes = {a.code for a in alerts}
@@ -333,9 +333,9 @@ def test_drain_stall_alert_fires_when_every_reference_is_cooling_off():
 def test_no_drain_alert_while_it_is_still_harvesting():
     f = _facade()
     t = AlertThresholds(drain_window=3)
-    _finished_job(f, "auto-drain", {"attempted": 10, "harvested": 4})
+    _finished_job(f, "harvest-all", {"attempted": 10, "harvested": 4})
     for _ in range(2):
-        _finished_job(f, "auto-drain", {"attempted": 10, "harvested": 0})
+        _finished_job(f, "harvest-all", {"attempted": 10, "harvested": 0})
     with f._open() as (cat, _rs, _ts):
         alerts = check_alerts(cat, t)
     assert not any(a.code.startswith("drain_") for a in alerts)
@@ -345,7 +345,7 @@ def test_drain_alert_waits_for_enough_history():
     f = _facade()
     t = AlertThresholds(drain_window=5)
     for _ in range(2):  # fewer runs than the window → not enough to judge
-        _finished_job(f, "auto-drain", {"attempted": 0, "skipped_recent_fail": 100})
+        _finished_job(f, "harvest-all", {"attempted": 0, "skipped_recent_fail": 100})
     with f._open() as (cat, _rs, _ts):
         assert not any(a.code.startswith("drain_") for a in check_alerts(cat, t))
 

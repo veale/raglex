@@ -10453,10 +10453,34 @@ class Facade:
             fid = cat.add_feedback(kind=k, message=msg[:8000], page=page, url=url, metadata=meta)
         return {"submitted": True, "feedback_id": fid, "kind": k}
 
-    def list_feedback(self, *, status: str | None = "open", limit: int = 500) -> list[dict]:
+    def report_issue(self, *, message: str, fingerprint: str, page: str | None = None,
+                     metadata: dict | None = None, kind: str = "error") -> dict:
+        """File a SYSTEM-reported problem into the same review queue as user feedback and
+        refinement flags, deduplicated on ``fingerprint`` (see ops/errorlog.py).
+
+        This is what turns "a warning went into a container log nobody reads" into a work
+        item an agent can be told to fix, alongside the reports users file by hand."""
+        import json as _json
+        msg = (message or "").strip()
+        if not msg:
+            return {"error": "empty message"}
+        meta = None
+        try:
+            meta = _json.dumps(metadata) if metadata else None
+        except (TypeError, ValueError):
+            meta = None
+        with self._open() as (cat, _rs, _ts):
+            fid = cat.record_issue(fingerprint=fingerprint, message=msg[:8000], page=page,
+                                   metadata=meta, kind=kind)
+        return {"recorded": True, "feedback_id": fid, "kind": kind}
+
+    def list_feedback(self, *, status: str | None = "open", limit: int = 500,
+                      kind: str | None = None) -> list[dict]:
+        """The review queue: user Bugs / Feature requests AND the system's own errors
+        (``kind='error'``). Filter with ``kind``."""
         import json as _json
         with self._open() as (cat, _rs, _ts):
-            rows = [dict(r) for r in cat.feedback(status=status, limit=limit)]
+            rows = [dict(r) for r in cat.feedback(status=status, limit=limit, kind=kind)]
         for r in rows:
             if r.get("metadata"):
                 try:
