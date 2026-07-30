@@ -20,7 +20,14 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from ..core.models import Record, TypedRelation, UpstreamStatus
+from ..core.models import (
+    ExtractedVia,
+    Record,
+    RelationshipType,
+    ResolutionStatus,
+    TypedRelation,
+    UpstreamStatus,
+)
 from . import _postgres
 
 # SQLite-flavoured mirror of schema/postgres.sql (step-1 + tagging tables).
@@ -1643,18 +1650,22 @@ class Catalogue:
         ).fetchone()["n"]
 
     def clear_relations(self, src_id: str, *, extracted_via: str,
+                        relationship_type: str | None = None,
                         commit: bool = True) -> None:
         """Drop a source's edges from one extraction method, so re-running that
         extractor is idempotent (a re-derivable projection, §1.2). Leaves
         structurally-extracted and manual edges intact."""
-        self.conn.execute(
-            "DELETE FROM relations WHERE src_id = ? AND extracted_via = ?",
-            (src_id, extracted_via),
-        )
+        sql = "DELETE FROM relations WHERE src_id = ? AND extracted_via = ?"
+        params: tuple = (src_id, extracted_via)
+        if relationship_type is not None:
+            sql += " AND relationship_type = ?"
+            params += (relationship_type,)
+        self.conn.execute(sql, params)
         if commit:
             self.conn.commit()
 
-    def clear_relations_of_type(self, src_id: str, relationship_type: str) -> None:
+    def clear_relations_of_type(self, src_id: str, relationship_type: str, *,
+                                commit: bool = True) -> None:
         """Drop a source's edges of one relationship type — so re-deriving them (e.g.
         re-scanning an act's affecting-side Changes feed) is idempotent without touching
         its other edges."""
@@ -1662,7 +1673,8 @@ class Catalogue:
             "DELETE FROM relations WHERE src_id = ? AND relationship_type = ?",
             (src_id, relationship_type),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def mark_effects_due(self, stable_id: str, affecting, *, count: int = 1) -> None:
         """Flag an *affected* instrument for re-pull NOW — used when a newly-imported
@@ -1725,6 +1737,140 @@ class Catalogue:
         return self.conn.execute(
             "SELECT * FROM relations WHERE src_id = ?", (src_id,)
         ).fetchall()
+
+    @staticmethod
+    def _version_date(row) -> str | None:
+        """Best available ISO date for a held point-in-time legislative expression."""
+        sid = str(row["stable_id"] or "")
+        match = re.search(r"-(\d{4})(\d{2})(\d{2})$", sid)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+        match = re.search(r"@(\d{4}-\d{2}-\d{2})$", sid)
+        if match:
+            return match.group(1)
+        try:
+            meta = json.loads(row["meta_json"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        currency = meta.get("currency") if isinstance(meta.get("currency"), dict) else {}
+        for value in (
+            meta.get("as_at"), meta.get("point_in_time"), meta.get("updated_to"),
+            currency.get("as_at"), row["dst_anchor"],
+        ):
+            value = str(value or "")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value[:10]):
+                return value[:10]
+        return None
+
+    def legislative_versions(self, base_id: str) -> list[tuple[str, str]]:
+        """Held dated expressions of ``base_id``, ordered oldest to newest.
+
+        Both resolved and still-pending lineage edges count: a version and its base
+        are already present when this query runs, so resolver lag must not prevent a
+        temporally accurate citation link.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT d.stable_id, d.meta_json, r.dst_anchor
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE (r.dst_id = ? OR r.candidate_id = ?)
+              AND r.relationship_type IN ('consolidates', 'point_in_time_of')
+            """,
+            (base_id, base_id),
+        ).fetchall()
+        versions = {
+            (str(row["stable_id"]), version_date)
+            for row in rows
+            if (version_date := self._version_date(row))
+        }
+        return sorted(versions, key=lambda item: (item[1], item[0]))
+
+    def applicable_legislative_version(
+        self, base_id: str, on_date: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Latest held consolidation in force on ``on_date`` (today if undated)."""
+        cutoff = str(on_date or date.today().isoformat())[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
+            cutoff = date.today().isoformat()
+        eligible = [
+            item for item in self.legislative_versions(base_id)
+            if item[1] <= cutoff
+        ]
+        return eligible[-1] if eligible else None
+
+    def refresh_applicable_version_links(
+        self, base_id: str, *, commit: bool = True,
+    ) -> int:
+        """Rebuild citing-document → applicable-version edges for one base law.
+
+        Called when a new consolidation lands. It retrofits earlier citations rather
+        than waiting for every citing document to be re-extracted.
+        """
+        versions = self.legislative_versions(base_id)
+        if not versions:
+            return 0
+        version_ids = [item[0] for item in versions]
+        placeholders = ",".join("?" * len(version_ids))
+        self.conn.execute(
+            f"DELETE FROM relations WHERE relationship_type = 'applicable_version' "
+            f"AND dst_id IN ({placeholders})",
+            version_ids,
+        )
+        rows = self.conn.execute(
+            """
+            SELECT r.src_id, r.raw_citation_string, r.dst_anchor,
+                   r.context_start, r.context_end, d.decision_date, d.meta_json
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE (r.dst_id = ? OR r.candidate_id = ?)
+              AND r.relationship_type IN (
+                'mentions', 'interprets', 'applies', 'considers', 'follows',
+                'distinguishes', 'overrules', 'cites_for_fact'
+              )
+              AND r.src_id <> ?
+            """,
+            (base_id, base_id, base_id),
+        ).fetchall()
+        edges_by_source: dict[str, dict[tuple[str, str | None], TypedRelation]] = {}
+        for row in rows:
+            try:
+                meta = json.loads(row["meta_json"] or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            reference_date = (
+                str(meta.get("updated_at") or meta.get("public_updated_at") or "")[:10]
+                or str(row["decision_date"] or "")[:10]
+                or date.today().isoformat()
+            )
+            applicable = self.applicable_legislative_version(base_id, reference_date)
+            if not applicable:
+                continue
+            version_id, version_date = applicable
+            key = (version_id, row["dst_anchor"])
+            edges_by_source.setdefault(str(row["src_id"]), {}).setdefault(
+                key,
+                TypedRelation(
+                    relationship_type=RelationshipType.APPLICABLE_VERSION,
+                    raw_citation_string=row["raw_citation_string"],
+                    dst_id=version_id,
+                    dst_anchor=row["dst_anchor"],
+                    src_anchor=f"applicable on {reference_date}; consolidation {version_date}",
+                    extracted_via=ExtractedVia.INFERRED,
+                    resolution_status=ResolutionStatus.RESOLVED,
+                    context_start=row["context_start"],
+                    context_end=row["context_end"],
+                ),
+            )
+        count = 0
+        for src_id, edges in edges_by_source.items():
+            self.add_relations(src_id, list(edges.values()), commit=False)
+            count += len(edges)
+        if commit:
+            self.conn.commit()
+        return count
 
     # -- document assets (§1.9 attach/annotate) ----------------------------
     def add_asset(

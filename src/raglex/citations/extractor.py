@@ -555,14 +555,17 @@ def attach_stored_shorthands(
 # span begins at the tail of the list) and mints one pinpointed edge per article to
 # it. A single article number is left to the grammar.
 _ARTICLE_IN_LIST = re.compile(
-    r"(?:Art(?:icle|\.)?s?\.?\s+)?(?P<n>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)")
+    r"(?:(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+)?"
+    r"(?P<n>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)", re.IGNORECASE)
 # the whole list construct: two or more article numbers joined by commas / "and"
 # (allowing a repeated "and Article 52(1)"), ending just before the instrument
 _ARTICLE_LIST = re.compile(
-    r"\bArt(?:icle|\.)?s?\.?\s+"
+    r"\b(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+"
     r"(?P<list>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*"
-    r"(?:\s*(?:,|and|et|&|to|through|à|–|—|-)\s*(?:Art(?:icle|\.)?s?\.?\s+)?\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)+)"
-    r"\s+(?:(?:of|du|de\s+la|des)\s+)?(?:the\s+)?",
+    r"(?:\s*(?:,|and|en|et|e|ed|&|to|through|à|–|—|-)\s*"
+    r"(?:(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+)?"
+    r"\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)+)"
+    r"\s+(?:(?:of|du|de\s+la|des|van\s+de)\s+)?(?:the\s+)?",
     re.IGNORECASE)
 
 
@@ -690,9 +693,10 @@ def _attach_section_lists(text: str, kept: list[Citation]) -> list[Citation]:
 # say which instrument; the carry-forward pass attaches it to the last-named one.
 _BARE_PROVISION = re.compile(
     r"\b(?P<cue>section|sections|sub-?section|s|ss|article|articles|art|arts|"
+    r"artikel|artikelen|articolo|articoli|"
     r"recital|recitals|"
     r"regulation|regulations|reg|regs|paragraph|paragraphs|para|paras|schedule|sch)\.?\s*"
-    r"(?P<num>\d+[A-Z]?(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?=\W|$)",
+    r"(?P<num>\d+[A-Z]?(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
 # carry-forward only attaches a bare provision to a *legislation* antecedent — a
@@ -726,6 +730,8 @@ def _cue_allows(cue: str, kind: str, candidate_id: str | None = None) -> bool:
         # "Section 1 of the Code" in a Commission opinion attached itself to the DSA.
         return not eu
     if c.startswith(("article", "art")):
+        if c.startswith(("artikel", "articolo", "articoli")):
+            return True  # Dutch/Italian statutes and EU instruments both use articles
         return eu                             # Article → EU instrument / treaty, not a UK Act
     if c.startswith("recital"):
         # Recitals belong to EU instruments (regulations included — the GDPR is one) and
@@ -740,6 +746,10 @@ def _bare_pinpoint(cue: str, num: str) -> str:
     if c.startswith("recital"):
         return f"Recital {num}"
     if c.startswith(("article", "art")):
+        if c.startswith("artikel"):
+            return f"Artikel {num}"
+        if c.startswith(("articolo", "articoli")):
+            return f"Articolo {num}"
         return f"Article {num}"
     if c.startswith(("regulation", "reg")):
         return f"reg. {num}"
@@ -1009,6 +1019,8 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # surface span as a German ``Art.`` reference.
     from .dutch import dutch_citations
     cites += dutch_citations(text)
+    from .italian import italian_citations
+    cites += italian_citations(text)
     # German references are normalised before linking and may expand to several exact
     # targets (ranges, i.V.m., repeated Nr./Abs. clauses), which the one-match/one-edge
     # grammar interface cannot represent.

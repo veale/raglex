@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Iterator
+from typing import Iterator, Mapping
 from urllib.parse import urljoin
 
 from ..core.adapter import BaseAdapter
@@ -88,6 +88,9 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         organisation: str | None = None,
         document_type: str | None = None,
         court: str,
+        search_filters: Mapping[str, str] | None = None,
+        record_doc_type: DocType | None = None,
+        require_recognized_legal_citation: bool = True,
         client: RateLimitedClient | None = None,
     ) -> None:
         if not organisation and not document_type:
@@ -96,6 +99,9 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         self.organisation = organisation
         self.document_type = document_type
         self.court = court
+        self.search_filters = dict(search_filters or {})
+        self.record_doc_type = record_doc_type
+        self.require_recognized_legal_citation = require_recognized_legal_citation
         self._client = client or RateLimitedClient(
             source, min_interval=self.min_interval, timeout=60
         )
@@ -116,6 +122,7 @@ class GOVUKRegulatorAdapter(BaseAdapter):
                 params["filter_organisations"] = self.organisation
             if self.document_type:
                 params["filter_document_type"] = self.document_type
+            params.update(self.search_filters)
             data = self._client.get(SEARCH, params=params).json()
             items = data.get("results") or []
             if not items:
@@ -159,6 +166,36 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         text = content_text(content)
         details = content.get("details") or {}
         attachment_meta: list[dict] = []
+        html_attachment_titles: set[str] = set()
+        aliases: list[str] = []
+        # A GOV.UK publication is a container. Its full, accessible guidance often
+        # lives in one or more child ``html_publication`` Content Store records, not
+        # in the parent's body (CMA207 is the canonical example). Follow those
+        # internal attachments before falling back to the equivalent PDF.
+        for attachment in details.get("attachments") or ():
+            if not isinstance(attachment, dict):
+                continue
+            url = str(attachment.get("url") or "")
+            if attachment.get("attachment_type") != "html" or not url.startswith("/"):
+                continue
+            try:
+                child_response = self._client.get(f"{CONTENT}{url}")
+                child = child_response.json()
+            except (FetchError, ValueError):
+                continue
+            body = content_text(child)
+            if not body:
+                continue
+            title = str(attachment.get("title") or child.get("title") or "").strip()
+            if title:
+                html_attachment_titles.add(re.sub(r"\W+", " ", title).strip().lower())
+                text += f"\n\n{title}\n{body}"
+            else:
+                text += "\n\n" + body
+            attachment_meta.append({
+                "url": url, "title": title or None, "type": "html",
+                "text_chars": len(body),
+            })
         # Decisions are often a short landing page plus the legally operative PDF.
         # Include each English PDF before applying the citation gate.
         for attachment in details.get("attachments") or ():
@@ -167,6 +204,14 @@ class GOVUKRegulatorAdapter(BaseAdapter):
             url = str(attachment.get("url") or "")
             mime = str(attachment.get("content_type") or "")
             if not url or ("pdf" not in mime.lower() and not url.lower().endswith(".pdf")):
+                continue
+            title = str(attachment.get("title") or "").strip()
+            title_key = re.sub(r"\W+", " ", title).strip().lower()
+            reference = str(attachment.get("unique_reference") or "").strip()
+            if reference:
+                aliases.append(reference)
+            # Prefer the accessible HTML rendition where GOV.UK publishes both.
+            if title_key and title_key in html_attachment_titles:
                 continue
             try:
                 pdf = self._client.get(url).content
@@ -177,7 +222,7 @@ class GOVUKRegulatorAdapter(BaseAdapter):
             if body:
                 text += "\n\n" + body
             attachment_meta.append({
-                "url": url, "title": attachment.get("title"), "bytes": len(pdf),
+                "url": url, "title": title or None, "type": "pdf", "bytes": len(pdf),
                 "text_chars": len(body),
             })
         text = text.strip()
@@ -186,11 +231,17 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         base_path = str(content.get("base_path") or "")
         updated = content.get("public_updated_at") or stub.hints.get("watermark")
         first = content.get("first_published_at")
-        doc_type = (
-            DocType.DECISION
-            if self.document_type == "cma_case"
-            else DocType.GUIDANCE
+        doc_type = self.record_doc_type or (
+            DocType.DECISION if self.document_type == "cma_case" else DocType.GUIDANCE
         )
+        for value in (content.get("title"), stub.title):
+            aliases.extend(re.findall(r"\bCMA\d{1,4}[A-Z]?\b", str(value or ""), re.I))
+        aliases = list(dict.fromkeys(a.upper() for a in aliases if a))
+        default_instrument = None
+        if any(code in aliases for code in ("CMA200", "CMA207", "CMA208")):
+            default_instrument = {"id": "ukpga/2024/13", "kind": "act"}
+        elif "CMA37" in aliases:
+            default_instrument = {"id": "ukpga/2015/15", "kind": "act"}
         return Record(
             source=self.source,
             stable_id=f"{self.source}/{base_path.strip('/') or stub.stable_id.split('/', 1)[-1]}",
@@ -214,7 +265,8 @@ class GOVUKRegulatorAdapter(BaseAdapter):
                 "updated_at": updated,
                 "contenthash": stub.hints.get("contenthash"),
                 "attachments": attachment_meta,
-                "require_recognized_legal_citation": True,
+                "aliases": aliases,
+                "citation_default_instrument": default_instrument,
+                "require_recognized_legal_citation": self.require_recognized_legal_citation,
             },
         )
-

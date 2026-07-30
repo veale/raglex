@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import date
 
 from raglex.citations import extract_citations, extract_document
-from raglex.core.models import DocType, ExtractedVia, Record
+from raglex.core.models import (
+    DocType,
+    ExtractedVia,
+    Record,
+    RelationshipType,
+    ResolutionStatus,
+    TypedRelation,
+)
 from raglex.resolve import Resolver
 from raglex.storage import TextStore
 
@@ -280,10 +287,86 @@ def test_overlapping_match_keeps_most_specific():
 def _doc(catalogue, ts, stable_id, text, **kw):
     rec = Record(source=kw.get("source", "x"), stable_id=stable_id,
                  ecli=kw.get("ecli"), doc_type=kw.get("doc_type", DocType.JUDGMENT),
-                 decision_date=date(2024, 1, 1), text=text, raw_bytes=text.encode(),
+                 decision_date=kw.get("decision_date", date(2024, 1, 1)),
+                 text=text, raw_bytes=text.encode(),
+                 relations=kw.get("relations", []),
                  extracted_via=ExtractedVia.STRUCTURED)
     rec.ensure_payload_hash()
     catalogue.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, text)))
+
+
+def _law_version(catalogue, stable_id, base_id):
+    rec = Record(
+        source="eu-legislation",
+        stable_id=stable_id,
+        doc_type=DocType.LEGISLATION,
+        text="Article 5",
+        raw_bytes=stable_id.encode(),
+        extracted_via=ExtractedVia.STRUCTURED,
+        relations=[
+            TypedRelation(
+                relationship_type=RelationshipType.CONSOLIDATES,
+                raw_citation_string=stable_id,
+                dst_id=base_id,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING,
+            )
+        ],
+    )
+    rec.ensure_payload_hash()
+    catalogue.upsert_document(rec)
+
+
+def test_citation_also_links_temporally_applicable_consolidation(catalogue, tmp_path):
+    ts = TextStore(tmp_path / "text")
+    base = "32005L0029"
+    _law_version(catalogue, "02005L0029-20050612", base)
+    _law_version(catalogue, "02005L0029-20220528", base)
+    _law_version(catalogue, "02005L0029-20990101", base)
+
+    text = "Article 5 of Directive 2005/29/EC applies."
+    _doc(catalogue, ts, "case/2021", text, decision_date=date(2021, 3, 1))
+    _doc(catalogue, ts, "case/2024", text, decision_date=date(2024, 3, 1))
+    extract_document(catalogue, ts, "case/2021")
+    extract_document(catalogue, ts, "case/2024")
+
+    def version_edge(src_id):
+        return next(
+            row for row in catalogue.relations_for(src_id)
+            if row["relationship_type"] == "applicable_version"
+        )
+
+    old = version_edge("case/2021")
+    current = version_edge("case/2024")
+    assert old["dst_id"] == "02005L0029-20050612"
+    assert current["dst_id"] == "02005L0029-20220528"
+    assert current["dst_anchor"] == "Article 5"
+    assert current["raw_citation_string"] == "Article 5 of Directive 2005/29/EC"
+    assert current["extracted_via"] == "inferred"
+    assert current["resolution_status"] == "resolved"
+    assert "applicable on 2024-03-01" in current["src_anchor"]
+
+    # Structured adapter links receive the temporal companion too, and a rerun is
+    # idempotent even though no regex citation exists in the body.
+    _doc(
+        catalogue, ts, "structured/2024", "No printed instrument number.",
+        decision_date=date(2024, 6, 1),
+        relations=[TypedRelation(
+            relationship_type=RelationshipType.INTERPRETS,
+            raw_citation_string="UCPD",
+            dst_id=base,
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.PENDING,
+        )],
+    )
+    extract_document(catalogue, ts, "structured/2024")
+    extract_document(catalogue, ts, "structured/2024")
+    structured_versions = [
+        row for row in catalogue.relations_for("structured/2024")
+        if row["relationship_type"] == "applicable_version"
+    ]
+    assert len(structured_versions) == 1
+    assert structured_versions[0]["dst_id"] == "02005L0029-20220528"
 
 
 def _prelim_edge(catalogue, stable_id, ref_text):

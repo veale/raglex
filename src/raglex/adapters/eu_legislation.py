@@ -20,12 +20,21 @@ document-date cursor; a **backfill** (no cursor, no page cap) walks the whole se
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
-from ..core.models import DocType, ExtractedVia, Record, Stub, TypedRelation
+from ..core.models import (
+    DocType,
+    ExtractedVia,
+    Record,
+    RelationshipType,
+    ResolutionStatus,
+    Stub,
+    TypedRelation,
+)
 from ..formats import parse
 
 # A Directive CELEX (sector 3, descriptor L) — the only instruments that have national
@@ -109,6 +118,10 @@ def _year_span(spec: str | None) -> tuple[int, int] | None:
     b = int(m.group(2)) if m.group(2) else a
     return (min(a, b), max(a, b))
 
+
+def _flag(value: bool | str | None) -> bool:
+    return value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
 class EULegislationAdapter(BaseAdapter):
     source = "eu-legislation"
     min_interval = 0.5
@@ -117,6 +130,7 @@ class EULegislationAdapter(BaseAdapter):
 
     def __init__(self, *, celex: str | tuple[str, ...] | None = None,
                  types: str | None = None, years: str | None = None,
+                 include_consolidations: bool | str = False,
                  page_size: int = 200, client: RateLimitedClient | None = None) -> None:
         if isinstance(celex, str):
             celex = tuple(c.strip() for c in celex.split(",") if c.strip())
@@ -124,6 +138,7 @@ class EULegislationAdapter(BaseAdapter):
         self.types = tuple(t.strip().upper() for t in (types or "").split(",") if t.strip()) \
             or DEFAULT_TYPES
         self.years = _year_span(years)
+        self.include_consolidations = _flag(include_consolidations)
         self.page_size = max(1, min(int(page_size), 1000))
         # With no explicit CELEX list, enumerate the catalogue over SPARQL.
         self.enumerate = not self.celex_list
@@ -142,6 +157,34 @@ class EULegislationAdapter(BaseAdapter):
                             f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
                 raw_url=f"{CELEX_BASE}/{celex}",
                 court=None,
+            )
+            if self.include_consolidations and re.match(r"^3\d{4}[RLD]\d{4}$", celex):
+                yield from self._consolidation_stubs(celex)
+
+    def _consolidation_stubs(self, base_celex: str) -> Iterator[Stub]:
+        """All dated sector-0 snapshots for one explicitly named base act."""
+        prefix = "0" + base_celex[1:] + "-"
+        query = f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex WHERE {{
+  ?work cdm:resource_legal_id_celex ?celex .
+  FILTER(STRSTARTS(STR(?celex), "{prefix}"))
+}}
+ORDER BY ?celex
+"""
+        try:
+            rows = self._sparql(query)
+        except Exception:
+            return
+        for row in rows:
+            celex = str(row.get("celex") or "").strip().upper()
+            if not re.fullmatch(r"0\d{4}[RLD]\d{4}-\d{8}", celex):
+                continue
+            yield Stub(
+                stable_id=celex,
+                landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
+                raw_url=f"{CELEX_BASE}/{celex}",
+                hints={"consolidation_of": base_celex},
             )
 
     # -- SPARQL enumeration (the full-catalogue path) -----------------------
@@ -244,7 +287,7 @@ LIMIT {self.page_size} OFFSET {offset}
             raw = None
         parsed = parse("formex-legislation", raw) if raw else None
         if parsed and parsed.text:
-            return Record(
+            return self._decorate_currency(Record(
                 source=self.source,
                 stable_id=stub.stable_id,  # CELEX — the resolution target (§5b)
                 doc_type=DocType.LEGISLATION,
@@ -256,7 +299,7 @@ LIMIT {self.page_size} OFFSET {offset}
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"format": "formex-legislation", "celex": stub.stable_id,
                        "eli": primary.get("eli") if primary else None, "aliases": aliases},
-            )
+            ))
         # No Formex rendition (common for old instruments like Directive 95/46) — fall
         # back to the EUR-Lex HTML, which exists even when Formex doesn't.
         html = self._fetch_html(stub.stable_id)
@@ -266,7 +309,7 @@ LIMIT {self.page_size} OFFSET {offset}
             # or a stray heading ("ANNEX") — derive a real title from the CELEX then.
             title = (str(primary["title"]) if primary else
                      celex_title(stub.stable_id) if _is_generic_title(hp.title) else hp.title)
-            return Record(
+            return self._decorate_currency(Record(
                 source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
                 title=title or stub.stable_id, language="en", source_language="en",
                 landing_url=stub.landing_url, raw_bytes=html, raw_ext="html",
@@ -274,11 +317,11 @@ LIMIT {self.page_size} OFFSET {offset}
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"format": "eurlex-html", "celex": stub.stable_id,
                        "eli": primary.get("eli") if primary else None, "aliases": aliases},
-            )
+            ))
         # Neither Formex nor HTML parsed — register a metadata stub so the (often
         # heavily-cited) instrument is still a real, clickable node and its citations
         # resolve (§5b); text can be backfilled later.
-        return Record(
+        return self._decorate_currency(Record(
             source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
             title=str(primary["title"]) if primary else stub.stable_id,
             language="en", source_language="en",
@@ -287,7 +330,37 @@ LIMIT {self.page_size} OFFSET {offset}
             extracted_via=ExtractedVia.STRUCTURED,
             extra={"celex": stub.stable_id, "metadata_only": True,
                    "eli": primary.get("eli") if primary else None, "aliases": aliases},
-        )
+        ))
+
+    @staticmethod
+    def _decorate_currency(record: Record) -> Record:
+        """Attach sector-0 identity and its authoritative base-act edge."""
+        from ..eu_law import consolidation_base, consolidation_date
+
+        base = consolidation_base(record.stable_id)
+        if not base:
+            return record
+        if not any(
+            rel.relationship_type is RelationshipType.CONSOLIDATES
+            and rel.dst_id == base for rel in record.relations
+        ):
+            record.relations.append(TypedRelation(
+                relationship_type=RelationshipType.CONSOLIDATES,
+                raw_citation_string=record.stable_id,
+                dst_id=base,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING,
+            ))
+        as_at = consolidation_date(record.stable_id)
+        record.extra.update({
+            "is_consolidation": True,
+            "consolidation_of": base,
+            "as_at": as_at,
+            "future_effective": bool(as_at and as_at > date.today().isoformat()),
+            "text_status": "consolidated (documentation only; no legal effect)",
+            "is_authoritative": False,
+        })
+        return record
 
     def _fetch_html(self, celex: str) -> bytes | None:
         """The rendered HTML for a CELEX (the fallback when no Formex): the EUR-Lex

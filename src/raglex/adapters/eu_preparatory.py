@@ -225,6 +225,13 @@ SELECT DISTINCT ?title ?proposalCelex ?adopted ?adoptedRelated WHERE {{
         aliases = printed_aliases(rec.stable_id, rec.title, rec.text)
         rec.extra.update({"celex": rec.stable_id, "preparatory_subtype": preparatory_subtype(rec.stable_id)[0],
                           "aliases": list(dict.fromkeys([*(rec.extra.get("aliases") or []), *aliases]))})
+        # OJ C guidance notices frequently define one directive in the title and
+        # then use hundreds of orphaned "Article N" references. The title is strong
+        # enough to supply that one home; mixed/comparative titles deliberately do not.
+        from .eu_consumer_guidance import title_default_instrument
+        default_instrument = title_default_instrument(rec.title)
+        if default_instrument:
+            rec.extra["citation_default_instrument"] = default_instrument
         for target in stub.hints.get("adopted_as") or ():
             rec.relations.append(TypedRelation(
                 relationship_type=RelationshipType.ADOPTED_AS,

@@ -36,12 +36,42 @@ _LAW_NAMES = {
     "Gw": "Grondwet", "Rv": "Wetboek van Burgerlijke Rechtsvordering",
     "Vw": "Vreemdelingenwet 2000", "Wob": "Wet openbaarheid van bestuur",
     "Woo": "Wet open overheid", "UAVG": "Uitvoeringswet AVG",
+    "Whc": "Wet handhaving consumentenbescherming",
+    "Prijzenwet": "Prijzenwet",
+    "Tw": "Telecommunicatiewet",
     "WIA": "Wet werk en inkomen naar arbeidsvermogen",
     "WAO": "Wet op de arbeidsongeschiktheidsverzekering",
     "WW": "Werkloosheidswet", "ZW": "Ziektewet",
 }
 _LAW_ALT = "|".join(sorted((re.escape(x) for x in (*_LAW_NAMES, *_LAW_NAMES.values())),
                            key=len, reverse=True))
+
+# In Dutch, AVG is the GDPR. ``artikel 15 AVG`` otherwise has exactly the shape
+# accepted by the deliberately broad German-law parser and becomes the phantom
+# ``de/gesetz/avg``. Capture the Dutch construction first and keep the EU article
+# anchor in the same language-neutral form as Formex.
+AVG_ARTICLE_RE = re.compile(
+    r"\b(?:art(?:ikel)?\.?)\s+(?P<article>\d{1,3}[a-z]?"
+    r"(?:\(\d+[a-z]?\))*)"
+    r"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?"
+    r"\s+(?:van\s+de\s+)?(?-i:AVG)\b",
+    re.I,
+)
+
+
+def avg_citations(text: str) -> list[Citation]:
+    out: list[Citation] = []
+    for match in AVG_ARTICLE_RE.finditer(text):
+        pinpoint = f"Article {match.group('article')}"
+        if match.group("lid"):
+            pinpoint += f", lid {match.group('lid')}"
+        out.append(Citation(
+            raw=match.group(0), entity_kind="regulation",
+            candidate_id="32016R0679", pinpoint=pinpoint,
+            char_start=match.start(), char_end=match.end(),
+            method="nl_avg_article", confidence=1.0,
+        ))
+    return out
 
 
 def _pin(article: str | None, paragraph: str | None = None,
@@ -88,7 +118,7 @@ def juriconnect_citations(text: str) -> list[Citation]:
 
 # ``artikel 6:162 BW``, ``art. 8:42, eerste lid, Awb`` and ``artikel 10 Grondwet``.
 LAW_REFERENCE_RE = re.compile(
-    rf"\b(?:art(?:ikel)?\.?\s+)(?P<article>\d{{1,3}}(?::\d{{1,4}})?[a-z]?)"
+    rf"\b(?:art(?:ikel)?\.?\s+)(?P<article>\d{{1,3}}(?:[:.]\d{{1,4}})?[a-z]?)"
     rf"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?"
     rf"(?:\s*,?\s*(?:van\s+)?(?:de|het)?\s*)?(?P<law>(?:Wet\s+)?(?:{_LAW_ALT}))\b", re.I)
 
@@ -104,6 +134,37 @@ def law_citations(text: str) -> list[Citation]:
             raw=m.group(0), entity_kind="act", candidate_id=law_name_alias(title),
             pinpoint=_pin(m.group("article"), m.group("lid")), char_start=m.start(),
             char_end=m.end(), method="nl_law_reference", confidence=.97,
+        ))
+    return out
+
+
+# Regulator guidance often gives the host first and the article later:
+# ``Telecommunicatiewet, zie artikel 11.7`` and ``Burgerlijk Wetboek Boek 6
+# (oneerlijke handelspraktijken), in het bijzonder artikel 193h``. The generic
+# carry-forward pass cannot safely infer these when an EU regulation was cited in
+# between, so capture the local host literally.
+HOST_BEFORE_RE = re.compile(
+    r"\b(?P<law>Telecommunicatiewet|Burgerlijk\s+Wetboek(?:\s+Boek\s+(?P<book>\d+))?)"
+    r"(?P<middle>[^.\n]{0,180}?)\b"
+    r"(?:art(?:ikel)?\.?\s+)(?P<article>\d{1,3}(?:[:.]\d{1,4})?[a-z]?)"
+    r"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?",
+    re.I,
+)
+
+
+def host_before_citations(text: str) -> list[Citation]:
+    out: list[Citation] = []
+    for match in HOST_BEFORE_RE.finditer(text):
+        law = match.group("law")
+        title = "Telecommunicatiewet" if law.casefold().startswith("tele") \
+            else "Burgerlijk Wetboek"
+        article = match.group("article")
+        if match.group("book") and ":" not in article and "." not in article:
+            article = f"{match.group('book')}:{article}"
+        out.append(Citation(
+            raw=match.group(0), entity_kind="act", candidate_id=law_name_alias(title),
+            pinpoint=_pin(article, match.group("lid")), char_start=match.start(),
+            char_end=match.end(), method="nl_host_before_article", confidence=.96,
         ))
     return out
 
@@ -133,5 +194,5 @@ def ljn_citations(text: str) -> list[Citation]:
 
 
 def dutch_citations(text: str) -> list[Citation]:
-    return (juriconnect_citations(text) + law_citations(text) + echr_citations(text)
-            + ljn_citations(text))
+    return (avg_citations(text) + juriconnect_citations(text) + law_citations(text)
+            + host_before_citations(text) + echr_citations(text) + ljn_citations(text))

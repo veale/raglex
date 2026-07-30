@@ -14,12 +14,14 @@ leaving structured (adapter) and manual edges untouched.
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing
 import os
 import re
 import threading
 from dataclasses import dataclass, replace
+from datetime import date
 
 from ..core.models import DocType, ExtractedVia, RelationshipType, ResolutionStatus, TypedRelation
 from ..storage.catalogue import Catalogue
@@ -60,8 +62,30 @@ def _allows_us_reporters(doc) -> bool:
 _CELEX_KIND = {"R": "regulation", "L": "directive", "D": "decision", "E": "treaty"}
 
 
+def _meta_of(doc) -> dict:
+    try:
+        raw = doc["meta_json"]
+    except (KeyError, IndexError):
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _home_of(doc) -> tuple[str | None, str | None]:
     if doc["doc_type"] != str(DocType.LEGISLATION):
+        # Some guidance has one explicit governing instrument throughout (for
+        # example the Commission's UCPD notice). Adapters may declare that fact so
+        # an orphan "Article 5" returns to the document's subject after a sentence
+        # discussing another directive. This is deliberately opt-in; mixed-law
+        # registers and weekly bulletins must never guess a home.
+        default = _meta_of(doc).get("citation_default_instrument")
+        if isinstance(default, dict) and default.get("id"):
+            return str(default["id"]), str(default.get("kind") or "named")
         return None, None
     sid = str(doc["stable_id"] or "")
     if not sid:
@@ -70,6 +94,77 @@ def _home_of(doc) -> tuple[str | None, str | None]:
     if m:
         return sid, _CELEX_KIND.get(m.group(1), "eu_instrument")
     return sid, "act" if sid.startswith(("ukpga/", "asp/", "nia/", "anaw/")) else "named"
+
+
+def _reference_date(doc) -> str:
+    """Date on which a citing document should be matched to consolidated law."""
+    meta = _meta_of(doc)
+    for value in (
+        meta.get("updated_at"), meta.get("public_updated_at"), doc["decision_date"],
+    ):
+        value = str(value or "")[:10]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return value
+    return date.today().isoformat()
+
+
+def _attach_applicable_versions(catalogue: Catalogue, doc, edges: dict) -> dict:
+    """Keep the literal base-law citation and add its applicable dated expression.
+
+    The derived edge is a different relationship type and ``inferred`` provenance:
+    it says which held text was current on the source's date, not that the author
+    literally printed the consolidation identifier.
+    """
+    reference_date = _reference_date(doc)
+    source_relations = list(edges.values())
+    # Adapter-declared and manually curated law links survive citation re-extraction
+    # and need the same temporal companion even if the body grammar found nothing.
+    versionable_types = {
+        str(RelationshipType.MENTIONS), str(RelationshipType.INTERPRETS),
+        str(RelationshipType.APPLIES), str(RelationshipType.CONSIDERS),
+        str(RelationshipType.FOLLOWS), str(RelationshipType.DISTINGUISHES),
+        str(RelationshipType.OVERRULES), str(RelationshipType.CITES_FOR_FACT),
+    }
+    for row in catalogue.relations_for(str(doc["stable_id"])):
+        if row["relationship_type"] not in versionable_types:
+            continue
+        source_relations.append(TypedRelation(
+            relationship_type=RelationshipType(row["relationship_type"]),
+            raw_citation_string=row["raw_citation_string"],
+            dst_id=row["dst_id"] or row["candidate_id"],
+            dst_anchor=row["dst_anchor"],
+            extracted_via=ExtractedVia(row["extracted_via"]),
+            resolution_status=ResolutionStatus(row["resolution_status"]),
+            context_start=row["context_start"],
+            context_end=row["context_end"],
+        ))
+    for rel in source_relations:
+        if str(rel.relationship_type) not in versionable_types or not rel.dst_id:
+            continue
+        applicable = catalogue.applicable_legislative_version(
+            rel.dst_id, reference_date,
+        )
+        if not applicable:
+            continue
+        version_id, version_date = applicable
+        key = ("applicable_version", version_id, rel.dst_anchor)
+        edges.setdefault(
+            key,
+            TypedRelation(
+                relationship_type=RelationshipType.APPLICABLE_VERSION,
+                raw_citation_string=rel.raw_citation_string,
+                dst_id=version_id,
+                dst_anchor=rel.dst_anchor,
+                src_anchor=(
+                    f"applicable on {reference_date}; consolidation {version_date}"
+                ),
+                extracted_via=ExtractedVia.INFERRED,
+                resolution_status=ResolutionStatus.RESOLVED,
+                context_start=rel.context_start,
+                context_end=rel.context_end,
+            ),
+        )
+    return edges
 
 
 def _is_us_source(doc) -> bool:
@@ -699,6 +794,8 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     # attribute to and the heuristic is back to guessing.
     if doc["doc_type"] == str(DocType.LEGISLATION) and not _home_of(doc)[0]:
         cites = [c for c in cites if c.method != "carry_forward"]
+    if _meta_of(doc).get("disable_carry_forward"):
+        cites = [c for c in cites if c.method != "carry_forward"]
 
     # Inside a JUDGMENT, a bare "paragraph N" refers to the judgment's own
     # numbered paragraphs ("in paragraph 77 above") or a cited case's — never to
@@ -823,7 +920,11 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     catalogue.clear_relations(stable_id, extracted_via=str(ExtractedVia.REGEX),
                               commit=commit)
     catalogue.clear_relations(stable_id, extracted_via=str(ExtractedVia.INFERRED),
+                              relationship_type=str(RelationshipType.MENTIONS),
                               commit=commit)
+    catalogue.clear_relations_of_type(
+        stable_id, str(RelationshipType.APPLICABLE_VERSION), commit=commit,
+    )
 
     catalogue.add_citations(stable_id, [
         {
@@ -853,6 +954,7 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
                 context_end=c.char_end,
             )
     edges = _drop_self_citations(catalogue, stable_id, edges)
+    edges = _attach_applicable_versions(catalogue, doc, edges)
     catalogue.add_relations(stable_id, list(edges.values()), commit=commit)
     # durable "last rescanned at" stamp — set even when the document cited nothing, so a
     # staleness-scoped rescan can skip it next time (§5).

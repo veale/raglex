@@ -10,10 +10,13 @@ def test_national_transposition_edges_from_sparql():
     rows = [
         {"nim": "http://.../nim1", "country": "FRA",
          "eli": "http://data.europa.eu/eli/FR/loi/1978/78-17",
+         "nimCelex": "72016L0680FRA_1",
          "title": "Loi Informatique et Libertés"},
-        {"nim": "http://.../nim2", "country": "DEU", "title": "Bundesdatenschutzgesetz"},
+        {"nim": "http://.../nim2", "country": "DEU",
+         "nimCelex": "72016L0680DEU_2", "title": "Bundesdatenschutzgesetz"},
         # duplicate of nim2 (same title+country) → deduped
-        {"nim": "http://.../nim2b", "country": "DEU", "title": "Bundesdatenschutzgesetz"},
+        {"nim": "http://.../nim2b", "country": "DEU",
+         "nimCelex": "72016L0680DEU_2", "title": "Bundesdatenschutzgesetz"},
     ]
     edges = national_transposition_edges("32016L0680", lambda q: rows)
     assert len(edges) == 2
@@ -21,14 +24,15 @@ def test_national_transposition_edges_from_sparql():
     fr = edges[0]
     assert fr.dst_id == "eli/FR/loi/1978/78-17"  # national ELI → resolvable destination
     de = edges[1]
-    assert de.dst_id is None  # no ELI → dangling, resolved when de-neuris harvests it
+    assert de.dst_id == "72016L0680DEU_2"  # sector-7 CELEX remains a stable pending target
     assert "country: DEU" in de.raw_citation_string
 
 
 def test_transposition_query_is_directive_scoped():
     from raglex.adapters.eu_cellar import _transposition_query
     q = _transposition_query("32016L0680")
-    assert "resource_legal_implements_resource_legal" in q
+    assert "measure_national_implementing_implements_resource_legal" in q
+    assert 'STRSTARTS(STR(?nimCelex), "72016L0680")' in q
     assert "32016L0680" in q
 
 

@@ -109,6 +109,11 @@ class RelationshipType(StrEnum):
     # of POINT_IN_TIME_OF; kept distinct because it also carries the ``consolidates`` CDM
     # link and amendment apparatus. Consolidated text has no legal value (display-only).
     CONSOLIDATES = "consolidates"
+    # A citing document → the dated consolidation that was current on the citing
+    # document's date. The literal citation still points to the base Work; this second,
+    # derived edge makes the temporally applicable text directly traversable without
+    # pretending that the author cited a sector-0 / point-in-time identifier.
+    APPLICABLE_VERSION = "applicable_version"
     # A recast/codification new act → the predecessor it re-enacts (derivation lineage,
     # ``based_on``). Substantive-change (recast) vs none (codification) is a descriptor
     # classification, not a separate edge.

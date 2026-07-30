@@ -2615,6 +2615,7 @@ class Facade:
         (("fr-",), "France"),
         (("de-",), "Germany"),
         (("nl-",), "Netherlands"),
+        (("it-",), "Italy"),
         (("ie-", "eisb"), "Ireland"),
         (("au-",), "Australia"),
         (("ca-",), "Canada"),
@@ -2637,9 +2638,13 @@ class Facade:
         "ofcom-enforcement": "Ofcom enforcement", "ico": "ICO",
         "eu-cellar": "EUR-Lex (CJEU)", "eu-legislation": "EUR-Lex",
         "eu-preparatory": "EUR-Lex (EU preparatory & Commission policy documents)",
+        "eu-consumer-guidance": "European Commission consumer guidance",
         "edpb": "EDPB", "edpb-oss": "EDPB one-stop-shop", "a29wp": "Article 29 WP",
         "dma-cases": "DMA case register", "echr": "HUDOC (ECtHR)",
         "nl-rechtspraak": "Rechtspraak.nl", "nl-legislation": "wetten.overheid.nl",
+        "nl-acm-guidance": "ACM", "it-agcm": "AGCM",
+        "uk-cma": "Competition and Markets Authority",
+        "uk-cma-guidance": "Competition and Markets Authority",
         "ie-legislation": "eISB (Ireland)", "ie-caselaw": "Irish courts",
         "au-caselaw": "Open Australian Legal Corpus", "au-legislation": "Federal Register (AU)",
         # A2AJ publish their own bulk corpus; it is not a CanLII scrape, so naming
@@ -2874,7 +2879,7 @@ class Facade:
         "edpb", "eu-dgcomp-antitrust", "dma-cases", "eu-esma-sanctions",
         "eu-esas-boa", "eu-srb-appeals", "eu-ombudsman",
         # national competition / financial regulators
-        "ie-ccpc-mergers", "uk-cma", "uk-fca-notices",
+        "ie-ccpc-mergers", "uk-cma", "uk-fca-notices", "it-agcm",
     }
     # The only source whose PREPARATORY documents are legislative travaux (Commission
     # proposals, impact assessments) rather than reports. Everything else that files as

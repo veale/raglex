@@ -6,6 +6,8 @@ from __future__ import annotations
 from xml.etree import ElementTree as ET
 
 from raglex import eu_law as E
+from raglex.adapters.eu_legislation import EULegislationAdapter
+from raglex.core.models import DocType, Record, RelationshipType
 
 
 def test_celex_sector_and_consolidation_identity():
@@ -16,6 +18,30 @@ def test_celex_sector_and_consolidation_identity():
     assert E.consolidation_base("02016R0679-20160504") == "32016R0679"
     assert E.consolidation_date("02016R0679-20160504") == "2016-05-04"
     assert E.consolidation_base("32016R0679") is None
+
+
+def test_targeted_legislation_can_enumerate_and_link_consolidations(monkeypatch):
+    adapter = EULegislationAdapter(
+        celex="32005L0029", include_consolidations=True
+    )
+    monkeypatch.setattr(adapter, "_sparql", lambda query: [
+        {"celex": "02005L0029-20050612"},
+        {"celex": "02005L0029-20220528"},
+    ])
+    stubs = list(adapter.discover(None))
+    assert [stub.stable_id for stub in stubs] == [
+        "32005L0029", "02005L0029-20050612", "02005L0029-20220528"
+    ]
+    record = adapter._decorate_currency(Record(
+        source="eu-legislation", stable_id="02005L0029-20220528",
+        doc_type=DocType.LEGISLATION, raw_bytes=b"x", text="Article 1",
+    ))
+    assert record.extra["consolidation_of"] == "32005L0029"
+    assert record.extra["as_at"] == "2022-05-28"
+    assert record.extra["is_authoritative"] is False
+    assert [(rel.relationship_type, rel.dst_id) for rel in record.relations] == [
+        (RelationshipType.CONSOLIDATES, "32005L0029")
+    ]
 
 
 def test_classify_change_reconstructs_the_kind():

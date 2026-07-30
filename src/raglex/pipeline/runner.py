@@ -20,7 +20,7 @@ from datetime import date, timedelta
 
 from ..core.adapter import Adapter
 from ..core.errors import FetchError, RateLimitException
-from ..core.models import Record, Stub, UpstreamStatus
+from ..core.models import Record, RelationshipType, Stub, UpstreamStatus
 from ..storage.catalogue import Catalogue
 from ..storage.rawstore import RawStore
 from ..storage.textstore import TextStore
@@ -541,6 +541,21 @@ class Pipeline:
             self.textstore.put_segments(record.payload_hash, record.segments)
 
         self.catalogue.upsert_document(record, raw_path=raw_path, text_path=text_path)
+        # A newly held consolidation makes a more accurate target available for
+        # citations that already point at the base law. Rebuild those derived links
+        # immediately; otherwise they would appear only after every citing document
+        # happened to be re-extracted.
+        version_bases = {
+            rel.dst_id
+            for rel in record.relations
+            if rel.dst_id
+            and rel.relationship_type in {
+                RelationshipType.CONSOLIDATES,
+                RelationshipType.POINT_IN_TIME_OF,
+            }
+        }
+        for base_id in version_bases:
+            self.catalogue.refresh_applicable_version_links(base_id)
         return True
 
     def _reconcile_identity(self, record: Record) -> str | None:

@@ -318,16 +318,21 @@ _NIM_ELI_RE = re.compile(r"(eli/[^\s?#\"']+)", re.IGNORECASE)
 
 
 def _transposition_query(celex: str) -> str:
+    # CELLAR models these resources as ``measure_national_implementing`` works.
+    # The older/general-looking ``resource_legal_implements_resource_legal``
+    # predicate returns no rows in the current CDM.
+    nim_prefix = "7" + celex[1:]
     return f"""
 PREFIX cdm: <{CDM}>
 SELECT DISTINCT ?nim ?nimCelex ?country ?eli ?title WHERE {{
   ?dir cdm:resource_legal_id_celex ?dc . FILTER(STR(?dc) = "{celex}")
-  ?nim cdm:resource_legal_implements_resource_legal ?dir .
-  OPTIONAL {{ ?nim cdm:resource_legal_id_celex ?nimCelex }}
-  OPTIONAL {{ ?nim cdm:resource_legal_in_force_country ?c .
+  ?nim cdm:measure_national_implementing_implements_resource_legal ?dir .
+  ?nim cdm:resource_legal_id_celex ?nimCelex .
+  FILTER(STRSTARTS(STR(?nimCelex), "{nim_prefix}"))
+  OPTIONAL {{ ?nim cdm:measure_national_implementing_implemented_by_country ?c .
              BIND(REPLACE(STR(?c), "^.*/", "") AS ?country) }}
   OPTIONAL {{ ?nim cdm:resource_legal_id_local ?eli }}
-  OPTIONAL {{ ?nim cdm:work_has_expression ?e . ?e cdm:expression_title ?title }}
+  OPTIONAL {{ ?nim cdm:work_title ?title }}
 }}
 LIMIT 500
 """
@@ -335,19 +340,25 @@ LIMIT 500
 
 def national_transposition_edges(celex: str, sparql) -> list[TypedRelation]:
     """`transposes` edges from a directive CELEX to its national implementing measures,
-    using a caller-supplied ``sparql(query) -> list[dict]``. Most destinations aren't in
-    the corpus yet, so the edge is dangling (dst None) with the national title/country/ELI
-    kept in ``raw_citation_string`` — it surfaces in the §5b worklist and resolves when
-    fr-legislation / de-neuris harvests the measure. A national ELI, when present, is used
-    directly as the destination id."""
+    using a caller-supplied ``sparql(query) -> list[dict]``. Most destinations are not
+    in the corpus yet, so their sector-7 CELEX remains a pending destination and the
+    national title/country/local id stays auditable in ``raw_citation_string``. A real
+    national ELI, when present, is preferred and can resolve directly against a domestic
+    corpus."""
     edges: list[TypedRelation] = []
     seen: set[str] = set()
     for row in sparql(_transposition_query(celex)):
         eli = row.get("eli") or ""
         m = _NIM_ELI_RE.search(eli)
         dst = m.group(1).rstrip("/") if m else None
-        title = row.get("title") or row.get("nimCelex") or eli or row.get("nim")
+        nim_celex = row.get("nimCelex") or ""
+        title = row.get("title") or nim_celex or eli or row.get("nim")
         country = row.get("country")
+        # Sector-7 CELEX is the only universal identifier.  Keep it as the
+        # pending destination when CELLAR does not expose a national ELI so the
+        # measure remains enumerable and can later be aliased to a domestic
+        # corpus identifier.
+        dst = dst or nim_celex or None
         key = dst or f"{title}|{country}"
         if not title or key in seen:
             continue

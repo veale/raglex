@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..core.adapter import Adapter
+from ..core.models import DocType
 from ..scraping.recipes import RECIPES
 from ..scraping.scrape_adapter import RecipeScrapeAdapter
 from .a29wp import A29WPAdapter
@@ -51,6 +52,7 @@ from .eu_preparatory import EUPreparatoryAdapter
 from .eu_ombudsman import EUOmbudsmanAdapter
 from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
 from .eu_dgcomp import DGCompAntitrustAdapter
+from .eu_consumer_guidance import EUConsumerGuidanceAdapter
 from .eu_regulator_registers import (
     ESMASanctionsAdapter,
     ESAsBoardOfAppealAdapter,
@@ -65,6 +67,8 @@ from .ie_ccpc_mergers import IrishCCPCMergerAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
+from .nl_acm_guidance import ACMGuidanceAdapter
+from .it_agcm import AGCMBulletinAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
 from .uk_cat import CompetitionAppealTribunalAdapter
@@ -101,7 +105,20 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # replacing existing textless UKET stubs with the official full text.
     "uk-et": UKEmploymentTribunalAdapter,
     "uk-cma": lambda **kw: GOVUKRegulatorAdapter(
-        source="uk-cma", document_type="cma_case", court="CMA", **kw),
+        source="uk-cma", document_type="cma_case", court="CMA",
+        search_filters={
+            "filter_format": "cma_case",
+            "filter_case_type": "consumer-enforcement",
+        },
+        **kw),
+    "uk-cma-guidance": lambda **kw: GOVUKRegulatorAdapter(
+        source="uk-cma-guidance",
+        organisation="competition-and-markets-authority",
+        court="CMA",
+        search_filters={"filter_format": "guidance"},
+        record_doc_type=DocType.GUIDANCE,
+        require_recognized_legal_citation=False,
+        **kw),
     "uk-ofgem": lambda **kw: GOVUKRegulatorAdapter(
         source="uk-ofgem", organisation="ofgem", court="Ofgem", **kw),
     "uk-ofwat": lambda **kw: GOVUKRegulatorAdapter(
@@ -125,8 +142,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # The Commission's digital-policy publication register (DG CONNECT), pre-filtered to
     # policy/legislation + reports; each item's downloads panel holds the real documents.
     "eu-digital-strategy": DigitalStrategyLibraryAdapter,
+    "eu-consumer-guidance": EUConsumerGuidanceAdapter,
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
+    "nl-acm-guidance": ACMGuidanceAdapter,
+    "it-agcm": AGCMBulletinAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
     "eu-cellar": EUCellarAdapter,
     # ECHR — HUDOC; resolves by ECLI (ECLI:CE:ECHR:…) OR application number (58170/13).
@@ -393,6 +413,16 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "recorded on the record. Newest-first, so an incremental run stops at the cursor.",
         (), ("library item URL", "document title"),
     ),
+    "eu-consumer-guidance": SourceInfo(
+        "eu-consumer-guidance", "European Commission consumer guidance and CPC positions",
+        "guidance", "EU", False,
+        "The English Commission consumer-policy subtree from its official sitemap: CPC "
+        "common positions and understandings, coordinated actions, sweeps, commitments "
+        "and DG JUST consumer guidance. First-party document UUIDs are stored separately "
+        "from their context pages; a title naming exactly one directive supplies a safe "
+        "default for otherwise orphaned Article references.",
+        (), ("Commission document UUID", "consumer-topic page URL"),
+    ),
     "uk-judiciary": SourceInfo(
         "uk-judiciary", "UK judicial guidance (judiciary.uk)", "guidance", "GB", False,
         "The Judicial College's bench books and the Chief Coroner's guidance: the Crown "
@@ -432,10 +462,16 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (), ("Law Commission number", "project/document title"),
     ),
     "uk-cma": SourceInfo(
-        "uk-cma", "Competition and Markets Authority cases", "guidance", "GB", False,
-        "Official CMA case register through GOV.UK Search and Content APIs. Full case "
-        "attachments are combined with the case page; citation-free items remain "
-        "processed but are excluded from retrieval.",
+        "uk-cma", "CMA consumer-enforcement cases", "guidance", "GB", False,
+        "The consumer-enforcement facet of the official CMA case register through "
+        "GOV.UK Search and Content APIs. Full decisions and undertakings are combined "
+        "with each case timeline.",
+    ),
+    "uk-cma-guidance": SourceInfo(
+        "uk-cma-guidance", "CMA guidance and regulation", "guidance", "GB", False,
+        "All official CMA guidance publications from GOV.UK, including the CMA200-series "
+        "DMCCA guidance, unfair-contract-terms guidance and sector compliance guides. "
+        "Accessible HTML children are preferred and supplementary PDFs are retained.",
     ),
     "uk-ofgem": SourceInfo(
         "uk-ofgem", "Ofgem regulatory publications", "guidance", "GB", False,
@@ -454,6 +490,21 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("path", "Bulk archive path", "OpenDataUitspraken.zip or extracted folder"),
          SourceOption("lido_links", "Import LiDO graph", "true — structured outgoing links")),
         ("ECLI:NL:…",),
+    ),
+    "nl-acm-guidance": SourceInfo(
+        "nl-acm-guidance", "Netherlands ACM guidance (Leidraden)", "guidance", "NL", False,
+        "The complete official ACM guidance series for businesses, including online "
+        "consumer protection, price display and sustainability claims. Detail-page HTML "
+        "and official PDF attachments are combined; the small catalogue is fully "
+        "rechecked so revisions retaining their original publication date are caught.",
+    ),
+    "it-agcm": SourceInfo(
+        "it-agcm", "Italy AGCM weekly decision bulletins", "guidance", "IT", False,
+        "The official sequential Bollettino settimanale: competition and consumer "
+        "protection measures as published PDFs. Italian Codice del consumo article "
+        "references are extracted explicitly; orphan article carry-forward is disabled "
+        "across the mixed-decision bulletin to prevent cross-case false links.",
+        (), ("bulletin number and year", "AGCM PS decision number"),
     ),
     "eu-cellar": SourceInfo(
         "eu-cellar", "EU CJEU case law (CELLAR / SPARQL)", "caselaw", "EU", False,
@@ -585,6 +636,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "fetch specific instruments (Formex; articles + recitals). EU primary-law "
         "documents (Charter, TEU, TFEU) are importable by CELEX and retain their ELI + names.",
         (SourceOption("celex", "CELEX ids", "32016R0679,12012P,12016M,12016E"),
+         SourceOption("include_consolidations", "Fetch dated consolidations",
+                      "true — with explicitly named sector-3 CELEX ids"),
          SourceOption("types", "Descriptors to enumerate", "R,L,D,TREATY (default)"),
          SourceOption("years", "Year range", "1990-2026")),
         ("CELEX (32016R0679)", "Treaty/Charter CELEX (12012P)", "Directive/Regulation number"),
@@ -1188,7 +1241,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     # client-side early-stop on a newest-first feed
     "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-ftt-tax": "early-stop",
     "uk-utaac": "early-stop", "uk-iac": "early-stop", "uk-legislation": "early-stop",
-    "uk-cma": "early-stop", "uk-ofgem": "early-stop", "uk-ofwat": "early-stop",
+    "uk-cma": "early-stop", "uk-cma-guidance": "early-stop",
+    "uk-ofgem": "early-stop", "uk-ofwat": "early-stop",
     "uk-fca-notices": "early-stop",
     "au-nsw-caselaw": "early-stop", "au-fca": "early-stop", "au-hca": "early-stop",
     "ca-scc-live": "early-stop", "ca-tcc-live": "early-stop",
@@ -1200,6 +1254,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "ie-ccpc-mergers": "full-walk",
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
+    "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
+    "it-agcm": "early-stop",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
     "eu-ombudsman": "full-walk",
     "eu-edps-opinions": "early-stop",

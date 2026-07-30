@@ -28,3 +28,22 @@ def test_fetch_adds_procedure_edges_and_correct_type(monkeypatch):
     assert rec.title == "Proposal for a Regulation"
     assert {r.relationship_type.value for r in rec.relations} == {"adopted_as", "related_to"}
     assert "COM(2021) 554" in rec.extra["aliases"]
+
+
+def test_notice_title_declares_single_directive_as_orphan_article_home(monkeypatch):
+    def base_fetch(self, stub):
+        return Record(
+            source=self.source, stable_id=stub.stable_id,
+            doc_type=DocType.LEGISLATION,
+            title="Guidance on the interpretation of Directive 2005/29/EC",
+            raw_bytes=b"x", text="Article 5 applies.", extra={},
+        )
+
+    from raglex.adapters import eu_legislation
+    monkeypatch.setattr(eu_legislation.EULegislationAdapter, "fetch", base_fetch)
+    rec = EUPreparatoryAdapter(celex="52021XC1229(05)").fetch(
+        Stub(stable_id="52021XC1229(05)", hints={})
+    )
+    assert rec.extra["citation_default_instrument"] == {
+        "id": "32005L0029", "kind": "directive"
+    }

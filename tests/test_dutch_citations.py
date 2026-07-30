@@ -28,6 +28,40 @@ def test_dutch_social_security_abbreviations_keep_article_pincites():
     ]
 
 
+def test_dutch_colon_article_is_not_truncated_into_bare_article_six():
+    cites = extract_citations(
+        "De AVG is relevant. Zie artikel 6:193a BW voor oneerlijke handelspraktijken."
+    )
+    assert any(c.candidate_id == "nl:law:burgerlijk wetboek"
+               and c.pinpoint == "Artikel 6:193a" for c in cites)
+    assert not any(c.method == "carry_forward" and c.pinpoint == "Artikel 6"
+                   for c in cites)
+
+
+def test_dutch_avg_article_beats_german_law_abbreviation_and_expands_lists():
+    cites = extract_citations(
+        "Dit volgt uit artikel 15 AVG en uit artikelen 5, 6 en 9 van de AVG."
+    )
+    gdpr = [c for c in cites if c.candidate_id == "32016R0679"]
+    assert {c.pinpoint for c in gdpr} >= {
+        "Article 15", "Article 5", "Article 6", "Article 9",
+    }
+    assert not any(c.candidate_id == "de/gesetz/avg" for c in cites)
+
+
+def test_dutch_host_before_article_resolves_local_consumer_guidance_form():
+    text = ("Titel 3, afdeling 3A, Burgerlijk Wetboek Boek 6 "
+            "(Oneerlijke handelspraktijken), in het bijzonder artikel 193h. "
+            "Telecommunicatiewet, zie artikel 11.7 voor ongevraagde communicatie.")
+    cites = _nl(text)
+    assert ("nl:law:burgerlijk wetboek", "Artikel 6:193h") in [
+        (c.candidate_id, c.pinpoint) for c in cites
+    ]
+    assert ("nl:law:telecommunicatiewet", "Artikel 11.7") in [
+        (c.candidate_id, c.pinpoint) for c in cites
+    ]
+
+
 def test_dutch_echr_title_resolves_with_lid_pinpoint():
     cite = _nl("artikel 6, tweede lid, van het Verdrag tot bescherming van de rechten "
                "van de mens en de fundamentele vrijheden")[0]
