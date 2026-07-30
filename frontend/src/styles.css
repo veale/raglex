@@ -329,8 +329,31 @@ tbody tr:hover { background: var(--surface-2); }
 }
 
 /* --- OSCOLA title + summary line ------------------------------------------- */
-.doc-title { font-size: 1.6rem; line-height: 1.25; font-weight: 600; }
+.doc-title-row { display: flex; align-items: flex-start; gap: var(--sp-4); }
+.doc-title { flex: 1; min-width: 0; font-size: 1.6rem; line-height: 1.25; font-weight: 600; }
 .doc-title i { font-style: italic; }
+.doc-action-menu { position: relative; flex: 0 0 auto; }
+.doc-action-menu > summary {
+  list-style: none; min-width: 2rem; padding: 0 .35rem .2rem; cursor: pointer;
+  border: 1px solid transparent; color: var(--subtext); font-size: 1.35rem;
+  line-height: 1; text-align: center; user-select: none;
+}
+.doc-action-menu > summary::-webkit-details-marker { display: none; }
+.doc-action-menu > summary:hover, .doc-action-menu[open] > summary {
+  color: var(--text); border-color: var(--line);
+}
+.doc-action-sheet {
+  position: absolute; z-index: 20; top: calc(100% + 5px); right: 0; width: 285px;
+  padding: var(--sp-3); border: 1px solid var(--text); border-radius: 0;
+  background: var(--surface);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--text) 22%, transparent);
+}
+.doc-action-sheet button {
+  width: 100%; padding: var(--sp-2) var(--sp-3); border-radius: 0; text-align: left;
+  background: transparent; color: var(--text);
+}
+.doc-action-sheet p { margin: var(--sp-2) var(--sp-1) 0; font-size: .78rem; line-height: 1.4; }
+.doc-action-sheet p + p { padding-top: var(--sp-2); border-top: 1px dotted var(--line); }
 /* deciding court, jurisdiction, date and the outbound source link */
 .doc-provenance { font-size: .8125rem; margin-top: var(--sp-2); }
 .doc-provenance a { color: var(--subtext); }

@@ -27,11 +27,26 @@ class SettingSpec:
     secret: bool
     group: str
     placeholder: str = ""
-    kind: str = "text"  # "text" | "bool" — bool renders as an on/off toggle ("1"/"" stored)
+    kind: str = "text"  # "text" | "bool" | "html"
 
 
 # The known settings the UI renders. Adding a credentialed source = one row here.
 KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
+    SettingSpec(
+        "RAGLEX_STATIC_EXPORT_ATTRIBUTION",
+        "Attribution beneath exported document titles",
+        False,
+        "Static exports",
+        (
+            'Document generated from a dataset held and maintained by '
+            '<a href="https://profiles.ucl.ac.uk/53958-michael-veale">Michael Veale</a>, '
+            'Professor of Technology Law and Policy, UCL Faculty of Laws. If you wish to '
+            'study these instruments, consider our UCL Laws '
+            '<a href="https://www.ucl.ac.uk/laws/study/master-laws-llm-courses/'
+            'llm-law-and-technology">LLM in Law and Technology</a>.'
+        ),
+        kind="html",
+    ),
     # Free-text search. These are written by the Search admin page rather than typed,
     # but they must be registered here: update() silently ignores any key it doesn't
     # know, so an unregistered setting saves without error and reads back empty.

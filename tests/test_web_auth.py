@@ -71,6 +71,10 @@ def test_reader_is_read_only(build):
     assert c.get("/stats").status_code == 200
     assert c.get("/settings").status_code == 403
     assert c.get("/jobs").status_code == 403
+    assert c.get(
+        "/export/static-law",
+        params={"id": "ECLI:EU:C:2020:1"},
+    ).status_code == 403
     # writes: general mutation denied, flag + single-fetch allowed
     assert c.post("/link", json={}, headers=h).status_code == 403
     assert c.post("/tag", json={}, headers=h).status_code == 403
@@ -92,6 +96,10 @@ def test_admin_full_access(build):
     csrf = r.json()["csrf"]
     assert c.get("/settings").status_code == 200
     assert c.get("/jobs").status_code == 200
+    assert c.get(
+        "/export/static-law",
+        params={"id": "ECLI:EU:C:2020:1"},
+    ).status_code == 200
     # admin write reaches handler
     assert c.post("/link", json={}, headers={"x-raglex-csrf": csrf}).status_code != 403
 

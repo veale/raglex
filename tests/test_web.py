@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -124,6 +125,28 @@ def test_document_body_endpoint(client):
     assert "erasure" in (body["text"] or "")
     assert "segments" in body and body["doc_type"] == "judgment"
     assert body["oscola"]["text"]  # every body carries an OSCOLA citation
+
+
+def test_static_document_export_endpoint(client):
+    response = client.post(
+        "/export/static-law", json={"id": "ECLI:EU:C:2020:1"})
+    assert response.status_code == 200
+    job_id = response.json().get("job_id")
+    if job_id:
+        for _ in range(100):
+            job = client.get(f"/jobs/{job_id}").json()
+            if job["status"] in {"done", "error", "cancelled"}:
+                break
+            time.sleep(0.02)
+        assert job["status"] == "done", job
+
+    response = client.get(
+        "/export/static-law.html", params={"id": "ECLI:EU:C:2020:1"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["x-raglex-export-documents"] == "1"
+    assert b"Document generated from a dataset held and maintained by" in response.content
 
 
 def test_document_endpoint_carries_oscola_and_counts(client):

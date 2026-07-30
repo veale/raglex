@@ -2172,6 +2172,37 @@ function OriginalSources({ meta }: { meta?: any }) {
   );
 }
 
+function StaticExportMenu({ id }: { id: string }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const download = async () => {
+    setBusy(true);
+    setMessage("Preparing the current export…");
+    try {
+      const filename = await api.downloadStaticLaw(id, setMessage);
+      setMessage(`Downloaded ${filename}`);
+    } catch {
+      setMessage("The static edition could not be prepared.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <details className="doc-action-menu">
+      <summary aria-label="Document actions" title="Document actions">…</summary>
+      <div className="doc-action-sheet">
+        <button type="button" disabled={busy} onClick={download}>
+          {busy ? "Preparing static edition…" : "Build and download static edition"}
+        </button>
+        <p>One HTML file built from the current corpus, with this text, citation excerpts and public source links.</p>
+        {message && <p className={message.startsWith("The ") ? "err" : "muted"}>{message}</p>}
+      </div>
+    </details>
+  );
+}
+
 export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
   const [doc, err, reload] = useAsync(() => api.document(id), [id]);
   const [pinAnchor, setPinAnchor] = useState("");
@@ -2189,7 +2220,10 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
   return (
     <div>
       <div className="panel">
-        <h2 className="doc-title" style={{ marginTop: 0 }}><Oscola c={doc.oscola} fallback={d.title || d.stable_id} /></h2>
+        <div className="doc-title-row">
+          <h2 className="doc-title" style={{ marginTop: 0 }}><Oscola c={doc.oscola} fallback={d.title || d.stable_id} /></h2>
+          {canWrite && d.doc_type === "legislation" && <StaticExportMenu id={d.stable_id} />}
+        </div>
         {/* who decided this, and where — "Court of Appeal (Civil Division) ·
             England & Wales", matching the typology the explorer uses */}
         <div className="doc-provenance muted">
@@ -3348,6 +3382,11 @@ export function SettingsView() {
                       onChange={(e) => setEdits({ ...edits, [s.key]: e.target.checked ? "1" : "0" })} />
                     <span className="muted">{s.placeholder}</span>
                   </label>
+                ) : s.kind === "html" ? (
+                  <textarea rows={6} placeholder={s.placeholder || (s.set ? s.display : "")}
+                    disabled={s.source === "env"}
+                    value={edits[s.key] ?? (s.source === "file" ? s.display : "")}
+                    onChange={(e) => setEdits({ ...edits, [s.key]: e.target.value })} />
                 ) : (
                   <input type={s.secret ? "password" : "text"} placeholder={s.placeholder || (s.set ? s.display : "")}
                     disabled={s.source === "env"}

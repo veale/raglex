@@ -258,6 +258,27 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export_static(args: argparse.Namespace) -> int:
+    """Write a self-contained law + incoming-citations edition."""
+    from .static_export import StaticLawExporter
+
+    config = Config.from_env()
+    exporter = StaticLawExporter(config)
+
+    def progress(done: int, total: int) -> None:
+        print(f"\rreading citing documents: {done:,}/{total:,}", end="", flush=True)
+
+    result = exporter.build(
+        args.stable_id, max_snippets=args.max_snippets, progress=progress)
+    output = Path(args.output) if args.output else config.data_dir / "exports" / result.filename
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(result.html)
+    print(
+        f"\nwrote {output} ({result.documents:,} documents, "
+        f"{result.mentions:,} mentions, {len(result.html) / 1_048_576:.1f} MiB)")
+    return 0
+
+
 def cmd_hpc_embed(args: argparse.Namespace) -> int:
     """Drive the Myriad bulk-embed relay end-to-end (dry-run unless --go)."""
     from .facade import Facade
@@ -1084,6 +1105,18 @@ def build_parser() -> argparse.ArgumentParser:
     sch.add_argument("name", nargs="?", help="task name (for on/off/every/reset)")
     sch.add_argument("minutes", nargs="?", type=int, help="cadence minutes (for 'every')")
     sch.set_defaults(func=cmd_schedule)
+
+    static = sub.add_parser(
+        "export-static",
+        help="self-contained HTML edition of a held law and the documents mentioning it",
+    )
+    static.add_argument("stable_id", help="held law/document id (for example 32016R0679)")
+    static.add_argument("-o", "--output", help="output .html path (default: data/exports/...)")
+    static.add_argument(
+        "--max-snippets", type=int, default=4,
+        help="citation excerpts kept per citing document (default 4, maximum 12)",
+    )
+    static.set_defaults(func=cmd_export_static)
 
     hpc = sub.add_parser("hpc-embed",
                          help="drive the whole Myriad bulk-embed relay in one resumable command")

@@ -166,10 +166,27 @@ uv run raglex worklist --limit 10           # most-cited references not yet held
 uv run raglex embed                         # chunk and embed documents that have text
 uv run raglex search "right to erasure of personal data"
 uv run raglex stats                         # corpus breakdown and resolution coverage
+uv run raglex export-static 32016R0679      # one-file law + incoming-citations edition
 uv run raglex serve                         # the web API (needs: uv sync --extra web)
 uv run raglex mcp                           # the agent server
 uv run pytest
 ```
+
+`export-static` writes a self-contained HTML file under `data/exports` unless `--output`
+names another path. It embeds the held text, provision index, incoming references, excerpts,
+filters and public-source links; it makes no API requests when opened, so the file can be
+used offline or copied directly to GitHub Pages. Where the public page supports it, excerpt
+links include a browser text fragment which attempts to scroll to and highlight the passage.
+PDF links use a page fragment when RagLex has a page anchor. Missing public copies remain in
+the results and are labelled as such. The Settings page's “Static exports” section controls
+the short HTML attribution beneath each exported title.
+
+Administrators can download the same edition from the document page's `…` menu. For a large
+instrument, `POST /export/static-law` starts a durable background build; poll its `job_id` at
+`GET /jobs/{job_id}`, then download from
+`GET /export/static-law.html?id=32016R0679`. Pass `{"id":"32016R0679","refresh":true}` to
+rebuild the saved edition from the current corpus. A cron job can instead run `export-static`
+with a fixed `--output` path before publishing that path to a static host.
 
 For the web interface, run the API with `uv sync --extra web && uv run raglex serve`, which
 serves on port 8000, and then start the frontend with `cd frontend && npm install && npm run

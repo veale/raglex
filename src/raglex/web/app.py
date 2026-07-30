@@ -170,6 +170,73 @@ def create_app(config: Config | None = None) -> FastAPI:
         return PlainTextResponse(res["combined_text"], headers={
             "Content-Disposition": 'attachment; filename="raglex-citations-for-retrieval.txt"'})
 
+    @app.get("/export/static-law")
+    def export_static_law_status_ep(id: str, max_snippets: int = 4) -> dict:
+        """Whether a completed static artifact is ready for immediate download."""
+        from ..static_export import static_export_status
+
+        status = static_export_status(
+            facade.config, id, max_snippets=max(1, min(int(max_snippets), 12)))
+        status.pop("_path", None)
+        return status
+
+    @app.post("/export/static-law")
+    def export_static_law_build_ep(payload: dict = Body(...)) -> dict:
+        """Build or refresh an edition as a durable background job.
+
+        GDPR-scale editions read thousands of source texts for their excerpts, so building
+        inside the download request would exceed ordinary proxy timeouts.  The completed
+        file is cached atomically and subsequent downloads are immediate.
+        """
+        from ..static_export import static_export_status
+
+        stable_id = str((payload or {}).get("id") or "").strip()
+        if not stable_id:
+            return JSONResponse({"error": "id is required"}, status_code=422)
+        max_snippets = max(1, min(int((payload or {}).get("max_snippets") or 4), 12))
+        with facade._open() as (cat, _rs, _ts):
+            if cat.get_document(stable_id) is None:
+                return JSONResponse({"error": "document not found"}, status_code=404)
+        cached = static_export_status(
+            facade.config, stable_id, max_snippets=max_snippets)
+        if cached.get("ready") and not (payload or {}).get("refresh"):
+            cached.pop("_path", None)
+            return cached
+        return _start_job(
+            "static-export",
+            f"build static edition of {stable_id}",
+            {"stable_id": stable_id, "max_snippets": max_snippets},
+        )
+
+    @app.get("/export/static-law.html")
+    def export_static_law_download_ep(id: str, max_snippets: int = 4):
+        """Download a completed, self-contained law-and-citations HTML file."""
+        from fastapi.responses import FileResponse
+
+        from ..static_export import static_export_status
+
+        status = static_export_status(
+            facade.config, id, max_snippets=max(1, min(int(max_snippets), 12)))
+        path = status.pop("_path", None)
+        if not status.get("ready") or not path:
+            return JSONResponse(
+                {
+                    "error": "static edition is not built",
+                    "hint": "POST /export/static-law, then poll its job id",
+                },
+                status_code=409,
+            )
+        return FileResponse(
+            path,
+            media_type="text/html",
+            filename=status["filename"],
+            headers={
+                "Cache-Control": "no-store",
+                "X-Raglex-Export-Documents": str(status["documents"]),
+                "X-Raglex-Export-Mentions": str(status["mentions"]),
+            },
+        )
+
     @app.get("/coverage")
     def coverage() -> dict:
         """Completeness/uncertainty dashboard: counts, date spans, resolution rate,

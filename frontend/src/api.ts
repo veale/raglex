@@ -160,6 +160,61 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
+  // Administrator-only, self-contained law edition. Fetch rather than using a bare
+  // download link so bearer-token deployments receive the same auth as the rest of UI.
+  downloadStaticLaw: async (
+    id: string,
+    onProgress?: (message: string) => void,
+  ) => {
+    onProgress?.("Adding sources and excerpts…");
+    // The administrator's button means "export what RagLex holds now". API callers that
+    // want the last scheduled edition can omit refresh and download the cached artifact.
+    const build = await req<any>("/export/static-law", {
+      method: "POST",
+      body: JSON.stringify({ id, refresh: true }),
+    });
+    if (build.job_id) {
+      while (true) {
+        const job = await req<any>(
+          `/jobs/${encodeURIComponent(build.job_id)}`);
+        if (job.status === "done") break;
+        if (job.status === "error") {
+          throw new Error(job.result?.error || job.error || "Static edition build failed");
+        }
+        if (job.status === "cancelled") {
+          throw new Error("Static edition build was cancelled");
+        }
+        const done = Number(job.progress?.done || 0);
+        const total = Number(job.progress?.total || 0);
+        if (total > 0) {
+          onProgress?.(
+            `Adding sources and excerpts: ${done.toLocaleString()} of ${total.toLocaleString()}…`,
+          );
+        } else {
+          onProgress?.("Preparing the static edition…");
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+      }
+    }
+    onProgress?.("Downloading…");
+    const res = await fetch(
+      `${BASE}/export/static-law.html?id=${encodeURIComponent(id)}`,
+      { credentials: "include", headers: authHeaders() });
+    if (res.status === 401) window.dispatchEvent(new CustomEvent("raglex-unauthenticated"));
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const disposition = res.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename="([^"]+)"/i);
+    const filename = match?.[1] || "raglex-static-edition.html";
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return filename;
+  },
   // grammar-recognise + resolve citations in arbitrary text (the PDF text layer)
   scanCitations: (text: string) =>
     req<{ citations: any[] }>("/citations/scan", { method: "POST", body: JSON.stringify({ text }) }),

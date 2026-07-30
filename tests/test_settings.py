@@ -48,6 +48,18 @@ def test_update_clears_on_empty_and_ignores_unknown(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "settings.json").read_text()) == {}  # cleared
 
 
+def test_static_export_attribution_is_editable_html(tmp_path, monkeypatch):
+    monkeypatch.delenv("RAGLEX_STATIC_EXPORT_ATTRIBUTION", raising=False)
+    s = SettingsStore(tmp_path / "settings.json")
+    value = 'Maintained by <a href="https://example.test/profile">Example</a>.'
+    s.update({"RAGLEX_STATIC_EXPORT_ATTRIBUTION": value})
+
+    rows = {row["key"]: row for row in s.masked()["settings"]}
+    row = rows["RAGLEX_STATIC_EXPORT_ATTRIBUTION"]
+    assert row["kind"] == "html"
+    assert row["display"] == value
+
+
 def test_facade_settings_roundtrip(tmp_path, monkeypatch):
     monkeypatch.delenv("ZOTERO_API_KEY", raising=False)
     from raglex.config import Config

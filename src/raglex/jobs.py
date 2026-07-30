@@ -61,7 +61,9 @@ MAX_CONCURRENT_JOBS = 6
 # a us-caselaw harvest must not be blocked by a running uk-legislation one. Two clicks of the
 # SAME category still dedup, and the nightly whole-queue drain (no adapter → distinct params)
 # dedups against a second whole-queue drain but no longer blocks the per-category buttons.
-DEDUP_KINDS = frozenset({"run-watch", "gap-scan", "harvest-source", "harvest-all"})
+DEDUP_KINDS = frozenset({
+    "run-watch", "gap-scan", "harvest-source", "harvest-all", "static-export",
+})
 
 # Resume is an explicit contract, not a blanket promise that "idempotent" means no
 # repeated work. ``checkpoint`` jobs stamp each completed document with a stable root
@@ -253,7 +255,20 @@ def _maintenance(facade, params, on_progress, cancel_check):
     return run_maintenance(facade, params, on_progress, cancel_check)
 
 
+def _static_export(facade, params, on_progress, cancel_check):
+    from .static_export import build_static_export_cache
+
+    return build_static_export_cache(
+        facade,
+        params["stable_id"],
+        max_snippets=int(params.get("max_snippets") or 4),
+        on_progress=on_progress,
+        cancel_check=cancel_check,
+    )
+
+
 RUNNERS: dict[str, Callable] = {
+    "static-export": _static_export,
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
         source=p.get("source"), run_id=p.get("_resume_run_id"),
         on_progress=cb, cancel_check=cancel),
