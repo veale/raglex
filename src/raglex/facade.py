@@ -1251,6 +1251,20 @@ class Facade:
             incoming = self._assemble_cited_by(
                 cat, cat.top_citing_edges(ids_self, limit=600), cap=200)
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
+            mapping_rows = [dict(r) for r in cat.provision_mappings(stable_id)]
+            inherited_edges = [dict(r) for r in cat.inherited_mentions_for(
+                stable_id, limit=1200)]
+            inherited_incoming = self._assemble_cited_by(
+                cat, inherited_edges, cap=400)
+            direct_citer_ids = {row["src_id"] for row in incoming}
+            inherited_citer_ids = {row["src_id"] for row in inherited_incoming}
+            inherited_by_mapping: dict[int, set[str]] = {}
+            for row in inherited_edges:
+                inherited_by_mapping.setdefault(int(row["mapping_id"]), set()).add(
+                    row["src_id"])
+            for row in mapping_rows:
+                row["mentioned_by_count"] = len(
+                    inherited_by_mapping.get(int(row["mapping_id"]), set()))
             inferred_total = cat.inferred_citer_count(ids_self)
             preparatory_count = cat.citer_count_by_doc_type(ids_self, "preparatory")
             meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
@@ -1303,7 +1317,12 @@ class Facade:
                 "relations": [r for r in rels if r["relationship_type"] != "suppressed"],
                 "suppressed_count": len(suppressed),
                 "incoming": incoming,
-                "cited_by_count": cited_by_total,
+                "cited_by_count": cited_by_total + len(
+                    inherited_citer_ids - direct_citer_ids),
+                "direct_cited_by_count": cited_by_total,
+                "inherited_incoming": inherited_incoming,
+                "inherited_cited_by_count": len(inherited_citer_ids),
+                "provision_mappings": mapping_rows,
                 "preparatory_documents": {
                     "available": bool(preparatory_count),
                     "count": preparatory_count,
@@ -2713,6 +2732,16 @@ class Facade:
                        "html", "xml", "api", "sso", "frl", "a29wp", "fcl"}
 
     def source_label(self, source: str) -> str:
+        # Harvestable-source names have one canonical home. This keeps document/search
+        # payloads aligned with /sources/catalog, MCP, Backfill, and Keep Current instead
+        # of letting this legacy short-label table drift from the adapter registry.
+        try:
+            from .adapters.registry import SOURCE_INFO
+            info = SOURCE_INFO.get(source)
+            if info is not None:
+                return info.label
+        except Exception:  # noqa: BLE001 — display fallback must never break a reader
+            pass
         if source in self._SOURCE_LABELS:
             return self._SOURCE_LABELS[source]
         words = (source or "").replace("_", "-").split("-")
@@ -8784,6 +8813,86 @@ class Facade:
             return {"src_id": src_id, "dst_id": dst_id, "relationship": rel.value,
                     "src_anchor": src_anchor, "dst_anchor": dst_anchor, "resolved": resolved}
 
+    def upsert_provision_mappings(
+        self, *, current_id: str, previous_id: str, mappings: list[dict],
+        created_by: str = "manual", replace: bool = False,
+    ) -> dict:
+        """Bulk-create article/section functional lineage.
+
+        Direction is current provision → previous provision. This never rewrites the
+        literal citation and therefore must not be implemented with citation aliases.
+        """
+        created_by = (created_by or "manual").strip().lower()
+        if created_by not in {"manual", "llm", "structured"}:
+            return {"error": "created_by must be manual, llm, or structured"}
+        if not current_id or not previous_id or current_id == previous_id:
+            return {"error": "distinct current_id and previous_id are required"}
+        clean: list[dict] = []
+        for item in mappings or []:
+            current_anchor = str(item.get("current_anchor") or "").strip()
+            previous_anchor = str(item.get("previous_anchor") or "").strip()
+            if not current_anchor or not previous_anchor:
+                return {"error": "every mapping needs current_anchor and previous_anchor"}
+            confidence = item.get("confidence")
+            if confidence is not None:
+                try:
+                    confidence = max(0.0, min(1.0, float(confidence)))
+                except (TypeError, ValueError):
+                    return {"error": "confidence must be between 0 and 1"}
+            clean.append({
+                "current_anchor": current_anchor,
+                "previous_anchor": previous_anchor,
+                "mapping_type": "functional_predecessor",
+                "note": str(item.get("note") or "").strip() or None,
+                "confidence": confidence,
+            })
+        if not clean or len(clean) > 1000:
+            return {"error": "supply between 1 and 1000 mappings"}
+        with self._open() as (cat, _rs, _ts):
+            if cat.get_document(current_id) is None:
+                return {"error": f"current law not held: {current_id}"}
+            if cat.get_document(previous_id) is None:
+                return {"error": f"previous law not held: {previous_id}"}
+            written = cat.upsert_provision_mappings(
+                current_id, previous_id, clean, created_by=created_by,
+                replace=replace)
+            rows = [dict(r) for r in cat.provision_mappings(current_id)]
+        self._invalidate_caches()
+        return {"current_id": current_id, "previous_id": previous_id,
+                "written": written, "mappings": rows}
+
+    def provision_mappings(self, *, stable_id: str) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            rows = [dict(r) for r in cat.provision_mappings(stable_id)]
+            inherited = [dict(r) for r in cat.inherited_mentions_for(
+                stable_id, limit=5000)]
+        counts: dict[int, set[str]] = {}
+        for row in inherited:
+            counts.setdefault(int(row["mapping_id"]), set()).add(row["src_id"])
+        for row in rows:
+            row["mentioned_by_count"] = len(
+                counts.get(int(row["mapping_id"]), set()))
+        return {"stable_id": stable_id, "mappings": rows,
+                "inherited_documents": len({r["src_id"] for r in inherited})}
+
+    def inherited_provision_mentions(
+        self, *, stable_id: str, current_anchor: str | None = None,
+        limit: int = 600,
+    ) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            rows = [dict(r) for r in cat.inherited_mentions_for(
+                stable_id, current_anchor=current_anchor, limit=limit)]
+            incoming = self._assemble_cited_by(cat, rows, cap=limit)
+        return {"stable_id": stable_id, "current_anchor": current_anchor,
+                "documents": len({r["src_id"] for r in rows}),
+                "incoming": incoming}
+
+    def delete_provision_mapping(self, *, mapping_id: int) -> dict:
+        with self._open() as (cat, _rs, _ts):
+            deleted = cat.delete_provision_mapping(mapping_id)
+        self._invalidate_caches()
+        return {"mapping_id": mapping_id, "deleted": deleted}
+
     def tag(self, *, doc_id: str, tag: str) -> dict:
         with self._open() as (cat, _rs, _ts):
             written = tag_document(cat, doc_id, tag)
@@ -9104,6 +9213,9 @@ class Facade:
                 "label": info.get("label") or key,
                 "jurisdiction": info.get("jurisdiction") or "",
                 "kind": info.get("kind") or "",
+                "group_key": info.get("group_key") or "other",
+                "group_label": info.get("group_label") or "Other",
+                "kind_label": info.get("kind_label") or info.get("kind") or "",
                 "incremental_mode": info.get("incremental_mode"),
                 "can_incremental": info.get("can_incremental"),
                 "doc_count": doc_counts.get(key, 0),

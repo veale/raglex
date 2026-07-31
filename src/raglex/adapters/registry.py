@@ -336,6 +336,25 @@ class SourceInfo:
     identifiers: tuple[str, ...] = field(default_factory=tuple)
 
 
+# Public source-catalogue schema. Keep these labels here rather than re-inventing them
+# in the REST API, MCP, or individual screens. Adapter authors add exactly one
+# ``SourceInfo`` row; ``source_catalog()`` supplies grouping/sort/capability fields.
+JURISDICTION_LABELS: dict[str, str] = {
+    "GB": "United Kingdom", "EU": "European Union", "CoE": "Council of Europe",
+    "IE": "Ireland", "FR": "France", "DE": "Germany", "NL": "Netherlands",
+    "IT": "Italy", "AU": "Australia", "CA": "Canada", "NZ": "New Zealand",
+    "SG": "Singapore", "HK": "Hong Kong", "IN": "India", "US": "United States",
+    "": "Other",
+}
+KIND_LABELS: dict[str, str] = {
+    "legislation": "Legislation",
+    "caselaw": "Case law",
+    "guidance": "Guidance and regulatory material",
+    "preparatory": "Preparatory and policy material",
+    "scrape": "Other harvested material",
+}
+
+
 SOURCE_INFO: dict[str, SourceInfo] = {
     "uk-caselaw": SourceInfo(
         "uk-caselaw", "UK Find Case Law", "caselaw", "GB", True,
@@ -1210,6 +1229,46 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("fond", "Fund", "CASS (default) | CAPP | JADE | CONSTIT | CNIL | LEGI")),
         ("ECLI:FR:…", "Légifrance JURI id", "LEGIARTI id"),
     ),
+    "fr-dila-legi": SourceInfo(
+        "fr-dila-legi", "DILA LEGI legislation bulk (France)", "legislation", "FR", False,
+        "Offline DILA LEGI archive using the same identifiers as the live Légifrance adapter.",
+        (SourceOption("path", "Path to LEGI archive", "/data/corpora/dila/LEGI"),),
+        ("LEGIARTI id", "LEGITEXT id"),
+    ),
+    "fr-dila-jade": SourceInfo(
+        "fr-dila-jade", "DILA JADE administrative case-law bulk (France)", "caselaw", "FR", False,
+        "Offline DILA JADE archive of French administrative case law.",
+        (SourceOption("path", "Path to JADE archive", "/data/corpora/dila/JADE"),),
+        ("ECLI:FR:…", "Légifrance JADE id"),
+    ),
+    "fr-dila-constit": SourceInfo(
+        "fr-dila-constit", "DILA constitutional decisions bulk (France)", "caselaw", "FR", False,
+        "Offline DILA CONSTIT archive of Conseil constitutionnel decisions.",
+        (SourceOption("path", "Path to CONSTIT archive", "/data/corpora/dila/CONSTIT"),),
+        ("ECLI:FR:CC:…",),
+    ),
+    "fr-dila-cnil": SourceInfo(
+        "fr-dila-cnil", "DILA CNIL decisions bulk (France)", "guidance", "FR", False,
+        "Offline DILA CNIL archive of data-protection authority decisions.",
+        (SourceOption("path", "Path to CNIL archive", "/data/corpora/dila/CNIL"),),
+        ("CNIL decision id",),
+    ),
+    "sg-sl": SourceInfo(
+        "sg-sl", "Singapore subsidiary legislation", "legislation", "SG", False,
+        "Subsidiary legislation from Singapore Statutes Online, using the same structured "
+        "provision model as the primary-legislation adapter.",
+        (), ("Singapore subsidiary-legislation id",),
+    ),
+    "uk-hol": SourceInfo(
+        "uk-hol", "House of Lords judgments archive", "caselaw", "GB", False,
+        "Closed official judgments archive from publications.parliament.uk (1996–2009).",
+        (), ("neutral citation ([2008] UKHL 1)",),
+    ),
+    "uk-ico": SourceInfo(
+        "uk-ico", "ICO enforcement actions", "guidance", "GB", False,
+        "Information Commissioner's Office enforcement and decision publications.",
+        (), ("ICO enforcement page",),
+    ),
 }
 
 
@@ -1307,6 +1366,18 @@ def source_catalog() -> list[dict]:
                    "description": "Scraped source (regulator portal). Keywords post-filter."}
         else:
             row = asdict(info)
+        jurisdiction = str(row.get("jurisdiction") or "")
+        kind = str(row.get("kind") or "scrape")
+        row["group_key"] = jurisdiction.casefold() or "other"
+        row["group_label"] = JURISDICTION_LABELS.get(
+            jurisdiction, jurisdiction or JURISDICTION_LABELS[""])
+        row["kind_label"] = KIND_LABELS.get(kind, kind.replace("_", " ").title())
+        row["sort_key"] = (
+            row["group_label"].casefold(),
+            row["kind_label"].casefold(),
+            str(row.get("label") or key).casefold(),
+            key,
+        )
         # capability flags the UI turns into plain-language chips
         row["can_keyword_search"] = bool(row.get("keyword_search"))
         row["can_discover_citing"] = key in DISCOVER_CITING_SOURCES
@@ -1324,7 +1395,7 @@ def source_catalog() -> list[dict]:
         # cannot (no moving feed / by-id only / no new items ever exist).
         row["can_incremental"] = mode in ("server", "early-stop", "full-walk")
         out.append(row)
-    return out
+    return sorted(out, key=lambda row: tuple(row["sort_key"]))
 
 
 def get_adapter(source_key: str, **kwargs) -> Adapter:

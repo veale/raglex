@@ -486,6 +486,44 @@ def build_server(config: Config | None = None) -> MCPServer:
                            src_anchor=src_anchor, dst_anchor=dst_anchor)
 
     @admin
+    def upsert_provision_mappings(
+        current_id: str, previous_id: str, mappings: list[dict],
+        replace: bool = False, created_by: str = "llm",
+    ) -> dict:
+        """Bulk-map functionally similar statutory provisions.
+
+        Direction is current → previous. Each mapping is
+        ``{"current_anchor":"Article 6","previous_anchor":"Article 15",
+        "note":"optional explanation","confidence":0.9}``. These mappings preserve
+        literal old-law citations and surface them separately beside the current article;
+        do not use citation aliases for this purpose. ``replace`` replaces all mappings
+        between this pair of laws, enabling an LLM to submit a reviewed correlation table.
+        """
+        return facade.upsert_provision_mappings(
+            current_id=current_id, previous_id=previous_id, mappings=mappings,
+            replace=replace, created_by=created_by)
+
+    @admin
+    def list_provision_mappings(stable_id: str) -> dict:
+        """List every current→previous provision mapping across one law, with inherited
+        mention counts. Use this before editing or replacing an existing map."""
+        return facade.provision_mappings(stable_id=stable_id)
+
+    @admin
+    def inherited_provision_mentions(
+        stable_id: str, current_anchor: Optional[str] = None, limit: int = 600,
+    ) -> dict:
+        """Documents that literally cited a mapped previous provision, projected as
+        functional history for the current provision. Results remain marked inherited."""
+        return facade.inherited_provision_mentions(
+            stable_id=stable_id, current_anchor=current_anchor, limit=limit)
+
+    @admin
+    def delete_provision_mapping(mapping_id: int) -> dict:
+        """Remove one editorial provision mapping by its mapping_id."""
+        return facade.delete_provision_mapping(mapping_id=mapping_id)
+
+    @admin
     def tag_document(doc_id: str, tag: str) -> dict:
         """Add a manual tag (never overwritten by rules)."""
         return facade.tag(doc_id=doc_id, tag=tag)

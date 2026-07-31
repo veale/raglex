@@ -440,7 +440,10 @@ def test_formex_legislation_splits_articles_into_paragraphs():
         <ARTICLE><TI.ART>Article 5</TI.ART><STI.ART>Scope</STI.ART>
           <PARAG><NO.PARAG>1.</NO.PARAG><ALINEA>First paragraph.</ALINEA></PARAG>
           <PARAG><NO.PARAG>2.</NO.PARAG><ALINEA>Second paragraph.</ALINEA></PARAG></ARTICLE>
-      </ENACTING.TERMS></ACT>"""
+      </ENACTING.TERMS>
+      <ANNEX><TITLE>ANNEX I</TITLE><P>Commercial practices which are in all
+      circumstances considered unfair.</P><ITEM>1. Claiming to be a signatory.</ITEM></ANNEX>
+      </ACT>"""
     text, segs = extract_formex(xml)
     labels = [s.label for s in segs]
     kinds = {s.label: s.kind for s in segs}
@@ -448,6 +451,8 @@ def test_formex_legislation_splits_articles_into_paragraphs():
     assert "Recital 1" in labels
     assert "Article 5" in labels                       # whole-article heading resolves
     assert "Article 5(1)" in labels and "Article 5(2)" in labels  # per-paragraph pincites
+    assert "ANNEX I" in labels and kinds["ANNEX I"] == "annex"
+    assert "Commercial practices" in text and "Claiming to be a signatory" in text
     # every segment's offsets slice real text, in document order (drift-safe)
     assert all(text[s.char_start:s.char_end].strip() for s in segs)
     assert [s.char_start for s in segs] == sorted(s.char_start for s in segs)

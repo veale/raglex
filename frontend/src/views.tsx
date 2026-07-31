@@ -2314,10 +2314,15 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
       </div>
       {(doc.incoming || []).length > 0 &&
-        <div id="cited-by-panel"><CitedByPanel id={d.stable_id} incoming={doc.incoming} count={doc.cited_by_count} inferred={doc.inferred_by_count} /></div>}
+        <div id="cited-by-panel"><CitedByPanel id={d.stable_id} incoming={doc.incoming}
+          count={doc.direct_cited_by_count ?? doc.cited_by_count} inferred={doc.inferred_by_count} /></div>}
+      {(doc.inherited_incoming || []).length > 0 &&
+        <InheritedProvisionMentions incoming={doc.inherited_incoming}
+          mappings={doc.provision_mappings || []} open={open} />}
       <RelatedPanel id={d.stable_id} open={open} />
       {d.doc_type === "legislation" && <EffectsBanner id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <ChangesPanel id={d.stable_id} open={open} />}
+      {d.doc_type === "legislation" && canWrite && <ProvisionMappingPanel id={d.stable_id} open={open} />}
       {d.doc_type === "legislation" && <VersionPanel id={d.stable_id} open={open} />}
       {canWrite && <AugmentPanel docId={d.stable_id} onDone={reload} pinAnchor={pinAnchor} clearPin={() => setPinAnchor("")} />}
       <div className="grid2">
@@ -2535,6 +2540,34 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
       )}
     </div>
   );
+}
+
+function InheritedProvisionMentions({ incoming, mappings, open }:
+  { incoming: any[]; mappings: any[]; open: (id: string, a?: string) => void }) {
+  const [anchor, setAnchor] = useState("");
+  const anchors = [...new Set(mappings.map((m: any) => m.current_anchor))] as string[];
+  const shown = anchor
+    ? incoming.filter((r: any) => r.inherited_current_anchor === anchor) : incoming;
+  return <div className="panel">
+    <select className="sort-select" style={{ float: "right" }} value={anchor}
+      onChange={(e) => setAnchor(e.target.value)} aria-label="current provision filter">
+      <option value="">all mapped provisions</option>
+      {anchors.map((a) => <option key={a} value={a}>{a}</option>)}
+    </select>
+    <h3>Previous, functionally similar iterations mentioned by <b>{shown.length}</b> document{shown.length === 1 ? "" : "s"}</h3>
+    <p className="muted" style={{ fontSize: 12 }}>
+      These authors cited the earlier law, not the current one. They are included as
+      functional history and remain distinct from direct citations.
+    </p>
+    <table><tbody>{shown.map((r: any) => <tr key={`${r.src_id}-${r.mapping_id}`}>
+      <td><DocLink id={r.src_id} anchor={r.src_anchor}
+        onOpen={() => open(r.src_id, r.src_anchor)}>{r.src_title || r.src_id}</DocLink></td>
+      <td className="muted">{r.inherited_current_anchor} ←{" "}
+        <DocLink id={r.inherited_from_id} anchor={r.inherited_from_anchor}
+          onOpen={() => open(r.inherited_from_id, r.inherited_from_anchor)}>
+          {r.inherited_from_title || r.inherited_from_id} {r.inherited_from_anchor}</DocLink></td>
+    </tr>)}</tbody></table>
+  </div>;
 }
 
 function AugmentPanel({ docId, onDone, pinAnchor, clearPin }: { docId: string; onDone: () => void; pinAnchor?: string; clearPin?: () => void }) {
@@ -3607,6 +3640,10 @@ function BackfillPanel() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const info = (cat ?? []).find((s: any) => s.key === source);
+  const sourceGroups = (cat ?? []).reduce((groups: Record<string, any[]>, item: any) => {
+    (groups[item.group_label || "Other"] ||= []).push(item);
+    return groups;
+  }, {});
 
   async function run() {
     if (!source) { setMsg("pick a source"); return; }
@@ -3644,7 +3681,11 @@ function BackfillPanel() {
       <div className="row" style={{ flexWrap: "wrap" }}>
         <select value={source} onChange={(e) => { setSource(e.target.value); setSrcOpts({}); }} style={{ flex: "0 0 auto", minWidth: 260 }}>
           <option value="">— source —</option>
-          {(cat ?? []).map((s: any) => <option key={s.key} value={s.key}>{s.label}</option>)}
+          {Object.entries(sourceGroups).map(([group, rows]: [string, any]) => (
+            <optgroup key={group} label={group}>
+              {rows.map((s: any) => <option key={s.key} value={s.key}>{s.kind_label} · {s.label}</option>)}
+            </optgroup>
+          ))}
         </select>
         <label style={{ flex: "0 0 auto" }} title="Uncapped walks the whole catalogue; capping is useful for a trial run.">
           <input type="checkbox" checked={bounded} onChange={(e) => setBounded(e.target.checked)} /> cap at
@@ -3722,11 +3763,6 @@ function RunDots({ runs }: { runs: any[] }) {
     </span>
   );
 }
-
-const JURIS_NAMES: Record<string, string> = { GB: "United Kingdom", EU: "European Union",
-  CoE: "Council of Europe (ECHR)", IE: "Ireland", FR: "France", DE: "Germany", NL: "Netherlands",
-  US: "United States", CA: "Canada", AU: "Australia", NZ: "New Zealand", SG: "Singapore",
-  HK: "Hong Kong", IN: "India", "": "Other" };
 
 // One watch's plan, rendered inline: what it harvests / discovers / enriches / tags.
 function WatchPlan({ w }: { w: any }) {
@@ -3815,8 +3851,8 @@ function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, stri
   if (!data) return <div className="panel"><h3>Keep current</h3><p className="muted">loading…</p></div>;
 
   const groups: Record<string, any[]> = {};
-  for (const s of data.sources) (groups[s.jurisdiction] ||= []).push(s);
-  const order = Object.keys(groups).sort((a, b) => (JURIS_NAMES[a] || a).localeCompare(JURIS_NAMES[b] || b));
+  for (const s of data.sources) (groups[s.group_label || "Other"] ||= []).push(s);
+  const order = Object.keys(groups).sort((a, b) => a.localeCompare(b));
   const capable = data.sources.filter((s: any) => s.can_incremental);
   const watched = capable.filter((s: any) => (s.watches || []).some((w: any) => w.enabled));
   const gaps = data.sources.filter((s: any) => s.incremental_mode === "targeted");
@@ -3838,7 +3874,7 @@ function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, stri
       </p>
       {order.map((j) => (
         <div key={j} style={{ marginBottom: 16 }}>
-          <div className="kc-juris">{JURIS_NAMES[j] || j} <span className="muted">({groups[j].length})</span></div>
+          <div className="kc-juris">{j} <span className="muted">({groups[j].length})</span></div>
           <table className="grid kc-table">
             <thead><tr>{["source", "how it updates", "held", "recent runs", "watches", ""].map(th)}</tr></thead>
             <tbody>
@@ -5783,6 +5819,66 @@ export function VersionPanel({ id, open }: { id: string; open: (id: string, a?: 
       {versions.length > 0 && <p className="muted" style={{ marginTop: 6 }}>held versions: {versions.map((v: any) => (
         <DocLink key={v.stable_id} id={v.stable_id} onOpen={() => open(v.stable_id)} style={{ marginRight: 10 }}>{v.date || v.stable_id}</DocLink>
       ))}</p>}
+    </div>
+  );
+}
+
+function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
+  const [data, _e, reload] = useAsync(() => api.provisionMappings(id), [id]);
+  const [previous, setPrevious] = useState("");
+  const [rows, setRows] = useState("");
+  const [msg, setMsg] = useState("");
+  const mappings = data?.mappings || [];
+  const save = async () => {
+    const parsed = rows.split(/\r?\n/).map((line) => {
+      const parts = line.split(/\s*(?:=>|=|\t)\s*/, 2);
+      return parts.length === 2
+        ? { current_anchor: parts[0].trim(), previous_anchor: parts[1].trim() } : null;
+    }).filter((x): x is any => !!x?.current_anchor && !!x?.previous_anchor);
+    if (!previous.trim() || !parsed.length) {
+      setMsg("error: give the previous law id and one mapping per line: Article 6 = Article 15");
+      return;
+    }
+    setMsg("saving…");
+    try {
+      const result = await api.saveProvisionMappings({
+        current_id: id, previous_id: previous.trim(), mappings: parsed,
+        created_by: "manual",
+      });
+      if (result.error) setMsg("error: " + result.error);
+      else { setMsg(`✓ saved ${result.written} mapping(s)`); setRows(""); reload(); }
+    } catch (e: any) { setMsg("error: " + e.message); }
+  };
+  return (
+    <div className="panel">
+      <h3>Provision lineage <span className="muted">— functionally similar provisions in earlier laws</span></h3>
+      <p className="muted" style={{ fontSize: 12 }}>
+        Direction is this/current law → previous law. This does not rewrite old citations:
+        it surfaces them separately as inherited context. Paste a whole correlation table,
+        one <span className="kbd">current = previous</span> pair per line.
+      </p>
+      <div className="row" style={{ alignItems: "flex-start", flexWrap: "wrap" }}>
+        <input value={previous} onChange={(e) => setPrevious(e.target.value)}
+          placeholder="previous law id, e.g. 31995L0046" style={{ minWidth: 250 }} />
+        <textarea value={rows} onChange={(e) => setRows(e.target.value)}
+          placeholder={"Article 16 = Article 12\nArticle 17 = Article 14"}
+          rows={4} style={{ minWidth: 330, flex: 1 }} />
+        <button className="primary" onClick={save}>Add mappings</button>
+      </div>
+      {msg && <p className={msg.startsWith("error") ? "err" : "ok"}>{msg}</p>}
+      {mappings.length > 0 && <table className="grid"><thead><tr>
+        <th>current provision</th><th>previous provision</th><th>inherited mentions</th><th></th>
+      </tr></thead><tbody>{mappings.map((m: any) => <tr key={m.mapping_id}>
+        <td>{m.current_anchor}</td>
+        <td><DocLink id={m.previous_doc_id} anchor={m.previous_anchor}
+          onOpen={() => open(m.previous_doc_id, m.previous_anchor)}>
+          {m.previous_title || m.previous_doc_id} · {m.previous_anchor}</DocLink>
+          {m.note && <div className="muted">{m.note}</div>}</td>
+        <td>{m.mentioned_by_count || 0}</td>
+        <td><a style={{ cursor: "pointer" }} onClick={async () => {
+          await api.deleteProvisionMapping(m.mapping_id); reload();
+        }}>✗</a></td>
+      </tr>)}</tbody></table>}
     </div>
   );
 }

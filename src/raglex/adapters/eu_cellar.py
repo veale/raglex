@@ -550,7 +550,7 @@ def _formex_legislation_blocks(root) -> list[tuple[str, str, str]]:
         t = "\n".join(_fmx_render(anx)).strip()
         if t:
             label = _fmx_first_child_text(anx, "TITLE") or _fmx_first_child_text(anx, "TI") or f"Annex {i}"
-            blocks.append((label[:60], "section", t))
+            blocks.append((label[:60], "annex", t))
     return blocks
 
 

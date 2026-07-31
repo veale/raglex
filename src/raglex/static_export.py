@@ -27,7 +27,7 @@ from .facade import Facade, _anchor_key, _oscola_cite, _row_meta
 
 _PDF_META_KEYS = ("pdf_url", "download_url", "bailii_pdf_url")
 _SOURCE_META_KEYS = ("url", "bailii_url", "gdprhub_url")
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 _DEFAULT_ATTRIBUTION = (
     'Document generated from a dataset held and maintained by '
@@ -427,10 +427,18 @@ class StaticLawExporter:
             sections = _law_sections(target_text, segments)
 
             relations = [
-                relation for relation in cat.relations_to(stable_id)
+                dict(relation) for relation in cat.relations_to(stable_id)
                 if relation["extracted_via"] != "inferred"
                 and relation["src_id"] != stable_id
             ]
+            provision_mappings = [dict(row) for row in cat.provision_mappings(stable_id)]
+            for inherited in cat.inherited_mentions_for(stable_id, limit=5000):
+                projected = dict(inherited)
+                # Index the literal old-law citation under the CURRENT provision while
+                # retaining its route/provenance for the separate filter and explanation.
+                projected["dst_anchor"] = projected["inherited_current_anchor"]
+                projected["is_inherited"] = True
+                relations.append(projected)
 
             def relation_keys(relation) -> list[str]:
                 anchor = relation["dst_anchor"]
@@ -488,6 +496,8 @@ class StaticLawExporter:
                 span_indices: dict[tuple[int | None, int | None], int] = {}
                 snippet_indices: dict[str, list[int]] = {"all": []}
                 mentions_by_key: dict[str, int] = {"all": len(source_relations)}
+                inherited_mentions_by_key: dict[str, int] = {
+                    "all": sum(bool(r.get("is_inherited")) for r in source_relations)}
                 labels_by_key: dict[str, set[str]] = {"all": set()}
                 target_keys: set[str] = set()
                 for relation in sorted(
@@ -504,6 +514,9 @@ class StaticLawExporter:
                         labels_by_key["all"].add(label)
                     for key in keys:
                         mentions_by_key[key] = mentions_by_key.get(key, 0) + 1
+                        if relation.get("is_inherited"):
+                            inherited_mentions_by_key[key] = \
+                                inherited_mentions_by_key.get(key, 0) + 1
                         if label:
                             labels_by_key.setdefault(key, set()).add(label)
 
@@ -545,6 +558,8 @@ class StaticLawExporter:
                     ),
                     "mentions": len(source_relations),
                     "mentions_by_key": mentions_by_key,
+                    "inherited_mentions_by_key": inherited_mentions_by_key,
+                    "has_inherited": bool(inherited_mentions_by_key["all"]),
                     "labels_by_key": {
                         key: sorted(labels) for key, labels in labels_by_key.items()
                     },
@@ -566,15 +581,21 @@ class StaticLawExporter:
 
         groups.sort(key=lambda g: (-g["pagerank"], g["date"] or "", g["cite"]))
         index: dict[str, list[int]] = {"all": list(range(len(groups))), "whole": []}
+        inherited_index: dict[str, list[int]] = {"all": []}
         for i, group in enumerate(groups):
+            if group["has_inherited"]:
+                inherited_index["all"].append(i)
             if group["whole_instrument"]:
                 index["whole"].append(i)
             for key in group["target_keys"]:
                 if key == "whole":
                     continue
                 index.setdefault(key, []).append(i)
+                if group["inherited_mentions_by_key"].get(key):
+                    inherited_index.setdefault(key, []).append(i)
 
         counts = {key: len(ids) for key, ids in index.items()}
+        inherited_counts = {key: len(ids) for key, ids in inherited_index.items()}
         for section in sections:
             marks = [
                 {"key": key, "label": label, "count": counts.get(key, 0)}
@@ -595,10 +616,13 @@ class StaticLawExporter:
                 "source": self.facade.source_label(target["source"]),
                 "links": target_links,
                 "sections": sections,
+                "provision_mappings": provision_mappings,
             },
             "groups": groups,
             "index": index,
+            "inherited_index": inherited_index,
             "counts": counts,
+            "inherited_counts": inherited_counts,
             "stats": {
                 "documents": len(groups),
                 "mentions": len(relations),
@@ -775,6 +799,13 @@ _HTML_TEMPLATE = """<!doctype html>
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
           <option value="passages">Most passages</option>
+        </select>
+      </label>
+      <label>Mentions
+        <select id="route-filter">
+          <option value="all">Direct + previous iterations</option>
+          <option value="direct">This law directly</option>
+          <option value="previous">Previous functionally similar provisions</option>
         </select>
       </label>
     </div>
@@ -1087,6 +1118,14 @@ _SCRIPT = r"""
   all.innerHTML = `<span>All mentions</span><span class="count">${number(data.counts.all)}</span>`;
   all.addEventListener("click", () => openMentions("all", "All mentions"));
   nav.appendChild(all);
+  if (Number(data.inherited_counts.all || 0)) {
+    const previous = document.createElement("button");
+    previous.type = "button";
+    previous.className = "all-mentions";
+    previous.innerHTML = `<span>Previous iterations</span><span class="count">${number(data.inherited_counts.all)}</span>`;
+    previous.addEventListener("click", () => openMentions("all", "Previous, functionally similar iterations", "previous"));
+    nav.appendChild(previous);
+  }
 
   for (const section of data.law.sections) {
     const count = data.counts[section.key] || 0;
@@ -1109,6 +1148,16 @@ _SCRIPT = r"""
         `[${number(count)} ${count === 1 ? "mention" : "mentions"}]`;
       mentions.addEventListener("click", () => openMentions(section.key, section.label));
       heading.appendChild(mentions);
+    }
+    const inheritedCount = Number(data.inherited_counts[section.key] || 0);
+    if (inheritedCount) {
+      const previous = document.createElement("button");
+      previous.type = "button";
+      previous.className = "mention-ref";
+      previous.textContent = `[${number(inheritedCount)} via previous law]`;
+      previous.addEventListener("click", () =>
+        openMentions(section.key, `${section.label} — previous iterations`, "previous"));
+      heading.appendChild(previous);
     }
     article.appendChild(heading);
     for (const paragraph of section.paragraphs || [{ text: section.text, indent: 0, marks: [] }]) {
@@ -1159,14 +1208,16 @@ _SCRIPT = r"""
   const flagHtml = (jurisdiction) => data.flags[jurisdiction]
     ? `<img class="flag-icon" src="${data.flags[jurisdiction]}" alt="">` : "";
 
-  const state = { key: "all", label: "All mentions", limit: 40, facet: null };
-  function openMentions(key, label) {
+  const state = { key: "all", label: "All mentions", limit: 40, facet: null, route: "all" };
+  function openMentions(key, label, route = "all") {
     state.key = key;
     state.label = label;
     state.limit = 40;
     state.facet = null;
+    state.route = route;
     $("mentions-title").textContent = label;
     $("sort-filter").value = "authority";
+    $("route-filter").value = route;
     renderResults();
     $("mentions-dialog").showModal();
   }
@@ -1179,6 +1230,10 @@ _SCRIPT = r"""
   function selectedGroups() {
     const ids = data.index[state.key] || [];
     const rows = ids.map((id) => data.groups[id]).filter((group) => {
+      const inherited = Number(group.inherited_mentions_by_key[state.key] || 0);
+      const total = Number(group.mentions_by_key[state.key] || 0);
+      if (state.route === "previous" && !inherited) return false;
+      if (state.route === "direct" && total <= inherited) return false;
       if (!state.facet) return true;
       return `${group.jurisdiction}|${group.kind}` === state.facet;
     });
@@ -1226,7 +1281,8 @@ _SCRIPT = r"""
       ? `<p class="result-targets">References ${labelsForSelection.map(esc).join(" · ")}</p>` : "";
     const details = [group.jurisdiction, kindNames[group.kind] || group.kind,
       group.court, group.source_label,
-      `${number(mentionsForSelection)} ${mentionsForSelection === 1 ? "mention" : "mentions"}`]
+      `${number(mentionsForSelection)} ${mentionsForSelection === 1 ? "mention" : "mentions"}`,
+      group.inherited_mentions_by_key[state.key] ? "includes previous-law lineage" : null]
       .filter(Boolean).map(esc).join(" · ");
     const excerpts = excerptsForSelection.length
       ? excerptsForSelection.map(snippetHtml).join("")
@@ -1289,6 +1345,11 @@ _SCRIPT = r"""
   });
   $("more-results").addEventListener("click", () => { state.limit += 40; renderResults(); });
   $("sort-filter").addEventListener("change", () => {
+    state.limit = 40;
+    renderResults();
+  });
+  $("route-filter").addEventListener("change", () => {
+    state.route = $("route-filter").value;
     state.limit = 40;
     renderResults();
   });

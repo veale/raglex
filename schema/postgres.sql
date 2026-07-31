@@ -81,6 +81,27 @@ CREATE TABLE IF NOT EXISTS relations (
 CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
+
+-- Editorial provision lineage. Unlike citation aliases, these mappings do not rewrite
+-- what a source cited: they let previous, functionally similar provisions be traversed
+-- and their mentions be surfaced separately beside the current provision.
+CREATE TABLE IF NOT EXISTS provision_mappings (
+    mapping_id          BIGSERIAL PRIMARY KEY,
+    current_doc_id      TEXT NOT NULL REFERENCES documents (stable_id),
+    current_anchor      TEXT NOT NULL,
+    previous_doc_id     TEXT NOT NULL REFERENCES documents (stable_id),
+    previous_anchor     TEXT NOT NULL,
+    mapping_type        TEXT NOT NULL DEFAULT 'functional_predecessor',
+    note                TEXT,
+    created_by          TEXT NOT NULL DEFAULT 'manual',
+    confidence          DOUBLE PRECISION,
+    created_at          TEXT NOT NULL,
+    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor, mapping_type)
+);
+CREATE INDEX IF NOT EXISTS provision_mappings_current_idx
+    ON provision_mappings (current_doc_id, current_anchor);
+CREATE INDEX IF NOT EXISTS provision_mappings_previous_idx
+    ON provision_mappings (previous_doc_id, previous_anchor);
 -- The pending slice is the only hot one (~6% of edges) and it is what the resolver
 -- and the worklist scan; partial indexes keep them off the other 94%.
 CREATE INDEX IF NOT EXISTS relations_pending_candidate_idx ON relations (candidate_id)

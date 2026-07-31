@@ -365,6 +365,24 @@ CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
 
+CREATE TABLE IF NOT EXISTS provision_mappings (
+    mapping_id          BIGSERIAL PRIMARY KEY,
+    current_doc_id      TEXT NOT NULL,
+    current_anchor      TEXT NOT NULL,
+    previous_doc_id     TEXT NOT NULL,
+    previous_anchor     TEXT NOT NULL,
+    mapping_type        TEXT NOT NULL DEFAULT 'functional_predecessor',
+    note                TEXT,
+    created_by          TEXT NOT NULL DEFAULT 'manual',
+    confidence          REAL,
+    created_at          TEXT NOT NULL,
+    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor, mapping_type)
+);
+CREATE INDEX IF NOT EXISTS provision_mappings_current_idx
+    ON provision_mappings (current_doc_id, current_anchor);
+CREATE INDEX IF NOT EXISTS provision_mappings_previous_idx
+    ON provision_mappings (previous_doc_id, previous_anchor);
+
 CREATE TABLE IF NOT EXISTS citation_counts (
     candidate_id  TEXT NOT NULL,
     entity_kind   TEXT,

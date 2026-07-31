@@ -384,6 +384,14 @@ export const api = {
   cancelJob: (id: string) => req<any>(`/jobs/${id}/cancel`, { method: "POST", body: "{}" }),
   restartJob: (id: string) => req<any>(`/jobs/${id}/restart`, { method: "POST", body: "{}" }),
   sourceCatalog: () => req<any[]>("/sources/catalog"),
+  provisionMappings: (id: string) =>
+    req<any>(`/provision-mappings?id=${encodeURIComponent(id)}`),
+  saveProvisionMappings: (body: Record<string, unknown>) =>
+    req<any>("/provision-mappings", { method: "POST", body: JSON.stringify(body) }),
+  deleteProvisionMapping: (id: number) =>
+    req<any>(`/provision-mappings/${id}`, { method: "DELETE" }),
+  inheritedProvisionMentions: (id: string, anchor?: string) =>
+    req<any>(`/provision-mappings/inherited?id=${encodeURIComponent(id)}${anchor ? `&current_anchor=${encodeURIComponent(anchor)}` : ""}`),
   keepCurrent: () => req<{ overlap_default_days: number; sources: any[] }>("/sources/keep-current"),
   watches: () => req<any[]>("/watches"),
   createWatch: (body: Record<string, unknown>) =>

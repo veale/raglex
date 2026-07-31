@@ -1668,6 +1668,25 @@ def create_app(config: Config | None = None) -> FastAPI:
     def link_ep(payload: dict = Body(...)) -> dict:
         return facade.link(**payload)
 
+    @app.get("/provision-mappings")
+    def provision_mappings_ep(id: str) -> dict:
+        return facade.provision_mappings(stable_id=id)
+
+    @app.post("/provision-mappings")
+    def upsert_provision_mappings_ep(payload: dict = Body(...)) -> dict:
+        return facade.upsert_provision_mappings(**payload)
+
+    @app.delete("/provision-mappings/{mapping_id}")
+    def delete_provision_mapping_ep(mapping_id: int) -> dict:
+        return facade.delete_provision_mapping(mapping_id=mapping_id)
+
+    @app.get("/provision-mappings/inherited")
+    def inherited_provision_mentions_ep(
+        id: str, current_anchor: str | None = None, limit: int = 600,
+    ) -> dict:
+        return facade.inherited_provision_mentions(
+            stable_id=id, current_anchor=current_anchor, limit=limit)
+
     @app.post("/link-at-selection")
     def link_at_selection_ep(payload: dict = Body(...)) -> dict:
         """Highlight-to-link: anchor a manual citation at a selected span so it renders

@@ -103,6 +103,27 @@ CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
 
+-- Editorial, article-to-article functional lineage. This is deliberately separate
+-- from citation aliases: a citation to the previous law remains literally true while
+-- the reader may additionally surface it beside the corresponding current provision.
+CREATE TABLE IF NOT EXISTS provision_mappings (
+    mapping_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    current_doc_id      TEXT NOT NULL,
+    current_anchor      TEXT NOT NULL,
+    previous_doc_id     TEXT NOT NULL,
+    previous_anchor     TEXT NOT NULL,
+    mapping_type        TEXT NOT NULL DEFAULT 'functional_predecessor',
+    note                TEXT,
+    created_by          TEXT NOT NULL DEFAULT 'manual',
+    confidence          REAL,
+    created_at          TEXT NOT NULL,
+    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor, mapping_type)
+);
+CREATE INDEX IF NOT EXISTS provision_mappings_current_idx
+    ON provision_mappings (current_doc_id, current_anchor);
+CREATE INDEX IF NOT EXISTS provision_mappings_previous_idx
+    ON provision_mappings (previous_doc_id, previous_anchor);
+
 -- Rolled-up citation frequencies (the substrate for the §5a snowball). Aggregating the
 -- 10M-row `citations` table live costs ~13s, so it is rebuilt on a cadence instead.
 -- No PK: entity_kind is nullable (an unclassified candidate), and the table is
@@ -1118,6 +1139,112 @@ class Catalogue:
         )
         if commit:
             self.conn.commit()
+
+    # -- provision lineage -------------------------------------------------
+    def upsert_provision_mappings(
+        self, current_doc_id: str, previous_doc_id: str, mappings: list[dict],
+        *, created_by: str = "manual", replace: bool = False,
+    ) -> int:
+        """Store current-provision → previous-provision functional mappings.
+
+        These are editorial mappings, not citation aliases and not synthetic citation
+        edges. The previous citation remains intact and can be surfaced as inherited
+        context without claiming that its author cited the current law.
+        """
+        now = _now()
+        with self._atomic():
+            if replace:
+                self.conn.execute(
+                    "DELETE FROM provision_mappings WHERE current_doc_id = ? "
+                    "AND previous_doc_id = ?",
+                    (current_doc_id, previous_doc_id),
+                )
+            for item in mappings:
+                self.conn.execute(
+                    """
+                    INSERT INTO provision_mappings (
+                        current_doc_id, current_anchor, previous_doc_id,
+                        previous_anchor, mapping_type, note, created_by,
+                        confidence, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT (
+                        current_doc_id, current_anchor, previous_doc_id,
+                        previous_anchor, mapping_type
+                    ) DO UPDATE SET
+                        note = excluded.note,
+                        created_by = excluded.created_by,
+                        confidence = excluded.confidence
+                    """,
+                    (
+                        current_doc_id, item["current_anchor"], previous_doc_id,
+                        item["previous_anchor"],
+                        item.get("mapping_type") or "functional_predecessor",
+                        item.get("note"), created_by, item.get("confidence"), now,
+                    ),
+                )
+        return len(mappings)
+
+    def provision_mappings(self, current_doc_id: str) -> list:
+        return self.conn.execute(
+            """
+            SELECT pm.*, d.title AS previous_title
+            FROM provision_mappings pm
+            LEFT JOIN documents d ON d.stable_id = pm.previous_doc_id
+            WHERE pm.current_doc_id = ?
+            ORDER BY pm.current_anchor, pm.previous_doc_id, pm.previous_anchor
+            """,
+            (current_doc_id,),
+        ).fetchall()
+
+    def delete_provision_mapping(self, mapping_id: int) -> bool:
+        with self._atomic():
+            changed = self.conn.execute(
+                "DELETE FROM provision_mappings WHERE mapping_id = ?", (mapping_id,)
+            ).rowcount
+        return bool(changed)
+
+    def inherited_mentions_for(
+        self, current_doc_id: str, *, current_anchor: str | None = None,
+        limit: int = 600,
+    ) -> list:
+        """Literal citations to mapped previous provisions, decorated with lineage.
+
+        Anchor matching is deliberately exact apart from case/space: citation extraction
+        emits canonical ``Article N``/``section N`` anchors, while loose numeric matching
+        would leak citations between unrelated provisions.
+        """
+        params: list = [current_doc_id]
+        anchor_sql = ""
+        if current_anchor:
+            anchor_sql = " AND lower(trim(pm.current_anchor)) = lower(trim(?))"
+            params.append(current_anchor)
+        params.append(max(1, min(int(limit), 5000)))
+        return self.conn.execute(
+            f"""
+            SELECT r.*, pm.mapping_id, pm.current_anchor AS inherited_current_anchor,
+                   pm.previous_doc_id AS inherited_from_id,
+                   pm.previous_anchor AS inherited_from_anchor,
+                   pm.note AS mapping_note, pm.created_by AS mapping_created_by,
+                   pm.confidence AS mapping_confidence,
+                   d.title AS inherited_from_title
+            FROM provision_mappings pm
+            JOIN relations r
+              ON (r.dst_id = pm.previous_doc_id OR r.candidate_id = pm.previous_doc_id)
+             AND lower(trim(r.dst_anchor)) = lower(trim(pm.previous_anchor))
+            LEFT JOIN documents d ON d.stable_id = pm.previous_doc_id
+            WHERE pm.current_doc_id = ?
+              {anchor_sql}
+              AND r.src_id <> pm.current_doc_id
+              AND r.relationship_type IN (
+                'mentions','interprets','applies','considers','follows',
+                'distinguishes','overrules','cites_for_fact'
+              )
+              AND r.extracted_via <> 'inferred'
+            ORDER BY r.relation_id
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
 
     # -- extracted citations (§5, the audit/observation layer) -------------
     def add_citations(self, src_id: str, rows: list[dict], *, commit: bool = True) -> None:

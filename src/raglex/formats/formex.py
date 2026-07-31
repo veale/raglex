@@ -72,6 +72,31 @@ def _recital_blocks(root: ET.Element) -> list[tuple[str, str, str]]:
     return blocks
 
 
+def _annex_blocks(root: ET.Element) -> list[tuple[str, str, str]]:
+    """Annexes are siblings of the enacting terms, not ``ARTICLE`` descendants.
+
+    The old parser assembled only recitals + articles, silently dropping the UCPD's
+    Annex I blacklist (and every other schedule). Preserve each annex as a citable
+    segment, including table/list contents.
+    """
+    blocks: list[tuple[str, str, str]] = []
+    annexes = [e for e in root.iter() if localname(e.tag) == "ANNEX"]
+    for index, annex in enumerate(annexes, 1):
+        title_node = next(
+            (e for e in annex.iter() if localname(e.tag) in {"TITLE", "TI.ANNEX"}),
+            None,
+        )
+        title = " ".join(element_text(title_node).split()) if title_node is not None else ""
+        label = title or (f"Annex {index}" if len(annexes) > 1 else "Annex")
+        body = flow_text(
+            annex, skip_tags={"title", "ti.annex"},
+            line_tags={"parag", "item", "row"},
+        )
+        if body:
+            blocks.append((label, "annex", body))
+    return blocks
+
+
 def _is_case_law(root: ET.Element) -> bool:
     """A judgment/opinion instance rather than an act: it wraps its reasoning in
     ``CONTENTS.JUDGMENT`` (or its root says so) and has no ``ENACTING.TERMS``."""
@@ -118,6 +143,7 @@ def parse_formex_legislation(raw: bytes) -> ParsedDoc:
     blocks: list[tuple[str, str, str]] = _recital_blocks(root)
     blocks += [(_label(a), "article", flow_text(a, skip_tags=_FMX_SKIP, line_tags=_FMX_LINES))
                for a in articles]
+    blocks += _annex_blocks(root)
     if not blocks:  # not an act we recognise — whole-document text
         blocks = [(title or "document", "section", element_text(root))]
 
