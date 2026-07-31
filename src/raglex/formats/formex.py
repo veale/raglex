@@ -42,6 +42,29 @@ def unzip_formex_content(raw: bytes) -> bytes | None:
         return None
 
 
+def unzip_formex_contents(raw: bytes) -> list[bytes]:
+    """Every content member in publication order.
+
+    CELLAR splits long OJ acts into files. For the UCPD, the largest member ends at
+    Article 21 while Annex I lives in a second member; selecting only the largest file
+    silently loses the annex. Bibliographic ``.doc.xml`` notices are excluded.
+    """
+    if raw.lstrip()[:1] == b"<":
+        return [raw]
+    if raw[:2] != b"PK":
+        return []
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            names = sorted(
+                n for n in zf.namelist()
+                if n.lower().endswith((".xml", ".fmx"))
+                and ".doc." not in n.lower()
+            )
+            return [zf.read(name) for name in names]
+    except zipfile.BadZipFile:
+        return []
+
+
 # Title children (the article's own num + heading) — its label, dropped from the
 # body; numbered paragraphs and list points start new lines (read as a list).
 _FMX_SKIP = {"ti.art", "sti.art"}
@@ -109,13 +132,25 @@ def _is_case_law(root: ET.Element) -> bool:
 
 
 def parse_formex_legislation(raw: bytes) -> ParsedDoc:
-    data = unzip_formex_content(raw)
-    if not data:
+    members = unzip_formex_contents(raw)
+    if not members:
         return ParsedDoc()
-    try:
-        root = ET.fromstring(data)
-    except ET.ParseError:
+    roots: list[ET.Element] = []
+    for data in members:
+        try:
+            roots.append(ET.fromstring(data))
+        except ET.ParseError:
+            continue
+    if not roots:
         return ParsedDoc()
+    if len(roots) == 1:
+        root = roots[0]
+        data = members[0]
+    else:
+        root = ET.Element("ACT")
+        for member_root in roots:
+            root.append(member_root)
+        data = ET.tostring(root, encoding="utf-8")
 
     # CJEU CASE LAW is Formex too, and this parser is registered for every Formex
     # instance. Run against a judgment it reads only what it recognises — the recitals

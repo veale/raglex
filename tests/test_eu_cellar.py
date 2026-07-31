@@ -462,6 +462,26 @@ def test_formex_legislation_splits_articles_into_paragraphs():
     assert [s.label for s in js] == ["1", "ruling"]
 
 
+def test_formex_legislation_combines_split_zip_members():
+    """The UCPD package stores Annex I outside the largest XML member."""
+    import io
+    import zipfile
+    from raglex.formats.formex import parse_formex_legislation
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("01.xml", """
+          <ACT><ENACTING.TERMS><ARTICLE><TI.ART>Article 1</TI.ART>
+          <P>Purpose.</P></ARTICLE></ENACTING.TERMS></ACT>""")
+        z.writestr("02.xml", """
+          <ACT><ANNEX><TITLE>ANNEX I</TITLE>
+          <P>Commercial practices always considered unfair.</P></ANNEX></ACT>""")
+        z.writestr("notice.doc.xml", "<DOC><TITLE>notice</TITLE></DOC>")
+    parsed = parse_formex_legislation(buf.getvalue())
+    assert [segment.label for segment in parsed.segments] == ["Article 1", "ANNEX I"]
+    assert "Commercial practices always considered unfair" in parsed.text
+
+
 def test_ag_opinion_head_gives_the_citation_its_missing_name():
     """CELLAR carries no Advocate General and these documents arrive titleless, so their
     OSCOLA citation rendered as "…, Opinion of AG" with a hole where the name goes. The

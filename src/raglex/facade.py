@@ -11164,6 +11164,7 @@ class Facade:
         ignore_watermark: bool = False, watermark_key: str | None = None,
         refetch_held: bool = False, use_llm: bool | None = None,
         overlap_days: int | None = None, force_full: bool = False,
+        resume_unfinished: bool = False,
         postprocess_after_relation_id: int = 0, return_ids: bool = False,
         on_progress=None, cancel_check=None,
     ) -> dict:
@@ -11265,7 +11266,8 @@ class Facade:
             #   restart would strand the whole stored backlog with no citation graph.
             # ``last_extracted_at`` is stamped even for citation-free documents, so this
             # selects precisely the stored-but-unfinished backlog and converges.
-            if (options or {}).get("start_offset") or adapter.source in primary_bulk_sources:
+            if (resume_unfinished or (options or {}).get("start_offset")
+                    or adapter.source in primary_bulk_sources):
                 new_ids = list(dict.fromkeys([
                     *cat.text_document_ids(source=adapter.source, only_never_extracted=True),
                     *new_ids,

@@ -109,6 +109,30 @@ def test_harvest_restart_restores_discovery_cursor(monkeypatch):
     monkeypatch.setattr(mgr, "start", fake_start)
     mgr.restart("nl-old")
     assert started["params"]["options"]["start_offset"] == 930_001
+    assert started["params"]["resume_unfinished"] is True
+
+
+def test_harvest_restart_always_finishes_stored_extraction_backlog(monkeypatch):
+    """Even a source without an offset cursor can finish storage before a deploy and be
+    interrupted during extraction. Its resumed discovery may yield zero at the completed
+    backfill frontier, so the durable never-extracted backlog must be selected explicitly."""
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job(
+            "cma-old", "harvest-source", "CMA backfill",
+            {"source": "uk-cma-guidance", "backfill": True, "max_pages": None},
+            origin="api", checkpoint={"phase": "extract", "done": 43},
+        )
+        cat.finish_job("cma-old", "interrupted", {})
+    started = {}
+    mgr = JobManager(f, origin="api")
+    monkeypatch.setattr(
+        mgr, "start",
+        lambda kind, label, params, **resume: (
+            started.update(params=params) or {"job_id": "cma-new"}),
+    )
+    mgr.restart("cma-old")
+    assert started["params"]["resume_unfinished"] is True
 
 
 def test_checkpoint_is_distinct_from_display_progress():

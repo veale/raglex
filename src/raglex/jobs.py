@@ -783,6 +783,13 @@ class JobManager:
         # checkpoints precisely so an interruption after discovery doesn't restart
         # the upstream walk from 0.
         if row.get("kind") == "harvest-source":
+            # A deploy may interrupt AFTER discovery/storage while citation extraction is
+            # only part-way through. Re-discovery can legitimately yield zero because the
+            # completed backfill frontier is already recorded; explicitly rebuild the
+            # extraction worklist from documents whose durable completion stamp is NULL.
+            # Without this, attempt 2 says "done — discovered 0" while hundreds of stored
+            # documents remain unextracted (the CMA guidance backfill incident).
+            params["resume_unfinished"] = True
             if (checkpoint.get("source") == params.get("source")
                     and checkpoint.get("resume_offset") is not None):
                 options = dict(params.get("options") or {})
