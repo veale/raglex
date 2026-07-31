@@ -1169,6 +1169,19 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)
         if not exact_multi and any(s <= c.char_start and c.char_end <= e for s, e in occupied):
             continue
+        # Two grammars can recognise the SAME instrument in spans that merely overlap,
+        # neither containing the other — "…(EC Directive) Regulations 2003" from the
+        # short-name grammar and "EC Directive) Regulations 2003, SI 2003/2426" from the
+        # series-number one. Containment alone lets both through, and one reference is
+        # then counted twice. Same target + overlapping text = one citation; a genuinely
+        # different pinpoint still survives, because that IS a second reference.
+        if not exact_multi and c.candidate_id and any(
+            k.candidate_id == c.candidate_id
+            and c.char_start < k.char_end and k.char_start < c.char_end
+            and (c.pinpoint is None or c.pinpoint == k.pinpoint)
+            for k in kept
+        ):
+            continue
         kept.append(c)
         occupied.append((c.char_start, c.char_end))
     return kept

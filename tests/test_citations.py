@@ -944,3 +944,46 @@ def test_an_issuing_body_before_the_instrument_keeps_the_pinpoint():
     assert ("31993L0013", "Article 3") in pinpoints
     assert ("32015R1998", "Article 5") in pinpoints
     assert ("31993L0013", "Recital 12") in pinpoints
+
+
+def test_pecr_is_reachable_by_its_name_and_acronym():
+    """An SI was unreachable by name — only by its series number.
+
+    `uk_statute_named` matches "<Title> Act|Measure <year>" and the gazetteer holds
+    Acts, so an instrument called "… Regulations 2003" was invisible to both; the only
+    route was `uk_si_named`, which needs "SI 2003/2426" written out. A judgment saying
+    "regulation 6 of PECR" resolved to nothing, which is why an instrument at the centre
+    of UK e-privacy law held 91 edges. SIs are pinpointed by REGULATION, so the pinpoint
+    has to meet the segment labels ("reg. 6"), not an Act's "s. 6".
+    """
+    for text, pinpoint in (
+        ("a breach of PECR", None),
+        ("regulation 6 of PECR", "reg. 6"),
+        ("reg 6 PECR", "reg. 6"),
+        ("PECR reg 21(1)(b)", "reg. 21(1)(b)"),
+        ("regulation 6 of the Privacy and Electronic Communications "
+         "(EC Directive) Regulations 2003", "reg. 6"),
+        ("THE PRIVACY AND ELECTRONIC COMMUNICATIONS REGULATIONS 2003", None),
+    ):
+        got = [(c.candidate_id, c.pinpoint) for c in extract_citations(text)]
+        assert got == [("uksi/2003/2426", pinpoint)], text
+
+    # The bare acronym is upper-case only, and never inside a longer word.
+    for text in ("specification pecr values", "the PECRs were amended",
+                 "Pecr is not a word here"):
+        assert not extract_citations(text), text
+
+
+def test_one_reference_written_two_ways_is_one_citation():
+    """"the X Regulations 2003, SI 2003/2426" is a name and its series number, not two
+    citations. Two grammars matched it in spans that merely OVERLAPPED — neither
+    containing the other — so containment-based dedupe let both through."""
+    cites = extract_citations(
+        "the Privacy and Electronic Communications (EC Directive) Regulations 2003, "
+        "SI 2003/2426 applies.")
+    assert [c.candidate_id for c in cites] == ["uksi/2003/2426"]
+
+    # …but two genuinely different pinpoints of one instrument remain two citations.
+    pins = {c.pinpoint for c in extract_citations(
+        "Article 5 and Article 17 of Regulation (EU) 2016/679")}
+    assert pins == {"Article 5", "Article 17"}

@@ -168,6 +168,32 @@ _UK_ACT_TO_ID = {
     "online safety act": "ukpga/2023/50",
 }
 
+# Statutory instruments cited BY NAME. They need their own map, and their own grammar,
+# for two reasons that the Act machinery cannot cover:
+#
+#  * ``uk_statute_named`` matches "<Title> Act|Measure <year>" and the vendored gazetteer
+#    holds Acts — so an instrument called "… Regulations 2003" is invisible to both. The
+#    only route to PECR was ``uk_si_named``, which requires the SERIES NUMBER to be
+#    written out ("…Regulations 2003, SI 2003/2426"). A judgment that says "the Privacy
+#    and Electronic Communications (EC Directive) Regulations 2003", or just "PECR",
+#    resolved to nothing at all — which is why an instrument at the centre of UK
+#    e-privacy law held 91 edges.
+#  * an SI is pinpointed by REGULATION, not section, so the pinpoint this grammar emits
+#    has to be "reg. 6" to meet the segment labels.
+_UK_SI_TO_ID = {
+    "pecr": "uksi/2003/2426",
+    "privacy and electronic communications (ec directive) regulations 2003": "uksi/2003/2426",
+    "privacy and electronic communications regulations 2003": "uksi/2003/2426",
+    "privacy and electronic communications regulations": "uksi/2003/2426",
+}
+# The bare acronym is matched case-SENSITIVELY (uppercase only), the spelled-out names
+# case-insensitively — the same discipline the EU acronyms use, so a lower-case "pecr"
+# inside a word can never mint an edge.
+_UK_SI_ACRONYMS = r"PECR"
+_UK_SI_FULL_NAMES = "|".join(
+    re.escape(k).replace(r"\ ", r"\s+")
+    for k in sorted(_UK_SI_TO_ID, key=len, reverse=True) if " " in k)
+
 
 # The many dash characters a PDF can encode a hyphen as — hyphen-minus, the Unicode
 # hyphen/non-breaking hyphen, figure/en/em dash, horizontal bar, minus sign. CJEU case
@@ -932,6 +958,48 @@ register(Grammar(
         (lambda s: f"s. {s}" if s else None)(m.group("sec") or m.group("sec2")),
         None,
     ),
+))
+
+
+# "regulation 6 of the Privacy and Electronic Communications (EC Directive) Regulations
+# 2003", "reg 6 PECR", "PECR", "PECR reg 6". The pinpoint may lead or trail, as it does
+# for Acts, and carries any sub-paragraph tail ("21(1)(b)").
+def _resolve_named_si(m: "re.Match[str]") -> Normalised:
+    number = m.group("reg") or m.group("reg2")
+    return (
+        _UK_SI_TO_ID.get(re.sub(r"\s+", " ", m.group("name")).strip().lower()),
+        f"reg. {re.sub(r'\s+', '', number)}" if number else None,
+        "regulation",
+    )
+
+
+def _si_pattern(names: str) -> str:
+    # "of" is optional: "reg 6 PECR" is as ordinary a form as "reg 6 of PECR".
+    return (
+        r"(?:reg(?:ulation|\.)?\s*(?P<reg>\d+[A-Za-z]?(?:\([0-9A-Za-z]+\))*)"
+        r"\s+(?:of\s+)?(?:the\s+)?)?"
+        rf"(?P<name>{names})\b"
+        # The series number is routinely restated right after the name — "the X
+        # Regulations 2003, SI 2003/2426". That is ONE reference, so swallow it here
+        # rather than leaving a second grammar to match it as a separate citation.
+        r"(?:\s*,?\s*\(?S\.?\s?I\.?\s*(?:No\.?\s*)?(?:(?:19|20)\d{2}\s*/\s*)?\d{1,5}\)?)?"
+        r"(?:\s*,?\s*reg(?:ulation|\.)?\s*(?P<reg2>\d+[A-Za-z]?(?:\([0-9A-Za-z]+\))*))?"
+    )
+
+
+# Two registrations, because the case rules differ: the spelled-out name is matched in
+# any case, the bare acronym only in upper — so "pecr" in a filename or an identifier
+# can never mint an edge, while "the Privacy and Electronic Communications Regulations"
+# resolves however a judgment happens to capitalise it.
+register(Grammar(
+    "uk_si_short_name", "regulation",
+    re.compile(_si_pattern(_UK_SI_FULL_NAMES), re.IGNORECASE),
+    _resolve_named_si,
+))
+register(Grammar(
+    "uk_si_acronym", "regulation",
+    re.compile(_si_pattern(_UK_SI_ACRONYMS)),
+    _resolve_named_si,
 ))
 
 
