@@ -262,6 +262,40 @@ def test_legislative_status_identifies_latest_and_historical_consolidations(tmp_
     ]
 
 
+def test_batch_applicable_versions_uses_resolved_and_pending_lineage(tmp_path):
+    """Resolver lag must not hide a consolidation, without a COALESCE table scan."""
+    f = _leg_facade(tmp_path)
+    with f._open() as (cat, _r, _t):
+        for sid in ("32005L0029", "02005L0029-20220528", "02016R0679-20240101"):
+            cat.upsert_document(Record(
+                source="eu-legislation", stable_id=sid,
+                doc_type=DocType.LEGISLATION, title=sid,
+            ))
+        # A normal resolved lineage edge uses dst_id.
+        cat.conn.execute(
+            "INSERT INTO relations "
+            "(src_id,dst_id,candidate_id,relationship_type,resolution_status,dst_anchor) "
+            "VALUES (?,?,?,?,?,?)",
+            ("02016R0679-20240101", "32016R0679", "32016R0679",
+             "consolidates", "resolved", "2024-01-01"),
+        )
+        # A just-imported edge can still have only candidate_id until the resolver runs.
+        cat.conn.execute(
+            "INSERT INTO relations "
+            "(src_id,dst_id,candidate_id,relationship_type,resolution_status,dst_anchor) "
+            "VALUES (?,?,?,?,?,?)",
+            ("02005L0029-20220528", None, "32005L0029",
+             "consolidates", "pending", "2022-05-28"),
+        )
+        cat.conn.commit()
+        got = cat.applicable_legislative_versions(
+            ["32016R0679", "32005L0029"], on_date="2026-01-01")
+    assert got == {
+        "32016R0679": ("02016R0679-20240101", "2024-01-01"),
+        "32005L0029": ("02005L0029-20220528", "2022-05-28"),
+    }
+
+
 def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
     from raglex.core.models import ExtractedVia, ResolutionStatus, TypedRelation
 

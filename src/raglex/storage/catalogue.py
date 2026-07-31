@@ -551,6 +551,15 @@ _POST_MIGRATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS relations_pending_ref_idx ON relations "
     "(COALESCE(candidate_id, raw_citation_string)) "
     "WHERE resolution_status = 'pending' AND extracted_via <> 'inferred'",
+    # A consolidation/version lookup must not walk every ordinary citation to a heavily
+    # cited act (GDPR/UCPD).  These tiny lineage-only indexes serve both the canonical-read
+    # redirect and the batched extraction projection.  On a large live table build them
+    # CONCURRENTLY first; startup's statements then become lock-free catalog no-ops.
+    "CREATE INDEX IF NOT EXISTS relations_lineage_dst_idx ON relations (dst_id) "
+    "WHERE relationship_type IN ('consolidates', 'point_in_time_of')",
+    "CREATE INDEX IF NOT EXISTS relations_lineage_pending_candidate_idx "
+    "ON relations (candidate_id) WHERE resolution_status = 'pending' AND dst_id IS NULL "
+    "AND relationship_type IN ('consolidates', 'point_in_time_of')",
 )
 
 # Postgres-only trigram indexes for substring search (§7): the corpus search matches a
@@ -2029,13 +2038,22 @@ class Catalogue:
 
         Both resolved and still-pending lineage edges count: a version and its base
         are already present when this query runs, so resolver lag must not prevent a
-        temporally accurate citation link.
+        temporally accurate citation link.  Keep the resolved and pending probes
+        separate: an ``OR`` across ``dst_id`` and ``candidate_id`` made PostgreSQL scan
+        the multi-million-row relations table for every citation target.
         """
         rows = self.conn.execute(
             """
             SELECT d.stable_id, d.meta_json, r.dst_anchor
             FROM relations r JOIN documents d ON d.stable_id = r.src_id
-            WHERE (r.dst_id = ? OR r.candidate_id = ?)
+            WHERE r.dst_id = ?
+              AND r.relationship_type IN ('consolidates', 'point_in_time_of')
+            UNION ALL
+            SELECT d.stable_id, d.meta_json, r.dst_anchor
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.candidate_id = ?
+              AND r.dst_id IS NULL
+              AND r.resolution_status = 'pending'
               AND r.relationship_type IN ('consolidates', 'point_in_time_of')
             """,
             (base_id, base_id),
@@ -2081,15 +2099,26 @@ class Catalogue:
         for start in range(0, len(ids), 800):
             chunk = ids[start:start + 800]
             qs = ",".join("?" * len(chunk))
+            # Two indexable branches are substantially faster than COALESCE(dst_id,
+            # candidate_id), which disables both btree probes and caused a full relations
+            # scan for every citation-dense document in production.
             rows = self.conn.execute(
                 f"""
-                SELECT COALESCE(r.dst_id, r.candidate_id) AS base_id,
+                SELECT r.dst_id AS base_id,
                        d.stable_id, d.meta_json, r.dst_anchor
                 FROM relations r JOIN documents d ON d.stable_id = r.src_id
-                WHERE COALESCE(r.dst_id, r.candidate_id) IN ({qs})
+                WHERE r.dst_id IN ({qs})
+                  AND r.relationship_type IN ('consolidates', 'point_in_time_of')
+                UNION ALL
+                SELECT r.candidate_id AS base_id,
+                       d.stable_id, d.meta_json, r.dst_anchor
+                FROM relations r JOIN documents d ON d.stable_id = r.src_id
+                WHERE r.candidate_id IN ({qs})
+                  AND r.dst_id IS NULL
+                  AND r.resolution_status = 'pending'
                   AND r.relationship_type IN ('consolidates', 'point_in_time_of')
                 """,
-                chunk,
+                [*chunk, *chunk],
             ).fetchall()
             for row in rows:
                 version_date = self._version_date(row)
