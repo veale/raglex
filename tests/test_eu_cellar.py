@@ -482,6 +482,24 @@ def test_formex_legislation_combines_split_zip_members():
     assert "Commercial practices always considered unfair" in parsed.text
 
 
+def test_formex_consolidation_preserves_cons_annexes():
+    """Sector-0 Formex spells annexes CONS.ANNEX rather than ANNEX."""
+    from raglex.formats.formex import parse_formex_legislation
+
+    parsed = parse_formex_legislation(b"""
+      <CONS.ACT><CONS.DOC><ENACTING.TERMS>
+        <ARTICLE><TI.ART>Article 1</TI.ART><P>Purpose.</P></ARTICLE>
+      </ENACTING.TERMS>
+      <CONS.ANNEX><TITLE><TI><P>ANNEX I</P></TI>
+        <STI><P>BLACKLIST</P></STI></TITLE>
+        <P>A practice always considered unfair.</P></CONS.ANNEX>
+      </CONS.DOC></CONS.ACT>""")
+    assert [(s.label, s.kind) for s in parsed.segments] == [
+        ("Article 1", "article"), ("ANNEX I BLACKLIST", "annex"),
+    ]
+    assert "A practice always considered unfair" in parsed.text
+
+
 def test_ag_opinion_head_gives_the_citation_its_missing_name():
     """CELLAR carries no Advocate General and these documents arrive titleless, so their
     OSCOLA citation rendered as "…, Opinion of AG" with a hole where the name goes. The

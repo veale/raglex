@@ -103,7 +103,13 @@ def _annex_blocks(root: ET.Element) -> list[tuple[str, str, str]]:
     segment, including table/list contents.
     """
     blocks: list[tuple[str, str, str]] = []
-    annexes = [e for e in root.iter() if localname(e.tag) == "ANNEX"]
+    # Enacted Formex uses ANNEX; dated sector-0 texts use CONS.ANNEX. Treat both
+    # as the same citable structure (the UCPD consolidation otherwise had 21
+    # articles and silently stopped before both annexes).
+    annexes = [
+        e for e in root.iter()
+        if localname(e.tag) == "ANNEX" or localname(e.tag).endswith(".ANNEX")
+    ]
     for index, annex in enumerate(annexes, 1):
         title_node = next(
             (e for e in annex.iter() if localname(e.tag) in {"TITLE", "TI.ANNEX"}),

@@ -283,8 +283,33 @@ def create_app(config: Config | None = None) -> FastAPI:
     def legislation_status_ep(id: str) -> dict:
         """Currency of an act from its change-edges: in force / amended / repealed / recast /
         corrected + a consolidation snapshot, with the acts that did it (and per-article
-        markers where pinpointed). Source-agnostic (UK + EU)."""
-        return facade.legislative_status(id)
+        markers where pinpointed). Source-agnostic (UK + EU).
+
+        A held EU base act with no dated expression is self-healing: opening it starts
+        one deduplicated Cellar consolidation sync. A completion stamp suppresses repeat
+        lookups for seven days when an act genuinely has no consolidation.
+        """
+        from datetime import datetime as _dt, timezone as _tz
+
+        status = facade.legislative_status(id)
+        if (status.get("source") == "eu-legislation"
+                and status.get("version_state") == "base_without_consolidation"
+                and re.fullmatch(r"3\d{4}[RLD]\d{4}", id or "", re.I)):
+            checked = status.get("consolidations_checked_at")
+            try:
+                checked_at = _dt.fromisoformat(str(checked).replace("Z", "+00:00"))
+                if checked_at.tzinfo is None:
+                    checked_at = checked_at.replace(tzinfo=_tz.utc)
+                recently_checked = (_dt.now(_tz.utc) - checked_at).total_seconds() < 7 * 86400
+            except (TypeError, ValueError):
+                recently_checked = False
+            if not recently_checked:
+                status["consolidation_sync"] = jobs.start(
+                    "sync-eu-consolidations",
+                    f"auto: import consolidations for {id}",
+                    {"stable_id": id},
+                )
+        return status
 
     @app.get("/legislation/versions")
     def legislation_versions_ep(id: str) -> dict:
@@ -758,6 +783,41 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: (payload or {})[k] for k in ("limit", "workers", "dry_run")
                   if k in (payload or {})}
         return _start_job("repair-eu-repeals", "re-type EU repeal edges", params)
+
+    @app.post("/jobs/repair-eu-annexes")
+    def job_repair_eu_annexes_ep(payload: dict = Body(default={})) -> dict:
+        """Inspect every held EU Formex ZIP and reparse packages whose annexes were
+        split into secondary XML members. Local-only, citation-safe, checkpointed."""
+        params = {k: (payload or {})[k] for k in ("limit", "after_stable_id")
+                  if k in (payload or {})}
+        return _start_job(
+            "repair-eu-annexes",
+            "repair split EU Formex annexes",
+            params,
+            queue=bool((payload or {}).get("queue")),
+        )
+
+    @app.post("/jobs/backfill-eu-consolidations")
+    def job_backfill_eu_consolidations_ep(payload: dict = Body(default={})) -> dict:
+        """Walk Cellar's complete sector-0 catalogue and import every dated EU
+        consolidation, including future-effective snapshots. The underlying harvest
+        checkpoint is its Cellar OFFSET, so interrupted walks resume without replay."""
+        payload = payload or {}
+        params = {
+            "source": "eu-legislation",
+            "backfill": True,
+            "max_pages": (int(payload["max_pages"])
+                          if payload.get("max_pages") is not None else None),
+            "options": {"consolidations_only": "true"},
+            "force_full": True,
+            "resume_unfinished": True,
+        }
+        return _start_job(
+            "harvest-source",
+            "backfill all EU dated consolidations (CELLAR)",
+            params,
+            queue=bool(payload.get("queue")),
+        )
 
     @app.post("/jobs/backfill-intituling")
     def job_backfill_intituling_ep(payload: dict = Body(default={})) -> dict:

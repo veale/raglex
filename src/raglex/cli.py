@@ -401,6 +401,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_hygiene = 0.0
         last_analyze = 0.0
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
+        last_eu_consolidations = time.time()  # explicit first backfill is queued at deploy
         last_eu_enrich = time.time()
         last_eu_case_names = time.time()  # credentialed webservice — wait a cadence too
         last_backfill = 0.0
@@ -598,6 +599,27 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     started = jobs.start("maintenance-run", "scheduled DB maintenance + repair", {})
                     if started.get("error"):
                         print(f"[watch] maintenance: {started['error']}")
+                # Weekly reverse sweep of Cellar's finite sector-0 catalogue. This is more
+                # efficient than walking every base act and asking whether it happens to
+                # have consolidations; held rows deduplicate before any Formex download.
+                if (_sched_on("eu-consolidations")
+                        and time.time() - last_eu_consolidations
+                        >= (_sched_min("eu-consolidations") or 10080) * 60):
+                    last_eu_consolidations = time.time()
+                    started = jobs.start(
+                        "harvest-source",
+                        "scheduled EU consolidation sweep (CELLAR sector-0)",
+                        {
+                            "source": "eu-legislation",
+                            "backfill": True,
+                            "max_pages": None,
+                            "options": {"consolidations_only": "true"},
+                            "force_full": True,
+                            "resume_unfinished": True,
+                        },
+                    )
+                    if started.get("error"):
+                        print(f"[watch] eu-consolidations: {started['error']}")
                 # EU legislative-change enrichment — harvest act-to-act CDM relations so old
                 # directives learn they were repealed/recast. Off by default; enable via toggles.
                 if _sched_on("eu-legislation-enrich") and time.time() - last_eu_enrich >= (_sched_min("eu-legislation-enrich") or 1440) * 60:

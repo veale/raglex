@@ -68,3 +68,42 @@ def test_bounded_victoria_watch_reads_acts_and_rules():
     ]
     assert [call[0] for call in client.calls] == ["act_in_force", "sr_in_force"]
     assert all(call[1]["sort"] == "-changed" for call in client.calls)
+
+
+def test_victoria_incremental_discovery_stops_at_cursor():
+    class Response:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def json(self):
+            return {
+                "data": [{
+                    "id": self.kind,
+                    "attributes": {
+                        "title": "Old item",
+                        "field_act_sr_year": "2025",
+                        "field_act_sr_number": "1",
+                        "changed": "2026-07-01T00:00:00+10:00",
+                        "path": {"alias": "/old"},
+                    },
+                    "relationships": {"field_in_force_version": {"data": []}},
+                }],
+                "links": {"next": {"href": "https://example.test/next"}},
+            }
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params=None):
+            kind = "sr_in_force" if "sr_in_force" in url else "act_in_force"
+            self.calls.append(kind)
+            return Response(kind)
+
+    client = Client()
+    rows = list(VictoriaLegislationAdapter(client=client).discover(
+        "2026-07-02T00:00:00+10:00", max_pages=40
+    ))
+    assert rows == []
+    # One cursor-reaching page per register, not 40 silent pages per register.
+    assert client.calls == ["act_in_force", "sr_in_force"]

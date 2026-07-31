@@ -379,8 +379,10 @@ def test_link_label_names_each_lii_and_tolerates_subdomains(config):
 def test_link_label_falls_back_to_source_without_a_url(config):
     f = Facade(config)
 
-    assert f.link_label(None, "uk-legislation") == "legislation.gov.uk"
-    assert f.link_label("", "edpb") == "EDPB"
+    # With no host, use the same canonical SourceInfo label every API/backfill
+    # surface uses (never a second screen-local naming table).
+    assert f.link_label(None, "uk-legislation") == "UK legislation (legislation.gov.uk)"
+    assert f.link_label("", "edpb") == "EDPB documents (guidelines, opinions, decisions…)"
     # an unmapped host is reported honestly as itself, never guessed
     assert f.link_label("https://example.gov/x", "uk-caselaw") == "example.gov"
 

@@ -38,6 +38,7 @@ log = logging.getLogger("raglex.jobs")
 SINGLETON_KINDS = frozenset({
     "rescan-citations", "backfill-metadata", "backfill-edge-keys", "repair-au-cth",
     "repair-de-citations", "repair-de-renditions", "repair-eu-repeals",
+    "repair-eu-annexes",
     "backfill-eu-stubs",
     "rebuild-citation-counts", "rebuild-authority", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
@@ -63,6 +64,7 @@ MAX_CONCURRENT_JOBS = 6
 # dedups against a second whole-queue drain but no longer blocks the per-category buttons.
 DEDUP_KINDS = frozenset({
     "run-watch", "gap-scan", "harvest-source", "harvest-all", "static-export",
+    "sync-eu-consolidations",
 })
 
 # Resume is an explicit contract, not a blanket promise that "idempotent" means no
@@ -72,6 +74,7 @@ DEDUP_KINDS = frozenset({
 RESUME_POLICIES = {
     "rescan-citations": "checkpoint", "rescan": "checkpoint",
     "harvest-source": "deduplicate", "harvest-all": "deduplicate",
+    "sync-eu-consolidations": "deduplicate",
     "embed": "deduplicate",
     "import-bailii-corpus": "deduplicate", "import-bailii-zip": "deduplicate",
     "import-bailii-dir": "deduplicate", "import-bailii-parquet": "deduplicate",
@@ -85,6 +88,8 @@ RESUME_POLICIES = {
     "reparse-source": "checkpoint",
     # resumes the whole-source citation re-anchor from the last stable_id checkpoint
     "reanchor-citations": "checkpoint",
+    # resumes the local Formex package repair from the last completely reparsed/re-mined act
+    "repair-eu-annexes": "checkpoint",
 }
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 # All three write the citations table; a re-anchor and a rescan of the SAME source must
@@ -104,6 +109,7 @@ CHAIN_TRIGGER_KINDS = frozenset({
     "import-caselaw-zip", "import-caselaw-dir", "reparse-source", "finish-bulk-postprocess",
     # a phantom prune changes the counts as surely as a harvest does
     "repair-de-citations",
+    "repair-eu-annexes", "sync-eu-consolidations",
 })
 # (follow-up kind, min seconds since its last completion before re-running). embed is cheap
 # and incremental; the count roll-up is moderate; PageRank walks the whole graph, so it gets
@@ -302,6 +308,12 @@ RUNNERS: dict[str, Callable] = {
     "repair-de-renditions": lambda f, p, cb, cancel: f.repair_de_duplicate_renditions(**p, on_progress=cb, cancel_check=cancel),
     # re-ask CELLAR which "repeals" edges were only implicit ones
     "repair-eu-repeals": lambda f, p, cb, cancel: f.repair_eu_implicit_repeals(**p, on_progress=cb, cancel_check=cancel),
+    "repair-eu-annexes": lambda f, p, cb, cancel: f.repair_eu_split_annexes(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
+    "sync-eu-consolidations": lambda f, p, cb, cancel: f.sync_eu_consolidations(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
     "backfill-intituling": lambda f, p, cb, cancel: f.backfill_intituling(**p, on_progress=cb, cancel_check=cancel),
     "resegment-judgments": lambda f, p, cb, cancel: f.resegment_judgments(**p, on_progress=cb, cancel_check=cancel),
     "build-fts": lambda f, p, cb, cancel: f.build_freetext_index(**p, on_progress=cb, cancel_check=cancel),
@@ -587,6 +599,9 @@ class JobManager:
 
         threading.Thread(target=pulse, daemon=True).start()
         try:
+            # Universal first event: even a runner that has not yet reached its own
+            # first callback is visibly alive and names what is starting.
+            on_progress(stage=f"starting {kind}", done=0)
             result = RUNNERS[kind](self.facade, params, on_progress, cancel_check)
             status = "cancelled" if state["cancel"] else "done"
             state["log"].append(f"— {status} —")
@@ -709,12 +724,23 @@ class JobManager:
                 if elapsed > 0 and isinstance(done, (int, float)) and done > done0 else None)
         eta = ((float(total) - float(done)) / rate
                if rate and isinstance(total, (int, float)) and total >= done else None)
+        process_alive = running and lease_idle < STALL_SECONDS
+        progress_quiet = running and idle >= STALL_SECONDS
+        activity_state = (
+            "stopped" if running and not process_alive else
+            "waiting" if process_alive and progress_quiet else
+            "working" if running else
+            "finished"
+        )
         out = {
             "id": j["job_id"], "kind": j["kind"], "label": j["label"], "status": j["status"],
             "origin": j["origin"], "progress": progress,
             "started_at": j["started_at"], "finished_at": j["finished_at"],
-            "idle_s": round(idle, 1), "stalled": running and idle >= STALL_SECONDS,
-            "process_alive": running and lease_idle < STALL_SECONDS,
+            "idle_s": round(idle, 1),
+            "stalled": running and not process_alive,
+            "waiting": process_alive and progress_quiet,
+            "activity_state": activity_state,
+            "process_alive": process_alive,
             "lease_idle_s": round(lease_idle, 1),
             "rate_per_s": round(rate, 3) if rate else None,
             "eta_s": round(eta) if eta is not None else None,
@@ -812,9 +838,10 @@ class JobManager:
                 if checkpoint.get("completed") is not None:
                     params["tag_start"] = int(checkpoint["completed"])
         # A whole-source reparse / re-anchor continues from the last stable_id it committed.
-        if (row.get("kind") in ("reparse-source", "reanchor-citations")
+        if (row.get("kind") in ("reparse-source", "reanchor-citations", "repair-eu-annexes")
                 and checkpoint.get("after_stable_id")
-                and checkpoint.get("source") == params.get("source")):
+                and (row.get("kind") == "repair-eu-annexes"
+                     or checkpoint.get("source") == params.get("source"))):
             params["after_stable_id"] = checkpoint["after_stable_id"]
         root = row.get("root_job_id") or row["job_id"]
         res = self.start(row["kind"], row["label"], params,

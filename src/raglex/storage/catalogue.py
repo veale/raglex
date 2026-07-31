@@ -1972,7 +1972,14 @@ class Catalogue:
                 or str(row["decision_date"] or "")[:10]
                 or date.today().isoformat()
             )
-            applicable = self.applicable_legislative_version(base_id, reference_date)
+            # ``versions`` is already loaded above. Calling
+            # applicable_legislative_version() here performed the same DB query once
+            # per citation (2,566 times for UCPD), making a three-version import look
+            # frozen for minutes. Select from the in-memory lineage instead.
+            applicable_versions = [
+                item for item in versions if item[1] <= reference_date
+            ]
+            applicable = applicable_versions[-1] if applicable_versions else None
             if not applicable:
                 continue
             version_id, version_date = applicable

@@ -572,6 +572,49 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.reparse_all(doc_type=doc_type)
 
     @admin
+    def repair_eu_annexes(limit: int = 100000, after_stable_id: str = "") -> dict:
+        """Start a resumable local repair of held EU Formex packages whose annexes
+        were split into secondary XML members. Reparse and citation re-extraction are
+        checkpointed together, so MCP and the web maintenance action behave identically."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "repair-eu-annexes",
+            "repair split EU Formex annexes",
+            {"limit": limit, "after_stable_id": after_stable_id},
+        )
+
+    @admin
+    def backfill_eu_consolidations(max_pages: Optional[int] = None) -> dict:
+        """Start the reverse Cellar sweep over every sector-0 dated expression,
+        including future-effective snapshots. Each is linked to its sector-3 base act;
+        the walk is offset-checkpointed and held versions deduplicate before download."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "harvest-source",
+            "backfill all EU dated consolidations (CELLAR)",
+            {
+                "source": "eu-legislation",
+                "backfill": True,
+                "max_pages": max_pages,
+                "options": {"consolidations_only": "true"},
+                "force_full": True,
+                "resume_unfinished": True,
+            },
+        )
+
+    @admin
+    def sync_eu_act_consolidations(stable_id: str) -> dict:
+        """Start an immediate deduplicated Cellar lookup for every dated expression
+        of one sector-3 CELEX. This is the same self-healing operation the reader starts
+        automatically when an EU base act has no held consolidation lineage."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "sync-eu-consolidations",
+            f"import consolidations for {stable_id}",
+            {"stable_id": stable_id},
+        )
+
+    @admin
     def backfill_eu_case_metadata(limit: int = 500) -> dict:
         """Augment harvested CJEU cases from the EUR-Lex webservice with the official
         case name + subject-matter tags (the free CELLAR data omits these). Batched +

@@ -3495,6 +3495,7 @@ function KeepCurrentPanel() {
     ["Propagate changes an act makes", "hourly", "Flags held acts affected by a change for re-pull."],
     ["Rebuild citation-frequency roll-up", "hourly", "Keeps the worklist ranking fresh."],
     ["Top up the statute gazetteer", "weekly", "Pulls newly passed acts from legislation.gov.uk so name citations keep confirming."],
+    ["Import EU dated consolidations", "weekly + on demand", "Walks Cellar's sector-0 catalogue directly, including future-effective snapshots. Opening an EU base act with a missing lineage also starts a targeted sync automatically."],
     ["Drain the harvest worklist", "per tick", "Fetches a bounded batch of routable references each tick (set auto-drain on the Unresolved tab)."],
     ["Run due watches", "per tick", "Every enabled watch whose cadence is due starts as a Job."],
   ];
@@ -3520,6 +3521,10 @@ function KeepCurrentPanel() {
         <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
         <button onClick={() => runNow("backfill-eu-case-names", "EU case names")}
           title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs as a Job — one call per 50 cases — and the scheduler runs the same job daily when the 'eu-case-names' task is enabled.">⇊ EU case names</button>
+        <button onClick={() => runNow("backfill-eu-consolidations", "EU consolidations")}
+          title="Walk Cellar sector-0 directly and import every dated Regulation, Directive and Decision consolidation, including future-effective snapshots. Resumable and deduplicated.">⇊ EU consolidations</button>
+        <button onClick={() => runNow("repair-eu-annexes", "EU annex repair")}
+          title="Inspect held EU Formex ZIPs and reparse acts whose annexes were split into separate XML members; re-extracts citations after text changes.">✎ Repair EU annexes</button>
         <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
         <button onClick={() => fireJob("rescan", { doc_types: ["judgment"], only_unextracted: true }, (m) => setMsg(`scan unscanned judgments: ${m}`))} title="Extract ONLY judgments that have no citation edges yet — the never-scanned backlog. Never re-touches an already-scanned document, so it's the cheap way to finish an interrupted run.">⟳ Scan unscanned (judgments)</button>
         <button onClick={() => fireJob("rescan", { only_unextracted: true }, (m) => setMsg(`resume extraction (whole corpus): ${m}`))} title="Resume citation extraction for EVERYTHING unextracted across the whole corpus — every text document with no citation edges yet, any source. This is what to run after a bulk/backfill import's Extract-Citations phase was cancelled: it's checkpointed and idempotent, so it processes only what never finished, no matter which source it belonged to.">⟳ Resume extraction (whole corpus)</button>
@@ -4450,20 +4455,22 @@ export function JobsPanel() {
           // bare fraction whose meaning silently changed.
           const phase = j.resume?.checkpoint?.phase;
           return (
-            <div key={j.id} className={`job${j.stalled ? " job-stalled" : ""}`}>
+            <div key={j.id} className={`job${j.stalled ? " job-stalled" : ""}${j.waiting ? " job-waiting" : ""}`}>
               <div className="row" style={{ alignItems: "center", gap: 6 }}>
                 <a onClick={() => setOpenId(isOpen ? null : j.id)} style={{ flex: 1, cursor: "pointer", fontSize: 12 }}>
                   {isOpen ? "▾" : "▸"} {j.label || j.kind}
                   {phase && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }} title="Current pipeline phase (from the job's saved checkpoint)">{phase}</span>}
                   {j.origin === "scheduler" && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }} title="Started by the background scheduler, not from this UI">scheduler</span>}</a>
-                {j.stalled && <span className="job-stall-tag" title={`No progress for ${Math.round(j.idle_s)}s — the job is probably frozen (its network connection died, e.g. after the host slept). Restart to resume from where the data left off; it skips work already done.`}>frozen?</span>}
-                <button className="mini" title="Re-run this job from where its saved data left off (skips work already done). Use it when a job has frozen after the machine slept/woke." onClick={() => api.restartJob(j.id)}>↻ restart</button>
+                {j.waiting && <span className="job-wait-tag" title={`The worker process is alive (lease heartbeat ${Math.round(j.lease_idle_s)}s ago), but this phase has not emitted an item-progress event for ${Math.round(j.idle_s)}s. It may be discovering, downloading, parsing, retrying, or doing database work; it is not classified as stopped.`}>working · quiet phase</span>}
+                {j.stalled && <span className="job-stall-tag" title={`The worker's process lease expired ${Math.round(j.lease_idle_s)}s ago. This is genuinely stopped, rather than merely a long source/database phase. Restart resumes according to the job's saved policy/checkpoint.`}>worker stopped</span>}
+                <button className="mini" title={j.stalled ? "Restart this stopped job from its durable checkpoint/state." : "Request a cooperative restart. The current live worker is cancelled first, so two writers never overlap."} onClick={() => api.restartJob(j.id)}>↻ restart</button>
                 <button className="mini" onClick={() => api.cancelJob(j.id)}>cancel</button>
               </div>
               <div className="job-bar"><div style={{ width: `${pct}%` }} /></div>
               <div className="muted" style={{ fontSize: 11 }}>
                 {j.last || (p.stage ? `${p.stage} ${p.done ?? 0}/${p.total ?? "?"}` : "starting…")}
                 {j.eta_s != null && j.eta_s > 0 && <span style={{ marginLeft: 6 }} title={j.rate_per_s ? `${j.rate_per_s}/s` : undefined}>· ~{fmtEta(j.eta_s)} left</span>}
+                {j.waiting && <span style={{ marginLeft: 6 }}>· worker alive; last item update {fmtEta(j.idle_s)} ago</span>}
               </div>
               {isOpen && detail?.log && (
                 <pre className="job-log">{(detail.log || []).slice(-14).join("\n")}</pre>
@@ -5681,9 +5688,17 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   } else if (s.version_state === "base_with_consolidation") {
     versionNotice = <><b>This is the base act, not a dated consolidated snapshot.</b>
       {" "}Latest applicable consolidation held by RagLex: {links([s.latest_applicable_consolidation.stable_id])}.</>;
+  } else if (s.source === "eu-legislation") {
+    versionNotice = <><b>This is the undated/base EU act, not a dated consolidated snapshot.</b>
+      {" "}RagLex has not yet imported a dated consolidation for this act; that does not mean none exists in EUR-Lex.
+      {s.consolidation_sync
+        ? <> A deduplicated Cellar lookup has started automatically.</>
+        : s.consolidations_checked_at
+          ? <> Cellar was last checked at {String(s.consolidations_checked_at).slice(0, 10)} and RagLex still holds none.</>
+          : <> A Cellar lookup will start automatically.</>}</>;
   } else {
     versionNotice = <><b>This is an undated legislation record, not a dated snapshot.</b>
-      {" "}RagLex currently holds no dated consolidation for this act.</>;
+      {" "}RagLex has not imported a dated consolidation for this act; this is a corpus-coverage statement, not a claim that the official source has none.</>;
   }
 
   const provisions = (s.provisions || []) as any[];

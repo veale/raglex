@@ -12,9 +12,11 @@ emitted (§5b). When CELLAR starts publishing an AKN4EU manifestation, it's a ne
 **Discovery is a CELLAR SPARQL enumeration by default** — the full-catalogue path.
 Naming CELEXes (``-o celex=32016R0679,32016L0680``) fetches exactly those; otherwise
 ``discover`` walks sector-3 legal acts (Regulations ``R``, Directives ``L``, Decisions
-``D``) newest-first, paging with ``OFFSET``. An **incremental** run stops at the stored
-document-date cursor; a **backfill** (no cursor, no page cap) walks the whole series.
-``types=`` picks the descriptors, ``years=`` bounds the span.
+``D``) newest-first, paging with ``OFFSET``. ``consolidations_only=true`` instead walks
+the complete sector-0 dated-expression series — including future-effective snapshots.
+An **incremental** run stops at the stored document-date cursor; a **backfill** (no
+cursor, no page cap) walks the whole series. ``types=`` picks the descriptors,
+``years=`` bounds the span.
 """
 
 from __future__ import annotations
@@ -131,6 +133,8 @@ class EULegislationAdapter(BaseAdapter):
     def __init__(self, *, celex: str | tuple[str, ...] | None = None,
                  types: str | None = None, years: str | None = None,
                  include_consolidations: bool | str = False,
+                 consolidations_only: bool | str = False,
+                 start_offset: int = 0,
                  page_size: int = 200, client: RateLimitedClient | None = None) -> None:
         if isinstance(celex, str):
             celex = tuple(c.strip() for c in celex.split(",") if c.strip())
@@ -139,12 +143,17 @@ class EULegislationAdapter(BaseAdapter):
             or DEFAULT_TYPES
         self.years = _year_span(years)
         self.include_consolidations = _flag(include_consolidations)
+        self.consolidations_only = _flag(consolidations_only)
+        self.start_offset = max(0, int(start_offset or 0))
         self.page_size = max(1, min(int(page_size), 1000))
         # With no explicit CELEX list, enumerate the catalogue over SPARQL.
         self.enumerate = not self.celex_list
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        if self.consolidations_only:
+            yield from self._discover_consolidations(max_pages=max_pages)
+            return
         if self.enumerate:
             yield from self._discover_enumerate(since, max_pages=max_pages)
             return
@@ -176,7 +185,8 @@ ORDER BY ?celex
             rows = self._sparql(query)
         except Exception:
             return
-        for row in rows:
+        total = len(rows) + 1  # the base stub precedes these dated expressions
+        for position, row in enumerate(rows, 2):
             celex = str(row.get("celex") or "").strip().upper()
             if not re.fullmatch(r"0\d{4}[RLD]\d{4}-\d{8}", celex):
                 continue
@@ -184,7 +194,11 @@ ORDER BY ?celex
                 stable_id=celex,
                 landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
                 raw_url=f"{CELEX_BASE}/{celex}",
-                hints={"consolidation_of": base_celex},
+                hints={
+                    "consolidation_of": base_celex,
+                    "feed_total": total,
+                    "feed_position": position,
+                },
             )
 
     # -- SPARQL enumeration (the full-catalogue path) -----------------------
@@ -195,6 +209,91 @@ ORDER BY ?celex
         )
         bindings = resp.json().get("results", {}).get("bindings", [])
         return [{k: v["value"] for k, v in row.items()} for row in bindings]
+
+    def _consolidation_query(self, offset: int) -> str:
+        """Enumerate every dated sector-0 expression.
+
+        Do not filter against today's date: EUR-Lex publishes future-effective
+        consolidations in advance, and RagLex must hold them while keeping them
+        distinct from the latest snapshot applicable *today*.
+        """
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex WHERE {{
+  ?work cdm:resource_legal_id_celex ?celex .
+        FILTER(REGEX(STR(?celex), "^0[0-9]{{4}}[A-Z]+[0-9]+-[0-9]{{8}}$"))
+}}
+ORDER BY ?celex
+LIMIT {self.page_size} OFFSET {offset}
+"""
+
+    def _discover_consolidations(self, *, max_pages: int | None) -> Iterator[Stub]:
+        """Walk the complete Cellar consolidation catalogue with a durable offset."""
+        offset = self.start_offset
+        pages = 0
+        while True:
+            try:
+                rows = self._sparql(self._consolidation_query(offset))
+            except Exception:
+                return
+            if not rows:
+                return
+            # Sector 0 replaces (and therefore hides) the base act's sector digit.
+            # Resolve it in one batched VALUES query per page across the only base
+            # sectors EUR-Lex consolidates: treaties, international agreements,
+            # secondary law and complementary legislation.
+            bodies = {
+                str(row.get("celex") or "")[1:].split("-", 1)[0]
+                for row in rows
+                if re.fullmatch(
+                    r"0\d{4}[A-Z]+\d+-\d{8}",
+                    str(row.get("celex") or "").strip().upper(),
+                )
+            }
+            candidates = [f"{sector}{body}" for body in bodies for sector in "1234"]
+            bases: set[str] = set()
+            if candidates:
+                values = " ".join(f'"{candidate}"' for candidate in candidates)
+                try:
+                    base_rows = self._sparql(f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?base WHERE {{
+  VALUES ?base {{ {values} }}
+  ?work cdm:resource_legal_id_celex ?base .
+}}
+""")
+                    bases = {
+                        str(row.get("base") or "").strip().upper()
+                        for row in base_rows
+                    }
+                except Exception:
+                    bases = set()
+            for index, row in enumerate(rows, 1):
+                celex = str(row.get("celex") or "").strip().upper()
+                if not re.fullmatch(r"0\d{4}[A-Z]+\d+-\d{8}", celex):
+                    continue
+                body = celex[1:].split("-", 1)[0]
+                matching = [candidate for candidate in bases if candidate[1:] == body]
+                base = (
+                    next((candidate for candidate in matching if candidate.startswith("3")), None)
+                    or (matching[0] if len(matching) == 1 else None)
+                    or "3" + body
+                )
+                yield Stub(
+                    stable_id=celex,
+                    landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
+                    raw_url=f"{CELEX_BASE}/{celex}",
+                    hints={
+                        "consolidation_of": base,
+                        # Pipeline persists this on the harvest job. A deploy resumes
+                        # at the next row rather than replaying the whole Cellar walk.
+                        "resume_offset": offset + index,
+                    },
+                )
+            pages += 1
+            offset += len(rows)
+            if len(rows) < self.page_size or (max_pages is not None and pages >= max_pages):
+                return
 
     def _enumerate_query(self, since: str | None, offset: int) -> str:
         descriptors = "".join(t for t in self.types if len(t) == 1)
@@ -299,7 +398,7 @@ LIMIT {self.page_size} OFFSET {offset}
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"format": "formex-legislation", "celex": stub.stable_id,
                        "eli": primary.get("eli") if primary else None, "aliases": aliases},
-            ))
+            ), base_celex=stub.hints.get("consolidation_of"))
         # No Formex rendition (common for old instruments like Directive 95/46) — fall
         # back to the EUR-Lex HTML, which exists even when Formex doesn't.
         html = self._fetch_html(stub.stable_id)
@@ -317,7 +416,7 @@ LIMIT {self.page_size} OFFSET {offset}
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"format": "eurlex-html", "celex": stub.stable_id,
                        "eli": primary.get("eli") if primary else None, "aliases": aliases},
-            ))
+            ), base_celex=stub.hints.get("consolidation_of"))
         # Neither Formex nor HTML parsed — register a metadata stub so the (often
         # heavily-cited) instrument is still a real, clickable node and its citations
         # resolve (§5b); text can be backfilled later.
@@ -330,14 +429,14 @@ LIMIT {self.page_size} OFFSET {offset}
             extracted_via=ExtractedVia.STRUCTURED,
             extra={"celex": stub.stable_id, "metadata_only": True,
                    "eli": primary.get("eli") if primary else None, "aliases": aliases},
-        ))
+        ), base_celex=stub.hints.get("consolidation_of"))
 
     @staticmethod
-    def _decorate_currency(record: Record) -> Record:
+    def _decorate_currency(record: Record, *, base_celex: str | None = None) -> Record:
         """Attach sector-0 identity and its authoritative base-act edge."""
         from ..eu_law import consolidation_base, consolidation_date
 
-        base = consolidation_base(record.stable_id)
+        base = base_celex or consolidation_base(record.stable_id)
         if not base:
             return record
         if not any(

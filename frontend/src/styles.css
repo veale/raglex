@@ -685,7 +685,11 @@ tbody tr:hover { background: var(--surface-2); }
 .job { margin-bottom: var(--sp-4); }
 .job-stalled { border-left: 2px solid var(--warn, #d9822b); padding-left: var(--sp-3); margin-left: -2px; }
 .job-stalled .job-bar > div { background: var(--warn, #d9822b); animation: jobpulse 1.4s ease-in-out infinite; }
+.job-waiting { border-left: 2px solid var(--accent); padding-left: var(--sp-3); margin-left: -2px; }
+.job-waiting .job-bar > div { animation: jobpulse 1.8s ease-in-out infinite; }
 .job-stall-tag { font-size: .6875rem; color: var(--warn, #d9822b); border: 1px solid currentColor;
+  padding: 0 var(--sp-2); border-radius: var(--radius); flex: 0 0 auto; cursor: help; }
+.job-wait-tag { font-size: .6875rem; color: var(--accent); border: 1px solid currentColor;
   padding: 0 var(--sp-2); border-radius: var(--radius); flex: 0 0 auto; cursor: help; }
 .job-bar { height: 6px; background: var(--surface-2); border-radius: var(--radius); overflow: hidden; margin: var(--sp-2) 0; }
 .job-bar > div { height: 100%; background: var(--accent); transition: width .3s; }

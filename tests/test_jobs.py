@@ -135,6 +135,31 @@ def test_harvest_restart_always_finishes_stored_extraction_backlog(monkeypatch):
     assert started["params"]["resume_unfinished"] is True
 
 
+def test_eu_annex_repair_restart_uses_stable_id_checkpoint(monkeypatch):
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job(
+            "annex-old", "repair-eu-annexes", "repair EU annexes",
+            {"limit": 100000}, origin="api",
+            checkpoint={
+                "phase": "repair",
+                "source": "eu-legislation",
+                "after_stable_id": "32005L0029",
+            },
+        )
+        cat.finish_job("annex-old", "interrupted", {})
+    started: dict = {}
+    mgr = JobManager(f, origin="api")
+    monkeypatch.setattr(
+        mgr, "start",
+        lambda kind, label, params, **resume:
+            started.update(kind=kind, params=params) or {"job_id": "annex-new"},
+    )
+    mgr.restart("annex-old")
+    assert started["kind"] == "repair-eu-annexes"
+    assert started["params"]["after_stable_id"] == "32005L0029"
+
+
 def test_checkpoint_is_distinct_from_display_progress():
     f = _facade()
     with f._open() as (cat, _rs, _ts):
@@ -226,6 +251,33 @@ def test_job_status_exposes_resume_lineage_and_liveness():
         "attempt": 2, "checkpoint": {},
     }
     assert row["process_alive"] is True
+
+
+def test_job_status_distinguishes_live_quiet_worker_from_stopped_worker():
+    from datetime import datetime, timedelta, timezone
+
+    f = _facade()
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(minutes=10)).isoformat()
+    live = now.isoformat()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("quiet", "harvest-source", "quiet", {})
+        cat.conn.execute(
+            "UPDATE jobs SET heartbeat_at = ?, lease_heartbeat_at = ? WHERE job_id = ?",
+            (old, live, "quiet"),
+        )
+        cat.create_job("stopped", "harvest-source", "stopped", {})
+        cat.conn.execute(
+            "UPDATE jobs SET heartbeat_at = ?, lease_heartbeat_at = ? WHERE job_id = ?",
+            (old, old, "stopped"),
+        )
+        cat.conn.commit()
+    quiet = JobManager(f).get("quiet")
+    stopped = JobManager(f).get("stopped")
+    assert quiet["waiting"] is True and quiet["stalled"] is False
+    assert quiet["activity_state"] == "waiting" and quiet["process_alive"] is True
+    assert stopped["stalled"] is True and stopped["waiting"] is False
+    assert stopped["activity_state"] == "stopped" and stopped["process_alive"] is False
 
 
 def test_harvest_restart_keeps_discovery_cursor_after_later_phases(monkeypatch):

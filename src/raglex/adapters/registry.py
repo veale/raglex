@@ -657,6 +657,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("celex", "CELEX ids", "32016R0679,12012P,12016M,12016E"),
          SourceOption("include_consolidations", "Fetch dated consolidations",
                       "true — with explicitly named sector-3 CELEX ids"),
+         SourceOption("consolidations_only", "Walk every dated consolidation",
+                      "true — all Cellar sector-0 acts, including future snapshots"),
          SourceOption("types", "Descriptors to enumerate", "R,L,D,TREATY (default)"),
          SourceOption("years", "Year range", "1990-2026")),
         ("CELEX (32016R0679)", "Treaty/Charter CELEX (12012P)", "Directive/Regulation number"),

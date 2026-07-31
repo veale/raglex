@@ -26,6 +26,13 @@ maintain their own country-name table.
 An adapter should also test that its key is present in `source_catalog()`, that its
 incremental mode is correct, and that each option name is accepted by its constructor.
 
+Any adapter used by a background harvest must also follow
+[`job-authoring.md`](job-authoring.md). In particular, discovery must stop at a
+newest-first cursor, expose a durable page/offset cursor where possible, and avoid
+silently paging for minutes without yielding an item. The shared pipeline reports
+fetch/store progress for each yielded `Stub`; accurate `Stub.hints.feed_total` and
+`resume_offset` make that progress determinate and resumable.
+
 ## Provision lineage
 
 Do not use citation aliases to say that two statutory provisions perform a similar
@@ -41,3 +48,23 @@ Each mapping records provenance (`manual`, `llm`, or `structured`), optional con
 and an explanation. Functional lineage causes citations to the previous provision to
 surface separately beside the current provision. It never changes the literal citation
 edge and never claims that the citing author mentioned the newer law.
+
+## Structured archives and legislation versions
+
+Never assume that the largest XML member of a structured archive is the whole
+document. Publication packages commonly split schedules/annexes, tables, or later
+parts into sibling members. A format parser must:
+
+- exclude bibliographic/manifest members explicitly;
+- parse every ordered content member;
+- preserve annexes/schedules as named, citable structural segments; and
+- include a regression fixture in which the annex is not in the largest member.
+
+Do not model a consolidated text as an overwrite of the base act. Store each dated
+expression under its own stable identifier and add a typed link to the base instrument.
+Keep all dates, including future-effective expressions; the currency layer decides which
+is latest *applicable today* and separately reports a newer future snapshot. An adapter
+with an enumerable version series should expose a resumable full-series mode rather than
+forcing one lookup per base act. For EU law this is the complete Cellar sector-0 sweep
+(`consolidations_only=true`); targeted sector-3 imports should use
+`include_consolidations=true`.

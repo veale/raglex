@@ -44,6 +44,109 @@ def test_targeted_legislation_can_enumerate_and_link_consolidations(monkeypatch)
     ]
 
 
+def test_reverse_sector_zero_sweep_keeps_future_versions_and_resume_offset(monkeypatch):
+    adapter = EULegislationAdapter(
+        consolidations_only=True, start_offset=400, page_size=2
+    )
+    queries = []
+
+    def fake_sparql(query):
+        queries.append(query)
+        return [
+            {"celex": "02005L0029-20220528"},
+            {"celex": "02005L0029-20260927"},
+        ] if "OFFSET 400" in query else []
+
+    monkeypatch.setattr(adapter, "_sparql", fake_sparql)
+    stubs = list(adapter.discover(None))
+    assert [s.stable_id for s in stubs] == [
+        "02005L0029-20220528", "02005L0029-20260927",
+    ]
+    assert [s.hints["consolidation_of"] for s in stubs] == [
+        "32005L0029", "32005L0029",
+    ]
+    assert [s.hints["resume_offset"] for s in stubs] == [401, 402]
+    assert "^0[0-9]{4}[A-Z]+" in queries[0]
+
+
+def test_corpus_annex_repair_reparses_and_reextracts_split_packages(tmp_path):
+    import io
+    import zipfile
+
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "01.xml",
+            "<ACT><ENACTING.TERMS><ARTICLE><TI.ART>Article 1</TI.ART>"
+            "<P>Purpose.</P></ARTICLE></ENACTING.TERMS></ACT>",
+        )
+        zf.writestr(
+            "02.xml",
+            "<ACT><ANNEX><TITLE>ANNEX I</TITLE>"
+            "<P>Article 2 of Directive 2005/29/EC applies.</P></ANNEX></ACT>",
+        )
+        zf.writestr("notice.doc.xml", "<DOC/>")
+    raw = buf.getvalue()
+    cfg = Config(
+        data_dir=tmp_path,
+        catalogue_path=tmp_path / "c.sqlite",
+        raw_dir=tmp_path / "raw",
+        text_dir=tmp_path / "text",
+        settings_path=tmp_path / "s.json",
+        embed_provider="local-hashing",
+        embed_model=None,
+    )
+    facade = Facade(cfg)
+    rec = Record(
+        source="eu-legislation",
+        stable_id="32005L0029",
+        doc_type=DocType.LEGISLATION,
+        title="Unfair Commercial Practices Directive",
+        raw_bytes=raw,
+        raw_ext="zip",
+        text="Article 1\nPurpose.",
+        extra={"format": "formex-legislation"},
+    )
+    rec.ensure_payload_hash()
+    with facade._open() as (cat, rs, ts):
+        raw_hash = rs.put(raw, ext="zip")
+        raw_path = str(rs.path_for(raw_hash, "zip"))
+        text_path = str(ts.put(rec.payload_hash, rec.text))
+        cat.upsert_document(rec, raw_path=raw_path, text_path=text_path)
+
+    result = facade.repair_eu_split_annexes()
+    assert result["eligible"] == result["reparsed"] == 1
+    assert result["citations_reextracted"] == 1
+    with facade._open() as (cat, _rs, ts):
+        doc = cat.get_document("32005L0029")
+        labels = [s.label for s in ts.get_segments(doc["payload_hash"])]
+        assert labels == ["Article 1", "ANNEX I"]
+        assert doc["last_extracted_at"] is not None
+
+
+def test_targeted_consolidation_sync_stamps_successful_lookup(tmp_path, monkeypatch):
+    facade = _leg_facade(tmp_path)
+    called = {}
+
+    def fake_harvest(source, **params):
+        called.update(source=source, params=params)
+        return {"stored": 2}
+
+    monkeypatch.setattr(facade, "harvest", fake_harvest)
+    result = facade.sync_eu_consolidations(stable_id="32016R0679")
+    assert result["stored"] == 2
+    assert called["source"] == "eu-legislation"
+    assert called["params"]["options"] == {
+        "celex": "32016R0679",
+        "include_consolidations": "true",
+    }
+    with facade._open() as (cat, _rs, _ts):
+        assert cat.document_meta("32016R0679")["consolidations_checked_at"]
+
+
 def test_classify_change_reconstructs_the_kind():
     assert E.classify_change(celex="02016R0679-20160504") == "consolidation"
     assert E.classify_change(repeals=True, based_on=True,

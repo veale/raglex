@@ -270,6 +270,20 @@ class Pipeline:
                         continue
                     refreshed = True
 
+                # Fetch is usually the longest opaque operation (network retries,
+                # download and parsing). Announce the exact item immediately before
+                # blocking; the throttled discovery heartbeat may name a preceding
+                # deduped stub on a short targeted run.
+                if on_progress:
+                    fetch_progress = {
+                        "stage": f"fetching {adapter.source}",
+                        "done": stats.discovered,
+                        "stored": stats.stored,
+                        "item": stub.stable_id,
+                    }
+                    if stub.hints.get("feed_total"):
+                        fetch_progress["total"] = int(stub.hints["feed_total"])
+                    on_progress(**fetch_progress)
                 try:
                     record = adapter.fetch(stub)
                 except RateLimitException:
@@ -319,6 +333,16 @@ class Pipeline:
                     stats.not_found += 1
                     continue
                 stats.fetched += 1
+                if on_progress:
+                    store_progress = {
+                        "stage": f"storing {adapter.source}",
+                        "done": stats.discovered,
+                        "stored": stats.stored,
+                        "item": record.stable_id,
+                    }
+                    if stub.hints.get("feed_total"):
+                        store_progress["total"] = int(stub.hints["feed_total"])
+                    on_progress(**store_progress)
 
                 # Provisional-id dedup (§5). Some adapters can only mint a stub's real
                 # identity by fetching it: the id is the neutral citation printed inside

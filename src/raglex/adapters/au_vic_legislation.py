@@ -134,6 +134,14 @@ class VictoriaLegislationAdapter(BaseAdapter):
                 data = self._client.get(url, params=params).json()
                 params = None
                 rows, url = parse_vic_page(data, kind)
+                # The register is sorted newest-first. Once a whole page is at or
+                # behind the watch cursor, every later page is older: stop instead
+                # of silently walking 40 pages while yielding no stubs/progress.
+                reached_cursor = bool(
+                    since and rows and all(
+                        row.get("changed") and row["changed"] <= since for row in rows
+                    )
+                )
                 for row in rows:
                     if since and row["changed"] and row["changed"] <= since:
                         continue
@@ -149,7 +157,7 @@ class VictoriaLegislationAdapter(BaseAdapter):
                         },
                     )
                 pages += 1
-                if max_pages is not None and pages >= max_pages:
+                if reached_cursor or (max_pages is not None and pages >= max_pages):
                     break
 
     def fetch(self, stub: Stub) -> Record | None:

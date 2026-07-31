@@ -1065,6 +1065,12 @@ class Facade:
             doc = cat.get_document(stable_id)
             meta = _row_meta(doc) if doc is not None else {}
             source = (doc["source"] if doc is not None else None)
+            # A sector-0 identifier hides whether its base came from sector 1, 2,
+            # 3 or 4. The adapter resolves and records the actual base from Cellar;
+            # only legacy records need the sector-3 string fallback above.
+            if is_cons and meta.get("consolidation_of"):
+                cons_base = str(meta["consolidation_of"])
+                lineage_base = cons_base
             held_versions = cat.legislative_versions(lineage_base)
             # editorial-lag backlog (UK unapplied effects), if this act is on the re-check queue
             eff = cat.conn.execute(
@@ -1197,6 +1203,7 @@ class Facade:
             "latest_held_consolidation": latest_held,
             "latest_applicable_consolidation": latest_applicable,
             "consolidation_versions": consolidation_versions,
+            "consolidations_checked_at": meta.get("consolidations_checked_at"),
             "point_in_time_capable": bool(native.point_in_time_capable),
             "unapplied_count": unapplied, "up_to_date": up_to_date,
             "by_article": by_article, "provisions": provisions,
@@ -5407,6 +5414,140 @@ class Facade:
         n = sum(1 for sid in ids if self.reparse_document(stable_id=sid).get("reparsed"))
         return {"candidates": len(ids), "reparsed": n}
 
+    def repair_eu_split_annexes(self, *, after_stable_id: str = "",
+                                limit: int = 100000, on_progress=None,
+                                cancel_check=None) -> dict:
+        """Repair held EU acts whose Formex annexes were previously omitted.
+
+        This is a local, resumable projection repair: immutable raw ZIPs are inspected
+        without touching the network. It covers both annexes split into sibling XML
+        members and sector-0 ``CONS.ANNEX`` elements. Qualifying acts are reparsed and
+        their citations re-extracted so offsets and annex pinpoints match the regenerated
+        text. The checkpoint advances only after both operations complete.
+        """
+        from pathlib import Path
+
+        from .citations import extract_document
+        from .formats.formex import unzip_formex_contents
+
+        cursor = after_stable_id or ""
+        checked = eligible = reparsed = reextracted = failed = 0
+        complete = True
+        cap = max(1, int(limit or 100000))
+
+        with self._open() as (cat, _rs, _ts):
+            total = int(cat.conn.execute(
+                "SELECT count(*) AS n FROM documents "
+                "WHERE source = 'eu-legislation' AND doc_type = 'legislation' "
+                "AND raw_path LIKE '%.zip' AND stable_id > ?",
+                (cursor,),
+            ).fetchone()["n"])
+
+        while checked < min(total, cap):
+            with self._open() as (cat, _rs, _ts):
+                rows = [dict(r) for r in cat.conn.execute(
+                    "SELECT stable_id, raw_path FROM documents "
+                    "WHERE source = 'eu-legislation' AND doc_type = 'legislation' "
+                    "AND raw_path LIKE '%.zip' AND stable_id > ? "
+                    "ORDER BY stable_id LIMIT 250",
+                    (cursor,),
+                ).fetchall()]
+            if not rows:
+                break
+            for row in rows:
+                if checked >= cap or (cancel_check and cancel_check()):
+                    complete = False
+                    break
+                sid = row["stable_id"]
+                cursor = sid
+                checked += 1
+                try:
+                    raw = Path(row["raw_path"]).read_bytes()
+                    members = unzip_formex_contents(raw)
+                    qualifies = any(
+                        b"<ANNEX" in member.upper()
+                        or b"<CONS.ANNEX" in member.upper()
+                        for member in members
+                    )
+                except OSError:
+                    failed += 1
+                    qualifies = False
+                if qualifies:
+                    eligible += 1
+                    result = self.reparse_document(stable_id=sid)
+                    if result.get("reparsed"):
+                        reparsed += 1
+                        # Reparse can move text offsets and introduces citations from
+                        # annexes. Re-mine this document before advancing the checkpoint.
+                        with self._open() as (cat, _rs, ts):
+                            extract_document(cat, ts, sid)
+                        reextracted += 1
+                    else:
+                        failed += 1
+                _progress(
+                    on_progress,
+                    stage="repairing EU Formex annexes",
+                    done=checked,
+                    total=min(total, cap),
+                    item=sid,
+                    eligible=eligible,
+                    reparsed=reparsed,
+                    _checkpoint={
+                        "phase": "repair",
+                        "source": "eu-legislation",
+                        "after_stable_id": sid,
+                    },
+                )
+            if not complete:
+                break
+
+        if checked < total and checked >= cap:
+            complete = False
+        if reextracted:
+            with self._open() as (cat, _rs, _ts):
+                Resolver(cat).run()
+            self._invalidate_caches()
+        return {
+            "checked": checked,
+            "eligible": eligible,
+            "reparsed": reparsed,
+            "citations_reextracted": reextracted,
+            "failed": failed,
+            "after_stable_id": cursor,
+            "remaining": max(0, total - checked),
+            "complete": complete,
+        }
+
+    def sync_eu_consolidations(self, *, stable_id: str, on_progress=None,
+                               cancel_check=None) -> dict:
+        """Import every dated Cellar expression for one held sector-3 act.
+
+        Called automatically when a reader opens an EU base act whose consolidation
+        lineage is absent. The completion timestamp prevents a genuinely
+        unconsolidated act causing another external lookup on every page view.
+        """
+        from .eu_law import consolidation_base
+
+        base = consolidation_base(stable_id) or stable_id
+        if not re.fullmatch(r"3\d{4}[RLD]\d{4}", base or "", re.I):
+            return {"error": "stable_id must be a sector-3 Regulation, Directive or Decision CELEX"}
+        result = self.harvest(
+            "eu-legislation",
+            backfill=True,
+            max_pages=None,
+            options={"celex": base, "include_consolidations": "true"},
+            force_full=True,
+            resume_unfinished=True,
+            on_progress=on_progress,
+            cancel_check=cancel_check,
+        )
+        if not (cancel_check and cancel_check()) and not result.get("error"):
+            with self._open() as (cat, _rs, _ts):
+                meta = cat.document_meta(base)
+                meta["consolidations_checked_at"] = _now_iso()
+                cat.set_document_meta(base, meta)
+        return {"base_id": base, **result}
+
     def reparse_source(self, *, source: str, workers: int = 12, after_stable_id: str = "",
                        on_progress=None, cancel_check=None) -> dict:
         """Re-derive text + segments for a whole SOURCE from its immutable raw, in
@@ -6098,6 +6239,10 @@ class Facade:
 
         base = consolidation_base(stable_id) or _act_level(stable_id.split("@")[0])
         with self._open() as (cat, _rs, _ts):
+            requested = cat.get_document(stable_id)
+            requested_meta = _row_meta(requested) if requested is not None else {}
+            if is_consolidation(stable_id) and requested_meta.get("consolidation_of"):
+                base = str(requested_meta["consolidation_of"])
             base_doc = cat.get_document(base)
             versions = []
             for sid, version_date in reversed(cat.legislative_versions(base)):
