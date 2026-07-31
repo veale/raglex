@@ -540,3 +540,70 @@ def test_lookup_says_when_the_held_text_has_been_struck_out(tmp_path):
 
     ordinary = f.lookup(citation="ukpga/2018/12", cited_by=False, similar=False)
     assert "text_available" not in ordinary                           # no false alarm
+
+
+def test_inherited_mentions_cross_the_version_and_punctuation_gap(tmp_path):
+    """The DPA 2018 showed nothing at all from 260 correct mappings.
+
+    Two independent breaks, both silent. The mappings name a dated snapshot of the old
+    act (`ukpga/1998/29@2015-01-01`) while every judgment cites the base act; and the
+    corpus stores `Sch. 2` where an editor wrote `Sch 2`, which an exact string join
+    treats as a different provision. Neither is a "lockout on old cases citing new law" —
+    there is no such rule — but the effect looked exactly like one.
+    """
+    f = _facade(tmp_path)
+    base, snapshot = "ukpga/1998/29", "ukpga/1998/29@2015-01-01"
+    with f._open() as (cat, _rs, ts):
+        for sid in ("ukpga/2018/12", base, snapshot, "case-a", "case-b"):
+            _held(cat, ts, sid)
+        cat.add_relations(snapshot, [TypedRelation(
+            relationship_type=RelationshipType.POINT_IN_TIME_OF,
+            raw_citation_string=base, dst_id=base,
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+        # Judgments cite the BASE act, with the corpus's own punctuation.
+        for src, anchor in (("case-a", "s. 7"), ("case-b", "Sch. 2")):
+            cat.add_relations(src, [TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string=anchor, dst_id=base, dst_anchor=anchor,
+                extracted_via=ExtractedVia.MANUAL,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )])
+
+    # The mapping is written against the SNAPSHOT, and spells Schedule 2 without a stop.
+    f.upsert_provision_mappings(
+        current_id="ukpga/2018/12", previous_id=snapshot,
+        mappings=[{"current_anchor": "s. 45", "previous_anchor": "s. 7"},
+                  {"current_anchor": "s. 15", "previous_anchor": "Sch 2"}])
+
+    inherited = f.inherited_provision_mentions(stable_id="ukpga/2018/12")
+    assert inherited["documents"] == 2
+    by_src = {r["src_id"]: r for r in inherited["incoming"]}
+    assert by_src["case-a"]["inherited_current_anchor"] == "s. 45"
+    assert by_src["case-b"]["inherited_current_anchor"] == "s. 15"   # Sch 2 == Sch. 2
+
+    # Scoping to one current provision still works, and stays scoped.
+    one = f.inherited_provision_mentions(
+        stable_id="ukpga/2018/12", current_anchor="s. 45")
+    assert [r["src_id"] for r in one["incoming"]] == ["case-a"]
+
+
+def test_one_predecessors_citations_do_not_satisfy_anothers_mapping(tmp_path):
+    """Expanding each predecessor's version family must not merge the families: "s. 7"
+    agrees across half the statute book, so a flat target list would cross-contaminate."""
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        for sid in ("new-act", "old-a", "old-b", "case-a"):
+            _held(cat, ts, sid)
+        cat.add_relations("case-a", [TypedRelation(
+            relationship_type=RelationshipType.INTERPRETS,
+            raw_citation_string="s. 7", dst_id="old-b", dst_anchor="s. 7",
+            extracted_via=ExtractedVia.MANUAL,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+    # A mapping about old-a only. The citation is of old-b, at the same anchor.
+    f.upsert_provision_mappings(
+        current_id="new-act", previous_id="old-a",
+        mappings=[{"current_anchor": "s. 1", "previous_anchor": "s. 7"}])
+    assert f.inherited_provision_mentions(stable_id="new-act")["documents"] == 0
