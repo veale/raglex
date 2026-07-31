@@ -375,3 +375,168 @@ def test_a_mapping_written_against_the_act_carries_to_its_later_versions(tmp_pat
         stable_id=version, current_anchor="Section 45")
     assert inherited["documents"] == 1
     assert inherited["incoming"][0]["src_id"] == "case-old"
+
+
+def test_provision_scoped_citers_are_found_however_the_pinpoint_is_punctuated(tmp_path):
+    """`citing_documents(anchor='s. 13')` returned 0 for the whole UK corpus.
+
+    The Python family matcher was always right; the coarse SQL guard in front of it
+    rebuilt "s. 13" as "s 13" and LIKE'd for that, so UK section citations were dropped
+    before the matcher ever saw them. EU material was unaffected only because
+    "Article 17" happens to survive the round trip.
+    """
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        _held(cat, ts, "ukpga/1998/29", title="Data Protection Act 1998")
+        _held(cat, ts, "case-lloyd", title="Lloyd v Google LLC")
+        cat.add_relations("case-lloyd", [
+            TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string="s. 13 DPA 1998", dst_id="ukpga/1998/29",
+                dst_anchor=anchor, extracted_via=ExtractedVia.MANUAL,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )
+            for anchor in ("s. 13", "s. 13(2)", "s. 4(4)")
+        ])
+
+    # Every spelling of the same provision finds it, including the full segment label.
+    for spelling in ("s. 13", "s 13", "section 13", "Section 13",
+                     "s. 13 Compensation for failure to comply"):
+        found = f.citing_documents("ukpga/1998/29", anchor=spelling)
+        assert found["total"] == 1, spelling
+        assert found["results"][0]["stable_id"] == "case-lloyd", spelling
+
+    # And a different section is still a different section.
+    assert f.citing_documents("ukpga/1998/29", anchor="s. 4")["total"] == 1
+    assert f.citing_documents("ukpga/1998/29", anchor="s. 99")["total"] == 0
+
+    # The contract the report asked for: anything in cites_provisions works as an anchor.
+    everything = f.citing_documents("ukpga/1998/29")
+    for pinpoint in everything["results"][0]["cites_provisions"]:
+        assert f.citing_documents("ukpga/1998/29", anchor=pinpoint)["total"] == 1, pinpoint
+
+
+def test_document_body_can_be_read_structurally_and_in_windows(tmp_path):
+    """A long act could not be returned at all: no pagination, no partial read.
+
+    The workaround was to abuse get_provision's context window at guessed char offsets
+    and merge the pieces. `segments_only` answers the structural question in one call,
+    and offset/limit make the text readable in pieces.
+    """
+    from raglex.core.models import Segment
+
+    f = _facade(tmp_path)
+    text = "".join(f"s. {n} Heading {n}\nSome provision text for section {n}.\n"
+                   for n in range(1, 41))
+    with f._open() as (cat, _rs, ts):
+        record = Record(
+            source="uk-legislation", stable_id="ukpga/2018/12",
+            doc_type=DocType.LEGISLATION, title="Data Protection Act 2018",
+            text=text, extracted_via=ExtractedVia.STRUCTURED,
+            segments=[
+                Segment(f"s. {n} Heading {n}",
+                        text.index(f"s. {n} Heading {n}"),
+                        text.index(f"s. {n} Heading {n}") + 50, kind="section")
+                for n in range(1, 41)
+            ],
+        )
+        record.ensure_payload_hash()
+        ts.put(record.payload_hash, text)
+        ts.put_segments(record.payload_hash, record.segments)
+        cat.upsert_document(record, text_path="")
+
+    spine = f.document_body("ukpga/2018/12", segments_only=True)
+    assert spine["segments_only"] is True
+    assert spine["segment_count"] == 40
+    assert spine["segments"][0]["label"] == "s. 1 Heading 1"
+    assert "text" not in spine                       # structure only: no body at all
+    assert spine["text_chars"] == len(text)
+
+    first = f.document_body("ukpga/2018/12", limit=200)
+    assert first["text"] == text[:200]
+    assert first["window"]["has_more"] is True
+    # Offsets stay absolute, so pages stitch on char_start.
+    assert all(s["char_start"] < 200 for s in first["segments"])
+    second = f.document_body("ukpga/2018/12", offset=first["window"]["next_offset"])
+    assert second["text"] == text[200:]
+    assert second["window"]["has_more"] is False
+
+    whole = f.document_body("ukpga/2018/12")
+    assert whole["text"] == text and "window" not in whole   # unchanged by default
+
+
+def test_provision_lookup_accepts_any_spelling_and_refuses_a_near_miss(tmp_path):
+    """get_provision demanded the exact full label; lookup took the natural pinpoint.
+
+    Two tools over one segment table with different resolution rules is a trap, and the
+    stricter one was the tool whose whole purpose is pinpoint reading. Worse, the
+    substring fallback answered "s. 16" with s. 166 — quoting the wrong provision.
+    """
+    from raglex.core.models import Segment
+
+    f = _facade(tmp_path)
+    text = ("s. 166 Orders to progress complaints\nThe Tribunal may order.\n"
+            "s. 167 Compliance orders\nA court may make a compliance order.\n")
+    with f._open() as (cat, _rs, ts):
+        record = Record(
+            source="uk-legislation", stable_id="ukpga/2018/12",
+            doc_type=DocType.LEGISLATION, title="Data Protection Act 2018",
+            text=text, extracted_via=ExtractedVia.STRUCTURED,
+            segments=[
+                Segment("s. 166 Orders to progress complaints", 0,
+                        text.index("s. 167"), kind="section"),
+                Segment("s. 167 Compliance orders", text.index("s. 167"), len(text),
+                        kind="section"),
+            ],
+        )
+        record.ensure_payload_hash()
+        ts.put(record.payload_hash, text)
+        ts.put_segments(record.payload_hash, record.segments)
+        cat.upsert_document(record, text_path="")
+
+    for spelling in ("s. 167", "s 167", "section 167", "SECTION 167",
+                     "s. 167 Compliance orders", "s. 167(2)"):
+        found = f.get_provision("ukpga/2018/12", label=spelling)
+        focus = next((s for s in found.get("segments", []) if s.get("focus")), None)
+        assert focus, spelling
+        assert focus["label"] == "s. 167 Compliance orders", spelling
+        assert "compliance order" in focus["text"], spelling
+
+    # A provision that does not exist says so, rather than handing back a near neighbour.
+    assert "error" in f.get_provision("ukpga/2018/12", label="s. 16")
+    assert "error" in f.get_provision("ukpga/2018/12", label="s. 999")
+
+
+def test_lookup_says_when_the_held_text_has_been_struck_out(tmp_path):
+    """`held: true`, 319 segments, an outline, 1,914 citers — and a body of dots.
+
+    legislation.gov.uk publishes a repealed provision struck out, so the live version of
+    a wholly-repealed Act looks perfectly healthy in metadata while containing no law.
+    Same shape of trap as `unapplied_count: 0`: a reassuring response over unusable text.
+    """
+    from raglex.core.models import Segment
+
+    f = _facade(tmp_path)
+    gutted = "s. 1 Basic interpretative provisions\n" + (". . . . . . . . . .\n" * 40)
+    live = "s. 1 Basic interpretative provisions\n" + ("Real operative words here.\n" * 40)
+    with f._open() as (cat, _rs, ts):
+        for sid, text in (("ukpga/1998/29", gutted), ("ukpga/2018/12", live)):
+            record = Record(
+                source="uk-legislation", stable_id=sid, doc_type=DocType.LEGISLATION,
+                title=sid, text=text, extracted_via=ExtractedVia.STRUCTURED,
+                segments=[Segment("s. 1 Basic interpretative provisions", 0,
+                                  len(text), kind="section")],
+            )
+            record.ensure_payload_hash()
+            ts.put(record.payload_hash, text)
+            ts.put_segments(record.payload_hash, record.segments)
+            cat.upsert_document(record, text_path="")
+
+    struck = f.lookup(citation="ukpga/1998/29", cited_by=False, similar=False)
+    assert struck["held"] is True and struck["segment_count"] == 1   # all still true…
+    assert struck["text_available"] is False                          # …and unusable
+    assert "struck out" in struck["text_note"]
+    assert struck["struck_out_ratio"] > 0.4
+
+    ordinary = f.lookup(citation="ukpga/2018/12", cited_by=False, similar=False)
+    assert "text_available" not in ordinary                           # no false alarm

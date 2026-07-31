@@ -1212,11 +1212,13 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/scheduled-tasks")
     def set_scheduled_task_ep(payload: dict = Body(...)) -> dict:
-        """Toggle/adjust one scheduler task: {name, enabled?, every_minutes?, remove?}."""
+        """Toggle/adjust one scheduler task:
+        {name, enabled?, every_minutes?, at_hour?, remove?}. ``at_hour`` pins it to one
+        UTC hour (0-23); ``"any"`` unpins it."""
         p = payload or {}
         return facade.set_scheduled_task(
             p["name"], enabled=p.get("enabled"), every_minutes=p.get("every_minutes"),
-            remove=bool(p.get("remove")))
+            at_hour=p.get("at_hour"), remove=bool(p.get("remove")))
 
     @app.post("/jobs/maintenance")
     def job_maintenance_ep(payload: dict = Body(default={})) -> dict:

@@ -210,10 +210,24 @@ def test_startup_auto_resumes_only_declared_safe_kinds(monkeypatch):
     assert resumed == ["scan"]
 
 
-def test_rollup_chain_deferred_until_the_import_batch_drains():
-    """Importing 11 zips must rebuild the citation counts + PageRank ONCE at the end, not
-    after each zip. While any other trigger-kind job is still queued/running, a finished
-    import defers the rollups; only the last one (empty pipeline) fires them."""
+def test_rollup_chain_is_off_unless_asked_for():
+    """The roll-ups are scheduled tasks (weekly, 04:00) and feed ranking, not
+    correctness. Chaining a whole-graph PageRank walk off every corpus-growing job was
+    most of what made a continuously-harvesting box sluggish, so it is opt-in."""
+    f = _facade()
+    JobManager(f, origin="api")._chain_postprocess("import-caselaw-zip", {"imported": 5})
+    with f._open() as (cat, _rs, _ts):
+        assert "rebuild-citation-counts" not in {j["kind"] for j in cat.queued_jobs()}
+        assert "rebuild-authority" not in {j["kind"] for j in cat.queued_jobs()}
+
+
+def test_rollup_chain_deferred_until_the_import_batch_drains(monkeypatch):
+    """With the chain switched on: importing 11 zips must rebuild the citation counts +
+    PageRank ONCE at the end, not after each zip. While any other trigger-kind job is
+    still queued/running, a finished import defers the rollups; only the last one (empty
+    pipeline) fires them."""
+    monkeypatch.setenv(
+        "RAGLEX_SCHEDULE", '{"postprocess-rollups": {"enabled": true}}')
     f = _facade()
     mgr = JobManager(f, origin="api")
     # one more import still queued → finishing this one must NOT enqueue the rollups yet

@@ -322,15 +322,29 @@ def build_server(config: Config | None = None) -> MCPServer:
         }
 
     @mcp.tool(annotations=_READ_ONLY)
-    def get_document_body(stable_id: str, original: bool = False) -> dict:
+    def get_document_body(stable_id: str, original: bool = False,
+                          segments_only: bool = False, offset: int = 0,
+                          limit: Optional[int] = None) -> dict:
         """The document's full text + structural segments (legislation articles /
         sections, judgment paragraphs) with their citable labels and levels. Base
         legislation defaults to today's applicable consolidation; pass
         ``original=true`` to read the original. A consolidation's unchanged recitals
         are returned separately as ``inherited_recitals`` with original-act provenance;
-        they are live projections, not copied consolidation text."""
+        they are live projections, not copied consolidation text.
+
+        A long act CANNOT be returned whole — the DPA 2018 is 1,222 segments and exceeds
+        the 1 MB tool ceiling outright. Two ways through:
+
+        * ``segments_only=True`` — every label, kind, level and char offset, no text. For
+          structural work (picking a provision to pincite, building a correlation table)
+          this is the whole answer, in one cheap call.
+        * ``offset``/``limit`` — a character window, carrying the segments and citations
+          that overlap it; ``window.next_offset`` walks the rest.
+        """
         target = facade.canonical_read_target(stable_id, original=original)
-        result = facade.document_body(target["stable_id"])
+        result = facade.document_body(
+            target["stable_id"], offset=offset, limit=limit,
+            segments_only=segments_only)
         result["read_target"] = target
         return result
 
@@ -581,6 +595,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         current_id: str, previous_id: str, mappings: list[dict],
         replace: bool = False, created_by: str = "llm",
         mapping_type: str = "functional_predecessor", dry_run: bool = False,
+        return_all: bool = False,
     ) -> dict:
         """Bulk-map corresponding statutory provisions between two laws.
 
@@ -605,11 +620,18 @@ def build_server(config: Config | None = None) -> MCPServer:
         that matches no provision comes back in ``unresolved_anchors`` (the mapping is
         still stored — a stub document has no segments to match — but you can SEE it).
         ``dry_run=True`` runs those checks and returns the plan without writing.
+
+        BATCHING a large correlation table: send **at most ~50 mappings per call**.
+        Beyond that the call has been seen to hit the four-minute tool ceiling — and the
+        write is ATOMIC under that timeout, so a timed-out batch stored nothing and the
+        correct recovery is to re-send it, smaller. The reply echoes only the rows this
+        call wrote (plus ``total_for_pair``); pass ``return_all=True``, or call
+        list_provision_mappings, for the whole set.
         """
         return facade.upsert_provision_mappings(
             current_id=current_id, previous_id=previous_id, mappings=mappings,
             replace=replace, created_by=created_by, mapping_type=mapping_type,
-            dry_run=dry_run)
+            dry_run=dry_run, return_all=return_all)
 
     @admin
     def list_provision_mappings(stable_id: str) -> dict:
@@ -1057,11 +1079,14 @@ def build_server(config: Config | None = None) -> MCPServer:
 
     @admin
     def set_scheduled_task(name: str, enabled: Optional[bool] = None,
-                           every_minutes: Optional[int] = None, remove: bool = False) -> dict:
-        """Enable/disable a scheduler task or set its cadence (e.g. turn off 'auto-embed').
-        ``remove`` reverts to default. Names: scheduled_tasks() lists them."""
+                           every_minutes: Optional[int] = None, remove: bool = False,
+                           at_hour: Optional[int] = None) -> dict:
+        """Enable/disable a scheduler task, set its cadence, or pin it to one UTC hour
+        (``at_hour=4`` for 04:00; the heavy roll-ups default there). ``remove`` reverts to
+        default. Names: scheduled_tasks() lists them."""
         return facade.set_scheduled_task(name, enabled=enabled,
-                                         every_minutes=every_minutes, remove=remove)
+                                         every_minutes=every_minutes, remove=remove,
+                                         at_hour=at_hour)
 
     @admin
     def hpc_embed(go: bool = False, pilot: Optional[int] = None,

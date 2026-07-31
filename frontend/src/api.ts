@@ -167,7 +167,9 @@ export interface StaticBundle {
   index_wordart?: boolean;
   webhook?: StaticBundleWebhook;
   last_run?: any;
-  schedule?: { name: string; enabled: boolean; every_minutes: number | null } | null;
+  // at_hour pins a scheduled rebuild to one UTC hour (null = any hour).
+  schedule?: { name: string; enabled: boolean; every_minutes: number | null;
+               at_hour?: number | null } | null;
 }
 
 export const api = {

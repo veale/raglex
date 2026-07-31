@@ -558,6 +558,36 @@ def test_uk_statute_names_stay_name_only_inside_irish_judgments(catalogue, tmp_p
     assert {"32016R0679", "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
 
 
+def test_a_learned_shorthand_cannot_smuggle_a_uk_act_into_an_irish_judgment(
+    catalogue, tmp_path
+):
+    """The guard has to run AFTER the corpus-wide shorthand store, not only before it.
+
+    Ireland's Data Protection Act 2018 and the UK's share a name, a year and a subject.
+    "the 2018 Act", learned from an English judgment, bound ukpga/2018/12 into 487 Irish
+    judgments in a 4,000-row sample of the live corpus — every one of them arriving by a
+    route with no uk_* method name on it, so the old grammar-keyed guard never saw them,
+    and bare "s. 50A" pinpoints then carried forward off the phantom antecedent.
+    """
+    ts = TextStore(tmp_path / "text")
+    catalogue.add_learned_shorthands(
+        [{"shorthand": "the 2018 Act", "candidate_id": "ukpga/2018/12",
+          "entity_kind": "act", "needs_pincite": False}],
+        doc_id="ewhc/admin/2020/1")
+    t = ("The Data Protection Act 2018 governs. Under the 2018 Act the respondent "
+         "must comply; see s. 50A and section 117 thereof. Contrast Article 17 of "
+         "Regulation (EU) 2016/679 and Smith v Jones [2020] EWCA Civ 99.")
+    _doc(catalogue, ts, "iehc/2024/2", t, source="ie-caselaw")
+    extract_document(catalogue, ts, "iehc/2024/2")
+
+    dsts = {e["dst_id"] for e in catalogue.relations_for("iehc/2024/2") if e["dst_id"]}
+    assert "ukpga/2018/12" not in dsts        # by any route: name, shorthand, carry-forward
+    assert not [c for c in catalogue.citations_for("iehc/2024/2")
+                if c["candidate_id"] == "ukpga/2018/12"]
+    # …and the citations that are unambiguous still resolve.
+    assert {"32016R0679", "ewca/civ/2020/99"} <= dsts
+
+
 def test_recitals_pinpoint_to_the_instrument():
     by = {c.raw: c for c in extract_citations(
         "See Recital 47 of the GDPR, recital 65 of Regulation (EU) 2016/679, "

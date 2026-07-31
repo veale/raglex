@@ -119,11 +119,21 @@ CHAIN_TRIGGER_KINDS = frozenset({
     "repair-eu-annexes", "sync-eu-consolidations",
 })
 # (follow-up kind, min seconds since its last completion before re-running). embed is cheap
-# and incremental; the count roll-up is moderate; PageRank walks the whole graph, so it gets
-# the longest cool-down. Overridable via RAGLEX_POSTPROCESS_COOLDOWN_S (scales all three).
+# and incremental, so it stays in the chain: a document with no vector is genuinely absent
+# from semantic search until it has one.
+#
+# The two ROLL-UPS are not in the chain by default. Both are whole-graph walks, both are
+# already scheduled tasks ("counts", "authority" — weekly, 04:00), and neither affects
+# correctness: a freshly harvested document is found, read and cited perfectly well while
+# carrying a stale authority score. Chaining them off every harvest meant up to ~48 PageRank
+# walks a day over a 17M-edge graph to keep a RANKING aggregate slightly fresher, which is
+# most of what made a continuously-harvesting box feel sluggish. Turn the "postprocess-
+# rollups" scheduler task on to restore the old behaviour.
 _COOLDOWN_SCALE = float(os.environ.get("RAGLEX_POSTPROCESS_COOLDOWN_S") or 0) or None
 CHAIN_FOLLOWUPS = (
     ("embed", _COOLDOWN_SCALE or 300.0),
+)
+CHAIN_ROLLUP_FOLLOWUPS = (
     ("rebuild-citation-counts", _COOLDOWN_SCALE or 1200.0),
     ("rebuild-authority", _COOLDOWN_SCALE or 1800.0),
 )
@@ -692,7 +702,10 @@ class JobManager:
         except Exception:  # noqa: BLE001 — if the check fails, fall through and chain anyway
             log.exception("could not check pending trigger jobs; chaining regardless")
         now = time.time()
-        for follow, cooldown in CHAIN_FOLLOWUPS:
+        followups = CHAIN_FOLLOWUPS
+        if _schedule.is_enabled("postprocess-rollups"):
+            followups = (*followups, *CHAIN_ROLLUP_FOLLOWUPS)
+        for follow, cooldown in followups:
             try:
                 # The post-harvest embed follow-up is the ONE unbounded, unscheduled path
                 # that could re-embed the whole corpus. Gate it on the same 'auto-embed'

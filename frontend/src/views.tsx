@@ -554,22 +554,6 @@ function SubBadge({ sp, sectionLabel, target }: { sp: SubPara; sectionLabel: str
   );
 }
 
-// Segment-level fallback badge row: the cited sub-parts of this provision that DIDN'T get
-// placed on their own line (``exclude`` = the parts already shown per-line). When the
-// drafting hierarchy resolved every cited sub-part to a line, this renders nothing.
-function SubParaMentions({ byAnchorRaw, sectionLabel, target, exclude }:
-  { byAnchorRaw: Record<string, any[]>; sectionLabel: string; target: string; exclude?: Set<string> }) {
-  const subs = [...subPartMap(byAnchorRaw, sectionLabel).values()]
-    .filter((s) => !(exclude && exclude.has(s.part)))
-    .sort((a, b) => a.part.localeCompare(b.part, undefined, { numeric: true }));
-  if (!subs.length) return null;
-  return (
-    <div className="subpara-mentions">
-      {subs.map((sp, i) => <SubBadge key={i} sp={sp} sectionLabel={sectionLabel} target={target} />)}
-    </div>
-  );
-}
-
 const REL_TYPES = [
   "analyses", "criticises", "summarises", "annotates", "follows", "distinguishes",
   "overrules", "applies", "considers", "interprets", "mentions",
@@ -1835,17 +1819,13 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     : (
       <div className={`reader${isCase ? " has-rails" : ""}`}>
         {segs.map((s, i) => {
-          // sub-provision mention badges: place each on its own provision line (via
-          // lineBadge) where the drafting hierarchy pinpointed it, and let the segment-level
-          // row below carry only the leftovers — so the comment numbers spread down the
-          // section instead of bunching at its foot.
+          // Sub-provision mention badges, each on its own provision line where the
+          // drafting hierarchy pinpointed it. One that pins to no line is not shown:
+          // see the note further down.
           const parts = subPartMap(mentions?.by_anchor || {}, s.label);
-          const placed = new Set<string>();
           const lineBadge = (anchorPath: string) => {
             const sp = parts.get(anchorPath);
-            if (!sp) return null;
-            placed.add(anchorPath);
-            return <SubBadge sp={sp} sectionLabel={s.label} target={id} />;
+            return sp ? <SubBadge sp={sp} sectionLabel={s.label} target={id} /> : null;
           };
           const sb = segBody(body.text, s, cites, onCite, paraSet, onPara, undefined, lineBadge);
           const rail = isCase ? railCaption(s) : null;
@@ -1868,11 +1848,14 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
               onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>}
             {sb.showLabel && <span className="seg-label">{s.label}</span>}
             <span className="seg-body">{sb.body}</span>
-            {/* subtle per-sub-paragraph mention badges (art 47(1), s 3(1)(a)…) — additional
-                to the provision-level "Mentioned by" line below. Those the drafting hierarchy
-                placed on their own line above are excluded here so they aren't shown twice;
-                this row carries only sub-parts we couldn't pin to a line. */}
-            <SubParaMentions byAnchorRaw={mentions?.by_anchor || {}} sectionLabel={s.label} target={id} exclude={placed} />
+            {/* Sub-paragraph badges are placed on their own provision line above, and
+                ONLY there. A cited sub-part we cannot pin to a line is a pinpoint that
+                does not correspond to anything — "s. 11(4)" of a section running (1),
+                (2), (2A), (3), or a mangled capture — and a foot-of-section row of them
+                read as "[43 mentions] [1 mention] [1 mention] [1 mention]…", one badge
+                per misreading, each opening a list of one. They are already counted in
+                the provision-level "Mentioned by" line below (a pinpoint folds into its
+                parent's anchor key), which is the only place they can honestly be read. */}
             {pinned(s.label).map((r, j) => (
               <div className="pinned" key={j}>💬 {r.relationship_type}: <DocLink id={r.src_id} onOpen={() => peek.push({ kind: "doc", id: r.src_id })}>{r.src_title || r.src_id}</DocLink>
                 {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}</div>
@@ -3762,6 +3745,16 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
           {sched?.enabled && <label style={{ flex: "0 0 auto" }}>every{" "}
             <FrequencySelect minutes={sched.every_minutes || 10080}
               onChange={(m) => setSchedule({ every_minutes: m })} /></label>}
+          {/* A full rebuild reads every citing document, so it belongs in the quiet
+              hours — cadence alone would fire it at whatever time the last run landed on. */}
+          {sched?.enabled && <label style={{ flex: "0 0 auto" }}>at{" "}
+            <select value={sched.at_hour == null ? "any" : String(sched.at_hour)}
+              onChange={(e) => setSchedule({ at_hour: e.target.value })}>
+              <option value="any">any hour</option>
+              {Array.from({ length: 24 }, (_, h) => (
+                <option key={h} value={h}>{String(h).padStart(2, "0")}:00 UTC</option>
+              ))}
+            </select></label>}
         </div>
         <p className="muted" style={{ fontSize: 11, margin: "6px 0 0" }}>
           Runs in the scheduler, not this browser, and rereads the corpus each time — the same work as

@@ -397,7 +397,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
         from .ops.errorlog import install as _install_errorlog
         _install_errorlog(f)
         jobs.reap_orphans()
-        from .schedule import is_enabled as _sched_on, every_minutes as _sched_min
+        from .schedule import (
+            every_minutes as _sched_min,
+            in_window as _sched_window,
+            is_enabled as _sched_on,
+        )
         last_hygiene = 0.0
         last_analyze = 0.0
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
@@ -573,14 +577,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # they share the singleton lock with the post-harvest chain (jobs._chain_
                 # postprocess) — two PageRank walks racing the relations table is exactly the
                 # double-work that made the box sluggish — and show up in the Jobs panel.
-                if _sched_on("counts") and time.time() - last_counts >= min(
-                        _stats_secs, (_sched_min("counts") or 10080) * 60):
+                if (_sched_on("counts") and _sched_window("counts")
+                        and time.time() - last_counts >= min(
+                            _stats_secs, (_sched_min("counts") or 10080) * 60)):
                     last_counts = time.time()
                     jobs.start("rebuild-citation-counts", "stats roll-up", {})
-                # Daily: recompute the PageRank authority roll-up (design §3a) —
-                # search fusion, the citator, related docs, and 'most authoritative'
-                # sort all read it, and it must track the graph as rescans land.
-                if _sched_on("authority") and time.time() - last_authority >= (_sched_min("authority") or 1440) * 60:
+                # Weekly, at 04:00 by default: recompute the PageRank authority roll-up
+                # (design §3a) — search fusion, the citator, related docs and 'most
+                # authoritative' sort all read it. It is a whole-graph walk and it feeds
+                # RANKING only, so it runs on a clock in the quiet hours rather than
+                # chasing each harvest; both cadence and hour are settable per task.
+                if (_sched_on("authority") and _sched_window("authority")
+                        and time.time() - last_authority
+                        >= (_sched_min("authority") or 10080) * 60):
                     last_authority = time.time()
                     jobs.start("rebuild-authority", "authority (PageRank) rebuild", {})
                 # Daily: refresh planner statistics so the query planner tracks the growing

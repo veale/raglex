@@ -24,6 +24,11 @@ class TaskSpec:
     default_enabled: bool
     default_minutes: int | None   # cadence for time-based tasks; None = "every tick"
     description: str
+    # Hour (UTC, 0-23) this task is allowed to start in, or None for "any hour". A
+    # corpus-wide roll-up costs the same whenever it runs, so it may as well run when
+    # nobody is reading — cadence alone would fire it at whatever time of day the last
+    # run happened to land on.
+    default_hour: int | None = None
 
 
 # The recurring tasks the scheduler runs. ``default_minutes=None`` = runs every scheduler
@@ -34,9 +39,20 @@ TASKS: tuple[TaskSpec, ...] = (
     TaskSpec("auto-embed", True, None, "index newly-texted documents into the embedding family each tick"),
     TaskSpec("canlii-enrich", True, None, "drain the rate-limited CanLII enrichment queue"),
     TaskSpec("effects", True, 720, "re-check legislation.gov.uk unapplied-effects queue"),
-    TaskSpec("counts", True, 10080, "citation-count roll-up (the snowball aggregate)"),
-    TaskSpec("authority", True, 1440, "PageRank authority rebuild"),
+    # Both are corpus-wide walks over a 17M-edge graph, and both feed RANKING, not
+    # correctness: a document harvested since the last run is still found, still read,
+    # still cited — it just carries a stale authority score until the next pass. So they
+    # run weekly, in the small hours, rather than chasing every harvest.
+    TaskSpec("counts", True, 10080, "citation-count roll-up (the snowball aggregate)",
+             default_hour=4),
+    TaskSpec("authority", True, 10080, "PageRank authority rebuild", default_hour=4),
     TaskSpec("analyze", True, 1440, "refresh Postgres planner statistics (ANALYZE)"),
+    # OFF: the scheduled weekly passes above are enough. On, every corpus-growing job
+    # also triggers the count + PageRank roll-ups (debounced) — fresher ranking, at the
+    # cost of repeated whole-graph walks while harvesting.
+    TaskSpec("postprocess-rollups", False, None,
+             "also rebuild counts + PageRank after each harvest (off by default; "
+             "the weekly 'counts'/'authority' passes normally suffice)"),
     TaskSpec("gazetteer", True, 10080, "top up the statute gazetteer from legislation.gov.uk"),
     TaskSpec("maintenance", False, 1440, "serial DB maintenance + safe repair pass (off by default)"),
     TaskSpec("static-bundle", False, 10080,
@@ -81,6 +97,36 @@ def every_minutes(name: str, default: int | None = None) -> int | None:
     return base
 
 
+def at_hour(name: str) -> int | None:
+    """The UTC hour this task may start in, or ``None`` for any hour."""
+    spec = _BY_NAME.get(name)
+    base = spec.default_hour if spec else None
+    ov = _overrides().get(name)
+    if isinstance(ov, dict) and "at_hour" in ov:
+        if ov["at_hour"] is None:
+            return None
+        try:
+            return max(0, min(23, int(ov["at_hour"])))
+        except (TypeError, ValueError):
+            return base
+    return base
+
+
+def in_window(name: str, now=None) -> bool:
+    """Is this task allowed to start RIGHT NOW?
+
+    Cadence says how often; this says when. A task with an hour set waits for it, so a
+    weekly roll-up lands at 04:00 rather than drifting to whenever the previous run
+    happened to finish. Tasks without an hour are always in window.
+    """
+    hour = at_hour(name)
+    if hour is None:
+        return True
+    from datetime import datetime, timezone
+
+    return (now or datetime.now(timezone.utc)).hour == hour
+
+
 def list_tasks() -> list[dict]:
     """Every known task with its effective enabled/cadence + whether it's overridden — the
     payload the on/off UI renders."""
@@ -93,6 +139,7 @@ def list_tasks() -> list[dict]:
             "description": t.description,
             "enabled": bool(o["enabled"]) if "enabled" in o else t.default_enabled,
             "every_minutes": every_minutes(t.name),
+            "at_hour": at_hour(t.name),
             "default_enabled": t.default_enabled,
             "overridden": bool(o),
         })
@@ -100,9 +147,11 @@ def list_tasks() -> list[dict]:
 
 
 def set_task(settings, name: str, *, enabled: bool | None = None,
-             every_minutes: int | None = None, remove: bool = False) -> dict:
+             every_minutes: int | None = None, remove: bool = False,
+             at_hour: int | str | None = None) -> dict:
     """Add/update/remove a task override in the persisted ``RAGLEX_SCHEDULE`` map. ``remove``
-    reverts the task to its default. Returns the new task list."""
+    reverts the task to its default. ``at_hour`` pins the task to one UTC hour; pass the
+    string ``"any"`` to clear it. Returns the new task list."""
     if name not in _BY_NAME:
         return {"error": f"unknown task {name!r}", "known": sorted(_BY_NAME)}
     current = _overrides()
@@ -114,6 +163,12 @@ def set_task(settings, name: str, *, enabled: bool | None = None,
             entry["enabled"] = bool(enabled)
         if every_minutes is not None:
             entry["every_minutes"] = max(1, int(every_minutes))
+        if at_hour is not None:
+            # "any" is how a caller says "no hour", which None cannot express here —
+            # None already means "leave this field alone".
+            entry["at_hour"] = (
+                None if str(at_hour).strip().lower() in ("any", "none", "")
+                else max(0, min(23, int(at_hour))))
         current[name] = entry
     settings.update({"RAGLEX_SCHEDULE": json.dumps(current)})
     settings.apply_to_env()  # take effect in this process immediately

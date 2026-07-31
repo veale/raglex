@@ -587,6 +587,16 @@ _PG_TRGM_INDEXES = (
 _PG_SCHEMA_READY: set[str] = set()
 
 
+# One SQL spelling of "this anchor, ignoring how it was punctuated". Citation pinpoints
+# arrive as "s. 13", segment labels as "s. 13 Compensation…", a caller may type
+# "section 13", and German material uses "§ 13" — all the same provision. Every coarse
+# anchor guard normalises through this, so a query can never miss an edge merely because
+# the corpus and the caller spell the unit differently.
+ANCHOR_NORM_SQL = (
+    "lower(replace(replace(replace(COALESCE(dst_anchor, ''), ' ', ''), '.', ''), '§', ''))"
+)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1519,7 +1529,7 @@ class Catalogue:
 
     def version_inherited_mentions_for(
         self, version_id: str, *, limit: int = 5000,
-        anchor_exact: str | None = None, anchor_prefix: str | None = None,
+        anchor_exact: str | None = None, anchor_prefixes: list[str] | None = None,
     ) -> list:
         """Literal mentions of a consolidation's base act, projected onto the version.
 
@@ -1543,12 +1553,16 @@ class Catalogue:
                 " AND lower(replace(COALESCE(r.dst_anchor, ''), ' ', '')) = ?"
             )
             anchor_params.append(anchor_exact.lower().replace(" ", ""))
-        elif anchor_prefix:
-            # This is only a coarse SQL prefilter: ``Article 6%`` may also retrieve
-            # Article 60, which the facade's exact family matcher then rejects.  It
-            # nevertheless turns a 350k-edge mega-authority request into a small query.
-            anchor_sql = " AND lower(COALESCE(r.dst_anchor, '')) LIKE ?"
-            anchor_params.append(anchor_prefix.lower() + "%")
+        elif anchor_prefixes:
+            # This is only a coarse SQL prefilter: ``art6%`` may also retrieve Article 60,
+            # which the facade's exact family matcher then rejects.  It nevertheless turns
+            # a 350k-edge mega-authority request into a small query. Normalised, and one
+            # branch per spelling of the unit, so "s. 13" / "section 13" / "§ 13" all hit.
+            likes = " OR ".join(
+                [f"{ANCHOR_NORM_SQL.replace('dst_anchor', 'r.dst_anchor')} LIKE ?"]
+                * len(anchor_prefixes))
+            anchor_sql = f" AND ({likes})"
+            anchor_params.extend(prefix + "%" for prefix in anchor_prefixes)
         return self.conn.execute(
             f"""
             SELECT r.*, ? AS version_inherited_from_id,
@@ -2526,7 +2540,7 @@ class Catalogue:
 
     def relations_to(
         self, dst_id: str, *, anchor_exact: str | None = None,
-        anchor_prefix: str | None = None,
+        anchor_prefixes: list[str] | None = None,
     ) -> list[sqlite3.Row]:
         """Incoming resolved edges — what cites/treats this document (citing cases,
         commentary). The other half of 1-hop graph expansion (§6c).
@@ -2535,6 +2549,12 @@ class Catalogue:
         readers.  Callers still perform canonical family matching, but no longer have
         to materialise every incoming edge to a mega-authority merely to show one
         Article or Recital.
+
+        ``anchor_prefixes`` are ALREADY normalised (see ``ANCHOR_NORM_SQL``): lower case,
+        no spaces, no punctuation, one entry per spelling of the unit. That matters —
+        the guard used to compare a reconstructed ``"s 13"`` against a stored ``"s. 13"``
+        and quietly dropped every UK section citation before the Python matcher ever saw
+        it, so a provision-scoped query over the UK corpus always returned nothing.
         """
         anchor_sql = ""
         params: list[str] = [dst_id]
@@ -2543,9 +2563,10 @@ class Catalogue:
                 " AND lower(replace(COALESCE(dst_anchor, ''), ' ', '')) = ?"
             )
             params.append(anchor_exact.lower().replace(" ", ""))
-        elif anchor_prefix:
-            anchor_sql = " AND lower(COALESCE(dst_anchor, '')) LIKE ?"
-            params.append(anchor_prefix.lower() + "%")
+        elif anchor_prefixes:
+            likes = " OR ".join([f"{ANCHOR_NORM_SQL} LIKE ?"] * len(anchor_prefixes))
+            anchor_sql = f" AND ({likes})"
+            params.extend(prefix + "%" for prefix in anchor_prefixes)
         return self.conn.execute(
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
             "AND relationship_type <> 'cited_by'"  # reverse-oriented scaffold
@@ -2664,6 +2685,13 @@ class Catalogue:
                 f"SELECT * FROM doc_authority WHERE doc_id IN ({qs})", chunk).fetchall()
             out.update({r["doc_id"]: dict(r) for r in rows})
         return out
+
+    def _anchor_prefix_sql(self, anchor_prefixes: list[str] | None) -> tuple[str, list]:
+        """``(sql, params)`` for a normalised anchor-prefix guard, or empty."""
+        if not anchor_prefixes:
+            return "", []
+        likes = " OR ".join([f"{ANCHOR_NORM_SQL} LIKE ?"] * len(anchor_prefixes))
+        return f" AND ({likes})", [prefix + "%" for prefix in anchor_prefixes]
 
     def _type_filter(self, relationship_types: list[str] | None) -> tuple[str, list]:
         """A relationship-type restriction expressed IN SQL.

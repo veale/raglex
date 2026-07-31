@@ -592,6 +592,43 @@ _UK_REFERRAL_RE = re.compile(
 # legislation.gov.uk URI grammar — an explicit URL is unambiguous, not a heuristic).
 _UK_NAME_HEURISTICS = {"uk_statute_named", "uk_act_section"}
 
+# UK domestic legislation, by the shape of its identifier. Gating on the TARGET rather
+# than on the grammar that produced it is what makes the guard below complete: a UK act
+# can also arrive by a learned shorthand ("the 2018 Act"), a corpus-wide named alias, or
+# a bare "section 45" carried forward, none of which carry a uk_* method name.
+_UK_LEGISLATION_ID_RE = re.compile(
+    r"^(?:ukpga|ukla|ukcm|uksi|ukmo|ukci|asp|ssi|anaw|asc|wsi|nia|nisr|apni|aosp|aep|mnia)/",
+    re.IGNORECASE,
+)
+# The one way a non-UK document may name UK legislation and be believed: it gave the
+# legislation.gov.uk URI, which is an identifier, not a name that happens to collide.
+_UK_EXPLICIT_METHODS = {"uk_legislation_uri"}
+
+
+def _is_uk_legislation_id(candidate_id: str | None) -> bool:
+    return bool(candidate_id and _UK_LEGISLATION_ID_RE.match(candidate_id))
+
+
+def _gate_domestic_statute_names(doc, cites: list) -> list:
+    """Drop UK domestic-legislation candidates from hosts that cannot mean them.
+
+    Applied TWICE per document, and it has to be. The corpus-wide shorthand store is
+    consulted after the first pass, and it re-attached exactly what the guard had just
+    removed: "the 2018 Act", learned from an English judgment, bound ukpga/2018/12 into
+    487 Irish judgments in a 4,000-row sample, and the bare "s. 50A" pinpoints then
+    carried forward off it. A guard that runs once is a guard the next stage undoes.
+    """
+    if not (_is_irish_case(doc) or _is_eu_guidance(doc)):
+        return cites
+    return [
+        replace(c, candidate_id=None)
+        if (c.method in _UK_NAME_HEURISTICS
+            or (_is_uk_legislation_id(c.candidate_id)
+                and c.method not in _UK_EXPLICIT_METHODS))
+        else c
+        for c in cites
+    ]
+
 
 def _is_irish_case(doc) -> bool:
     """Is this document a judgment of an Irish court? Inside one, an "<X> Act 1963"
@@ -846,18 +883,21 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     # the UK candidate (→ name-only). EU instruments and case citations (UK or Irish)
     # resolve normally. The bare "section N" carry-forward follows automatically: with
     # no UK candidate there is no legislation antecedent to attach to.
-    if _is_irish_case(doc):
-        cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
-                 for c in cites]
-
-    # EU guidance guard (EDPB / A29WP / OSS decisions): an EU-level document must not
-    # link a *domestic* statute by NAME (cross-jurisdiction collision), but its EU-law
+    # Ireland re-enacted much of its statute book under names the UK also uses, and the
+    # 2018 Data Protection Acts are the worst case: both are "Data Protection Act 2018",
+    # both commenced in May 2018, both implement the GDPR. An Irish judgment saying
+    # "section 117 of the Data Protection Act 2018" means the Oireachtas Act every time,
+    # so ANY route to UK domestic legislation is refused here, not just the two statute-
+    # name grammars — a learned shorthand, a corpus-wide alias and a carried-forward
+    # "section 45" all reached ukpga/2018/12 without ever carrying a uk_* method name.
+    # An explicit legislation.gov.uk URI still resolves: that is an identifier, and an
+    # Irish court citing one means it.
+    # …and the EU guidance guard (EDPB / A29WP / OSS decisions): an EU-level document must
+    # not link a *domestic* statute by NAME (cross-jurisdiction collision), but its EU-law
     # (CELEX), CJEU/ECHR (ECLI) and English/Irish case-law (neutral-citation) links are
     # all unambiguous and kept. Domestic (ICO etc.) guidance is deliberately NOT gated —
     # there a "Data Protection Act 2018" reference IS to the national statute.
-    if _is_eu_guidance(doc):
-        cites = [replace(c, candidate_id=None) if c.method in _UK_NAME_HEURISTICS else c
-                 for c in cites]
+    cites = _gate_domestic_statute_names(doc, cites)
 
     # Bare "the Charter" is EU-local shorthand: in a national text it may mean a
     # domestic constitutional charter. Explicit "EU Charter", CFREU and the formal
@@ -908,6 +948,9 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
             # this document defines for itself (already linked by the extractor's pass)
             cites = attach_stored_shorthands(
                 text, cites, stored, exclude={d["shorthand"] for d in defs})
+            # Re-gate: the store is corpus-wide, so it will happily bind a UK act into
+            # an Irish judgment under a name both jurisdictions use.
+            cites = _gate_domestic_statute_names(doc, cites)
         fresh = _SHORTHANDS.unseen(defs)
         if fresh:
             try:

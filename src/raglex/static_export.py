@@ -453,7 +453,6 @@ def _section_paragraphs(
 
     paragraphs: list[dict] = []
     current_number: str | None = None
-    placed: set[str] = set()
     for chunk in chunks:
         stripped = chunk.lstrip()
         numeric = re.match(r"(\d+[a-z]?)\.\s+", stripped, re.I)
@@ -473,15 +472,16 @@ def _section_paragraphs(
         # line sits under "1."; accept that form if the fully-qualified path was absent.
         if parenthetical and not marks:
             marks = list(by_suffix.get(f"({parenthetical.group(1)})", []))
-        placed.update(mark["key"] for mark in marks)
         paragraphs.append({"text": chunk.strip(), "indent": indent, "marks": marks})
 
-    leftovers = [
-        mark for mark in anchor_marks
-        if mark["key"] not in placed
-    ]
-    if paragraphs and leftovers:
-        paragraphs[-1]["marks"].extend(leftovers)
+    # Marks that matched no drafting line are NOT dumped on the last paragraph. They are
+    # the ones whose sub-provision could not be located — a citation to "s. 11(4)" of a
+    # section that runs (1), (2), (2A), (3), or a pinpoint the extractor mangled — and
+    # bunching them at the section foot produced a meaningless row of "[1 mention]"
+    # badges, one per misreading, each opening a list of one. Every such citation is
+    # already counted under the section's own key (a pinpoint indexes under both its
+    # exact anchor and its parent), so dropping the badge here silently rolls it into
+    # the broader provision, which is the only place it can honestly be read.
     return paragraphs
 
 

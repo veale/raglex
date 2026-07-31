@@ -34,7 +34,36 @@ def test_task_cadence_override_and_reset(facade):
     facade.set_scheduled_task("authority", every_minutes=60)
     assert schedule.every_minutes("authority") == 60
     facade.set_scheduled_task("authority", remove=True)
-    assert schedule.every_minutes("authority") == 1440         # back to default
+    # Weekly by default: a whole-graph PageRank walk feeds ranking, not correctness.
+    assert schedule.every_minutes("authority") == 10080        # back to default
+
+
+def test_heavy_rollups_default_to_the_quiet_hours(facade):
+    """Cadence says how often; at_hour says when. Without it a weekly roll-up drifts to
+    whatever time of day the previous run happened to land on."""
+    from datetime import datetime, timezone
+
+    assert schedule.at_hour("authority") == 4
+    assert schedule.at_hour("counts") == 4
+    assert schedule.at_hour("watches") is None                 # unpinned tasks: any hour
+
+    at_four = datetime(2026, 8, 1, 4, 30, tzinfo=timezone.utc)
+    at_noon = datetime(2026, 8, 1, 12, 30, tzinfo=timezone.utc)
+    assert schedule.in_window("authority", at_four) is True
+    assert schedule.in_window("authority", at_noon) is False
+    assert schedule.in_window("watches", at_noon) is True       # never gated
+
+    facade.set_scheduled_task("authority", at_hour=23)
+    assert schedule.at_hour("authority") == 23
+    facade.set_scheduled_task("authority", at_hour="any")
+    assert schedule.at_hour("authority") is None
+    assert schedule.in_window("authority", at_noon) is True
+
+
+def test_post_harvest_rollups_are_off_by_default(facade):
+    """The weekly passes cover it; chaining a whole-graph walk off every harvest was
+    ~48 PageRank rebuilds a day to keep a ranking aggregate slightly fresher."""
+    assert schedule.is_enabled("postprocess-rollups") is False
 
 
 def test_maintenance_default_off(facade):

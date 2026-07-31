@@ -477,6 +477,55 @@ def probe_ambiguous_us_reporter(cat) -> ProbeResult:
         "warn", n, samples, repairable=True)
 
 
+# Ireland and the UK share statute names wholesale — and the 2018 Data Protection Acts
+# are the worst of it: same name, same year, same subject, both implementing the GDPR.
+# An Irish judgment naming "the Data Protection Act 2018" means the Oireachtas Act, so a
+# link from an Irish court to UK domestic legislation is a defect unless the judgment
+# gave the legislation.gov.uk URI (an identifier, not a colliding name). The extractor
+# now refuses these; this clears the ones written before it did.
+_UK_LEG_PREFIXES = (
+    "ukpga/", "ukla/", "ukcm/", "uksi/", "ukmo/", "ukci/", "asp/", "ssi/", "anaw/",
+    "asc/", "wsi/", "nia/", "nisr/", "apni/", "aosp/", "aep/", "mnia/",
+)
+
+
+def _irish_to_uk_legislation_sql(
+    table: str = "relations", target: str = "dst_id", provenance: str = "extracted_via",
+) -> tuple[str, list]:
+    """``(from/where, params)`` for machine-made Irish-court → UK-legislation rows.
+
+    Parameterised over the table because the same defect is recorded twice — as a graph
+    edge in ``relations`` and as an observation in ``citations`` — under different column
+    names, and both have to go or the next rescan re-mints the edge from the observation.
+    """
+    from ..citations.courts import IRISH_COURTS
+
+    courts = sorted(IRISH_COURTS)
+    like = " OR ".join([f"x.{target} LIKE ?"] * len(_UK_LEG_PREFIXES))
+    court_qs = ",".join("?" * len(courts))
+    sql = f"""
+    FROM {table} x JOIN documents s ON s.stable_id = x.src_id
+    WHERE ({like})
+      AND (s.source = 'ie-caselaw' OR lower(COALESCE(s.court, '')) IN ({court_qs}))
+      AND x.{provenance} IN ('regex', 'inferred')
+    """
+    return sql, [f"{p}%" for p in _UK_LEG_PREFIXES] + courts
+
+
+def probe_irish_case_cites_uk_legislation(cat) -> ProbeResult:
+    sql, params = _irish_to_uk_legislation_sql()
+    n = _one(cat, f"SELECT COUNT(*) AS n {sql}", params)
+    samples = _rows(cat, f"SELECT x.src_id, x.dst_id, x.raw_citation_string, "
+                         f"x.dst_anchor, x.extracted_via {sql} LIMIT {SAMPLE}", params)
+    return ProbeResult(
+        "irish_case_cites_uk_legislation",
+        "Irish judgments linked to UK domestic legislation by a name both "
+        "jurisdictions use (the two Data Protection Acts 2018 above all) — the Act "
+        "meant is the Irish one",
+        "warn", n, samples, repairable=True)
+
+
+
 PROBES = (
     probe_case_paragraph_carry_forward,
     probe_judgment_paragraph_carry_forward,
@@ -493,6 +542,7 @@ PROBES = (
     probe_never_extracted,
     probe_duplicate_spans,
     probe_ambiguous_us_reporter,
+    probe_irish_case_cites_uk_legislation,
 )
 
 
@@ -620,7 +670,30 @@ def repair_ambiguous_us_reporter(cat) -> dict:
     return {"citations_deleted": cites, "edges_deleted": edges}
 
 
+def repair_irish_case_cites_uk_legislation(cat) -> dict:
+    """Delete the machine-made edges the probe counts, and their citations rows.
+
+    Machine provenance only (``regex``/``inferred``) — a hand-made link from an Irish
+    judgment to a UK act is a deliberate comparative reference and is left alone. The
+    mention itself survives as unresolved text; only the wrong TARGET goes.
+
+    After repair, run rebuild-citation-counts: the roll-up still holds the phantom
+    occurrences until it is rebuilt."""
+    edge_sql, edge_params = _irish_to_uk_legislation_sql()
+    cite_sql, cite_params = _irish_to_uk_legislation_sql(
+        table="citations", target="candidate_id", provenance="method")
+    with cat._atomic():
+        edges = cat.conn.execute(
+            f"DELETE FROM relations WHERE relation_id IN "
+            f"(SELECT x.relation_id {edge_sql})", edge_params).rowcount
+        cites = cat.conn.execute(
+            f"DELETE FROM citations WHERE citation_id IN "
+            f"(SELECT x.citation_id {cite_sql})", cite_params).rowcount
+    return {"edges_deleted": edges, "citations_deleted": cites}
+
+
 REPAIRS = {
+    "irish_case_cites_uk_legislation": repair_irish_case_cites_uk_legislation,
     "ambiguous_us_reporter": repair_ambiguous_us_reporter,
     "case_paragraph_carry_forward": repair_case_paragraph_carry_forward,
     "judgment_paragraph_carry_forward": repair_judgment_paragraph_carry_forward,

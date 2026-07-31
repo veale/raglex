@@ -288,6 +288,61 @@ def test_static_export_names_the_previous_law_behind_inherited_mentions(tmp_path
     assert "Member States shall guarantee" in page
 
 
+def test_unplaceable_subprovision_pinpoints_roll_into_the_provision(tmp_path):
+    """A pinpoint that corresponds to nothing gets no badge of its own.
+
+    Citations to "s. 11(4)" of a section that runs (1), (2), (3) — a mangled capture, or
+    a number the drafter never used — used to be bunched at the foot of the section as a
+    row of "[1 mention]" badges, one per misreading, each opening a list of one. They are
+    counted under the section instead, which is the only place they can be read honestly.
+    """
+    config = _config(tmp_path)
+    cat = Catalogue(config.catalogue_path)
+    textstore = TextStore(config.text_dir)
+
+    law_text = ("s. 11 Right to prevent processing\n"
+                "1. An individual is entitled.\n"
+                "2. The court may order.\n")
+    law = Record(
+        source="uk-legislation", stable_id="ukpga/1998/29",
+        doc_type=DocType.LEGISLATION, title="Data Protection Act 1998",
+        text=law_text, raw_bytes=law_text.encode(),
+        segments=[Segment("s. 11 Right to prevent processing", 0, len(law_text),
+                          kind="section")],
+        extracted_via=ExtractedVia.STRUCTURED,
+    )
+    _store(cat, textstore, law)
+
+    citing = ("The judge considered s. 11(1) and then s. 11(4) and s. 11(9) of the Act.")
+    relations = []
+    for pinpoint in ("s. 11(1)", "s. 11(4)", "s. 11(9)"):
+        at = citing.index(pinpoint)
+        relations.append(TypedRelation(
+            relationship_type=RelationshipType.MENTIONS,
+            raw_citation_string=pinpoint, dst_id="ukpga/1998/29",
+            dst_anchor=pinpoint, context_start=at, context_end=at + len(pinpoint),
+            resolution_status=ResolutionStatus.PENDING,
+        ))
+    _store(cat, textstore, Record(
+        source="uk-caselaw", stable_id="ewhc/qb/2015/1", doc_type=DocType.JUDGMENT,
+        title="Example v Registrar", court="ewhc", decision_date=date(2015, 3, 1),
+        text=citing, raw_bytes=citing.encode(), relations=relations,
+        extracted_via=ExtractedVia.STRUCTURED))
+    Resolver(cat).run()
+    cat.commit()
+    cat.close()
+
+    data = StaticLawExporter(config).build_data("ukpga/1998/29")
+    section = data["law"]["sections"][0]
+    badges = [mark["label"] for para in section["paragraphs"] for mark in para["marks"]]
+    # (1) exists as a drafting line and keeps its own badge; (4) and (9) do not exist…
+    assert badges == ["s. 11(1)"]
+    # …but their citer is still counted against the section as a whole.
+    assert data["counts"][section["key"]] == 1
+    assert "exact:s11(4)" not in {
+        mark["key"] for para in section["paragraphs"] for mark in para["marks"]}
+
+
 def test_static_export_escapes_script_terminators_and_sanitises_attribution(
     tmp_path, monkeypatch
 ):

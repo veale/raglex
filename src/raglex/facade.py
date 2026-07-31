@@ -252,10 +252,34 @@ def _match_segment(segs, anchor: str) -> int:
     for i, s in enumerate(segs):
         if norm(s.label) == a:
             return i
+
+    # The canonical fold, which is what makes this agree with every other anchor
+    # comparison in the system: "section 167", "s. 167" and "s167" are one provision, and
+    # a UK segment label carries its title ("s. 167 Compliance orders") so a bare pinpoint
+    # never equals it outright. Restricted to a SIMPLE anchor — a bare unit+number, with
+    # optional sub-parts — because a compound label like "Sch 2 Pt 2 para 7" folds to just
+    # "sch:2" and would otherwise match any part of Schedule 2.
+    if _re.fullmatch(r"\s*[a-z]*\.?\s*\d+[a-z]?\s*(?:\([^()]+\)\s*)*", anchor.strip(),
+                     _re.IGNORECASE):
+        key = _anchor_key(anchor)
+        if key:
+            for i, s in enumerate(segs):
+                if _anchor_key(s.label) == key:
+                    return i
+
+    # Last resort, and number-guarded. A bare substring test answered "s. 16" with
+    # s. 166 — silently quoting the wrong provision, which is worse than finding
+    # nothing — so a match may not continue the number we were given.
     if len(a) > 2:
         for i, s in enumerate(segs):
-            if a in norm(s.label):
-                return i
+            label = norm(s.label)
+            at = label.find(a)
+            if at < 0:
+                continue
+            after = label[at + len(a):at + len(a) + 1]
+            if a[-1].isdigit() and after.isdigit():
+                continue
+            return i
     return -1
 
 
@@ -652,6 +676,33 @@ def _anchor_key(text: str | None) -> str | None:
         return None
     typ = _ANCHOR_TYPES.get(m.group(1) or "", "")
     return f"{typ}:{m.group(2)}" if typ else m.group(2)
+
+
+# Every way each unit gets written, keyed by the canonical type ``_anchor_key`` folds to.
+# The database guard needs the spellings, not the fold: the corpus stores whichever form
+# the citing document used ("s. 13"), and the caller types whichever they know
+# ("section 13") — a guard built from one spelling silently drops the other.
+_ANCHOR_SPELLINGS: dict[str, tuple[str, ...]] = {}
+for _spelling, _canonical in _ANCHOR_TYPES.items():
+    _ANCHOR_SPELLINGS.setdefault(_canonical, ())
+    _ANCHOR_SPELLINGS[_canonical] += (_spelling,)
+
+
+def _anchor_sql_prefixes(anchor: str | None) -> list[str]:
+    """Normalised prefixes for the coarse database-side anchor guard.
+
+    "s. 13", "section 13" and "§ 13" all yield ``["section13", "sec13", "s13"]``, which
+    match the stored pinpoint whichever way it was punctuated. Returning *nothing* means
+    "don't narrow in SQL" — never "match nothing" — so an anchor shape this doesn't
+    understand degrades to the (correct, slower) unfiltered path.
+    """
+    key = _anchor_key(anchor)
+    if not key:
+        return []
+    typ, _, number = key.partition(":")
+    if not number:                       # a bare numeral: no unit to spell
+        return [typ]
+    return [f"{spelling}{number}" for spelling in _ANCHOR_SPELLINGS.get(typ, (typ,))]
 
 
 def _today_iso() -> str:
@@ -1937,11 +1988,23 @@ class Facade:
             ),
         }
 
-    def document_body(self, stable_id: str) -> dict:
+    def document_body(self, stable_id: str, *, offset: int = 0,
+                      limit: int | None = None, segments_only: bool = False) -> dict:
         """The document's extracted text + structural segments (§6b) for the reader.
         Segments carry kind/level so legislation renders as a hierarchy. Consolidated
         EU expressions also expose ``inherited_recitals``: a virtual, provenance-marked
-        projection of the original act's unchanged recitals and their citation links."""
+        projection of the original act's unchanged recitals and their citation links.
+
+        ``segments_only`` returns the STRUCTURE alone — labels, kinds, levels, offsets —
+        and no text, no citations. That is what structural work (picking a provision to
+        pincite, building a correlation table) actually needs, and it turns a document
+        that cannot be returned at all into one cheap call: the DPA 2018 is 1,222
+        segments and its full body exceeds the 1 MB tool ceiling outright.
+
+        ``offset``/``limit`` window the text in characters, carrying only the segments
+        and citations that overlap the window, so a large document can be read in
+        pieces instead of not at all.
+        """
         with self._open() as (cat, _rs, ts):
             doc = cat.get_document(stable_id)
             if doc is None or not doc["payload_hash"]:
@@ -1951,6 +2014,28 @@ class Facade:
                 text = ts.get(ph)
             except OSError:
                 text = None
+            if segments_only:
+                segments = ts.get_segments(ph)
+                if not segments and text:
+                    from .core.segmentation import synthesise_numbered_segments
+                    segments = synthesise_numbered_segments(text)
+                return {
+                    "stable_id": stable_id,
+                    "title": doc["title"],
+                    "doc_type": doc["doc_type"],
+                    "segments_only": True,
+                    "segment_count": len(segments),
+                    "text_chars": len(text or ""),
+                    "segments": [
+                        {"label": s.label, "kind": s.kind, "level": s.level,
+                         "char_start": s.char_start, "char_end": s.char_end}
+                        for s in segments
+                    ],
+                    "how_to_read": (
+                        "structure only. get_provision(stable_id, label=…) reads one "
+                        "provision; get_document_body(offset=…, limit=…) reads a window "
+                        "of the text."),
+                }
             # Inline citations (JADE-style): each recognised reference with its exact
             # char span, resolved to its target document where we hold it, plus its
             # pinpoint — so the reader can wrap the matched text in a live link to the
@@ -2007,11 +2092,28 @@ class Facade:
                 # which still wants indenting
                 if not segs and "\n" in text:
                     flat_lines = _spans(text, 0)
+            window = None
+            if text and (offset or limit):
+                # A character window, with segments/citations narrowed to what OVERLAPS
+                # it — a segment straddling the boundary still belongs to both pages, so
+                # its offsets stay absolute and the caller can stitch pages by char_start.
+                start = max(0, min(int(offset), len(text)))
+                end = len(text) if limit is None else min(len(text), start + max(1, int(limit)))
+                window = {"offset": start, "limit": end - start,
+                          "text_chars": len(text), "has_more": end < len(text),
+                          "next_offset": end if end < len(text) else None}
+                segs = [s for s in segs
+                        if s["char_end"] > start and s["char_start"] < end]
+                citations = [c for c in citations
+                             if (c["char_end"] or 0) > start
+                             and (c["char_start"] or 0) < end]
+                text = text[start:end]
             return {
                 "text": text,
                 "segments": segs,
                 "lines": flat_lines,
                 "citations": citations,
+                **({"window": window} if window else {}),
                 "doc_type": doc["doc_type"],
                 "title": doc["title"],
                 "oscola": _oscola_cite(doc, meta),
@@ -2060,27 +2162,18 @@ class Facade:
         """
         with self._open() as (cat, _rs, ts):
             anchor_exact = anchor if anchor and exact else None
-            anchor_prefix = None
-            if anchor and not exact:
-                # Segment labels may include their title ("Article 17 Right to
-                # erasure"), whereas citation edges carry only "Article 17(2)".
-                # Give the catalogue the canonical unit+number as a coarse prefix;
-                # the exact family matcher below remains authoritative.
-                m = re.match(
-                    r"^([A-Za-z]+)\.?\s*(\d+[A-Za-z]?)",
-                    anchor.strip().lstrip("[("),
-                )
-                if m:
-                    anchor_prefix = f"{m.group(1)} {m.group(2)}"
-                else:
-                    anchor_prefix = re.sub(
-                        r"(?:\([^()]+\))+\s*$", "", anchor,
-                    ).strip()
+            # Segment labels may include their title ("Article 17 Right to erasure",
+            # "s. 13 Compensation for failure to comply"), whereas citation edges carry
+            # only the bare pinpoint ("Article 17(2)", "s. 13"). Give the catalogue every
+            # spelling of the canonical unit+number as a coarse guard; the exact family
+            # matcher below remains authoritative.
+            anchor_prefixes = (
+                _anchor_sql_prefixes(anchor) if anchor and not exact else [])
             rels = [
                 dict(r) for r in cat.relations_to(
                     stable_id,
                     anchor_exact=anchor_exact,
-                    anchor_prefix=anchor_prefix,
+                    anchor_prefixes=anchor_prefixes,
                 )
                 if r["extracted_via"] != "inferred"
             ]
@@ -2092,7 +2185,7 @@ class Facade:
             for row in cat.version_inherited_mentions_for(
                 stable_id, limit=20000,
                 anchor_exact=anchor_exact,
-                anchor_prefix=anchor_prefix,
+                anchor_prefixes=anchor_prefixes,
             ):
                 projected = dict(row)
                 key = (
@@ -2916,6 +3009,22 @@ class Facade:
     # default. A preview orients the agent; a pincite quotes exactly; ``full`` is the
     # explicit, still-capped escape hatch. ~2.5k chars ≈ 600 tokens preview; ~48k ≈ 12k
     # tokens for a capped full read (well under the 25k-token tool-response ceiling).
+    @staticmethod
+    def _struck_out_text(text: str | None) -> float:
+        """How much of this text has been GUTTED, 0.0–1.0.
+
+        legislation.gov.uk publishes a repealed provision as rows of dots, so the live
+        consolidation of a wholly-repealed Act is a full-length document made almost
+        entirely of ``. . . . . . .``. Everything about it reads healthy — held, 319
+        segments, an outline, 1,914 citers — and the text says nothing at all. Measuring
+        it is the only way to tell that apart from a document that simply is dot-heavy.
+        """
+        body = re.sub(r"\s+", "", text or "")
+        if len(body) < 200:
+            return 0.0
+        return sum(ch in ".·…" for ch in body) / len(body)
+
+    _STRUCK_OUT_RATIO = 0.4
     _LOOKUP_PREVIEW_CHARS = 2500
     _LOOKUP_FULL_CHARS = 48_000
     _LOOKUP_OUTLINE_LABELS = 120
@@ -3018,6 +3127,20 @@ class Facade:
             segs = body.get("segments") or []
             inherited_recitals = body.get("inherited_recitals")
             out["segment_count"] = len(segs)
+            # A repealed Act's live text is struck out at source, so "held: true" with a
+            # healthy segment count is not a promise that anything can be READ. Say so,
+            # and point at the versions that still carry the words.
+            struck = self._struck_out_text(text)
+            if struck >= self._STRUCK_OUT_RATIO:
+                out["text_available"] = False
+                out["struck_out_ratio"] = round(struck, 2)
+                out["text_note"] = (
+                    "The held text is the CURRENT version of an instrument whose "
+                    "provisions have been repealed, so the source publishes them struck "
+                    "out — this document is mostly rows of dots, not law. Call "
+                    "legislative_status() for what repealed it, and read a point-in-time "
+                    "version (list_versions / an @YYYY-MM-DD id) for the words as they "
+                    "stood.")
             if inherited_recitals:
                 # Keep the original act's immutable preamble separate from the
                 # consolidated expression text, but make it fully discoverable to
@@ -4725,12 +4848,14 @@ class Facade:
         return {"tasks": list_tasks(), "scheduler_paused": scheduler_paused()}
 
     def set_scheduled_task(self, name: str, *, enabled: bool | None = None,
-                           every_minutes: int | None = None, remove: bool = False) -> dict:
-        """Enable/disable a scheduler task or set its cadence (persisted); ``remove`` reverts
-        it to its default. The scheduler picks the change up on its next tick."""
+                           every_minutes: int | None = None, remove: bool = False,
+                           at_hour: int | str | None = None) -> dict:
+        """Enable/disable a scheduler task, set its cadence, or pin it to one UTC hour
+        (persisted); ``remove`` reverts it to its default, ``at_hour='any'`` unpins it.
+        The scheduler picks the change up on its next tick."""
         from .schedule import set_task
         return set_task(self.settings, name, enabled=enabled,
-                        every_minutes=every_minutes, remove=remove)
+                        every_minutes=every_minutes, remove=remove, at_hour=at_hour)
 
     def maintenance_plan(self, **params) -> dict:
         """Preview the serial maintenance queue without running it (what a maintenance-run
@@ -9663,6 +9788,7 @@ class Facade:
         self, *, current_id: str, previous_id: str, mappings: list[dict],
         created_by: str = "manual", replace: bool = False,
         mapping_type: str = "functional_predecessor", dry_run: bool = False,
+        return_all: bool = False,
     ) -> dict:
         """Bulk-create article/section correspondences between two laws.
 
@@ -9679,6 +9805,11 @@ class Facade:
         Every anchor is resolved against its document's segments at write time, and any
         that names nothing is reported back per row. ``dry_run`` runs that check and
         returns the plan without writing.
+
+        The reply carries only the rows this call wrote, plus ``total_for_pair``. Batch
+        sizes above ~55 rows have been seen to exceed the four-minute tool ceiling; the
+        write is atomic under that timeout (nothing is stored), so the safe recovery is
+        simply to re-send in smaller batches.
         """
         created_by = (created_by or "manual").strip().lower()
         if created_by not in {"manual", "llm", "structured"}:
@@ -9749,10 +9880,27 @@ class Facade:
             written = cat.upsert_provision_mappings(
                 current_id, previous_id, clean, created_by=created_by,
                 replace=replace)
-            rows = [dict(r) for r in cat.provision_mappings(current_id)]
+            # Only the rows THIS call wrote. Echoing every mapping for the pair made a
+            # build quadratic in its own output: 260 rows in 6 batches re-read ~900 rows
+            # of already-known data, the notes being the bulk of it, and the last batches
+            # blew the response ceiling. `list_provision_mappings` returns the whole set
+            # for anyone who wants it; `return_all=True` restores the old behaviour.
+            everything = [dict(r) for r in cat.provision_mappings(current_id)]
+            for_pair = [r for r in everything if r["previous_doc_id"] == previous_id]
+            anchors = {(m["current_anchor"].strip().lower(),
+                        m["previous_anchor"].strip().lower()) for m in clean}
+            rows = for_pair if return_all else [
+                r for r in for_pair
+                if (str(r["current_anchor"] or "").strip().lower(),
+                    str(r["previous_anchor"] or "").strip().lower()) in anchors
+            ]
         self._invalidate_caches()
         result = {"current_id": current_id, "previous_id": previous_id,
-                  "written": written, "mappings": rows}
+                  "written": written, "mappings": rows,
+                  # The pair's full size, so a caller can see the running total without
+                  # being handed it row by row on every batch.
+                  "total_for_pair": len(for_pair),
+                  "returned": "all" if return_all else "written"}
         if unresolved:
             # Reported, not refused: a mapping can legitimately name a provision of a
             # document held only as a metadata stub. The caller must be able to SEE it.
