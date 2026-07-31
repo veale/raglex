@@ -607,3 +607,35 @@ def test_one_predecessors_citations_do_not_satisfy_anothers_mapping(tmp_path):
         current_id="new-act", previous_id="old-a",
         mappings=[{"current_anchor": "s. 1", "previous_anchor": "s. 7"}])
     assert f.inherited_provision_mentions(stable_id="new-act")["documents"] == 0
+
+
+def test_a_subsection_citation_inherits_through_its_provisions_mapping(tmp_path):
+    """"s. 33A(1)" inherits from a mapping written about "s. 33A".
+
+    A provision heading represents its family everywhere else in the reader; the
+    inherited-mentions join was exact-only, which dropped 241 of the DPA 1998's
+    pinpointed citations — every one of them to a subsection of a provision that IS
+    mapped, and so exactly the history the mapping exists to surface.
+    """
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        for sid in ("new-act", "old-act", "case-sub", "case-exact", "case-other"):
+            _held(cat, ts, sid)
+        for src, anchor in (("case-sub", "s. 33A(1)"), ("case-exact", "s. 33A"),
+                            ("case-other", "s. 3")):
+            cat.add_relations(src, [TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string=anchor, dst_id="old-act", dst_anchor=anchor,
+                extracted_via=ExtractedVia.MANUAL,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )])
+
+    f.upsert_provision_mappings(
+        current_id="new-act", previous_id="old-act",
+        mappings=[{"current_anchor": "s. 24", "previous_anchor": "s. 33A"}])
+
+    inherited = f.inherited_provision_mentions(stable_id="new-act")
+    srcs = {r["src_id"] for r in inherited["incoming"]}
+    assert srcs == {"case-sub", "case-exact"}
+    # "s. 3" must NOT be swept in by a prefix match on "s. 33A".
+    assert "case-other" not in srcs

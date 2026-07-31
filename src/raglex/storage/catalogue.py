@@ -1436,8 +1436,16 @@ class Catalogue:
             clauses.append(f"(pm.previous_doc_id = ? AND "
                            f"(r.dst_id IN ({qs}) OR r.candidate_id IN ({qs})))")
             join_params.extend([previous_id, *group, *group])
-        anchor_match = (f"{anchor_norm_sql('r.dst_anchor')} = "
-                        f"{anchor_norm_sql('pm.previous_anchor')}")
+        # A citation of "s. 33A(1)" is a citation of the provision a mapping of "s. 33A"
+        # speaks about, exactly as a provision heading represents its family everywhere
+        # else in the reader. Exact-only matching lost 241 of the DPA 1998's pinpointed
+        # citations — every one of them to a subsection of a provision that IS mapped.
+        # The "(" is load-bearing: it stops "s. 3" claiming "s. 33A(1)".
+        anchor_match = (
+            f"({anchor_norm_sql('r.dst_anchor')} = {anchor_norm_sql('pm.previous_anchor')}"
+            f" OR {anchor_norm_sql('r.dst_anchor')} LIKE "
+            f"{anchor_norm_sql('pm.previous_anchor')} || '(%')"
+        )
         family_sql = " OR ".join(clauses)
         params = [*join_params, *mapping_params, max(1, min(int(limit), 5000))]
         return self.conn.execute(
