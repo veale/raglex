@@ -512,19 +512,30 @@ def build_server(config: Config | None = None) -> MCPServer:
     def upsert_provision_mappings(
         current_id: str, previous_id: str, mappings: list[dict],
         replace: bool = False, created_by: str = "llm",
+        mapping_type: str = "functional_predecessor",
     ) -> dict:
-        """Bulk-map functionally similar statutory provisions.
+        """Bulk-map corresponding statutory provisions between two laws.
 
-        Direction is current → previous. Each mapping is
+        Direction is current → the other law. Each mapping is
         ``{"current_anchor":"Article 6","previous_anchor":"Article 15",
         "note":"optional explanation","confidence":0.9}``. These mappings preserve
         literal old-law citations and surface them separately beside the current article;
         do not use citation aliases for this purpose. ``replace`` replaces all mappings
         between this pair of laws, enabling an LLM to submit a reviewed correlation table.
+
+        ``mapping_type`` — set per call or per mapping — says what the row CLAIMS, and an
+        unknown value is refused rather than silently downgraded:
+
+        * ``functional_predecessor`` (default) — the other provision is an earlier
+          iteration this one succeeds (ECD Art 14 → DSA Art 6; DPD → GDPR). Citations to
+          it are read as this provision's history.
+        * ``equivalent`` — a parallel provision in a companion instrument, both in force
+          (GDPR / EUDPR / LED, drafted as one package). Use this rather than asserting
+          descent between instruments that never replaced one another.
         """
         return facade.upsert_provision_mappings(
             current_id=current_id, previous_id=previous_id, mappings=mappings,
-            replace=replace, created_by=created_by)
+            replace=replace, created_by=created_by, mapping_type=mapping_type)
 
     @admin
     def list_provision_mappings(stable_id: str) -> dict:

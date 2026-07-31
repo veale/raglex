@@ -1235,6 +1235,9 @@ class Catalogue:
                    pm.previous_anchor AS inherited_from_anchor,
                    pm.note AS mapping_note, pm.created_by AS mapping_created_by,
                    pm.confidence AS mapping_confidence,
+                   -- what the mapping CLAIMS: an earlier iteration (history) or a
+                   -- companion instrument's parallel provision (in force alongside)
+                   pm.mapping_type AS mapping_type,
                    d.title AS inherited_from_title
             FROM provision_mappings pm
             JOIN relations r

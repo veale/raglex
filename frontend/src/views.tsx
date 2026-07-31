@@ -2656,22 +2656,43 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
   );
 }
 
+// What a mapping row asserts, in the reader's words. A repealed predecessor's citers are
+// this provision's history; a companion instrument's are a parallel provision's, in force
+// alongside — calling the latter "previous" would be simply untrue.
+const MAPPING_KIND: Record<string, { row: string; heading: string; blurb: string }> = {
+  functional_predecessor: {
+    row: "earlier iteration",
+    heading: "Previous, functionally similar iterations",
+    blurb: "These authors cited the earlier law, not the current one. They are included as functional history and remain distinct from direct citations.",
+  },
+  equivalent: {
+    row: "parallel provision",
+    heading: "Parallel provisions in companion instruments",
+    blurb: "These authors cited a provision of a companion instrument that is in force alongside this one — not an earlier iteration of it. They remain distinct from direct citations.",
+  },
+};
+const mappingKind = (t?: string) => MAPPING_KIND[t || "functional_predecessor"] || MAPPING_KIND.functional_predecessor;
+
 function InheritedProvisionMentions({ incoming, mappings, open }:
   { incoming: any[]; mappings: any[]; open: (id: string, a?: string) => void }) {
   const [anchor, setAnchor] = useState("");
-  const anchors = [...new Set(mappings.map((m: any) => m.current_anchor))] as string[];
+  // The dropdown is how you get from "148 documents" to "the 45 that cited ECD Article 14,
+  // shown against DSA Article 6" — so it names the pairing, not just the current anchor.
+  const pairs = [...new Map(mappings.map((m: any) => [m.current_anchor, m])).values()] as any[];
   const shown = anchor
     ? incoming.filter((r: any) => r.inherited_current_anchor === anchor) : incoming;
+  const kinds = [...new Set(shown.map((r: any) => r.mapping_type || "functional_predecessor"))];
+  const kind = kinds.length === 1 ? mappingKind(kinds[0] as string) : null;
   return <div className="panel">
     <select className="sort-select" style={{ float: "right" }} value={anchor}
       onChange={(e) => setAnchor(e.target.value)} aria-label="current provision filter">
       <option value="">all mapped provisions</option>
-      {anchors.map((a) => <option key={a} value={a}>{a}</option>)}
+      {pairs.map((m: any) => <option key={m.current_anchor} value={m.current_anchor}>
+        {m.current_anchor} ← {m.previous_anchor}</option>)}
     </select>
-    <h3>Previous, functionally similar iterations mentioned by <b>{shown.length}</b> document{shown.length === 1 ? "" : "s"}</h3>
+    <h3>{kind ? kind.heading : "Corresponding provisions in other instruments"} mentioned by <b>{shown.length}</b> document{shown.length === 1 ? "" : "s"}</h3>
     <p className="muted" style={{ fontSize: 12 }}>
-      These authors cited the earlier law, not the current one. They are included as
-      functional history and remain distinct from direct citations.
+      {kind ? kind.blurb : "These authors cited a corresponding provision of another instrument, not this one. Each row says what the mapping claims; all remain distinct from direct citations."}
     </p>
     <table><tbody>{shown.map((r: any) => <tr key={`${r.src_id}-${r.mapping_id}`}>
       <td><DocLink id={r.src_id} anchor={r.src_anchor}
@@ -2679,7 +2700,8 @@ function InheritedProvisionMentions({ incoming, mappings, open }:
       <td className="muted">{r.inherited_current_anchor} ←{" "}
         <DocLink id={r.inherited_from_id} anchor={r.inherited_from_anchor}
           onOpen={() => open(r.inherited_from_id, r.inherited_from_anchor)}>
-          {r.inherited_from_title || r.inherited_from_id} {r.inherited_from_anchor}</DocLink></td>
+          {r.inherited_from_title || r.inherited_from_id} {r.inherited_from_anchor}</DocLink>
+        {!kind && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }}>{mappingKind(r.mapping_type).row}</span>}</td>
     </tr>)}</tbody></table>
   </div>;
 }
@@ -6172,6 +6194,7 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
   const [data, _e, reload] = useAsync(() => api.provisionMappings(id), [id]);
   const [previous, setPrevious] = useState("");
   const [rows, setRows] = useState("");
+  const [kind, setKind] = useState("functional_predecessor");
   const [msg, setMsg] = useState("");
   const mappings = data?.mappings || [];
   const save = async () => {
@@ -6188,7 +6211,7 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
     try {
       const result = await api.saveProvisionMappings({
         current_id: id, previous_id: previous.trim(), mappings: parsed,
-        created_by: "manual",
+        created_by: "manual", mapping_type: kind,
       });
       if (result.error) setMsg("error: " + result.error);
       else { setMsg(`✓ saved ${result.written} mapping(s)`); setRows(""); reload(); }
@@ -6196,15 +6219,22 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
   };
   return (
     <div className="panel">
-      <h3>Provision lineage <span className="muted">— functionally similar provisions in earlier laws</span></h3>
+      <h3>Provision lineage <span className="muted">— corresponding provisions in other laws</span></h3>
       <p className="muted" style={{ fontSize: 12 }}>
-        Direction is this/current law → previous law. This does not rewrite old citations:
+        Direction is this/current law → the other law. This does not rewrite old citations:
         it surfaces them separately as inherited context. Paste a whole correlation table,
-        one <span className="kbd">current = previous</span> pair per line.
+        one <span className="kbd">current = other</span> pair per line. The kind is part of
+        the claim: <b>earlier iteration</b> makes the other law's citers read as this
+        provision's history; <b>parallel provision</b> is for a companion instrument in
+        force alongside (GDPR / EUDPR / LED), which never became this one.
       </p>
       <div className="row" style={{ alignItems: "flex-start", flexWrap: "wrap" }}>
+        <select value={kind} onChange={(e) => setKind(e.target.value)} style={{ flex: "0 0 auto" }}>
+          <option value="functional_predecessor">earlier iteration (predecessor)</option>
+          <option value="equivalent">parallel provision (companion instrument)</option>
+        </select>
         <input value={previous} onChange={(e) => setPrevious(e.target.value)}
-          placeholder="previous law id, e.g. 31995L0046" style={{ minWidth: 250 }} />
+          placeholder="other law id, e.g. 31995L0046" style={{ minWidth: 250 }} />
         <textarea value={rows} onChange={(e) => setRows(e.target.value)}
           placeholder={"Article 16 = Article 12\nArticle 17 = Article 14"}
           rows={4} style={{ minWidth: 330, flex: 1 }} />
@@ -6212,13 +6242,14 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
       </div>
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"}>{msg}</p>}
       {mappings.length > 0 && <table className="grid"><thead><tr>
-        <th>current provision</th><th>previous provision</th><th>inherited mentions</th><th></th>
+        <th>current provision</th><th>corresponds to</th><th>kind</th><th>inherited mentions</th><th></th>
       </tr></thead><tbody>{mappings.map((m: any) => <tr key={m.mapping_id}>
         <td>{m.current_anchor}</td>
         <td><DocLink id={m.previous_doc_id} anchor={m.previous_anchor}
           onOpen={() => open(m.previous_doc_id, m.previous_anchor)}>
           {m.previous_title || m.previous_doc_id} · {m.previous_anchor}</DocLink>
           {m.note && <div className="muted">{m.note}</div>}</td>
+        <td className="muted">{mappingKind(m.mapping_type).row}</td>
         <td>{m.mentioned_by_count || 0}</td>
         <td><a style={{ cursor: "pointer" }} onClick={async () => {
           await api.deleteProvisionMapping(m.mapping_id); reload();

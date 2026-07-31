@@ -32,6 +32,20 @@ log = logging.getLogger("raglex.facade")
 # defaults to a dated consolidation).  Keep this explicit and reviewable: selecting
 # every sector-3 instrument would turn a focused 8k-document repair back into a
 # multi-million-document French rescan.
+# What an editorial provision-to-provision mapping asserts. The distinction is
+# substantive, not decorative: a repealed instrument's provision is the current one's
+# ancestry, so citations to it read as that provision's history; a companion instrument
+# drafted in the same package (GDPR / EUDPR / LED) is in force alongside, so its citations
+# are a parallel provision's, never the current provision's past. Rows are labelled by
+# this in the reader, and callers may not assert descent by accident — an unrecognised
+# value is refused rather than coerced.
+PROVISION_MAPPING_TYPES = {
+    "functional_predecessor":
+        "the other provision is an earlier iteration this one succeeds",
+    "equivalent":
+        "a parallel provision in a companion instrument, both in force",
+}
+
 EU_DIGITAL_ACQUIS_IDS = (
     # data protection / data economy
     "31995L0046", "32016R0679", "32016L0680", "32002L0058",
@@ -9480,17 +9494,29 @@ class Facade:
     def upsert_provision_mappings(
         self, *, current_id: str, previous_id: str, mappings: list[dict],
         created_by: str = "manual", replace: bool = False,
+        mapping_type: str = "functional_predecessor",
     ) -> dict:
-        """Bulk-create article/section functional lineage.
+        """Bulk-create article/section correspondences between two laws.
 
-        Direction is current provision → previous provision. This never rewrites the
-        literal citation and therefore must not be implemented with citation aliases.
+        Direction is current provision → the other law's provision. This never rewrites
+        the literal citation and therefore must not be implemented with citation aliases.
+
+        ``mapping_type`` says what the correspondence CLAIMS (see
+        :data:`PROVISION_MAPPING_TYPES`) and may be set per item. It is not cosmetic: a
+        repealed predecessor's citations are the current provision's history, whereas a
+        companion instrument's are a parallel provision in force alongside it, and the
+        reader labels them differently. An unknown value is an error rather than a silent
+        downgrade — asserting descent between companion instruments would be wrong.
         """
         created_by = (created_by or "manual").strip().lower()
         if created_by not in {"manual", "llm", "structured"}:
             return {"error": "created_by must be manual, llm, or structured"}
         if not current_id or not previous_id or current_id == previous_id:
             return {"error": "distinct current_id and previous_id are required"}
+        default_type = str(mapping_type or "functional_predecessor").strip().lower()
+        if default_type not in PROVISION_MAPPING_TYPES:
+            return {"error": f"unknown mapping_type {mapping_type!r}",
+                    "known": sorted(PROVISION_MAPPING_TYPES)}
         clean: list[dict] = []
         for item in mappings or []:
             current_anchor = str(item.get("current_anchor") or "").strip()
@@ -9503,10 +9529,15 @@ class Facade:
                     confidence = max(0.0, min(1.0, float(confidence)))
                 except (TypeError, ValueError):
                     return {"error": "confidence must be between 0 and 1"}
+            item_type = str(item.get("mapping_type") or default_type).strip().lower()
+            if item_type not in PROVISION_MAPPING_TYPES:
+                return {"error": f"unknown mapping_type {item.get('mapping_type')!r} for "
+                                 f"{current_anchor}",
+                        "known": sorted(PROVISION_MAPPING_TYPES)}
             clean.append({
                 "current_anchor": current_anchor,
                 "previous_anchor": previous_anchor,
-                "mapping_type": "functional_predecessor",
+                "mapping_type": item_type,
                 "note": str(item.get("note") or "").strip() or None,
                 "confidence": confidence,
             })
