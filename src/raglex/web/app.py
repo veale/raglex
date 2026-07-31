@@ -281,6 +281,28 @@ def create_app(config: Config | None = None) -> FastAPI:
             params,
         )
 
+    @app.post("/export/bundle/webhook-test")
+    def export_bundle_webhook_test_ep() -> dict:
+        """Send the configured webhook once, now, against the last run's summary.
+
+        The point is to find out whether the endpoint accepts the request BEFORE a
+        scheduled export depends on it — so a failure comes back as a reported status,
+        exactly as it would during a real run, rather than as an exception."""
+        from ..static_bundle import fire_webhook, last_run, load_config
+
+        config = load_config(facade.config)
+        hook = dict(config.get("webhook") or {})
+        if not hook.get("url"):
+            return JSONResponse({"error": "no webhook URL is configured"}, status_code=422)
+        run = last_run(facade.config) or {}
+        sample = {**{"documents": len(config.get("items") or []),
+                     "output_dir": config.get("resolved_output_dir") or "",
+                     "bytes": 0, "files": [], "started_at": "", "finished_at": ""},
+                  **run, "test": True}
+        # A test must send even while the hook is switched off — that is how an operator
+        # checks it before enabling it.
+        return fire_webhook({**hook, "enabled": True}, sample) or {}
+
     @app.get("/export/bundle.zip")
     def export_bundle_zip_ep():
         """Download the zip written by the most recent build."""

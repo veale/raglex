@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SettingsView, TrayProvider, TrayStack, UnresolvedView } from "./views";
+import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SettingsView, StaticExportView, TrayProvider, TrayStack, UnresolvedView } from "./views";
 import { ExploreView, SearchAdminView, SearchPage } from "./explore";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
@@ -114,7 +114,7 @@ function ThemeSwitch() {
 }
 
 type Tab = "explore" | "search" | "admin" | "settings" | "document" | "graph";
-type AdminSection = "overview" | "unresolved" | "maintain" | "search" | "import";
+type AdminSection = "overview" | "unresolved" | "maintain" | "search" | "import" | "export";
 
 // slug/docHref live in links.tsx — the address bar this file writes and the href every
 // link carries must come from the SAME function, or they disagree.
@@ -138,6 +138,9 @@ function AdminView({ open, navigate }:
     ["maintain", "Maintain", "rescans · roll-ups · repairs · watches"],
     ["search", "Search", "free-text index · embeddings · scope · the note readers see"],
     ["import", "Import", "files · corpora · Zotero · seeds"],
+    // Publishing is an operational surface, not a preference: it schedules work, runs
+    // jobs and writes a folder. It lives here rather than in Settings for that reason.
+    ["export", "Static export", "the published set · schedule · webhook"],
   ];
   return (
     <div className="admin admin-dense">
@@ -153,6 +156,7 @@ function AdminView({ open, navigate }:
         {section === "maintain" && <MaintainView open={open} navigate={navigate} />}
         {section === "search" && <SearchAdminView />}
         {section === "import" && <ImportView open={open} />}
+        {section === "export" && <StaticExportView />}
       </div>
     </div>
   );

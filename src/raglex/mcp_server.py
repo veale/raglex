@@ -24,6 +24,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from .config import Config
+from .core.models import RelationshipType as _RelationshipType
 from .facade import Facade
 
 # Tool behaviour hints (MCP spec) — clients read these to decide auto-approval + safety UX.
@@ -203,7 +204,8 @@ def build_server(config: Config | None = None) -> MCPServer:
     @mcp.tool(annotations=_FETCHING)
     def lookup(citation: str, pincite: Optional[str] = None, context: int = 1,
                full: bool = False, cited_by: bool = True, similar: bool = True,
-               autofetch: bool = True, original: bool = False) -> dict:
+               autofetch: bool = True, original: bool = False,
+               outline_kind: Optional[str] = None) -> dict:
         """Resolve a CITATION, a statute-by-name, or a stable_id and return one
         self-contained answer. This is the front door — start here.
 
@@ -226,13 +228,18 @@ def build_server(config: Config | None = None) -> MCPServer:
         the whole (capped) text — prefer a pincite, it is exact and cheap. Also returned: the
         ways it is cited (``also_cited_as``) and cocitation neighbours (``similar``).
 
+        The outline is sampled ACROSS segment kinds, with the true totals in
+        ``outline_counts``, so a long EU act does not spend the whole outline on recitals
+        and never reach an article. ``outline_kind='article'`` (or 'recital', 'section',
+        …) returns that one kind in full.
+
         SILENT FETCH: an authority merely NEW to the corpus but routable (US case via
         CourtListener, a UK case/act, an EU/ECHR item) is fetched and returned. Only when it
         can't be fetched do you get an external LII/BAILII URL to read yourself. You rarely
         need to harvest by hand."""
         return facade.lookup(citation=citation, pincite=pincite, context=context, full=full,
                              cited_by=cited_by, similar=similar, autofetch=autofetch,
-                             original=original)
+                             original=original, outline_kind=outline_kind)
 
     @mcp.tool(annotations=_READ_ONLY)
     def citing_documents(target: str, anchor: Optional[str] = None, sort: str = "pagerank",
@@ -266,13 +273,37 @@ def build_server(config: Config | None = None) -> MCPServer:
                                      query=query, limit=limit)
 
     @mcp.tool(annotations=_READ_ONLY)
-    def get_document(stable_id: str, original: bool = False) -> dict:
+    def get_document(stable_id: str, original: bool = False,
+                     relations_limit: int = 50, incoming_limit: int = 50,
+                     offset: int = 0, brief: bool = True) -> dict:
         """Full document: metadata, tags, relations, attachments, and a
         ``preparatory_documents`` availability/count flag when legislative history exists.
         Base legislation opens at today's applicable consolidation; pass
-        ``original=true`` for the original/base text."""
+        ``original=true`` for the original/base text.
+
+        The two edge lists are PAGED — ``relations`` (what this document cites) and
+        ``incoming`` (what cites it) each return ``*_limit`` rows from ``offset``, with
+        the true totals in ``relations_total`` / ``incoming_total``. A heavily-cited
+        instrument otherwise returned hundreds of fully-nested rows in one response.
+        ``brief=False`` restores the full nested OSCOLA object per incoming row; by
+        default each carries its citation as a string instead."""
         target = facade.canonical_read_target(stable_id, original=original)
-        result = facade.get_document(target["stable_id"])
+        result = dict(facade.get_document(target["stable_id"]))
+        offset = max(0, int(offset))
+        for key, limit in (("relations", relations_limit), ("incoming", incoming_limit)):
+            rows = result.get(key) or []
+            result[f"{key}_total"] = len(rows)
+            page = rows[offset:offset + max(1, min(int(limit), 500))]
+            if brief and key == "incoming":
+                # The nested src_oscola object per row is most of the response weight and
+                # its rendered text is the only part a reader uses.
+                page = [
+                    {**row, "src_oscola": (row.get("src_oscola") or {}).get("text")
+                     if isinstance(row.get("src_oscola"), dict) else row.get("src_oscola")}
+                    for row in page
+                ]
+            result[key] = page
+            result[f"{key}_offset"] = offset
         result["read_target"] = target
         return result
 
@@ -322,7 +353,13 @@ def build_server(config: Config | None = None) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     def graph_neighbours(stable_id: str, relationship_types: Optional[list[str]] = None) -> dict:
         """1-hop typed citation/commentary neighbourhood of a document, most
-        authoritative neighbours first (PageRank-ranked, design §3c)."""
+        authoritative neighbours first (PageRank-ranked, design §3c).
+
+        One row per (neighbour, relationship, direction). ``passages`` is how many edges
+        that row stands for and ``anchor_pairs`` lists their pinpoints — so four
+        per-provision edges to the same act read as one row of four, not as one edge.
+        ``relationship_types`` filters in the query, so a rare edge type is found from
+        either end however heavily cited the document is."""
         return facade.graph(stable_id, rel=relationship_types)
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -499,20 +536,51 @@ def build_server(config: Config | None = None) -> MCPServer:
 
     @admin
     def link_documents(src_id: str, dst_id: str, relationship: str,
-                       src_anchor: Optional[str] = None, dst_anchor: Optional[str] = None) -> dict:
+                       src_anchor: Optional[str] = None, dst_anchor: Optional[str] = None,
+                       note: Optional[str] = None, dry_run: bool = False) -> dict:
         """Add a typed edge between two documents (e.g. an article 'analyses' a law
         article). Optional pinpoint anchors link a *fragment* of the source to a
         *fragment* of the target — e.g. a handbook's src_anchor='pp. 45-47'
         analyses a law's dst_anchor='Article 17' (use the article/section label
-        from get_document_body's segments)."""
+        from get_document_body's segments).
+
+        ``relationship`` is a CLOSED vocabulary — call list_relationship_types() rather
+        than guessing; an unknown term is refused, never coerced. Re-running an identical
+        edge updates it in place instead of minting a second one. ``note`` records why
+        the edge was asserted. ``dry_run=True`` returns what would be written, including
+        whether each anchor matches a real segment, and writes nothing."""
         return facade.link(src_id=src_id, dst_id=dst_id, relationship=relationship,
-                           src_anchor=src_anchor, dst_anchor=dst_anchor)
+                           src_anchor=src_anchor, dst_anchor=dst_anchor,
+                           note=note, dry_run=dry_run)
+
+    @admin
+    def list_relationship_types() -> dict:
+        """The relationship vocabulary link_documents accepts, grouped by family.
+        Read this before writing an edge: an unrecognised term is rejected. Also
+        reproduced in maintenance('help'), which needs no admin token."""
+        return facade.relationship_types()
+
+    @admin
+    def list_manual_links(stable_id: str, limit: int = 500) -> dict:
+        """Every HAND-WRITTEN edge into or out of a document, each with its own
+        relation_id — which is what delete_manual_link needs. A manual edge on a
+        document pair that also has an extracted citation is otherwise invisible as a
+        separately addressable thing."""
+        return facade.manual_links(stable_id=stable_id, limit=limit)
+
+    @admin
+    def delete_manual_link(relation_id: int) -> dict:
+        """Retract ONE hand-written edge by its relation_id. Unlike
+        correct_citation(suppress=True) — which suppresses the whole relation and would
+        take a genuine extracted citation between the same documents down with it — this
+        removes only the manual assertion, and refuses to touch anything else."""
+        return facade.delete_manual_link(relation_id=relation_id)
 
     @admin
     def upsert_provision_mappings(
         current_id: str, previous_id: str, mappings: list[dict],
         replace: bool = False, created_by: str = "llm",
-        mapping_type: str = "functional_predecessor",
+        mapping_type: str = "functional_predecessor", dry_run: bool = False,
     ) -> dict:
         """Bulk-map corresponding statutory provisions between two laws.
 
@@ -532,10 +600,16 @@ def build_server(config: Config | None = None) -> MCPServer:
         * ``equivalent`` — a parallel provision in a companion instrument, both in force
           (GDPR / EUDPR / LED, drafted as one package). Use this rather than asserting
           descent between instruments that never replaced one another.
+
+        Anchors are resolved against each law's own segments as they are written; any
+        that matches no provision comes back in ``unresolved_anchors`` (the mapping is
+        still stored — a stub document has no segments to match — but you can SEE it).
+        ``dry_run=True`` runs those checks and returns the plan without writing.
         """
         return facade.upsert_provision_mappings(
             current_id=current_id, previous_id=previous_id, mappings=mappings,
-            replace=replace, created_by=created_by, mapping_type=mapping_type)
+            replace=replace, created_by=created_by, mapping_type=mapping_type,
+            dry_run=dry_run)
 
     @admin
     def list_provision_mappings(stable_id: str) -> dict:
@@ -1043,6 +1117,11 @@ def build_server(config: Config | None = None) -> MCPServer:
         if op in ("help", "", "list", "ops"):
             return {"count": len(_MAINT),
                     "note": "call maintenance('<op>', {..args..}); most research needs none of these",
+                    # The closed vocabulary link_documents accepts, in the one place a
+                    # caller is guaranteed to look. It used to be discoverable only by
+                    # writing an edge and reading back what landed.
+                    "relationship_types": sorted(
+                        r.value for r in _RelationshipType),
                     "ops": {name: _op_summary(fn) for name, fn in sorted(_MAINT.items())}}
         # everything past the help listing changes the corpus
         _require_admin()

@@ -1004,6 +1004,26 @@ register(Grammar(
 ))
 
 
+# The bare series form, with no short title in front of it: ``SI 2003/2426``,
+# ``S.I. 2003 No. 2426``. Inside a sentence the named grammar above already caught it,
+# so a lookup of the SAME citation on its own answered "not held, not routable" for an
+# instrument the corpus had all along — the front door said no about PECR while the
+# document sat in the catalogue. The pattern is deliberately anchored on the year/number
+# pair, so it cannot fire on a stray "SI" (Système international, a party's initials).
+def _uk_si_bare(m: "re.Match[str]") -> Normalised:
+    return f"uksi/{m.group('year')}/{int(m.group('num'))}", None, "regulation"
+
+
+register(Grammar(
+    "uk_si_bare", "regulation",
+    re.compile(
+        r"\bS\.?\s?I\.?\s*"
+        r"(?P<year>(?:19|20)\d{2})\s*(?:/|No\.?\s*)\s*(?P<num>\d{1,5})\b"
+    ),
+    _uk_si_bare,
+))
+
+
 # Commonwealth citation forms that break the shapes above — India's colon-delimited
 # neutral citation and AIR, Canada's CanLII slot, the South African SA-report shape,
 # Nigeria's NWLR part format, Kenya's eKLR database id, and Hong Kong registry case

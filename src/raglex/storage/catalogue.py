@@ -93,6 +93,10 @@ CREATE TABLE IF NOT EXISTS relations (
     -- the JuriConnect-style fragment link.
     src_anchor         TEXT,
     dst_anchor         TEXT,
+    -- Free text on a HAND-WRITTEN edge: why it was asserted, and by what authority
+    -- (a correlation table, a recital, an editor's reading). Extraction never writes
+    -- here; it exists so a manual assertion carries its own justification.
+    note               TEXT,
     -- representative char span of the citation in the source text, so a later
     -- pass can read the surrounding prose and classify the *treatment* (§1.3a):
     -- mentions → follows / distinguishes / overrules / applies / considers.
@@ -779,6 +783,11 @@ class Catalogue:
             ("feedback", "fingerprint", "TEXT"),
             ("feedback", "seen_count", "INTEGER NOT NULL DEFAULT 1"),
             ("feedback", "last_seen_at", "TEXT"),
+            # Why a HAND-WRITTEN edge exists. Provision mappings have always had a note,
+            # which is what makes an editorial convention greppable and a mistake
+            # recoverable; a manual edge had nowhere to record its reasoning at all, so a
+            # wrong one left no trace of what was intended.
+            ("relations", "note", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -869,6 +878,25 @@ class Catalogue:
         return self.conn.execute(
             "SELECT * FROM documents WHERE stable_id = ?", (stable_id,)
         ).fetchone()
+
+    def get_documents(self, stable_ids: list[str]) -> dict:
+        """``{stable_id: row}`` for many documents in one round trip.
+
+        The cited-by page enriched each of its rows (title, court, OSCOLA, jurisdiction)
+        with a separate ``get_document`` — up to 200 sequential single-row queries for
+        one page view, which on a heavily-cited authority is the difference between a
+        fast response and a timeout.
+        """
+        ids = list(dict.fromkeys(str(i) for i in stable_ids if i))
+        out: dict = {}
+        # Stay under SQLite's 999-bind ceiling; Postgres is happier with modest IN lists.
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            qs = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                    f"SELECT * FROM documents WHERE stable_id IN ({qs})", chunk):
+                out[str(row["stable_id"])] = row
+        return out
 
     def document_id_by_landing_url(self, url: str | None) -> str | None:
         """The stable_id of a held document with this landing URL, if any. The dedup
@@ -1119,6 +1147,116 @@ class Catalogue:
         self._add_relation(src_id, rel)
         self.conn.commit()
 
+    def upsert_manual_relation(
+        self, src_id: str, rel: TypedRelation, *, note: str | None = None,
+    ) -> dict:
+        """Write ONE hand-authored edge, in place if it already exists.
+
+        Its identity is ``(src_id, dst_id/candidate, relationship_type, src_anchor,
+        dst_anchor)``. Re-running the same assertion previously minted a second row —
+        while the neighbouring provision-mapping call correctly updated in place, so one
+        of a pair of adjacent operations was safe to re-run and the other silently
+        duplicated. Returns the row's id and whether it was created or updated, because
+        a caller checking its own work cannot otherwise tell.
+        """
+        candidate_id, raw_fold = self._edge_keys(rel)
+        target = rel.dst_id or candidate_id
+        existing = self.conn.execute(
+            """
+            SELECT relation_id FROM relations
+            WHERE src_id = ?
+              AND COALESCE(dst_id, candidate_id, '') = ?
+              AND relationship_type = ?
+              AND COALESCE(src_anchor, '') = ?
+              AND COALESCE(dst_anchor, '') = ?
+              AND extracted_via = 'manual'
+            ORDER BY relation_id
+            LIMIT 1
+            """,
+            (src_id, target or "", str(rel.relationship_type),
+             rel.src_anchor or "", rel.dst_anchor or ""),
+        ).fetchone()
+        if existing:
+            relation_id = int(existing["relation_id"])
+            self.conn.execute(
+                "UPDATE relations SET dst_id = ?, candidate_id = ?, raw_fold = ?, "
+                "raw_citation_string = ?, resolution_status = ?, "
+                "note = COALESCE(?, note) WHERE relation_id = ?",
+                (rel.dst_id, candidate_id, raw_fold, rel.raw_citation_string,
+                 str(rel.resolution_status), note, relation_id),
+            )
+            self.conn.commit()
+            return {"relation_id": relation_id, "created": False}
+        self._add_relation(src_id, rel)
+        row = self.conn.execute(
+            """
+            SELECT relation_id FROM relations
+            WHERE src_id = ? AND COALESCE(dst_id, candidate_id, '') = ?
+              AND relationship_type = ? AND extracted_via = 'manual'
+            ORDER BY relation_id DESC LIMIT 1
+            """,
+            (src_id, target or "", str(rel.relationship_type)),
+        ).fetchone()
+        relation_id = int(row["relation_id"]) if row else 0
+        if relation_id and note:
+            self.conn.execute(
+                "UPDATE relations SET note = ? WHERE relation_id = ?",
+                (note, relation_id))
+        self.conn.commit()
+        return {"relation_id": relation_id, "created": True}
+
+    def delete_manual_relation(self, relation_id: int) -> dict:
+        """Retract ONE hand-written edge, and only if it is hand-written.
+
+        The alternative — ``correct_citation(suppress=True)`` — suppresses the whole
+        relation, which on a document pair that also has a genuine extracted citation
+        takes the real one down as collateral. A manual assertion must be removable
+        without touching what the extractor found.
+        """
+        row = self.conn.execute(
+            "SELECT relation_id, src_id, dst_id, candidate_id, relationship_type, "
+            "src_anchor, dst_anchor, extracted_via, note FROM relations "
+            "WHERE relation_id = ?",
+            (relation_id,),
+        ).fetchone()
+        if row is None:
+            return {"deleted": False, "error": f"no relation {relation_id}"}
+        if str(row["extracted_via"]) != "manual":
+            return {"deleted": False, "relation_id": relation_id,
+                    "extracted_via": str(row["extracted_via"]),
+                    "error": "only a manual edge can be deleted here; use "
+                             "correct_citation(suppress=True) for an extracted one"}
+        with self._atomic():
+            self.conn.execute(
+                "DELETE FROM relations WHERE relation_id = ? AND extracted_via = 'manual'",
+                (relation_id,))
+        return {"deleted": True, "relation_id": relation_id,
+                "src_id": str(row["src_id"]),
+                "dst_id": row["dst_id"] or row["candidate_id"],
+                "relationship_type": str(row["relationship_type"]),
+                "src_anchor": row["src_anchor"], "dst_anchor": row["dst_anchor"]}
+
+    def manual_relations(
+        self, *, src_id: str | None = None, dst_id: str | None = None,
+        limit: int = 500,
+    ) -> list:
+        """Every hand-written edge touching a document, each with its own relation_id —
+        the list a caller needs in order to retract one."""
+        clauses, params = ["extracted_via = 'manual'"], []
+        if src_id:
+            clauses.append("src_id = ?")
+            params.append(src_id)
+        if dst_id:
+            clauses.append("COALESCE(dst_id, candidate_id) = ?")
+            params.append(dst_id)
+        params.append(max(1, min(int(limit), 5000)))
+        return self.conn.execute(
+            "SELECT relation_id, src_id, dst_id, candidate_id, relationship_type, "
+            "src_anchor, dst_anchor, note, resolution_status FROM relations "
+            f"WHERE {' AND '.join(clauses)} ORDER BY relation_id LIMIT ?",
+            tuple(params),
+        ).fetchall()
+
     def add_relations(self, src_id: str, rels: list[TypedRelation], *,
                       commit: bool = True) -> None:
         """Bulk-add edges — used by the citation-extraction stage. One executemany,
@@ -1193,16 +1331,32 @@ class Catalogue:
                 )
         return len(mappings)
 
+    def _mapping_doc_ids(self, current_doc_id: str) -> list[str]:
+        """This document plus the base act it is a version of.
+
+        A mapping is written against the act ("DPA 1998 → DPA 2018"), not against one
+        dated expression of it. When a later consolidation or point-in-time snapshot of
+        that act is held, opening it must carry the same lineage forward — otherwise the
+        editorial work vanishes the moment the text is updated, which is exactly when a
+        reader most needs to know where a provision came from.
+        """
+        base = self.consolidation_base_for(current_doc_id)
+        return [current_doc_id, base] if base and base != current_doc_id else [current_doc_id]
+
     def provision_mappings(self, current_doc_id: str) -> list:
+        ids = self._mapping_doc_ids(current_doc_id)
+        qs = ",".join("?" * len(ids))
         return self.conn.execute(
-            """
-            SELECT pm.*, d.title AS previous_title
+            f"""
+            SELECT pm.*, d.title AS previous_title,
+                   CASE WHEN pm.current_doc_id = ? THEN 0 ELSE 1 END
+                       AS mapping_from_base_act
             FROM provision_mappings pm
             LEFT JOIN documents d ON d.stable_id = pm.previous_doc_id
-            WHERE pm.current_doc_id = ?
+            WHERE pm.current_doc_id IN ({qs})
             ORDER BY pm.current_anchor, pm.previous_doc_id, pm.previous_anchor
             """,
-            (current_doc_id,),
+            (current_doc_id, *ids),
         ).fetchall()
 
     def delete_provision_mapping(self, mapping_id: int) -> bool:
@@ -1221,13 +1375,19 @@ class Catalogue:
         Anchor matching is deliberately exact apart from case/space: citation extraction
         emits canonical ``Article N``/``section N`` anchors, while loose numeric matching
         would leak citations between unrelated provisions.
+
+        A mapping written against the base act also applies to its dated versions (see
+        :meth:`_mapping_doc_ids`): reading the DPA 2018 as amended must still show what
+        the DPA 1998 provision it succeeded was cited for.
         """
-        params: list = [current_doc_id]
+        ids = self._mapping_doc_ids(current_doc_id)
+        params: list = list(ids)
         anchor_sql = ""
         if current_anchor:
             anchor_sql = " AND lower(trim(pm.current_anchor)) = lower(trim(?))"
             params.append(current_anchor)
         params.append(max(1, min(int(limit), 5000)))
+        id_qs = ",".join("?" * len(ids))
         return self.conn.execute(
             f"""
             SELECT r.*, pm.mapping_id, pm.current_anchor AS inherited_current_anchor,
@@ -1244,7 +1404,7 @@ class Catalogue:
               ON (r.dst_id = pm.previous_doc_id OR r.candidate_id = pm.previous_doc_id)
              AND lower(trim(r.dst_anchor)) = lower(trim(pm.previous_anchor))
             LEFT JOIN documents d ON d.stable_id = pm.previous_doc_id
-            WHERE pm.current_doc_id = ?
+            WHERE pm.current_doc_id IN ({id_qs})
               {anchor_sql}
               AND r.src_id <> pm.current_doc_id
               AND r.relationship_type IN (
@@ -1259,16 +1419,24 @@ class Catalogue:
         ).fetchall()
 
     def consolidation_base_for(self, version_id: str) -> str | None:
-        """The base act represented by a dated consolidation, if ``version_id`` is one.
+        """The base act behind a dated version of it, if ``version_id`` is one.
 
         Read this from the durable lineage edge rather than reconstructing an identifier:
         non-EU adapters also publish consolidations, and their ids do not follow CELEX.
+
+        BOTH lineage predicates count. An EU consolidation carries ``consolidates``; a
+        legislation.gov.uk / NZ / eISB point-in-time snapshot carries
+        ``point_in_time_of``. They are separate edges because they mean different things
+        for *reading* (a snapshot is never opened by default), but for *citation
+        inheritance* they are the same fact: the citers of ukpga/1998/29 are the citers
+        of ukpga/1998/29@2015-01-01, which otherwise showed none at all.
         """
         row = self.conn.execute(
             """
             SELECT COALESCE(dst_id, candidate_id) AS base_id
             FROM relations
-            WHERE src_id = ? AND relationship_type = 'consolidates'
+            WHERE src_id = ?
+              AND relationship_type IN ('consolidates', 'point_in_time_of')
               AND COALESCE(dst_id, candidate_id) IS NOT NULL
             ORDER BY (resolution_status = 'resolved') DESC, relation_id
             LIMIT 1
@@ -1298,7 +1466,8 @@ class Catalogue:
                        COALESCE(r.dst_id, r.candidate_id) AS base_id,
                        d.meta_json, r.dst_anchor
                 FROM relations r JOIN documents d ON d.stable_id = r.src_id
-                WHERE r.src_id IN ({qs}) AND r.relationship_type = 'consolidates'
+                WHERE r.src_id IN ({qs})
+                  AND r.relationship_type IN ('consolidates', 'point_in_time_of')
                   AND COALESCE(r.dst_id, r.candidate_id) IS NOT NULL
                 """,
                 chunk,
@@ -2496,24 +2665,43 @@ class Catalogue:
             out.update({r["doc_id"]: dict(r) for r in rows})
         return out
 
+    def _type_filter(self, relationship_types: list[str] | None) -> tuple[str, list]:
+        """A relationship-type restriction expressed IN SQL.
+
+        It has to be: these queries are bounded and unordered, so filtering the rows in
+        Python afterwards asks for "any hundred edges" and then keeps the matching ones.
+        On a heavily-cited instrument the four edges you asked about are essentially
+        never in that hundred — which is exactly why a supersedes query returned nothing
+        from the target side while the same edge was visible from the source side.
+        """
+        wanted = [str(t) for t in (relationship_types or []) if t]
+        if not wanted:
+            return "", []
+        return f"AND relationship_type IN ({','.join('?' * len(wanted))}) ", wanted
+
     def neighbours_out(self, doc_id: str, *, limit: int = 200,
-                       include_inferred: bool = False) -> list[sqlite3.Row]:
+                       include_inferred: bool = False,
+                       relationship_types: list[str] | None = None) -> list[sqlite3.Row]:
         """Bounded outgoing resolved edges — unlike ``relations_for`` this never
         returns an unbounded set, so it's safe on any node."""
         extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
+        types_sql, types = self._type_filter(relationship_types)
         return self.conn.execute(
             "SELECT * FROM relations WHERE src_id = ? AND resolution_status = 'resolved' "
-            f"AND dst_id IS NOT NULL AND dst_id <> src_id {extra}LIMIT ?",
-            (doc_id, limit)).fetchall()
+            f"AND dst_id IS NOT NULL AND dst_id <> src_id {extra}{types_sql}LIMIT ?",
+            (doc_id, *types, limit)).fetchall()
 
     def neighbours_in(self, doc_id: str, *, limit: int = 200,
-                      include_inferred: bool = False) -> list[sqlite3.Row]:
+                      include_inferred: bool = False,
+                      relationship_types: list[str] | None = None) -> list[sqlite3.Row]:
         """Bounded incoming resolved edges (a heavily-cited authority has 100k+)."""
         extra = "" if include_inferred else "AND extracted_via <> 'inferred' "
+        types_sql, types = self._type_filter(relationship_types)
         return self.conn.execute(
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
             "AND relationship_type <> 'cited_by' "  # reverse-oriented scaffold
-            f"AND src_id <> dst_id {extra}LIMIT ?", (doc_id, limit)).fetchall()
+            f"AND src_id <> dst_id {extra}{types_sql}LIMIT ?",
+            (doc_id, *types, limit)).fetchall()
 
     def co_cited_with(self, ids: list[str], *, limit: int = 15,
                       max_citers: int = 500) -> list[dict]:

@@ -381,6 +381,53 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
     assert f.get_document("32000L0001")["cited_by_count"] == 1
 
 
+def test_point_in_time_snapshot_inherits_the_base_acts_citations(tmp_path):
+    """A UK/NZ/IE point-in-time version is a version, for citation purposes.
+
+    ``ukpga/1998/29@2015-01-01`` showed no citing documents at all while the base act had
+    nearly two thousand, because the lineage query recognised only the EU
+    ``consolidates`` edge. A snapshot still must not become the DEFAULT read — that
+    remains a separate decision — so this asserts both halves.
+    """
+    from raglex.core.models import ExtractedVia, ResolutionStatus, TypedRelation
+
+    f = _leg_facade(tmp_path)
+    base, snapshot = "ukpga/1998/29", "ukpga/1998/29@2015-01-01"
+    with f._open() as (cat, _r, _t):
+        for sid, kind, text in (
+            (base, DocType.LEGISLATION, "Section 7 Right of access"),
+            (snapshot, DocType.LEGISLATION, "Section 7 Right of access"),
+            ("case-old", DocType.JUDGMENT, None),
+        ):
+            cat.upsert_document(Record(
+                source="uk-legislation" if kind == DocType.LEGISLATION else "user-import",
+                stable_id=sid, doc_type=kind, title=sid, text=text,
+                extracted_via=ExtractedVia.STRUCTURED,
+            ))
+        cat.add_relations(snapshot, [TypedRelation(
+            relationship_type=RelationshipType.POINT_IN_TIME_OF,
+            raw_citation_string=base, dst_id=base,
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+        cat.add_relations("case-old", [TypedRelation(
+            relationship_type=RelationshipType.INTERPRETS,
+            raw_citation_string="s. 7 DPA 1998", dst_id=base, dst_anchor="Section 7",
+            extracted_via=ExtractedVia.MANUAL,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+        assert cat.consolidation_base_for(snapshot) == base
+
+    mentions = f.document_mentions(snapshot)
+    assert mentions["version_inheritance"]["from_base_act"] == base
+    assert mentions["by_anchor"]["Section 7"][0]["version_inherited"] is True
+    assert f.get_document(snapshot)["cited_by_count"] == 1
+    # …but reading the base act still gives the base act: a dated snapshot is opened
+    # deliberately, never by default.
+    assert f.get_document(base).get("canonical_read") in (None, {}) or \
+        f.get_document(base)["canonical_read"]["stable_id"] == base
+
+
 def test_textless_consolidation_is_never_the_read_target(tmp_path):
     """A version held without text must not capture the read.
 

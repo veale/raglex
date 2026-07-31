@@ -862,3 +862,24 @@ def test_colon_shorthand_requires_a_short_paragraph_initial_label():
 def test_cfreu_is_an_unambiguous_charter_name():
     c = next(c for c in extract_citations("Article 47 CFREU") if c.candidate_id == "12012P")
     assert c.pinpoint == "Article 47"
+
+
+def test_bare_statutory_instrument_series_form_resolves_on_its_own():
+    """`SI 2003/2426` with no short title in front of it.
+
+    The same citation inside a longer sentence resolved to uksi/2003/2426 all along, so
+    a lookup of it alone answered "not held, not routable" about an instrument the
+    corpus already had.
+    """
+    from raglex.citations import extract_citations, grammar_citations
+
+    for text in ("SI 2003/2426", "S.I. 2003 No. 2426", "S.I. 2003/2426"):
+        found = grammar_citations(text)
+        assert [c.candidate_id for c in found] == ["uksi/2003/2426"], text
+
+    # A stray "SI" is not a citation, and the named form still wins the overlap.
+    assert grammar_citations("SI units are used throughout") == []
+    named = extract_citations(
+        "the Privacy and Electronic Communications (EC Directive) Regulations 2003, "
+        "SI 2003/2426 applies.")
+    assert [c.candidate_id for c in named] == ["uksi/2003/2426"]

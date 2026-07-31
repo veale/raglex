@@ -89,24 +89,38 @@ def test_placeholders_substitute_before_sanitising():
     assert text == "Exported 27 May 2026 · 3 items"
 
 
-def test_index_lists_every_edition_with_its_export_date():
+def test_index_groups_by_jurisdiction_and_states_both_counts():
     page = render_index_html(
         [
-            {"filename": "gdpr.html", "title": "GDPR", "documents": 1200,
+            {"filename": "gdpr.html", "title": "GDPR", "short": "GDPR",
+             "jurisdiction": "European Union", "documents": 1200, "mentions": 4800,
              "exported": "27 May 2026", "note": "The <b>consolidated</b> text."},
-            {"filename": "osa.html", "title": "Online Safety Act 2023", "documents": 0,
+            {"filename": "osa.html", "title": "Online Safety Act 2023",
+             "jurisdiction": "United Kingdom", "documents": 0, "mentions": 0,
              "exported": "27 May 2026", "note": ""},
         ],
         title="Statutes",
         intro='Exported <dateexported>. <a href="https://example.test">Home</a>'
               '<script>alert(1)</script>',
     )
-    assert '<a href="gdpr.html">GDPR</a>' in page          # relative, one level, no dirs
-    assert "exported 27 May 2026 · 1,200 citing documents" in page
+    assert 'href="gdpr.html"' in page                       # relative, one level, no dirs
+    # Both totals, and the citation count is the bigger one: a document can cite twice.
+    assert "Last updated: 27 May 2026 · 1,200 citing documents · 4,800 citations" in page
+    assert "<h2>" in page and "European Union" in page and "United Kingdom" in page
+    assert '<span class="export-short">GDPR:</span>' in page
     assert "The <b>consolidated</b> text." in page          # per-item line, simple markup
     assert 'href="https://example.test"' in page
     assert "<script>alert(1)</script>" not in page          # sanitised like the attribution
     assert "<dateexported>" not in page                     # placeholder was substituted
+
+
+def test_index_falls_back_when_an_edition_has_no_jurisdiction():
+    page = render_index_html(
+        [{"filename": "x.html", "title": "Some Instrument", "documents": 3,
+          "mentions": 3, "exported": "27 May 2026"}],
+        title="Statutes", intro="")
+    assert "Other instruments" in page
+    assert "Last updated: 27 May 2026 · 3 citing documents · 3 citations" in page
 
 
 def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):

@@ -1,5 +1,5 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, UsCaselawBudget } from "./api";
+import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, StaticBundleWebhook, UsCaselawBudget } from "./api";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
@@ -3513,11 +3513,39 @@ function CaseLawImportPanel() {
 // source texts per statute, so it runs as a job — one that skips the queue, because
 // someone is waiting at the browser for the download.
 const BUNDLE_PLACEHOLDERS = "<dateexported> · <datetimeexported> · <yearexported> · <count>";
+const WEBHOOK_PLACEHOLDERS = "{documents} · {output_dir} · {bytes} · {titles} · {finished_at} · {zip}";
+
+/** "Name: value" per line → the header map the API stores. Lines without a colon are
+ *  still being typed, so they are simply not sent yet. */
+function parseHeaders(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of (text || "").split("\n")) {
+    const at = line.indexOf(":");
+    if (at > 0 && line.slice(0, at).trim()) out[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+  }
+  return out;
+}
+
+// The whole publishing surface, on its own admin section: the set, the schedule that
+// republishes it, and the one request fired when a run lands (so a machine elsewhere can
+// scp the folder on, or a phone can be told it happened).
+export function StaticExportView() {
+  const [settings, setSettings] = useState<Setting[]>([]);
+  const load = () => api.getSettings().then((r) => setSettings(r.settings)).catch(() => { });
+  useEffect(() => { load(); }, []);
+  return (
+    <StaticExportsPanel
+      attribution={settings.find((s) => s.key === "RAGLEX_STATIC_EXPORT_ATTRIBUTION")}
+      onSavedSettings={load} />
+  );
+}
 
 function StaticExportsPanel({ attribution, onSavedSettings }:
   { attribution?: Setting; onSavedSettings: () => void }) {
   const [cfg, setCfg] = useState<StaticBundle | null>(null);
   const [attrib, setAttrib] = useState<string | null>(null);
+  const [hookMsg, setHookMsg] = useState("");
+  const [headerDraft, setHeaderDraft] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -3544,6 +3572,7 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
       const saved = await api.saveBundleConfig({
         items: cfg.items, index_title: cfg.index_title, index_text: cfg.index_text,
         max_snippets: cfg.max_snippets, output_dir: cfg.output_dir,
+        webhook: cfg.webhook,
       });
       if (attrib !== null && attribution && attribution.source !== "env") {
         await api.saveSettings({ RAGLEX_STATIC_EXPORT_ATTRIBUTION: attrib });
@@ -3576,6 +3605,13 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
   if (!cfg) return <div className="panel"><p className="muted loading-pulse">Loading static exports…</p></div>;
   const run = cfg.last_run || {};
   const sched = cfg.schedule;
+  const hook = cfg.webhook || { enabled: false, url: "", method: "POST", headers: {}, body: "" };
+  const setHook = (next: Partial<StaticBundleWebhook>) =>
+    patch({ webhook: { ...hook, ...next } as StaticBundleWebhook });
+  // The textarea keeps its own draft: a half-typed line has no colon yet, and parsing on
+  // every keystroke would delete it from under the cursor.
+  const headerText = headerDraft ?? Object.entries(hook.headers || {})
+    .map(([k, v]) => `${k}: ${v}`).join("\n");
   return (
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>Static exports <span className="muted">— publish a set of statutes as one small website</span></h3>
@@ -3614,7 +3650,8 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
 
       <table className="grid break-cells" style={{ marginTop: 12 }}>
         <thead><tr>
-          <th style={{ width: "34%" }}>statute</th><th style={{ width: "17%" }}>saves as</th>
+          <th style={{ width: "30%" }}>statute</th><th style={{ width: "15%" }}>saves as</th>
+          <th style={{ width: "12%" }}>short name</th>
           <th>its own line, under the shared text</th><th style={{ width: 78 }}></th>
         </tr></thead>
         <tbody>
@@ -3631,6 +3668,10 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
                   <span className="muted" style={{ fontSize: 11 }}>.html</span>
                 </div>
               </td>
+              <td title="Optional. Printed in bold before the full name on the index page only — DSA: Regulation (EU) 2022/2065…">
+                <input value={it.short || ""} placeholder="DSA" style={{ minWidth: 0 }}
+                  onChange={(e) => setItem(i, { short: e.target.value })} />
+              </td>
               <td>
                 <textarea rows={2} value={it.note} onChange={(e) => setItem(i, { note: e.target.value })}
                   placeholder="optional — appears on a new line below the shared text, in this file only" />
@@ -3643,7 +3684,7 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
               </td>
             </tr>
           ))}
-          {!items.length && <tr><td colSpan={4} className="muted">No statutes yet — add one below.</td></tr>}
+          {!items.length && <tr><td colSpan={5} className="muted">No statutes yet — add one below.</td></tr>}
         </tbody>
       </table>
 
@@ -3655,7 +3696,7 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
                 onPick={(id, title) => {
                   setAdding(false);
                   if (items.some((it) => it.stable_id === id)) { setMsg("error: already in the set"); return; }
-                  patch({ items: [...items, { stable_id: id, title, slug: "", note: "" }] });
+                  patch({ items: [...items, { stable_id: id, title, slug: "", short: "", note: "" }] });
                 }} />
             </div>
             <button className="mini" onClick={() => setAdding(false)}>cancel</button>
@@ -3698,21 +3739,76 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
       )}
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
 
-      <div className="row" style={{ marginTop: 10, alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <label style={{ flex: "0 0 auto", display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}
-          title="Rebuild the export folder on a schedule. Scheduled runs write the folder only — there is no browser to hand a zip to.">
-          <input type="checkbox" checked={!!sched?.enabled}
-            onChange={(e) => setSchedule({ enabled: e.target.checked })} />
-          Rebuild the export folder automatically
-        </label>
-        {sched?.enabled && <FrequencySelect minutes={sched.every_minutes || 10080}
-          onChange={(m) => setSchedule({ every_minutes: m })} />}
-        <span className="muted" style={{ fontSize: 12 }}>
+      <fieldset style={{ marginTop: 14 }}>
+        <legend>Automatic rebuild <span className="muted">— the scheduler republishes the folder on its own</span></legend>
+        <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <label style={{ flex: "0 0 auto", display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}
+            title="Rebuild the export folder on a schedule. Scheduled runs write the folder only — there is no browser to hand a zip to.">
+            <input type="checkbox" checked={!!sched?.enabled}
+              onChange={(e) => setSchedule({ enabled: e.target.checked })} />
+            Rebuild the export folder automatically
+          </label>
+          {sched?.enabled && <label style={{ flex: "0 0 auto" }}>every{" "}
+            <FrequencySelect minutes={sched.every_minutes || 10080}
+              onChange={(m) => setSchedule({ every_minutes: m })} /></label>}
+        </div>
+        <p className="muted" style={{ fontSize: 11, margin: "6px 0 0" }}>
+          Runs in the scheduler, not this browser, and rereads the corpus each time — the same work as
+          <span className="kbd">Build to folder only</span>. Nothing is downloaded and no zip is written.
+        </p>
+        <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
           {run.finished_at
             ? `Last export: ${new Date(run.finished_at).toLocaleString()} — ${run.documents || 0} editions → ${run.output_dir}`
             : "Not exported yet."}
-        </span>
-      </div>
+          {run.webhook && (run.webhook.ok
+            ? ` · webhook ${run.webhook.status ?? "sent"} ✓`
+            : ` · webhook failed: ${run.webhook.error || run.webhook.status}`)}
+        </p>
+      </fieldset>
+
+      <fieldset style={{ marginTop: 12 }}>
+        <legend>When a run finishes <span className="muted">— call something (ntfy, a sync hook, an scp trigger)</span></legend>
+        <div className="row" style={{ gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label style={{ flex: "0 0 auto", display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+            <input type="checkbox" checked={!!hook.enabled}
+              onChange={(e) => setHook({ enabled: e.target.checked })} />
+            Send it
+          </label>
+          <label style={{ flex: "0 0 90px" }}>method
+            <select value={hook.method || "POST"} onChange={(e) => setHook({ method: e.target.value })}>
+              <option>POST</option><option>PUT</option><option>GET</option>
+            </select></label>
+          <label style={{ flex: "1 1 320px" }}>URL
+            <input value={hook.url || ""} placeholder="https://ntfy.sh/my-raglex-topic"
+              onChange={(e) => setHook({ url: e.target.value })} /></label>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: "flex-start", flexWrap: "wrap", marginTop: 6 }}>
+          <label style={{ flex: "1 1 240px" }}>headers <span className="muted">— one <span className="kbd">Name: value</span> per line</span>
+            <textarea rows={3} value={headerText}
+              placeholder={"Title: RagLex export\nAuthorization: Bearer …"}
+              onChange={(e) => { setHeaderDraft(e.target.value); setHook({ headers: parseHeaders(e.target.value) }); }} /></label>
+          <label style={{ flex: "1 1 240px" }}>body
+            <textarea rows={3} value={hook.body || ""}
+              placeholder="{documents} editions written to {output_dir}"
+              onChange={(e) => setHook({ body: e.target.value })} /></label>
+        </div>
+        <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+          Placeholders: <span className="kbd">{WEBHOOK_PLACEHOLDERS}</span>. Leave the body empty to send the whole
+          run summary as JSON. A failed call is recorded on the run and never fails the export.
+        </p>
+        <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 6 }}>
+          <button className="mini" disabled={!hook.url} onClick={async () => {
+            setHookMsg("sending…");
+            try {
+              if (dirty && !(await save())) { setHookMsg(""); return; }
+              const r = await api.testBundleWebhook();
+              setHookMsg(r.ok ? `✓ ${r.status} from ${r.url}` : `error: ${r.error || r.status || "no response"}`);
+            } catch (e: any) { setHookMsg("error: " + e.message); }
+          }}>Send a test now</button>
+          {hookMsg && <span className={hookMsg.startsWith("error") ? "err" : "muted"}
+            style={{ fontSize: 12 }}>{hookMsg}</span>}
+        </div>
+      </fieldset>
     </div>
   );
 }
@@ -3733,14 +3829,17 @@ export function SettingsView() {
       .catch((e) => setLoadErr(String(e?.message || e))).finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
-  // "Static exports" is edited on its own panel below (the text that sits beneath every
-  // exported statute belongs next to the set it applies to), so it isn't listed twice.
+  // "Static exports" is edited on Admin ▸ Static export — publishing schedules work and
+  // writes a folder, so it belongs with the operational surfaces, not with preferences.
   const groups = [...new Set(settings.map((s) => s.group))].filter((g) => g !== "Static exports");
   return (
     <div>
-      <StaticExportsPanel
-        attribution={settings.find((s) => s.key === "RAGLEX_STATIC_EXPORT_ATTRIBUTION")}
-        onSavedSettings={load} />
+      <div className="panel">
+        <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+          Publishing a set of statutes as a small website — including the text shown beneath every
+          exported statute — lives on <b>Admin ▸ Static export</b>.
+        </p>
+      </div>
       <div className="panel">
         {health && <p className={health.healthy ? "ok" : "err"}>Embedding provider: {health.provider}/{health.model} ({health.dimensions}d) — {health.healthy ? "ready ✓" : "needs an API key ✗"}</p>}
         {loading && !settings.length && <p className="muted loading-pulse">Loading settings…</p>}
@@ -6077,10 +6176,14 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
         <span className={`leg-chip ${tone}`}>{icon} {label}</span>
         {s.native_status && <span className="leg-native" title={`source status (${s.scheme || ""})`}>{s.native_status}</span>}
         {unapplied && <span className="leg-chip leg-amended" title="changes known to the source but not yet written into this text">⚠ {s.unapplied_count} unapplied</span>}
+        {/* Amended, with no consolidation to diff against: the count is unknown, not
+            zero, and the held text may state the opposite of the operative law. */}
+        {s.amendments_uncomparable && <span className="leg-chip leg-amended" title={s.currency_note || ""}>⚠ amendments not applied to this text</span>}
         {s.point_in_time_capable && <span className="muted leg-pit">point-in-time available</span>}
         {s.degraded && <span className="muted" title="status inferred from absence of recorded changes; not confirmed by the source">· unconfirmed</span>}
       </div>
       {versionNotice && <div className="leg-version-state">{versionNotice}</div>}
+      {s.currency_note && <div className="leg-version-state">{s.currency_note}</div>}
       {dates && <div className="leg-status-line muted">{dates}</div>}
       {lines.map((b, i) => <div key={i} className="leg-status-line">{b}</div>)}
       {provisions.length > 0 && (

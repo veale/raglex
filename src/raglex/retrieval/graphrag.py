@@ -39,6 +39,13 @@ class Neighbour:
     extracted_via: str | None = None
     # network authority of the neighbour (PageRank roll-up) — what ranked it in
     authority: float = 0.0
+    # How many edges of this type join the two documents, and their pinpoint pairs.
+    # One row per (neighbour, relationship) is the right shape for a graph view, but it
+    # used to hide the arity: four per-provision ``supersedes`` edges to the same act
+    # appeared as one, so a caller verifying its own work read a false negative on
+    # three of the four it had just written.
+    passages: int = 1
+    anchor_pairs: list[tuple[str | None, str | None]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -66,17 +73,16 @@ def expand(
     trivial mentioner. With an empty roll-up every authority is 0 and the order
     degrades to the old arrival order."""
     exp = Expansion(doc_id=doc_id)
-    rt_filter = set(relationship_types) if relationship_types else None
+    # The type restriction goes to SQL, not to a post-filter: these queries are bounded
+    # and unordered, so filtering afterwards means "keep the matches among any hundred
+    # edges" — which made a rare relationship invisible from the heavily-cited side.
+    rt_filter = [t for t in (relationship_types or []) if t] or None
 
     half = max(1, pool // 2)
     rows: list[tuple] = []  # (neighbour_id, direction, row)
-    for row in catalogue.neighbours_out(doc_id, limit=half):
-        if rt_filter and row["relationship_type"] not in rt_filter:
-            continue
+    for row in catalogue.neighbours_out(doc_id, limit=half, relationship_types=rt_filter):
         rows.append((row["dst_id"], "out", row))
-    for row in catalogue.neighbours_in(doc_id, limit=half):
-        if rt_filter and row["relationship_type"] not in rt_filter:
-            continue
+    for row in catalogue.neighbours_in(doc_id, limit=half, relationship_types=rt_filter):
         rows.append((row["src_id"], "in", row))
 
     auth = catalogue.authority_for([nid for nid, _d, _r in rows])
@@ -85,26 +91,33 @@ def expand(
         arow = auth.get(item[0])
         return arow["pagerank"] if arow else 0.0
 
-    seen: set[tuple[str, str]] = set()  # (neighbour, relationship) — dedupe repeat edges
+    # One row per (neighbour, relationship, direction), but every edge folded into it is
+    # counted and its pinpoint pair kept — so the arity of a per-provision mapping is
+    # visible rather than silently collapsed to one.
+    by_key: dict[tuple[str, str, str], Neighbour] = {}
     for nid, direction, row in sorted(rows, key=_rank, reverse=True):
-        key = (nid, row["relationship_type"])
-        if key in seen:
+        key = (nid, row["relationship_type"], direction)
+        pair = (_col(row, "src_anchor"), _col(row, "dst_anchor"))
+        existing = by_key.get(key)
+        if existing is not None:
+            existing.passages += 1
+            if pair not in existing.anchor_pairs and len(existing.anchor_pairs) < 50:
+                existing.anchor_pairs.append(pair)
             continue
-        seen.add(key)
+        if len(by_key) >= limit:
+            continue
         nb = catalogue.get_document(nid)
-        exp.neighbours.append(
-            Neighbour(
-                dst_id=nid,
-                relationship_type=row["relationship_type"],
-                direction=direction,
-                title=nb["title"] if nb else None,
-                court=nb["court"] if nb else None,
-                src_anchor=_col(row, "src_anchor"),
-                dst_anchor=_col(row, "dst_anchor"),
-                extracted_via=_col(row, "extracted_via"),
-                authority=_rank((nid, direction, row)),
-            )
+        by_key[key] = Neighbour(
+            dst_id=nid,
+            relationship_type=row["relationship_type"],
+            direction=direction,
+            title=nb["title"] if nb else None,
+            court=nb["court"] if nb else None,
+            src_anchor=pair[0],
+            dst_anchor=pair[1],
+            extracted_via=_col(row, "extracted_via"),
+            authority=_rank((nid, direction, row)),
+            anchor_pairs=[pair],
         )
-        if len(exp.neighbours) >= limit:
-            break
+    exp.neighbours.extend(by_key.values())
     return exp

@@ -188,6 +188,106 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
     assert data["groups"][0]["links"][0]["url"].startswith("https://www.bailii.org/")
 
 
+def test_static_export_names_the_previous_law_behind_inherited_mentions(tmp_path):
+    """An inherited mention is attributed to the instrument that was actually cited.
+
+    The page must be able to say "3 mentions of a similar provision in Directive
+    95/46/EC" rather than "3 via previous law", and must keep that route separable from
+    the mentions of the current text.
+    """
+    config = _config(tmp_path)
+    cat = Catalogue(config.catalogue_path)
+    textstore = TextStore(config.text_dir)
+
+    current_text = "Article 15 Right of access\n1. The data subject has the right."
+    current = Record(
+        source="eu-legislation", stable_id="32016R0679", doc_type=DocType.LEGISLATION,
+        title="Regulation (EU) 2016/679 of the European Parliament and of the Council "
+              "of 27 April 2016 on the protection of natural persons",
+        text=current_text, raw_bytes=current_text.encode(),
+        segments=[Segment("Article 15 Right of access", 0, len(current_text),
+                          kind="article")],
+        extracted_via=ExtractedVia.STRUCTURED,
+    )
+    previous_text = "Article 12 Right of access\nMember States shall guarantee."
+    previous = Record(
+        source="eu-legislation", stable_id="31995L0046", doc_type=DocType.LEGISLATION,
+        title="Directive 95/46/EC of the European Parliament and of the Council of "
+              "24 October 1995 on the protection of individuals",
+        text=previous_text, raw_bytes=previous_text.encode(),
+        extracted_via=ExtractedVia.STRUCTURED,
+    )
+    _store(cat, textstore, current)
+    _store(cat, textstore, previous)
+
+    old_citer_text = "The court applied Article 12 of Directive 95/46/EC directly."
+    old_start = old_citer_text.index("Article 12")
+    old_citer = Record(
+        source="uk-caselaw", stable_id="ewca/civ/2010/1", doc_type=DocType.JUDGMENT,
+        title="Old v Registrar", court="ewca", decision_date=date(2010, 5, 1),
+        text=old_citer_text, raw_bytes=old_citer_text.encode(),
+        relations=[TypedRelation(
+            relationship_type=RelationshipType.MENTIONS,
+            raw_citation_string="Article 12", dst_id="31995L0046",
+            dst_anchor="Article 12", context_start=old_start,
+            context_end=old_start + len("Article 12"),
+            resolution_status=ResolutionStatus.PENDING,
+        )],
+        extracted_via=ExtractedVia.STRUCTURED,
+    )
+    new_citer_text = "The claimant relied on Article 15 GDPR."
+    new_start = new_citer_text.index("Article 15")
+    new_citer = Record(
+        source="uk-caselaw", stable_id="ewhc/admin/2024/11", doc_type=DocType.JUDGMENT,
+        title="New v Commissioner", court="ewhc", decision_date=date(2024, 2, 1),
+        text=new_citer_text, raw_bytes=new_citer_text.encode(),
+        relations=[TypedRelation(
+            relationship_type=RelationshipType.MENTIONS,
+            raw_citation_string="Article 15 GDPR", dst_id="32016R0679",
+            dst_anchor="Article 15", context_start=new_start,
+            context_end=new_start + len("Article 15 GDPR"),
+            resolution_status=ResolutionStatus.PENDING,
+        )],
+        extracted_via=ExtractedVia.STRUCTURED,
+    )
+    _store(cat, textstore, old_citer)
+    _store(cat, textstore, new_citer)
+    Resolver(cat).run()
+    cat.upsert_provision_mappings(
+        "32016R0679", "31995L0046",
+        [{"current_anchor": "Article 15", "previous_anchor": "Article 12"}])
+    cat.commit()
+    cat.close()
+
+    data = StaticLawExporter(config).build_data("32016R0679")
+    laws = {law["id"]: law for law in data["previous_laws"]}
+    assert laws["31995L0046"]["label"] == "Directive 95/46/EC"   # not the wordy title
+    assert data["previous_counts"]["31995L0046"]["art:15"] == 1
+    assert data["direct_counts"]["art:15"] == 1                  # the two routes separate
+    assert data["counts"]["art:15"] == 2
+    by_id = {group["id"]: group for group in data["groups"]}
+    assert by_id["ewca/civ/2010/1"]["previous_mentions_by_key"]["art:15"] == {
+        "31995L0046": 1}
+    assert by_id["ewhc/admin/2024/11"]["previous_mentions_by_key"] == {}
+    assert data["law"]["jurisdiction"] == "European Union"
+    assert data["law"]["short_title"] == "Regulation (EU) 2016/679"
+
+    # Both mapped provisions travel with the page, so a reader can judge the claim of
+    # similarity side by side instead of taking the mapping on trust.
+    comparison = data["comparisons"]["art:15"][0]
+    assert comparison["previous_id"] == "31995L0046"
+    assert comparison["previous_label"] == "Directive 95/46/EC"
+    assert comparison["previous_provision_label"].startswith("Article 12")
+    assert "Member States shall guarantee" in comparison["previous_text"]
+    assert "the right" in comparison["current_text"]
+
+    page = StaticLawExporter(config).build("32016R0679").html.decode()
+    assert "via previous law" not in page
+    assert "of a similar provision in" in page
+    assert 'id="compare-dialog"' in page
+    assert "Member States shall guarantee" in page
+
+
 def test_static_export_escapes_script_terminators_and_sanitises_attribution(
     tmp_path, monkeypatch
 ):

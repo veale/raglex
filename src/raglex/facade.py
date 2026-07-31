@@ -150,7 +150,13 @@ def _progress(cb, **fields) -> None:
 from .citations.extractor import valid_shorthand as _valid_shorthand
 from .citations.oscola import cite as _oscola_cite
 from .config import Config
-from .core.models import DocType, RelationshipType
+from .core.models import (
+    DocType,
+    ExtractedVia,
+    RelationshipType,
+    ResolutionStatus,
+    TypedRelation,
+)
 from .embeddings import EmbedStage
 
 # The line under the free-text box. Editable in settings, because only the operator
@@ -1218,6 +1224,19 @@ class Facade:
         # Low confidence when we're calling it "in force" purely from absence of edges + no
         # native confirmation — the banner uses this to hedge rather than over-claim currency.
         degraded = (native.status is None and edge_status is None and not is_cons)
+        # The held text is the ENACTED text of an act we know has been amended, and no
+        # consolidation exists to diff it against. ePrivacy read `unapplied_count: 0,
+        # degraded: false` in exactly this state while its held Article 5(3) still said
+        # "offered the right to refuse" — the pre-2009 opt-out, the opposite of the law.
+        # Zero there meant "nothing to compare", and it read as reassurance.
+        uncomparable = bool(
+            version_state == "base_without_consolidation"
+            and amended_by and not eff
+        )
+        if uncomparable:
+            degraded = True
+            unapplied = None
+            up_to_date = False
         return {
             "stable_id": stable_id, "status": merged,
             "status_label": meta_info["label"], "status_icon": meta_info["icon"],
@@ -1249,6 +1268,15 @@ class Facade:
             "unapplied_count": unapplied, "up_to_date": up_to_date,
             "by_article": by_article, "provisions": provisions,
             "degraded": degraded,
+            # Explicit, because `unapplied_count: null` alone doesn't say WHY.
+            "amendments_uncomparable": uncomparable,
+            "currency_note": (
+                "The held text is the act as enacted. It has been amended and no "
+                "consolidation is held, so there is nothing to compare it against: "
+                "unapplied_count is unknown, not zero. Read the amending instruments "
+                f"({', '.join(sorted(set(filter(None, amended_by)))[:5])}) before "
+                "relying on any provision."
+            ) if uncomparable else None,
         }
 
     def canonical_read_target(self, stable_id: str, *, original: bool = False) -> dict:
@@ -1601,10 +1629,13 @@ class Facade:
                  "relationship_type": demoted.get("relationship_type")})
         incoming: list[dict] = []
         page_ids = list(best.items())[:cap]
-        # one grouped aggregate for the whole page, not one query per row
+        # one grouped aggregate for the whole page, not one query per row — and one
+        # batched document read for the same reason: 200 sequential single-row lookups
+        # per page view is the N+1 that made get_document time out on a mega-authority.
         citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
+        sources = cat.get_documents([sid for sid, _ in page_ids])
         for sid, r in page_ids:
-            src = cat.get_document(sid)
+            src = sources.get(sid)
             # OSCOLA citation for the citing document, so "cited by / mentioned by"
             # reads in proper form. meta_json is on the row → no extra query.
             src_oscola = _oscola_cite(src, _row_meta(src)) if src else None
@@ -2678,7 +2709,15 @@ class Facade:
                     {"id": n.dst_id, "relationship_type": n.relationship_type,
                      "direction": n.direction, "title": n.title, "court": n.court,
                      "src_anchor": n.src_anchor, "dst_anchor": n.dst_anchor,
-                     "extracted_via": n.extracted_via, "authority": n.authority}
+                     "extracted_via": n.extracted_via, "authority": n.authority,
+                     # One row per (document, relationship, direction); ``passages``
+                     # says how many edges it stands for and ``anchor_pairs`` names
+                     # them, so per-provision edges can be verified.
+                     "passages": n.passages,
+                     "anchor_pairs": [
+                         {"src_anchor": src, "dst_anchor": dst}
+                         for src, dst in n.anchor_pairs
+                     ]}
                     for n in exp.neighbours
                 ],
             }
@@ -2759,7 +2798,8 @@ class Facade:
     # -- the agent's front door: resolve a citation, fetch it if we can, return it -----
     def lookup(self, *, citation: str, pincite: str | None = None, context: int = 1,
                cited_by: bool = True, similar: bool = True, autofetch: bool = True,
-               full: bool = False, original: bool = False) -> dict:
+               full: bool = False, original: bool = False,
+               outline_kind: str | None = None) -> dict:
         """Resolve a citation (or a stable_id) and return one self-contained answer.
 
         This is the retrieval front door — it folds fetching in as a silent fallback rather
@@ -2845,6 +2885,7 @@ class Facade:
                 held_id, raw=raw, pincite=pincite, context=context,
                 cited_by=cited_by, similar=similar, fetched=fetched,
                 full=full, pincite_inferred=pincite_inferred,
+                outline_kind=outline_kind,
             )
             if held_id != requested_held_id:
                 answer["requested_stable_id"] = requested_held_id
@@ -2877,10 +2918,73 @@ class Facade:
     # tokens for a capped full read (well under the 25k-token tool-response ceiling).
     _LOOKUP_PREVIEW_CHARS = 2500
     _LOOKUP_FULL_CHARS = 48_000
+    _LOOKUP_OUTLINE_LABELS = 120
+    _LOOKUP_OUTLINE_ONE_KIND = 400
+
+    @classmethod
+    def _outline(cls, segments: list[dict], *, kind: str | None = None) -> dict:
+        """The structural spine, with every KIND of provision represented.
+
+        A flat head-of-list truncation is worthless on an EU act: taking the first 60
+        labels of a 190-segment regulation returns Recitals 1–60 and never reaches an
+        article, which is the one thing the outline exists to help you pincite. So the
+        budget is shared between kinds in document order, the true per-kind totals are
+        always reported, and one kind can be asked for in full.
+        """
+        spine = [
+            (str(segment.get("label")), str(segment.get("kind") or "section"))
+            for segment in segments
+            if segment.get("label") and segment.get("kind") not in ("paragraph",)
+        ]
+        counts: dict[str, int] = {}
+        for _label, segment_kind in spine:
+            counts[segment_kind] = counts.get(segment_kind, 0) + 1
+        wanted = (kind or "").strip().casefold() or None
+        if wanted:
+            labels = [label for label, k in spine if k.casefold() == wanted]
+            return {
+                "outline": labels[:cls._LOOKUP_OUTLINE_ONE_KIND],
+                "outline_kind": wanted,
+                "outline_counts": counts,
+                "outline_truncated": len(labels) > cls._LOOKUP_OUTLINE_ONE_KIND,
+            }
+        budget = cls._LOOKUP_OUTLINE_LABELS
+        if len(spine) <= budget:
+            return {"outline": [label for label, _k in spine],
+                    "outline_counts": counts, "outline_truncated": False}
+        # An equal share per kind, with any unused share handed back to the rest — so a
+        # document of two recitals and 190 articles still lists the articles.
+        share = {k: 0 for k in counts}
+        remaining, kinds = budget, [k for k in counts]
+        while remaining > 0 and kinds:
+            slice_size = max(1, remaining // len(kinds))
+            for segment_kind in list(kinds):
+                take = min(slice_size, counts[segment_kind] - share[segment_kind], remaining)
+                share[segment_kind] += take
+                remaining -= take
+                if share[segment_kind] >= counts[segment_kind]:
+                    kinds.remove(segment_kind)
+                if remaining <= 0:
+                    break
+        taken: dict[str, int] = {k: 0 for k in counts}
+        labels: list[str] = []
+        for label, segment_kind in spine:
+            if taken[segment_kind] < share[segment_kind]:
+                taken[segment_kind] += 1
+                labels.append(label)
+        return {
+            "outline": labels,
+            "outline_counts": counts,
+            "outline_truncated": True,
+            "outline_note": (
+                "sampled across kinds so every kind is represented; pass "
+                "outline_kind='article' (or 'recital', …) for one kind in full"),
+        }
 
     def _lookup_held(self, held_id: str, *, raw: str, pincite: str | None, context: int,
                      cited_by: bool, similar: bool, fetched: bool, full: bool = False,
-                     pincite_inferred: bool = False) -> dict:
+                     pincite_inferred: bool = False,
+                     outline_kind: str | None = None) -> dict:
         """Assemble the held-document answer for :meth:`lookup`."""
         doc = self.get_document(held_id)
         d = doc.get("document", {}) or {}
@@ -2943,8 +3047,7 @@ class Facade:
                 out["preview_truncated"] = len(text) > self._LOOKUP_PREVIEW_CHARS
                 # the structural spine (headings / section & article labels), so the agent
                 # can pincite the right provision without reading the body
-                out["outline"] = [s.get("label") for s in segs
-                                  if s.get("label") and s.get("kind") not in ("paragraph",)][:60]
+                out.update(self._outline(segs, kind=outline_kind))
                 out["how_to_read"] = ("preview only — pass pincite='<label>' for one "
                                       "provision (with context 0/1/2), or full=true for the "
                                       "whole text")
@@ -9483,18 +9586,83 @@ class Facade:
                 "pinpoint": pinpoint, "target_present": present, "resolved": resolved}
 
     def link(self, *, src_id: str, dst_id: str, relationship: str,
-             src_anchor: str | None = None, dst_anchor: str | None = None) -> dict:
-        with self._open() as (cat, _rs, _ts):
-            rel = _rel_type(relationship, RelationshipType.ANALYSES)
-            resolved = link_documents(cat, src_id=src_id, dst_id=dst_id, relationship=rel,
-                                      src_anchor=src_anchor, dst_anchor=dst_anchor)
-            return {"src_id": src_id, "dst_id": dst_id, "relationship": rel.value,
-                    "src_anchor": src_anchor, "dst_anchor": dst_anchor, "resolved": resolved}
+             src_anchor: str | None = None, dst_anchor: str | None = None,
+             note: str | None = None, dry_run: bool = False) -> dict:
+        """Assert ONE hand-written edge between two held documents.
+
+        Three properties this call did not previously have, each of which turned a
+        mistake into a durable false statement about the law:
+
+        * an unrecognised ``relationship`` is REFUSED, with the accepted vocabulary in the
+          error. It used to fall back to ``analyses`` and report ``resolved: true``, so a
+          typo became a plausible-looking edge the response could not be distinguished
+          from a success;
+        * writing the same edge twice UPDATES it rather than minting a second row;
+        * ``dry_run`` reports exactly what would be written — including whether each
+          anchor resolves to a real segment — without writing it.
+        """
+        rel = _rel_type(relationship)
+        if rel is None:
+            return {"error": f"unknown relationship {relationship!r}",
+                    "known": sorted(r.value for r in RelationshipType)}
+        with self._open() as (cat, _rs, ts):
+            if cat.get_document(src_id) is None:
+                return {"error": f"source document not held: {src_id}"}
+            target = cat.get_document(dst_id)
+            anchors = {
+                "src_anchor_resolved": self._anchor_resolves(cat, ts, src_id, src_anchor),
+                "dst_anchor_resolved": self._anchor_resolves(cat, ts, dst_id, dst_anchor),
+            }
+            plan = {"src_id": src_id, "dst_id": dst_id, "relationship": rel.value,
+                    "src_anchor": src_anchor, "dst_anchor": dst_anchor,
+                    "note": note, "resolved": target is not None, **anchors}
+            if dry_run:
+                return {**plan, "dry_run": True, "written": False}
+            written = cat.upsert_manual_relation(
+                src_id,
+                TypedRelation(
+                    relationship_type=rel,
+                    raw_citation_string=dst_id,
+                    dst_id=dst_id,
+                    extracted_via=ExtractedVia.MANUAL,
+                    resolution_status=(ResolutionStatus.RESOLVED if target is not None
+                                       else ResolutionStatus.PENDING),
+                    src_anchor=src_anchor,
+                    dst_anchor=dst_anchor,
+                ),
+                note=note,
+            )
+        self._invalidate_caches()
+        return {**plan, **written, "written": True}
+
+    @staticmethod
+    def _anchor_resolves(cat, textstore, stable_id: str, anchor: str | None) -> bool | None:
+        """Does ``anchor`` name a real segment of ``stable_id``?
+
+        ``None`` means the question doesn't arise (no anchor given, or no text held to
+        check against) — deliberately distinct from ``False``, which means the caller
+        named a provision that does not exist and is almost certainly a mistake.
+        """
+        if not anchor:
+            return None
+        row = cat.get_document(stable_id)
+        if row is None or not row["payload_hash"]:
+            return None
+        try:
+            segments = textstore.get_segments(row["payload_hash"])
+        except OSError:
+            return None
+        if not segments:
+            return None
+        wanted = _anchor_key(anchor)
+        if not wanted:
+            return None
+        return any(_anchor_key(segment.label or "") == wanted for segment in segments)
 
     def upsert_provision_mappings(
         self, *, current_id: str, previous_id: str, mappings: list[dict],
         created_by: str = "manual", replace: bool = False,
-        mapping_type: str = "functional_predecessor",
+        mapping_type: str = "functional_predecessor", dry_run: bool = False,
     ) -> dict:
         """Bulk-create article/section correspondences between two laws.
 
@@ -9507,6 +9675,10 @@ class Facade:
         companion instrument's are a parallel provision in force alongside it, and the
         reader labels them differently. An unknown value is an error rather than a silent
         downgrade — asserting descent between companion instruments would be wrong.
+
+        Every anchor is resolved against its document's segments at write time, and any
+        that names nothing is reported back per row. ``dry_run`` runs that check and
+        returns the plan without writing.
         """
         created_by = (created_by or "manual").strip().lower()
         if created_by not in {"manual", "llm", "structured"}:
@@ -9543,18 +9715,52 @@ class Facade:
             })
         if not clean or len(clean) > 1000:
             return {"error": "supply between 1 and 1000 mappings"}
-        with self._open() as (cat, _rs, _ts):
+        with self._open() as (cat, _rs, ts):
             if cat.get_document(current_id) is None:
                 return {"error": f"current law not held: {current_id}"}
             if cat.get_document(previous_id) is None:
                 return {"error": f"previous law not held: {previous_id}"}
+            # Resolve every anchor against the two documents' own segments BEFORE
+            # writing. The whole value of this table is that its anchors point at real
+            # provisions; an unresolvable one (a "regulation 6" against an instrument
+            # whose segments are all "s. (1)") was previously stored in silence and
+            # simply never matched anything.
+            checked = []
+            unresolved = []
+            for item in clean:
+                current_ok = self._anchor_resolves(
+                    cat, ts, current_id, item["current_anchor"])
+                previous_ok = self._anchor_resolves(
+                    cat, ts, previous_id, item["previous_anchor"])
+                checked.append({**item, "current_anchor_resolved": current_ok,
+                                "previous_anchor_resolved": previous_ok})
+                if current_ok is False or previous_ok is False:
+                    unresolved.append({
+                        "current_anchor": item["current_anchor"],
+                        "previous_anchor": item["previous_anchor"],
+                        "current_anchor_resolved": current_ok,
+                        "previous_anchor_resolved": previous_ok,
+                    })
+            if dry_run:
+                return {"current_id": current_id, "previous_id": previous_id,
+                        "dry_run": True, "written": 0, "would_write": len(clean),
+                        "replace": bool(replace), "mappings": checked,
+                        "unresolved_anchors": unresolved}
             written = cat.upsert_provision_mappings(
                 current_id, previous_id, clean, created_by=created_by,
                 replace=replace)
             rows = [dict(r) for r in cat.provision_mappings(current_id)]
         self._invalidate_caches()
-        return {"current_id": current_id, "previous_id": previous_id,
-                "written": written, "mappings": rows}
+        result = {"current_id": current_id, "previous_id": previous_id,
+                  "written": written, "mappings": rows}
+        if unresolved:
+            # Reported, not refused: a mapping can legitimately name a provision of a
+            # document held only as a metadata stub. The caller must be able to SEE it.
+            result["unresolved_anchors"] = unresolved
+            result["warning"] = (
+                f"{len(unresolved)} of {len(clean)} mappings name an anchor that does "
+                "not match any segment of the document it belongs to")
+        return result
 
     def provision_mappings(self, *, stable_id: str) -> dict:
         with self._open() as (cat, _rs, _ts):
@@ -9581,6 +9787,55 @@ class Facade:
         return {"stable_id": stable_id, "current_anchor": current_anchor,
                 "documents": len({r["src_id"] for r in rows}),
                 "incoming": incoming}
+
+    def relationship_types(self) -> dict:
+        """The closed vocabulary ``link`` accepts, so it can be read rather than probed.
+
+        Guessing at it was how two wrong edges were written: the only way to learn which
+        terms existed was to send one, read the corpus back and see what had landed.
+        """
+        families = {
+            "treatment": ["follows", "distinguishes", "overrules", "applies",
+                          "considers", "cites_for_fact", "mentions", "interprets"],
+            "commentary": ["analyses", "summarises", "criticises", "annotates",
+                           "cited_by_commentary"],
+            "legislative": ["implements", "transposes", "supersedes", "amends",
+                            "amended_by", "repeals", "repealed_by", "corrects",
+                            "corrected_by", "consolidates", "point_in_time_of",
+                            "assimilated_version_of", "legal_basis"],
+        }
+        known = sorted(r.value for r in RelationshipType)
+        placed = {value for values in families.values() for value in values}
+        return {
+            "relationship_types": known,
+            "families": {name: [v for v in values if v in known]
+                         for name, values in families.items()},
+            "other": sorted(v for v in known if v not in placed),
+            "note": "link() refuses anything not on this list; it does not fall back.",
+        }
+
+    def manual_links(self, *, stable_id: str, limit: int = 500) -> dict:
+        """Every hand-written edge into or out of a document, each with its relation_id.
+
+        Without this there was no addressable handle on a manual assertion that had been
+        folded into an existing relation's passages, and therefore no way to retract one.
+        """
+        with self._open() as (cat, _rs, _ts):
+            outgoing = [dict(r) for r in cat.manual_relations(
+                src_id=stable_id, limit=limit)]
+            incoming = [dict(r) for r in cat.manual_relations(
+                dst_id=stable_id, limit=limit)]
+        return {"stable_id": stable_id, "outgoing": outgoing, "incoming": incoming,
+                "total": len(outgoing) + len(incoming)}
+
+    def delete_manual_link(self, *, relation_id: int) -> dict:
+        """Retract one hand-written edge by its relation_id, leaving extracted citations
+        between the same two documents untouched."""
+        with self._open() as (cat, _rs, _ts):
+            result = cat.delete_manual_relation(relation_id)
+        if result.get("deleted"):
+            self._invalidate_caches()
+        return result
 
     def delete_provision_mapping(self, *, mapping_id: int) -> dict:
         with self._open() as (cat, _rs, _ts):

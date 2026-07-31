@@ -147,11 +147,22 @@ export interface Setting {
 }
 export interface StaticBundleItem {
   stable_id: string; slug: string; title: string; note: string;
+  // Operator's own shorthand ("DSA"), shown bold before the full name on the index page
+  // only — inside an edition the instrument keeps its full title.
+  short?: string;
+}
+// One outbound request when a run finishes: an ntfy push, a Slack hook, or a listener
+// that kicks off an scp. Deliberately a raw URL + headers + body rather than a named
+// integration.
+export interface StaticBundleWebhook {
+  enabled: boolean; url: string; method: string;
+  headers: Record<string, string>; body: string;
 }
 export interface StaticBundle {
   items: StaticBundleItem[];
   index_title: string; index_text: string; max_snippets: number;
   output_dir: string; resolved_output_dir?: string;
+  webhook?: StaticBundleWebhook;
   last_run?: any;
   schedule?: { name: string; enabled: boolean; every_minutes: number | null } | null;
 }
@@ -462,6 +473,10 @@ export const api = {
   bundleConfig: () => req<StaticBundle>("/export/bundle"),
   saveBundleConfig: (body: Record<string, unknown>) =>
     req<StaticBundle>("/export/bundle", { method: "POST", body: JSON.stringify(body) }),
+  // Fire the configured webhook once against the LAST run's summary, so the operator can
+  // see the request land before trusting a scheduled export to it.
+  testBundleWebhook: () =>
+    req<any>("/export/bundle/webhook-test", { method: "POST", body: "{}" }),
   // Build every configured edition, then (when a zip was asked for) download it. The
   // build is a job because it reads thousands of source texts per statute; progress is
   // reported per edition AND within one, so a long run stays legible.
