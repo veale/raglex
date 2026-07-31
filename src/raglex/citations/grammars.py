@@ -185,6 +185,13 @@ _UK_SI_TO_ID = {
     "privacy and electronic communications (ec directive) regulations 2003": "uksi/2003/2426",
     "privacy and electronic communications regulations 2003": "uksi/2003/2426",
     "privacy and electronic communications regulations": "uksi/2003/2426",
+    # The Electronic Commerce (EC Directive) Regulations 2002 — the UK transposition of
+    # the e-Commerce Directive, and the hosting/mere-conduit defences litigated with it.
+    # NB no acronym: "ECR" is the European Court Reports and would collide catastrophically.
+    "electronic commerce (ec directive) regulations 2002": "uksi/2002/2013",
+    "electronic commerce (ec directive) regulations": "uksi/2002/2013",
+    "electronic commerce regulations 2002": "uksi/2002/2013",
+    "e-commerce regulations 2002": "uksi/2002/2013",
 }
 # The bare acronym is matched case-SENSITIVELY (uppercase only), the spelled-out names
 # case-insensitively — the same discipline the EU acronyms use, so a lower-case "pecr"
