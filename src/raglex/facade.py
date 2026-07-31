@@ -1437,7 +1437,8 @@ class Facade:
                         key: inherited_recitals[key]
                         for key in (
                             "count", "source_stable_id", "source_title",
-                            "source_url", "unchanged", "virtual", "note",
+                            "source_url", "base_stable_id", "source_is_base_act",
+                            "unchanged", "virtual", "note",
                         )
                     }
                     if inherited_recitals else None
@@ -1745,23 +1746,56 @@ class Facade:
             ):
                 return None
         base = cat.get_document(base_id)
-        if base is None or not base["payload_hash"]:
+
+        def _recitals_for(row):
+            if row is None or not row["payload_hash"]:
+                return None
+            try:
+                candidate_text = ts.get(row["payload_hash"])
+            except OSError:
+                return None
+            candidate_segments = ts.get_segments(row["payload_hash"])
+            candidate_recitals = [
+                segment for segment in candidate_segments
+                if (segment.kind or "").casefold() == "recital"
+                or re.match(r"^\s*recitals?\b", segment.label or "", re.I)
+            ]
+            return (
+                (candidate_text, candidate_recitals)
+                if candidate_recitals else None
+            )
+
+        source = base
+        source_body = _recitals_for(base)
+        source_is_base_act = bool(source_body)
+        # Old imports sometimes hold the sector-3 act only as flattened HTML whose
+        # parser dropped its preamble. Recitals are immutable across consolidations, so
+        # the earliest held sector-0 expression with structured recitals is a safe
+        # temporary projection source while the reverse sweep refreshes the base Formex.
+        if source_body is None and re.fullmatch(r"3\d{4}[A-Z]+\d+", base_id):
+            siblings = cat.conn.execute(
+                """
+                SELECT d.*
+                FROM relations r JOIN documents d ON d.stable_id = r.src_id
+                WHERE r.relationship_type = 'consolidates'
+                  AND (r.dst_id = ? OR r.candidate_id = ?)
+                  AND d.payload_hash IS NOT NULL
+                ORDER BY d.stable_id
+                """,
+                (base_id, base_id),
+            ).fetchall()
+            for sibling in siblings:
+                source_body = _recitals_for(sibling)
+                if source_body is not None:
+                    source = sibling
+                    break
+        if source is None or source_body is None:
             return None
-        try:
-            source_text = ts.get(base["payload_hash"])
-        except OSError:
-            return None
-        source_segments = ts.get_segments(base["payload_hash"])
-        recital_segments = [
-            segment for segment in source_segments
-            if (segment.kind or "").casefold() == "recital"
-            or re.match(r"^\s*recitals?\b", segment.label or "", re.I)
-        ]
-        if not recital_segments:
-            return None
+        source_text, recital_segments = source_body
+        source_id = str(source["stable_id"])
 
         source_citations = (
-            list(cat.citations_for(base_id)) if include_citations else [])
+            list(cat.citations_for(source_id)) if include_citations else [])
         text_parts: list[str] = []
         segments: list[dict] = []
         citations: list[dict] = []
@@ -1786,7 +1820,7 @@ class Facade:
                 "char_start": start,
                 "char_end": cursor,
                 "inherited": True,
-                "source_stable_id": base_id,
+                "source_stable_id": source_id,
             })
 
             # ``strip`` may remove whitespace before the segment body. Account for it
@@ -1820,7 +1854,7 @@ class Facade:
                         else ("pending" if candidate else "maybe")
                     ),
                     "inherited": True,
-                    "source_stable_id": base_id,
+                    "source_stable_id": source_id,
                 })
 
         if not segments:
@@ -1830,15 +1864,24 @@ class Facade:
             "segments": segments,
             "citations": citations,
             "count": len(segments),
-            "source_stable_id": base_id,
-            "source_title": base["title"] or base_id,
-            "source_url": base["landing_url"],
+            "source_stable_id": source_id,
+            "source_title": source["title"] or source_id,
+            "source_url": source["landing_url"],
+            "base_stable_id": base_id,
+            "source_is_base_act": source_is_base_act,
             "unchanged": True,
             "virtual": True,
             "note": (
-                "Recitals are inherited unchanged from the original act; "
-                "they are displayed here without being copied into this "
-                "consolidated expression."
+                (
+                    "Recitals are inherited unchanged from the original act; "
+                    "they are displayed here without being copied into this "
+                    "consolidated expression."
+                    if source_is_base_act else
+                    "Recitals are inherited unchanged from the earliest held "
+                    "expression with a structured preamble while the original "
+                    "act's Formex rendition is refreshed; they are not copied "
+                    "into this consolidated expression."
+                )
             ),
         }
 
@@ -2829,7 +2872,8 @@ class Facade:
                     key: inherited_recitals.get(key)
                     for key in (
                         "count", "source_stable_id", "source_title",
-                        "source_url", "unchanged", "virtual", "note",
+                        "source_url", "base_stable_id", "source_is_base_act",
+                        "unchanged", "virtual", "note",
                     )
                 }
                 out["recital_outline"] = [
@@ -3042,7 +3086,9 @@ class Facade:
                                 key: inherited[key]
                                 for key in (
                                     "source_stable_id", "source_title",
-                                    "source_url", "unchanged", "virtual", "note",
+                                    "source_url", "base_stable_id",
+                                    "source_is_base_act", "unchanged", "virtual",
+                                    "note",
                                 )
                             },
                         }

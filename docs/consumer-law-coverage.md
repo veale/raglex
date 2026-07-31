@@ -108,7 +108,9 @@ A complete resumable sector-0 Cellar walk and a local all-held-EU annex repair a
 available as first-class jobs and scheduled maintenance. Opening a base EU act with no
 held version also starts a deduplicated targeted Cellar sync automatically. Targeted sync
 only processes that act's discovered versions; the source-wide unfinished citation
-backlog belongs exclusively to the full sector-0 sweep.
+backlog belongs exclusively to the full sector-0 sweep. The reverse sweep yields each
+distinct sector-3 base act before its first dated expression, so the original Formex
+preamble is collected as the consolidation catalogue expands.
 
 Repeatable audit queries:
 

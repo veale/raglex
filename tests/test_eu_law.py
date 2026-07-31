@@ -60,12 +60,13 @@ def test_reverse_sector_zero_sweep_keeps_future_versions_and_resume_offset(monke
     monkeypatch.setattr(adapter, "_sparql", fake_sparql)
     stubs = list(adapter.discover(None))
     assert [s.stable_id for s in stubs] == [
-        "02005L0029-20220528", "02005L0029-20260927",
+        "32005L0029", "02005L0029-20220528", "02005L0029-20260927",
     ]
-    assert [s.hints["consolidation_of"] for s in stubs] == [
+    assert [s.hints["consolidation_of"] for s in stubs[1:]] == [
         "32005L0029", "32005L0029",
     ]
-    assert [s.hints["resume_offset"] for s in stubs] == [401, 402]
+    assert [s.hints["resume_offset"] for s in stubs[1:]] == [401, 402]
+    assert stubs[0].hints["from_consolidation_sweep"] is True
     assert "^0[0-9]{4}[A-Z]+" in queries[0]
 
 
@@ -470,6 +471,45 @@ def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_p
     assert "Recitals are inherited unchanged from the original act" in page
     assert "Member States shall prohibit unfair practices." in page
     assert "inherited-recital" in page
+
+    # A legacy flattened base may temporarily lack structured preamble segments.
+    # Use the earliest held expression that has them, with explicit provenance, until
+    # the reverse Cellar sweep refreshes the sector-3 Formex.
+    fallback_id = "02005L0029-20050612"
+    fallback_text = "Original recital wording.\n\nArticle 1 Purpose\nOriginal text."
+    with facade._open() as (cat, _rawstore, textstore):
+        base = cat.get_document(base_id)
+        textstore.put_segments(base["payload_hash"], [
+            Segment("Article 1 Purpose", article_1, len(base_text), kind="article"),
+        ])
+        fallback = Record(
+            source="eu-legislation", stable_id=fallback_id,
+            doc_type=DocType.LEGISLATION, title="Earliest UCPD expression",
+            text=fallback_text, raw_bytes=fallback_text.encode(),
+            segments=[
+                Segment("Recital 1", 0, fallback_text.index("Article 1") - 2,
+                        kind="recital"),
+                Segment("Article 1 Purpose", fallback_text.index("Article 1"),
+                        len(fallback_text), kind="article"),
+            ],
+            relations=[TypedRelation(
+                relationship_type=RelationshipType.CONSOLIDATES,
+                raw_citation_string=base_id, dst_id=base_id,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )],
+            extracted_via=ExtractedVia.STRUCTURED,
+        )
+        fallback.ensure_payload_hash()
+        path = textstore.put(fallback.payload_hash, fallback.text or "")
+        textstore.put_segments(fallback.payload_hash, fallback.segments)
+        cat.upsert_document(fallback, text_path=str(path))
+        cat.add_relations(fallback_id, fallback.relations)
+    fallback_body = facade.document_body(version_id)["inherited_recitals"]
+    assert fallback_body["source_stable_id"] == fallback_id
+    assert fallback_body["base_stable_id"] == base_id
+    assert fallback_body["source_is_base_act"] is False
+    assert fallback_body["text"] == "Original recital wording."
 
 
 def test_formex_quoted_amendments_are_not_promoted_to_act_articles():

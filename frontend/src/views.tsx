@@ -1416,7 +1416,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
       {inheritedRecitals?.text && recitalSegs.length > 0 && (
         <>
           <p className="leg-version-state">
-            Unchanged recitals inherited from the original act.
+            {inheritedRecitals.note}
           </p>
           <div className="reader">
             {recitalSegs.map((s, i) => {
@@ -1790,8 +1790,8 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   const recitalContent = inheritedRecitals?.text && recitalSegs.length > 0 ? (
     <div className="inherited-recitals">
       <div className="leg-version-state">
-        <b>Unchanged recitals from the original act.</b>{" "}
-        They are displayed live here and are not copied into this consolidated expression.
+        <b>Unchanged inherited recitals.</b>{" "}
+        {inheritedRecitals.note}
         {inheritedRecitals.source_url && <>{" "}
           <a href={inheritedRecitals.source_url} target="_blank" rel="noreferrer">
             View original act ↗</a></>}

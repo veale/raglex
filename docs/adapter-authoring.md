@@ -87,7 +87,9 @@ is latest *applicable today* and separately reports a newer future snapshot. An 
 with an enumerable version series should expose a resumable full-series mode rather than
 forcing one lookup per base act. For EU law this is the complete Cellar sector-0 sweep
 (`consolidations_only=true`); targeted sector-3 imports should use
-`include_consolidations=true`.
+`include_consolidations=true`. A reverse sector-0 discovery must also yield each distinct
+sector-3 base once: the dated expression omits its preamble, so version discovery is also
+the efficient enumeration key for harvesting the recital source.
 
 The read model is also part of this contract. When a base act has a dated consolidation
 applicable today, ordinary web and MCP reads default to that consolidation and expose an
@@ -104,6 +106,10 @@ provenance-marked virtual section on every consolidation that lacks recital segm
 Reader, MCP provision lookup and static export must all use that projection. Incoming
 `Recital N` mentions follow the same version-inheritance rule as Article mentions, while
 outgoing links printed inside a recital are read live from the base act.
+If a legacy base rendition lacks structured recital segments, the reader may temporarily
+project them from the earliest held expression with a structured preamble (recitals are
+unchanged), but it must label that provenance and the sweep must refresh the sector-3
+Formex rather than treating the fallback as permanent.
 
 Apply lineage in both directions. When a consolidated act cites a third instrument,
 do not show the base act and every dated snapshot as separate citers of that third

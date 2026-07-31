@@ -673,7 +673,8 @@ class StaticLawExporter:
                         key: inherited_recitals[key]
                         for key in (
                             "count", "source_stable_id", "source_title",
-                            "source_url", "unchanged", "virtual", "note",
+                            "source_url", "base_stable_id", "source_is_base_act",
+                            "unchanged", "virtual", "note",
                         )
                     }
                     if inherited_recitals else None
@@ -1174,7 +1175,7 @@ _SCRIPT = r"""
     ? `<a href="${esc(inheritedRecitals.source_url)}" target="_blank" rel="noopener noreferrer">${esc(inheritedRecitals.source_title || inheritedRecitals.source_stable_id)} →</a>`
     : esc(inheritedRecitals?.source_title || inheritedRecitals?.source_stable_id || "");
   sourceNote.innerHTML = lawLinks + (inheritedRecitals
-    ? `<br><span class="muted">Recitals are inherited unchanged from the original act (${recitalSource}); they are displayed here without being copied into this consolidated expression.</span>`
+    ? `<br><span class="muted">${esc(inheritedRecitals.note)} Source: ${recitalSource}</span>`
     : "");
   $("law").appendChild(sourceNote);
 

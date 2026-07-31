@@ -228,9 +228,17 @@ LIMIT {self.page_size} OFFSET {offset}
 """
 
     def _discover_consolidations(self, *, max_pages: int | None) -> Iterator[Stub]:
-        """Walk the complete Cellar consolidation catalogue with a durable offset."""
+        """Walk the complete Cellar consolidation catalogue with a durable offset.
+
+        Each distinct sector-3 base is yielded immediately before the first sector-0
+        expression that reveals it. Consolidations omit the preamble, so a reverse-only
+        walk that stored just sector 0 could never expose the original recitals. The
+        pipeline deduplicates an already-held base cheaply; a one-time repair harvest can
+        use ``refetch_held`` to upgrade old flattened-HTML renditions to Formex.
+        """
         offset = self.start_offset
         pages = 0
+        yielded_bases: set[str] = set()
         while True:
             try:
                 rows = self._sparql(self._consolidation_query(offset))
@@ -279,6 +287,20 @@ SELECT DISTINCT ?base WHERE {{
                     or (matching[0] if len(matching) == 1 else None)
                     or "3" + body
                 )
+                if base not in yielded_bases:
+                    yielded_bases.add(base)
+                    yield Stub(
+                        stable_id=base,
+                        landing_url=(
+                            "https://eur-lex.europa.eu/legal-content/EN/ALL/"
+                            f"?uri=CELEX:{base}"
+                        ),
+                        raw_url=f"{CELEX_BASE}/{base}",
+                        hints={
+                            "from_consolidation_sweep": True,
+                            "consolidation_revealed_by": celex,
+                        },
+                    )
                 yield Stub(
                     stable_id=celex,
                     landing_url=f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}",
