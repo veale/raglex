@@ -2007,8 +2007,29 @@ class Facade:
         could narrow to.
         """
         with self._open() as (cat, _rs, ts):
+            anchor_exact = anchor if anchor and exact else None
+            anchor_prefix = None
+            if anchor and not exact:
+                # Segment labels may include their title ("Article 17 Right to
+                # erasure"), whereas citation edges carry only "Article 17(2)".
+                # Give the catalogue the canonical unit+number as a coarse prefix;
+                # the exact family matcher below remains authoritative.
+                m = re.match(
+                    r"^([A-Za-z]+)\.?\s*(\d+[A-Za-z]?)",
+                    anchor.strip().lstrip("[("),
+                )
+                if m:
+                    anchor_prefix = f"{m.group(1)} {m.group(2)}"
+                else:
+                    anchor_prefix = re.sub(
+                        r"(?:\([^()]+\))+\s*$", "", anchor,
+                    ).strip()
             rels = [
-                dict(r) for r in cat.relations_to(stable_id)
+                dict(r) for r in cat.relations_to(
+                    stable_id,
+                    anchor_exact=anchor_exact,
+                    anchor_prefix=anchor_prefix,
+                )
                 if r["extracted_via"] != "inferred"
             ]
             direct_keys = {
@@ -2016,7 +2037,11 @@ class Facade:
                 for r in rels
             }
             version_base = cat.consolidation_base_for(stable_id)
-            for row in cat.version_inherited_mentions_for(stable_id, limit=20000):
+            for row in cat.version_inherited_mentions_for(
+                stable_id, limit=20000,
+                anchor_exact=anchor_exact,
+                anchor_prefix=anchor_prefix,
+            ):
                 projected = dict(row)
                 key = (
                     projected["src_id"], projected["dst_anchor"],

@@ -1281,18 +1281,25 @@ class Catalogue:
         ids = list(dict.fromkeys(str(i) for i in version_ids if i))
         if not ids:
             return {}
-        qs = ",".join("?" * len(ids))
-        rows = self.conn.execute(
-            f"""
-            SELECT r.src_id, r.src_id AS stable_id,
-                   COALESCE(r.dst_id, r.candidate_id) AS base_id,
-                   d.meta_json, r.dst_anchor
-            FROM relations r JOIN documents d ON d.stable_id = r.src_id
-            WHERE r.src_id IN ({qs}) AND r.relationship_type = 'consolidates'
-              AND COALESCE(r.dst_id, r.candidate_id) IS NOT NULL
-            """,
-            ids,
-        ).fetchall()
+        # PostgreSQL's extended-query protocol caps one statement at 65,535 bind
+        # parameters. Mega-authorities (the ECHR, GDPR) can have more distinct incoming
+        # rows than that; version-family collapse must not make their reader fail merely
+        # by building one enormous ``IN`` clause.
+        rows = []
+        for start in range(0, len(ids), 40_000):
+            chunk = ids[start:start + 40_000]
+            qs = ",".join("?" * len(chunk))
+            rows.extend(self.conn.execute(
+                f"""
+                SELECT r.src_id, r.src_id AS stable_id,
+                       COALESCE(r.dst_id, r.candidate_id) AS base_id,
+                       d.meta_json, r.dst_anchor
+                FROM relations r JOIN documents d ON d.stable_id = r.src_id
+                WHERE r.src_id IN ({qs}) AND r.relationship_type = 'consolidates'
+                  AND COALESCE(r.dst_id, r.candidate_id) IS NOT NULL
+                """,
+                chunk,
+            ).fetchall())
         out: dict[str, tuple[str, str | None]] = {}
         for row in rows:
             out[str(row["src_id"])] = (
@@ -1330,6 +1337,7 @@ class Catalogue:
 
     def version_inherited_mentions_for(
         self, version_id: str, *, limit: int = 5000,
+        anchor_exact: str | None = None, anchor_prefix: str | None = None,
     ) -> list:
         """Literal mentions of a consolidation's base act, projected onto the version.
 
@@ -1342,8 +1350,25 @@ class Catalogue:
         base_id = self.consolidation_base_for(version_id)
         if not base_id:
             return []
+        anchor_sql = ""
+        anchor_params: list[str] = []
+        if anchor_exact:
+            # ``replace`` + ``lower`` is deliberately portable between SQLite and
+            # PostgreSQL.  The facade repeats the full whitespace-normalised comparison
+            # after this indexed-size prefilter, so tabs/newlines cannot create a false
+            # positive here.
+            anchor_sql = (
+                " AND lower(replace(COALESCE(r.dst_anchor, ''), ' ', '')) = ?"
+            )
+            anchor_params.append(anchor_exact.lower().replace(" ", ""))
+        elif anchor_prefix:
+            # This is only a coarse SQL prefilter: ``Article 6%`` may also retrieve
+            # Article 60, which the facade's exact family matcher then rejects.  It
+            # nevertheless turns a 350k-edge mega-authority request into a small query.
+            anchor_sql = " AND lower(COALESCE(r.dst_anchor, '')) LIKE ?"
+            anchor_params.append(anchor_prefix.lower() + "%")
         return self.conn.execute(
-            """
+            f"""
             SELECT r.*, ? AS version_inherited_from_id,
                    ? AS version_inherited_current_id,
                    d.title AS version_inherited_from_title,
@@ -1358,13 +1383,16 @@ class Catalogue:
                 'distinguishes','overrules','cites_for_fact'
               )
               AND r.extracted_via <> 'inferred'
+              {anchor_sql}
             ORDER BY src_pagerank DESC, r.relation_id
             LIMIT ?
             """,
-            (
+            tuple((
                 base_id, version_id, base_id, base_id, base_id,
-                version_id, base_id, max(1, min(int(limit), 20000)),
-            ),
+                version_id, base_id,
+            ) + tuple(anchor_params) + (
+                max(1, min(int(limit), 20000)),
+            )),
         ).fetchall()
 
     def version_combined_citer_count(self, version_id: str) -> int | None:
@@ -2314,13 +2342,33 @@ class Catalogue:
         self.conn.commit()
         return cur.rowcount > 0
 
-    def relations_to(self, dst_id: str) -> list[sqlite3.Row]:
+    def relations_to(
+        self, dst_id: str, *, anchor_exact: str | None = None,
+        anchor_prefix: str | None = None,
+    ) -> list[sqlite3.Row]:
         """Incoming resolved edges — what cites/treats this document (citing cases,
-        commentary). The other half of 1-hop graph expansion (§6c)."""
+        commentary). The other half of 1-hop graph expansion (§6c).
+
+        Optional anchor filters are coarse database-side guards for provision-level
+        readers.  Callers still perform canonical family matching, but no longer have
+        to materialise every incoming edge to a mega-authority merely to show one
+        Article or Recital.
+        """
+        anchor_sql = ""
+        params: list[str] = [dst_id]
+        if anchor_exact:
+            anchor_sql = (
+                " AND lower(replace(COALESCE(dst_anchor, ''), ' ', '')) = ?"
+            )
+            params.append(anchor_exact.lower().replace(" ", ""))
+        elif anchor_prefix:
+            anchor_sql = " AND lower(COALESCE(dst_anchor, '')) LIKE ?"
+            params.append(anchor_prefix.lower() + "%")
         return self.conn.execute(
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
-            "AND relationship_type <> 'cited_by'",  # reverse-oriented scaffold
-            (dst_id,),
+            "AND relationship_type <> 'cited_by'"  # reverse-oriented scaffold
+            f"{anchor_sql}",
+            tuple(params),
         ).fetchall()
 
     def cited_by_family_count(self, ids: list[str]) -> int:
