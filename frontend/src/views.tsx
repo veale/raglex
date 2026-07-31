@@ -3572,7 +3572,7 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
       const saved = await api.saveBundleConfig({
         items: cfg.items, index_title: cfg.index_title, index_text: cfg.index_text,
         max_snippets: cfg.max_snippets, output_dir: cfg.output_dir,
-        webhook: cfg.webhook,
+        index_wordart: cfg.index_wordart, webhook: cfg.webhook,
       });
       if (attrib !== null && attribution && attribution.source !== "env") {
         await api.saveSettings({ RAGLEX_STATIC_EXPORT_ATTRIBUTION: attrib });
@@ -3639,6 +3639,17 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
           <input type="number" min={1} max={12} value={cfg.max_snippets}
             onChange={(e) => patch({ max_snippets: Math.max(1, Math.min(12, +e.target.value || 4)) })} /></label>
       </div>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, marginTop: 4 }}
+        title="Renders the index title as nostalgic rainbow WordArt, with a drop shadow. The index page only — inside an edition the title is the name of a legal instrument.">
+        <input type="checkbox" checked={!!cfg.index_wordart}
+          onChange={(e) => patch({ index_wordart: e.target.checked })} />
+        <span>Index title as <span style={{
+          background: "linear-gradient(to right,#b306a9,#ef2667,#f42e2c,#ffa509,#55ac2f,#0b13fd)",
+          WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+          fontWeight: 700, fontFamily: "Arial, sans-serif",
+        }}>WordArt</span> <span className="muted">— rainbow, with a shadow; index page only</span></span>
+      </label>
+
       <label>Index page text</label>
       <textarea rows={3} value={cfg.index_text} onChange={(e) => patch({ index_text: e.target.value })}
         placeholder="Shown under the index title. Same simple HTML." />

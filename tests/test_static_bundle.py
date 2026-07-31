@@ -213,3 +213,30 @@ def test_the_scheduler_sees_an_edit_without_a_restart(tmp_path, monkeypatch):
     assert [i["slug"] for i in load_config(config)["items"]] == ["osa"]
     # with no Config to locate the file, the environment is all there is
     assert [i["slug"] for i in load_config()["items"]] == ["stale"]
+
+
+def test_index_title_can_be_rendered_as_wordart_and_is_off_by_default():
+    entries = [{"filename": "gdpr.html", "title": "GDPR", "jurisdiction": "European Union",
+                "documents": 1, "mentions": 1, "exported": "27 May 2026"}]
+    plain = render_index_html(entries, title="Statutes", intro="")
+    assert "wordart" not in plain                       # opt-in, and costs nothing when off
+
+    fancy = render_index_html(entries, title="Statutes", intro="", wordart=True)
+    assert '<span class="wordart rainbow">' in fancy
+    assert 'data-text="Statutes"' in fancy
+    assert "linear-gradient(to right, #b306a9" in fancy   # the rainbow theme itself
+    assert "text-shadow: 0.02em 0.02em 0 #b9b2a4" in fancy
+    # The heading is still a heading with the title as its text.
+    assert "<h1>" in fancy and ">Statutes</span>" in fancy
+    # …and it degrades to plain ink where the gradient can't be clipped, or on paper.
+    assert "@supports not ((-webkit-background-clip: text)" in fancy
+    assert "@media print" in fancy
+
+
+def test_wordart_choice_round_trips_through_the_stored_plan(tmp_path):
+    config = _config(tmp_path)
+    settings = SettingsStore(config.settings_path)
+    assert load_config(config)["index_wordart"] is False
+    saved = save_config(settings, {"items": [], "index_wordart": True}, config)
+    assert saved["index_wordart"] is True
+    assert load_config(config)["index_wordart"] is True

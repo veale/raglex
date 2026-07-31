@@ -199,6 +199,7 @@ def load_config(config: Config | None = None) -> dict:
                           else DEFAULT_INDEX_TEXT),
         "max_snippets": max_snippets,
         "output_dir": str(data.get("output_dir") or ""),
+        "index_wordart": bool(data.get("index_wordart")),
         "webhook": _clean_webhook(data.get("webhook")),
     }
     if config is not None:
@@ -212,7 +213,7 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
     current = load_config()
     merged = {**current, **{k: v for k, v in (patch or {}).items() if k in
                             ("items", "index_title", "index_text", "max_snippets",
-                             "output_dir", "webhook")}}
+                             "output_dir", "index_wordart", "webhook")}}
     items, used = [], set()
     for entry in merged.get("items") or []:
         if not isinstance(entry, dict):
@@ -239,9 +240,10 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
     except (TypeError, ValueError):
         merged["max_snippets"] = 4
     merged["webhook"] = _clean_webhook(merged.get("webhook"))
+    merged["index_wordart"] = bool(merged.get("index_wordart"))
     stored = {k: merged[k] for k in
               ("items", "index_title", "index_text", "max_snippets", "output_dir",
-               "webhook")}
+               "index_wordart", "webhook")}
     settings.update({CONFIG_KEY: json.dumps(stored, ensure_ascii=False)})
     settings.apply_to_env()  # visible to this process (and this request) immediately
     return load_config(config)
@@ -268,6 +270,63 @@ def _record_last_run(facade: Facade, info: dict) -> None:
 
 
 # --- the index page --------------------------------------------------------
+# The index title, optionally, as nostalgic WordArt. Transcribed from css-wordart
+# (MIT, Shalom Yerushalmy — `raglex design docs/css-wordart/styles.scss`): its `.wordart`
+# base and `rainbow` theme, plus the drop shadow the same package builds for its
+# `superhero`/`horizon` themes out of a `:before` layer carrying `attr(data-text)`.
+# Inlined rather than depended on, because an edition is one self-contained file with no
+# build step and no external request.
+#
+# Only the index page ever wears it. Inside an edition the title is the name of a legal
+# instrument, and it stays in the same Times as the law beneath it.
+_WORDART_STYLE = """
+.wordart {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: clamp(2.2rem, 7vw, 4.4rem);
+  font-weight: bold;
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  max-width: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.wordart.rainbow {
+  transform: scale(1, 1.5);
+  -webkit-transform: scale(1, 1.5);
+  margin: .5em 0 .75em;
+}
+.wordart.rainbow .text {
+  position: relative;
+  background: #f42e2c;
+  background: linear-gradient(to right, #b306a9, #ef2667, #f42e2c, #ffa509, #fdfc00, #55ac2f, #0b13fd, #a804af);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+/* The shadow sits BEHIND the gradient as its own layer: a text-shadow on the element
+   itself would be clipped away with the fill. */
+.wordart.rainbow .text::before {
+  content: attr(data-text);
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: -1;
+  -webkit-text-fill-color: #b9b2a4;
+  text-shadow: 0.02em 0.02em 0 #b9b2a4, 0.04em 0.04em 0 #cdc7ba;
+}
+/* Print and very old engines get plain, legible ink rather than an invisible title:
+   without background-clip support the fill would be transparent over nothing. */
+@supports not ((-webkit-background-clip: text) or (background-clip: text)) {
+  .wordart .text { -webkit-text-fill-color: currentColor; color: var(--ink); }
+  .wordart .text::before { display: none; }
+}
+@media print {
+  .wordart { transform: none; font-size: 2.2rem; }
+  .wordart .text { -webkit-text-fill-color: currentColor; color: var(--ink); background: none; }
+  .wordart .text::before { display: none; }
+}
+"""
 # Deliberately the same typography as the editions themselves (it reuses their stylesheet)
 # and deliberately relative links: every file sits at one level, so the folder works
 # opened from disk, served from a static host, or unzipped anywhere.
@@ -278,7 +337,7 @@ _INDEX_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>__PAGE_TITLE__</title>
-  <style>__STYLE__
+  <style>__STYLE____WORDART_STYLE__
 .export-group { margin: 0 0 2.2rem; max-width: 52rem; }
 .export-group h2 {
   display: flex;
@@ -318,7 +377,8 @@ __ITEMS__
 
 
 def render_index_html(
-    entries: list[dict], *, title: str, intro: str, generated_at: datetime | None = None
+    entries: list[dict], *, title: str, intro: str,
+    generated_at: datetime | None = None, wordart: bool = False,
 ) -> str:
     """``entries`` are the built editions: filename, title, short name, jurisdiction,
     last-updated date, both counts, note.
@@ -384,12 +444,21 @@ def render_index_html(
             "      </section>"
         )
 
+    # The WordArt is a decoration on the SAME <h1>, not a replacement for it — the
+    # heading stays one element with the title as its text, so a screen reader, a search
+    # engine and a print stylesheet all still find it.
+    heading = (
+        f'<span class="wordart rainbow"><span class="text" '
+        f'data-text="{escape(title, quote=True)}">{escape(title)}</span></span>'
+        if wordart else escape(title)
+    )
     page = _INDEX_TEMPLATE
     for token, value in {
         "__PAGE_TITLE__": escape(title, quote=True),
-        "__TITLE__": escape(title),
+        "__TITLE__": heading,
         "__INTRO__": f'<p class="attribution">{intro_html}</p>' if intro_html.strip() else "",
         "__STYLE__": _STYLE,
+        "__WORDART_STYLE__": _WORDART_STYLE if wordart else "",
         "__ITEMS__": "\n".join(blocks),
     }.items():
         page = page.replace(token, value)
@@ -546,7 +615,7 @@ def build_bundle(
     emit(len(items), f"writing index.html for {len(entries)} editions")
     index_html = render_index_html(
         entries, title=config["index_title"], intro=config["index_text"],
-        generated_at=started,
+        generated_at=started, wordart=config["index_wordart"],
     ).encode("utf-8")
     files.append(("index.html", index_html))
 

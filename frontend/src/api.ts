@@ -162,6 +162,9 @@ export interface StaticBundle {
   items: StaticBundleItem[];
   index_title: string; index_text: string; max_snippets: number;
   output_dir: string; resolved_output_dir?: string;
+  // The index title as nostalgic rainbow WordArt. Index page only — an edition's title
+  // is the name of a legal instrument.
+  index_wordart?: boolean;
   webhook?: StaticBundleWebhook;
   last_run?: any;
   schedule?: { name: string; enabled: boolean; every_minutes: number | null } | null;
