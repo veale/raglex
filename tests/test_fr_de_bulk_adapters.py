@@ -172,6 +172,7 @@ def test_bulk_sources_registered():
     cat = {r["key"]: r for r in source_catalog()}
     assert cat["de-gii"]["jurisdiction"] == "DE"
     assert cat["fr-dila"]["kind"] == "caselaw"
+    assert cat["fr-dila-cnil"]["kind"] == "administrative"
 
 
 # -- bulk harvest recovery ---------------------------------------------------

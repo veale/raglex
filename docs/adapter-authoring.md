@@ -12,8 +12,8 @@ jurisdiction grouping. Use:
 - a stable lowercase source key, normally `{jurisdiction}-{publisher-or-series}`;
 - a human label led by the name a user will search for (`ACM guidance …`, not
   `Netherlands ACM …`);
-- one canonical `kind`: `legislation`, `caselaw`, `guidance`, `preparatory`, or
-  `scrape`;
+- one canonical `kind`: `legislation`, `caselaw`, `administrative`, `guidance`,
+  `preparatory`, or `scrape`;
 - an ISO-like jurisdiction code already declared in `JURISDICTION_LABELS`;
 - explicit `SourceOption` fields for every adapter keyword argument a user may set;
 - identifier examples for targeted fetching; and
@@ -25,6 +25,26 @@ maintain their own country-name table.
 
 An adapter should also test that its key is present in `source_catalog()`, that its
 incremental mode is correct, and that each option name is accepted by its constructor.
+
+Regulator determinations, sanctions, enforcement notices, and DPA deliberations are
+`administrative`, not case law and not guidance. A mixed archive such as DILA may keep
+one storage source for courts, legislation, and CNIL; in that case the document-level
+body/court discriminator must also be added to `Facade._ADMIN_COURTS` and mirrored by
+`_kind_clause`. Test both the Python display kind and the SQL-filtered slice so a facet
+cannot label CNIL correctly while still returning it under “cases”.
+
+Guidance that is explicitly about one governing instrument should store:
+
+```json
+{"citation_default_instrument": {"id": "32024R1689", "kind": "regulation"}}
+```
+
+This lets orphaned provisions later in the document (“Article 50(2)”) return to the
+guidance's declared subject after a sentence discussing another law. Only set it when the
+title, register, or source metadata identifies exactly one instrument. Mixed-regime
+registers must omit it. A title that itself deterministically cites exactly one law is also
+recognised for records imported before this field existed, but new adapters should write
+the field explicitly and test both the declaration and a later orphaned provision.
 
 Any adapter used by a background harvest must also follow
 [`job-authoring.md`](job-authoring.md). In particular, discovery must stop at a

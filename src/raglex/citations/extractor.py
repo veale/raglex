@@ -66,6 +66,29 @@ def _attach_case_pinpoints(text: str, cites: list[Citation]) -> list[Citation]:
     return out
 
 
+def _disambiguate_online_safety_act(cites: list[Citation]) -> list[Citation]:
+    """Use an explicit Australian title in the document to disambiguate later shorthand.
+
+    ``the Online Safety Act`` is curated as the UK 2023 Act in UK guidance, while an
+    Australian judgment naturally uses the same short form after first naming the Online
+    Safety Act 2021 (Cth).  Once that explicit Australian citation is present, only
+    year-less UK matches in the same document are redirected; an explicit 2023 citation
+    remains UK law.
+    """
+    au_id = "au/cth/act/2021/76"
+    uk_id = "ukpga/2023/50"
+    if not any(c.candidate_id == au_id for c in cites):
+        return cites
+    return [
+        replace(c, candidate_id=au_id)
+        if c.candidate_id == uk_id
+        and re.search(r"\bOnline\s+Safety\s+Act\b", c.raw, re.IGNORECASE)
+        and not re.search(r"\b2023\b", c.raw)
+        else c
+        for c in cites
+    ]
+
+
 # --- in-document shorthand names (design feedback, Perreault v Canada) --------
 # Canadian/UK drafting defines shorthands inline: "Suncor Energy Inc v … 2021 FC
 # 138 at para 64 [Suncor]" or "(hereinafter “Dagg”)" — and later cites "Suncor at
@@ -444,11 +467,21 @@ def _def_rows(defs: dict[str, tuple[Citation, bool]]) -> list[dict]:
     """Definitions as plain dicts — the harvest the stage promotes into the corpus-wide
     ``learned_shorthands`` store. Only definitions naming a resolvable candidate are
     kept; an unresolved host would store a link to nothing."""
-    return [
-        {"shorthand": name, "candidate_id": host.candidate_id,
-         "entity_kind": host.entity_kind, "is_abbrev": abbrev}
-        for name, (host, abbrev) in defs.items() if host.candidate_id
-    ]
+    rows: list[dict] = []
+    for name, (host, abbrev) in defs.items():
+        if not host.candidate_id:
+            continue
+        protected = _protected_shorthand_target(name)
+        # Established statutory abbreviations belong to deterministic grammars, not the
+        # learned store.  Even a target-correct learned ``AVG -> GDPR`` is unsafe in an
+        # Ontario judgment where AVG is a company's name.
+        if protected:
+            continue
+        rows.append({
+            "shorthand": name, "candidate_id": host.candidate_id,
+            "entity_kind": host.entity_kind, "is_abbrev": abbrev,
+        })
+    return rows
 
 
 def shorthand_defs(text: str, cites: list[Citation]) -> list[dict]:
@@ -467,6 +500,32 @@ def shorthand_defs(text: str, cites: list[Citation]) -> list[dict]:
 # — rather than being dropped, since a pincited "CA, at para 5" is genuinely a reference.
 _COMMON_INITIALISMS = {"ca", "sc", "hc", "cj", "dpp", "ec", "eu", "uk", "us", "ecj",
                        "cjeu", "echr", "hl", "fc", "qb", "kb", "sca", "cca"}
+
+# Some legal abbreviations have a single, corpus-wide statutory meaning and must never
+# be overwritten by a noisy inline definition learned from another document.  The most
+# damaging observed example was ``BDSG -> GDPR``: every German judgment that mentioned
+# both acts then acquired a false GDPR citation for each occurrence of BDSG.  This gate
+# applies on both WRITE and READ, so deploying it immediately retires conflicting rows
+# already in ``learned_shorthands`` and prevents a rescan from learning them again.
+_PROTECTED_SHORTHAND_TARGETS = {
+    "gdpr": "32016R0679",
+    "dsgvo": "32016R0679",
+    "avg": "32016R0679",
+    "rgpd": "32016R0679",
+    # A formal, unambiguous name in EU material.  It is resolved by the deterministic
+    # EU grammar (including the Commission form "Article 50 AI Act"), and must never
+    # be overwritten by a noisy corpus-learned definition.
+    "aiact": "32024R1689",
+    "bdsg": "de/gesetz/bdsg",
+    "dsa": "32022R2065",
+    "dma": "32022R1925",
+    "nis2": "32022L2555",
+}
+
+
+def _protected_shorthand_target(name: str | None) -> str | None:
+    key = re.sub(r"[^a-z0-9]+", "", (name or "").casefold())
+    return _PROTECTED_SHORTHAND_TARGETS.get(key)
 
 
 def attach_stored_shorthands(
@@ -513,6 +572,9 @@ def attach_stored_shorthands(
             stored, key=lambda r: len(r[0]), reverse=True):
         if not name or not candidate_id or name in exclude:
             continue
+        protected = _protected_shorthand_target(name)
+        if protected:
+            continue
         # The store predates ``valid_shorthand`` and holds hundreds of thousands of
         # rows that would never be learned now. Gating on READ retires them the
         # moment this ships, without waiting for the purge and re-scan.
@@ -554,17 +616,19 @@ def attach_stored_shorthands(
 # list (an instrument/treaty/regulation citation the grammars already resolved, whose
 # span begins at the tail of the list) and mints one pinpointed edge per article to
 # it. A single article number is left to the grammar.
+_ARTICLE_NUMBER = r"\d{1,3}[a-z]?(?:\([a-z0-9]+\))*"
 _ARTICLE_IN_LIST = re.compile(
     r"(?:(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+)?"
-    r"(?P<n>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)", re.IGNORECASE)
+    rf"(?P<n>{_ARTICLE_NUMBER})", re.IGNORECASE)
 # the whole list construct: two or more article numbers joined by commas / "and"
 # (allowing a repeated "and Article 52(1)"), ending just before the instrument
 _ARTICLE_LIST = re.compile(
     r"\b(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+"
-    r"(?P<list>\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*"
-    r"(?:\s*(?:,|and|en|et|e|ed|&|to|through|à|–|—|-)\s*"
+    rf"(?P<list>{_ARTICLE_NUMBER}"
+    r"(?:\s*(?:,\s*(?:(?:and|en|et|e|ed|&)\s+)?|"
+    r"(?:and|en|et|e|ed|&|to|through|à|–|—|-)\s+)"
     r"(?:(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+)?"
-    r"\d{1,3}[a-z]?(?:\(\d+[a-z]?\))*)+)"
+    rf"{_ARTICLE_NUMBER})+)"
     r"\s+(?:(?:of|du|de\s+la|des|van\s+de)\s+)?(?:the\s+)?",
     re.IGNORECASE)
 
@@ -809,14 +873,15 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
     out = list(kept)
     for m in _BARE_PROVISION.finditer(text):
         s, e = m.start(), m.end()
-        if any(os <= s and e <= oe for os, oe in occupied):
+        if any(os < e and s < oe for os, oe in occupied):
             continue  # already part of a literal citation ("s.5 of the FOIA 2000")
         if any(us <= s < ue for us, ue in urls):
             continue  # inside a URL — not a provision reference at all
         cue = m.group("cue").lower().rstrip(".")
         # The text names its own host ("of the Road Traffic Act", "of the Code").
         # Whatever that host is, it is not the last-named instrument.
-        if _EXPLICIT_HOST_RE.match(text, e):
+        if _EXPLICIT_HOST_RE.match(text, e) and not re.match(
+                r"\s*(?:,\s*)?of\s+(?:that|this)\s+Act\b", text[e:], re.IGNORECASE):
             continue
         # PDF extraction routinely splits "Articles" into "Article s", leaving a
         # stray "s 50(2)" that reads as a UK section and carried forward to the
@@ -1031,6 +1096,7 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # material. Added before the dedupe so a genuine overlap resolves by span.
     from .us_cases import us_case_citations
     cites += us_case_citations(text)
+    cites = _disambiguate_online_safety_act(cites)
     grammar = _dedupe_overlaps(cites)
     if llm is None:
         base = _attach_case_pinpoints(text, grammar)
@@ -1060,6 +1126,7 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     for c in ordered:
         exact_multi = c.method in ("de_law_reference", "nl_juriconnect",
                                    "fr_code_articles", "fr_echr_articles",
+                                   "fr_eu_articles",
                                    "uk_cpr_rule_list", "uk_cpr_pd_paragraph_list") and any(
             k.char_start == c.char_start and k.char_end == c.char_end
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)

@@ -27,7 +27,7 @@ from .facade import Facade, _anchor_key, _oscola_cite, _row_meta
 
 _PDF_META_KEYS = ("pdf_url", "download_url", "bailii_pdf_url")
 _SOURCE_META_KEYS = ("url", "bailii_url", "gdprhub_url")
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 _DEFAULT_ATTRIBUTION = (
     'Document generated from a dataset held and maintained by '
@@ -226,9 +226,16 @@ def _snippet(text: str, relation, *, before: int = 120, after: int = 260) -> dic
     start = relation["context_start"]
     if start is None or not text:
         return None
-    start = max(0, min(int(start), len(text)))
-    end = relation["context_end"]
-    end = start if end is None else max(start, min(int(end), len(text)))
+    from .citations.reanchor import aligned_span
+
+    aligned = aligned_span(
+        text, relation["raw_citation_string"], start, relation["context_end"])
+    if aligned is None:
+        # Preserve useful context but decline to mark bytes we cannot verify.
+        start = max(0, min(int(start), len(text)))
+        end = start
+    else:
+        start, end = aligned
     left, right = max(0, start - before), min(len(text), end + after)
     window = text[left:right]
     leading = len(window) - len(window.lstrip())

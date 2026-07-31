@@ -28,6 +28,40 @@ def test_compound_subprovisions_expand_and_inherit_levels():
     assert {c.candidate_id for c in cites} == {"de/gesetz/urhg"}
 
 
+def test_compound_german_eu_article_resolves_to_celex_work():
+    cites = _de("Art. 38 Abs. 3 Satz 2 DSGVO", "de_eu_article")
+    assert [(c.candidate_id, c.pinpoint) for c in cites] == [
+        ("32016R0679", "Article 38(3)")
+    ]
+    assert _de("Art. 4 Nr. 1 DSGVO", "de_eu_article")[0].pinpoint == "Article 4(1)"
+    assert _de("Art. 6 Abs. 1 DSA", "de_eu_article")[0].candidate_id == "32022R2065"
+
+
+def test_conflicting_protected_statutory_shorthand_is_ignored():
+    from raglex.citations.extractor import attach_stored_shorthands
+
+    kept = _de("Art. 6 Abs. 1 DSGVO", "de_eu_article")
+    cites = attach_stored_shorthands(
+        "Art. 6 Abs. 1 DSGVO in Verbindung mit dem BDSG", kept,
+        [("BDSG", "32016R0679", "regulation", True)],
+    )
+    assert [c.raw for c in cites if c.method == "shorthand_global"] == []
+
+    # Even a target-correct learned alias is not safe outside its language/context:
+    # this is a Canadian company, not the Dutch name of the GDPR.
+    assert not attach_stored_shorthands(
+        "The two companies were ASU Dominica and ASU AVG.", [],
+        [("AVG", "32016R0679", "regulation", True)],
+    )
+
+    ai = extract_citations("Article 50 of the AI Act")
+    assert any(c.candidate_id == "32024R1689" and c.pinpoint == "Article 50" for c in ai)
+    assert not [c for c in attach_stored_shorthands(
+        "Article 50 of the AI Act", ai,
+        [("AI Act", "32022R2065", "regulation", True)],
+    ) if c.method == "shorthand_global"]
+
+
 def test_compact_roman_and_parenthesised_forms_converge():
     explicit = _de("§ 19 Abs. 4 S. 1 BVerfGG")[0]
     roman = _de("§ 19 IV 1 BVerfGG")[0]

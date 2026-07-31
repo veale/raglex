@@ -101,3 +101,15 @@ def test_online_safety_act_grammar_resolves_with_or_without_cth_tag():
     }
     assert (ONLINE_SAFETY_ACT_2021, "s. 135") in got
     assert (ONLINE_SAFETY_ACT_2021, "s. 141") in got
+
+
+def test_australian_online_safety_short_form_does_not_switch_to_uk_act():
+    citations = extract_citations(
+        "The Online Safety Act 2021 (Cth) applies. "
+        "Section 45 of the Online Safety Act authorises a notice, "
+        "and s 56(2) of the Online Safety Act sets its scope."
+    )
+    osa = [c for c in citations if "Online Safety Act" in c.raw]
+    assert osa
+    assert {c.candidate_id for c in osa} == {ONLINE_SAFETY_ACT_2021}
+    assert {c.pinpoint for c in osa if c.pinpoint} >= {"s. 45", "s. 56(2)"}

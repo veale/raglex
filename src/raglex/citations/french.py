@@ -212,7 +212,12 @@ _CODE_ALT = "|".join(
                        key=len, reverse=True)
 )
 _ARTICLE = r"(?P<article>(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:-\d+)?(?:\s*(?-i:[A-Z]))?)"
-_ARTICLE_TOKEN = r"(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:\s*(?-i:[A-Z]))?"
+# Atomic because this token sits inside a repeated article-list expression.  Without
+# it, an English-language CJEU judgment containing many ordinary "Article N" phrases
+# made ``re`` revisit every optional prefix/space/list split while looking in vain for
+# a later French host: two 40k-character judgments exceeded the stage's 90-second
+# budget.  There is no useful alternate parse once the token's digits have been read.
+_ARTICLE_TOKEN = r"(?>(?:L|R|D|A|LO)?\s*\.?\s*\d{1,5}(?:-\d+)*(?:\s*(?-i:[A-Z]))?)"
 
 
 def _code_ref(m: re.Match[str]) -> Normalised:
@@ -231,8 +236,8 @@ register(Grammar(
 ))
 
 
-_FR_ARTICLE_LIST = rf"(?P<list>{_ARTICLE_TOKEN}(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})*)"
-_FR_ARTICLE_LIST_MULTI = rf"(?P<list>{_ARTICLE_TOKEN}(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})+)"
+_FR_ARTICLE_LIST = rf"(?P<list>(?>{_ARTICLE_TOKEN}(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})*))"
+_FR_ARTICLE_LIST_MULTI = rf"(?P<list>(?>{_ARTICLE_TOKEN}(?:\s*(?:,|et|à|a)\s*{_ARTICLE_TOKEN})+))"
 _FR_CODE_LIST = re.compile(
     rf"\b(?:articles?|arts?\.)\s+{_FR_ARTICLE_LIST_MULTI}\s+"
     rf"(?:du|de la|des|d['’]u?)\s+(?P<host>{_CODE_ALT})\b", re.IGNORECASE)
@@ -242,6 +247,31 @@ _FR_ECHR_LIST = re.compile(
     r"(?:\s+de\s+sauvegarde)?\s+des\s+droits\s+de\s+l['’](?:homme|Homme)"
     r"(?:\s+et\s+des\s+libertés\s+fondamentales)?\b", re.IGNORECASE)
 _FR_ARTICLE_VALUE = re.compile(_ARTICLE_TOKEN, re.IGNORECASE)
+# French judgments normally put the pinpoint *before* the formal EU instrument:
+# ``l'article 13 du règlement (UE) 2016/679``.  The generic numeric-instrument
+# grammar recognised the Regulation but threw the preceding article away, making
+# hundreds of French GDPR decisions look instrument-level only.  Lists and the
+# common paragraph/subpoint form are expanded here because one Grammar match can
+# emit only one edge.
+_FR_EU_KIND = r"règlement|reglement|directive|décision|decision"
+_FR_EU_ARTICLES = r"\d+[a-z]?(?:\s*(?:,|et|à|a)\s*\d+[a-z]?)*"
+_FR_EU_ARTICLE_REF = re.compile(
+    rf"\b(?:l['’])?(?:articles?|arts?\.)\s+(?P<list>{_FR_EU_ARTICLES})"
+    r"(?:\s*,?\s*(?:paragraphe|§)\s*(?P<para>\d+)"
+    r"(?:\s*,?\s*(?:sous\s+)?(?P<letter>[a-z])\)?)?)?\s*,?\s+"
+    rf"(?:du|de\s+la|de\s+l['’])\s+(?P<kind>{_FR_EU_KIND})\s*"
+    r"(?:\((?:UE|CE|CEE)\)\s*)?(?:n(?:o|°)\s*)?"
+    r"(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:UE|CE|CEE))?\b",
+    re.IGNORECASE,
+)
+_FR_EU_ARTICLE_VALUE = re.compile(r"\d+[a-z]?", re.IGNORECASE)
+
+
+def _fr_eu_kind(value: str) -> str:
+    return {
+        "règlement": "regulation", "reglement": "regulation",
+        "décision": "decision", "decision": "decision",
+    }.get(value.casefold(), "directive")
 
 
 def french_citations(text: str) -> list[Citation]:
@@ -260,6 +290,22 @@ def french_citations(text: str) -> list[Citation]:
                     method="fr_code_articles" if code else "fr_echr_articles",
                     confidence=1.0,
                 ))
+    for m in _FR_EU_ARTICLE_REF.finditer(text):
+        kind = _fr_eu_kind(m.group("kind"))
+        candidate = _eu_celex(kind, m.group("a"), m.group("b"))
+        articles = [am.group(0) for am in _FR_EU_ARTICLE_VALUE.finditer(m.group("list"))]
+        for article in articles:
+            pinpoint = f"Article {article}"
+            # Paragraph/subpoint syntax can only follow one article, not a list.
+            if len(articles) == 1 and m.group("para"):
+                pinpoint += f"({m.group('para')})"
+                if m.group("letter"):
+                    pinpoint += f"({m.group('letter').lower()})"
+            out.append(Citation(
+                raw=m.group(0), entity_kind=kind, candidate_id=candidate,
+                pinpoint=pinpoint, char_start=m.start(), char_end=m.end(),
+                method="fr_eu_articles", confidence=1.0,
+            ))
     return out
 
 # Légifrance identifiers and URLs are already canonical corpus identifiers.
@@ -297,12 +343,9 @@ register(Grammar(
 # English descriptors.  It still resolves to the same CELEX nodes.
 register(Grammar(
     "fr_eu_instrument", "eu_instrument",
-    re.compile(r"\b(?P<kind>règlement|reglement|directive|décision|decision)\s*(?:\((?:UE|CE|CEE)\)\s*)?(?:n(?:o|°)\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:UE|CE|CEE))?\b", re.IGNORECASE),
-    lambda m: (_eu_celex({"règlement": "regulation", "reglement": "regulation",
-                           "décision": "decision", "decision": "decision"}.get(
-                              m.group("kind").casefold(), "directive"),
-                         m.group("a"), m.group("b")), None,
-               {"règlement": "regulation", "reglement": "regulation",
-                "décision": "decision", "decision": "decision"}.get(
-                    m.group("kind").casefold(), "directive")),
+    re.compile(rf"\b(?P<kind>{_FR_EU_KIND})\s*(?:\((?:UE|CE|CEE)\)\s*)?"
+               r"(?:n(?:o|°)\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})"
+               r"(?:/(?:UE|CE|CEE))?\b", re.IGNORECASE),
+    lambda m: (_eu_celex(_fr_eu_kind(m.group("kind")), m.group("a"), m.group("b")),
+               None, _fr_eu_kind(m.group("kind"))),
 ))

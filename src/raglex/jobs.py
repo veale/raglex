@@ -276,7 +276,10 @@ def _static_export(facade, params, on_progress, cancel_check):
 RUNNERS: dict[str, Callable] = {
     "static-export": _static_export,
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
-        source=p.get("source"), run_id=p.get("_resume_run_id"),
+        source=p.get("source"), sources=p.get("sources"),
+        source_prefix=p.get("source_prefix"), target_ids=p.get("target_ids"),
+        document_ids=p.get("document_ids"),
+        run_id=p.get("_resume_run_id"),
         on_progress=cb, cancel_check=cancel),
     "backfill-metadata": lambda f, p, cb, cancel: f.backfill_document_metadata(on_progress=cb),
     "backfill-edge-keys": lambda f, p, cb, cancel: f.backfill_edge_keys(on_progress=cb, cancel_check=cancel),

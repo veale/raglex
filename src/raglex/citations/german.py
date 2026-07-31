@@ -16,6 +16,19 @@ from bundesrecht import normalise
 from .models import Citation
 
 
+# German judgments normally cite EU instruments by their German abbreviations.  They
+# have exactly the same surface form as a domestic statute reference, but must resolve
+# to the CELEX Work rather than a fictitious ``de/gesetz/dsgvo`` node.  Keep this list
+# deliberately small and unambiguous: these are official or universally established
+# abbreviations, not learned aliases.
+_EU_LAW_IDS = {
+    "DSGVO": "32016R0679",
+    "DSA": "32022R2065",
+    "DMA": "32022R1925",
+    "NIS2": "32022L2555",
+}
+
+
 def law_id(abbreviation: str) -> str:
     return "de/gesetz/" + re.sub(r"[^a-z0-9]+", "", _fold_law(abbreviation))
 
@@ -132,6 +145,23 @@ def _canonical_parts(canonical: str) -> tuple[str, str] | None:
     return m.group("law"), f"{m.group('prefix')} {m.group('body')}"
 
 
+def _eu_pinpoint(pinpoint: str) -> str:
+    """Translate a German EU-law pinpoint to the Formex anchor vocabulary.
+
+    Paragraphs and numbered definition points are useful article sub-anchors.  Sentence
+    and alternative markers are retained in the raw citation but omitted here because
+    EUR-Lex Formex does not expose stable sentence-level anchors consistently.
+    """
+    article = re.search(r"(?i)^Art(?:ikel|\.)?\s+(\d{1,3}[a-z]?)", pinpoint)
+    if not article:
+        return pinpoint
+    out = f"Article {article.group(1)}"
+    sub = re.search(r"(?i)\b(?:Abs(?:atz)?\.?|Nrn?\.?|Nummer)\s*(\d+[a-z]?)", pinpoint)
+    if sub:
+        out += f"({sub.group(1)})"
+    return out
+
+
 def law_citations(text: str) -> list[Citation]:
     found: list[Citation] = []
     for match in LAW_REFERENCE_RE.finditer(text):
@@ -155,9 +185,13 @@ def law_citations(text: str) -> list[Citation]:
             if not parts:
                 continue
             law, pinpoint = parts
+            eu_id = _EU_LAW_IDS.get(re.sub(r"\s+", "", law).upper())
             found.append(Citation(
-                raw=raw, entity_kind="act", candidate_id=law_id(law), pinpoint=pinpoint,
-                char_start=match.start(), char_end=match.end(), method="de_law_reference",
+                raw=raw, entity_kind="regulation" if eu_id else "act",
+                candidate_id=eu_id or law_id(law),
+                pinpoint=_eu_pinpoint(pinpoint) if eu_id else pinpoint,
+                char_start=match.start(), char_end=match.end(),
+                method="de_eu_article" if eu_id else "de_law_reference",
                 confidence=1.0,
             ))
     return found

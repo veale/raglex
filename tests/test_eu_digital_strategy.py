@@ -17,6 +17,7 @@ from raglex.adapters.eu_digital_strategy import (
     has_next_page,
     parse_item_page,
     parse_library_page,
+    _title_default_instrument,
 )
 
 LISTING = """
@@ -113,6 +114,13 @@ def test_language_grouping_is_by_title_and_keeps_documents_that_have_no_english(
     # unrelated titles are never grouped together
     mixed = [{"title": "Study A (English)", "url": "a"}, {"title": "Study B (English)", "url": "b"}]
     assert english_only(mixed) == mixed
+
+
+def test_ai_act_title_declares_the_guidance_default_instrument():
+    assert _title_default_instrument(
+        "Guidelines on transparency obligations under Article 50 of the AI Act"
+    ) == {"id": "32024R1689", "kind": "regulation"}
+    assert _title_default_instrument("Study of the AI Act and Digital Services Act") is None
 
 
 class _Resp:

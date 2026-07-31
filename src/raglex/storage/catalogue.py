@@ -3642,6 +3642,61 @@ class Catalogue:
             params.append(limit)
         return [r["stable_id"] for r in self.conn.execute(sql, params)]
 
+    def text_document_ids_citing(
+        self, target_ids: list[str], *, sources: list[str] | None = None,
+        source_prefix: str | None = None, exclude_extraction_run_id: str | None = None,
+    ) -> list[str]:
+        """Text documents already observed citing one of ``target_ids``.
+
+        This is the bounded grammar-upgrade worklist: a French EU-article grammar
+        improvement should revisit the 8k French documents known to discuss the digital
+        acquis, not all 2.9m DILA records.  Citation observations are occurrence-level and
+        survive resolution, so they are a more precise selector than a full-text LIKE.
+        ``last_extraction_run_id`` makes the selection restartable under the normal job
+        checkpoint contract.
+        """
+        ids = list(dict.fromkeys(str(i) for i in target_ids if i))
+        if not ids:
+            return []
+        qs = ",".join("?" * len(ids))
+        sql = (
+            "SELECT DISTINCT d.stable_id FROM documents d "
+            "JOIN citations c ON c.src_id = d.stable_id "
+            f"WHERE d.has_text = 1 AND c.candidate_id IN ({qs})"
+        )
+        params: list = list(ids)
+        if sources:
+            clean_sources = list(dict.fromkeys(str(s) for s in sources if s))
+            if not clean_sources:
+                return []
+            sql += f" AND d.source IN ({','.join('?' * len(clean_sources))})"
+            params.extend(clean_sources)
+        if source_prefix:
+            sql += " AND d.source LIKE ?"
+            params.append(f"{source_prefix}%")
+        if exclude_extraction_run_id:
+            sql += " AND (d.last_extraction_run_id IS NULL OR d.last_extraction_run_id <> ?)"
+            params.append(exclude_extraction_run_id)
+        sql += " ORDER BY d.stable_id"
+        return [r["stable_id"] for r in self.conn.execute(sql, params).fetchall()]
+
+    def held_text_document_ids(self, document_ids: list[str]) -> list[str]:
+        """The requested ids that are held with extractable text, preserving input order."""
+        requested = list(dict.fromkeys(str(i) for i in document_ids if i))
+        if not requested:
+            return []
+        held: set[str] = set()
+        for start in range(0, len(requested), 800):
+            chunk = requested[start:start + 800]
+            qs = ",".join("?" * len(chunk))
+            held.update(
+                r["stable_id"] for r in self.conn.execute(
+                    f"SELECT stable_id FROM documents WHERE has_text = 1 "
+                    f"AND stable_id IN ({qs})", chunk
+                ).fetchall()
+            )
+        return [stable_id for stable_id in requested if stable_id in held]
+
     def held_legislation_titles(self) -> list[sqlite3.Row]:
         """Every held piece of legislation as (stable_id, title) — the self-maintaining
         gazetteer the name-only statute matcher resolves against. Because it's derived from
@@ -4066,6 +4121,11 @@ class Catalogue:
         Splitting is on a paragraph boundary where one is available, so a phrase is
         only ever broken across parts if a single paragraph exceeds the cap — and the
         stored ``char_start`` keeps every hit mappable back onto the source text."""
+        # PostgreSQL text/tsvector rejects U+0000.  PDF and office converters do emit
+        # it occasionally (the Irish Court of Appeal record captured in feedback is a
+        # real example). Replace one code point with one code point so stored offsets
+        # remain aligned with the source text while the rest of the document indexes.
+        text = text.replace("\x00", "\ufffd")
         parts = _fts_parts(text, self.FTS_PART_CHARS)
         now = _now()
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))

@@ -126,6 +126,14 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
     )
     _store(cat, textstore, citer)
     Resolver(cat).run()
+    # A stale relation-span projection must not make the static page mark unrelated
+    # nearby words. The exporter validates/re-locates the raw citation on read.
+    cat.conn.execute(
+        "UPDATE relations SET context_start=context_start-9, context_end=context_end-9 "
+        "WHERE src_id=? AND raw_citation_string=?",
+        ("ewhc/admin/2024/10", "Article 15 GDPR"),
+    )
+    cat.commit()
     cat.close()
 
     result = StaticLawExporter(config).build("32016R0679")

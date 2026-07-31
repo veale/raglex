@@ -461,10 +461,13 @@ def test_mention_snippets_mark_the_citation_that_made_the_edge(config):
     hi = lo + len("Arbitration Act s 7")
     f.link(src_id=citing, dst_id=target, relationship="mentions")
     with f._open() as (cat, _rs, _ts):
+        # Simulate a parser projection that inserted eleven characters after this
+        # relation was extracted. The preview must confirm/re-locate raw text rather
+        # than highlighting whatever now occupies the stale bytes.
         cat.conn.execute(
             "UPDATE relations SET context_start = ?, context_end = ?, "
             "raw_citation_string = ? WHERE src_id = ? AND dst_id = ?",
-            (lo, hi, "Arbitration Act s 7", citing, target))
+            (lo - 11, hi - 11, "Arbitration Act s 7", citing, target))
         cat.conn.commit()
 
     snip = f.document_mentions(target)["groups"][0]["snippets"][0]
@@ -473,6 +476,7 @@ def test_mention_snippets_mark_the_citation_that_made_the_edge(config):
     # was windowed out of the middle of the text and then stripped
     assert snip["text"][ms:me] == "Arbitration Act s 7"
     assert snip["raw"] == "Arbitration Act s 7"
+    assert snip["start"] == lo
 
 
 def test_incoming_edges_carry_jurisdiction_and_kind_for_faceting(config):
@@ -548,6 +552,8 @@ def test_document_kinds_place_regulator_decisions_and_reports_where_readers_look
     assert f._doc_kind("edpb", "commentary", None) == "other"
     # a DPA's whole output is administrative however it is filed (BAILII's DPC studies)
     assert f._doc_kind("ie-caselaw", "judgment", "dpa-ie") == "administrative"
+    # DILA is a mixed corpus; its CNIL deliberations are regulator decisions, not cases.
+    assert f._doc_kind("fr-dila", "decision", "CNIL") == "administrative"
     # law-reform reports go with guidance; EU travaux keep their own category
     assert f._doc_kind("uk-lawcom-reports", "preparatory", None) == "guidance"
     assert f._doc_kind("eu-preparatory", "preparatory", None) == "preparatory"

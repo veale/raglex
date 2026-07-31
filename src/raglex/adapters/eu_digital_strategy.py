@@ -180,6 +180,18 @@ def parse_item_page(html: bytes | str, item: LibraryItem) -> LibraryItem:
 _KIND_TAG = {"policy and legislation": "policy", "report / study": "report"}
 
 
+def _title_default_instrument(title: str | None) -> dict | None:
+    """One deterministic instrument named by the publication title, or no default."""
+    from ..citations.extractor import grammar_citations
+
+    cites = [c for c in grammar_citations(title or "") if c.candidate_id]
+    ids = list(dict.fromkeys(c.candidate_id for c in cites))
+    if len(ids) != 1:
+        return None
+    host = next(c for c in cites if c.candidate_id == ids[0])
+    return {"id": ids[0], "kind": host.entity_kind or "named"}
+
+
 class DigitalStrategyLibraryAdapter(BaseAdapter):
     source = "eu-digital-strategy"
     min_interval = 1.5
@@ -288,6 +300,9 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                 "library_type": item.kind,
                 "summary": item.summary,
                 "item_title": stub.title,
+                "citation_default_instrument": _title_default_instrument(
+                    doc_title or stub.title
+                ),
                 "download_url": item.files[0]["url"] if item.files else None,
                 # the annexes published alongside, so a later pass can pull them
                 "other_files": [{"title": f["title"], "url": f["url"]}

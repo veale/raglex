@@ -792,9 +792,8 @@ def build_server(config: Config | None = None) -> MCPServer:
 
     @admin
     def import_echr_convention() -> dict:
-        """Import the European Convention on Human Rights (ETS No. 5) full text from
-        Wikisource as the corpus node ``echr/convention``, segmented by Article — so
-        "Article 10 of the Convention" resolves and pinpoints to the real Article 10."""
+        """Import the official current European Convention on Human Rights (ETS No. 5)
+        as ``echr/convention``, segmented through ``Article 5(1)(a)``-style anchors."""
         return facade.import_echr_convention()
 
     @admin

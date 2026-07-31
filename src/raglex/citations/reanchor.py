@@ -39,6 +39,36 @@ def _pattern(raw: str) -> "re.Pattern[str]":
     return re.compile(r"\s+".join(re.escape(t) for t in toks))
 
 
+def aligned_span(
+    text: str, raw: str | None, start: int | None, end: int | None, *,
+    radius: int = 5000,
+) -> tuple[int, int] | None:
+    """Return the real span of ``raw`` near a possibly stale stored offset.
+
+    Readers and static exports must never mark arbitrary nearby words just because a
+    legacy reparse shifted the relation copy of a citation span.  The durable re-anchor
+    job repairs those rows in bulk; this cheap read-side guard makes every surface correct
+    immediately, including a source not yet swept.  An already-correct span is O(length
+    of citation); only a mismatch searches a bounded neighbourhood.  ``None`` means the
+    raw citation cannot be confirmed nearby, so callers should show an unmarked preview
+    rather than a confidently wrong highlight.
+    """
+    if not text or start is None or not (raw or "").strip():
+        return None
+    old_start = max(0, min(int(start), len(text)))
+    old_end = old_start if end is None else max(old_start, min(int(end), len(text)))
+    pat = _pattern(str(raw))
+    if pat.fullmatch(text[old_start:old_end]):
+        return old_start, old_end
+    lo = max(0, old_start - max(0, int(radius)))
+    hi = min(len(text), old_end + max(0, int(radius)))
+    matches = list(pat.finditer(text, lo, hi))
+    if not matches:
+        return None
+    best = min(matches, key=lambda match: abs(match.start() - old_start))
+    return best.start(), best.end()
+
+
 def reanchor(text: str, rows: Sequence[Mapping]) -> tuple[list[tuple[int, int, int]], int]:
     """Re-locate each citation ``raw`` in ``text``.
 

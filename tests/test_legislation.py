@@ -122,6 +122,16 @@ def test_uk_legislation_adapter_builds_legislation_record():
     assert len(rec.segments) >= 3 and rec.extra["format"] == "akoma-ntoso"
 
 
+def test_uk_repealed_title_sets_canonical_currency():
+    raw = AKN.replace(
+        b"An Act to make provision for Freedom of Information.",
+        b"Race Relations Act 1976 (Repealed)",
+    )
+    ad = UKLegislationAdapter(ids="ukpga/1976/74", client=_FakeClient(raw))
+    rec = ad.fetch(list(ad.discover(None))[0])
+    assert rec.extra["currency"]["status"] == "repealed"
+
+
 AKN_WITH_EFFECTS = b"""<?xml version="1.0"?>
 <akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0"
             xmlns:ukm="http://www.legislation.gov.uk/namespaces/metadata">

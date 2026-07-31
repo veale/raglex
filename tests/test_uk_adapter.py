@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from raglex.adapters.uk_caselaw import parse_atom, parse_judgment
+from raglex.adapters.uk_caselaw import judgment_judges, parse_atom, parse_judgment
 
 ATOM = b"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -72,6 +72,34 @@ def test_parse_judgment_extracts_text_ncn_and_citation():
     assert len(segments) >= 1
     for s in segments:
         assert text[s.char_start:s.char_end].strip() != ""  # span indexes into text
+
+
+HEADING_JUDGMENT = b"""<?xml version="1.0"?>
+<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+ <judgment>
+  <header><p>Before:</p><p><judge>THE HONOURABLE MR JUSTICE SAINI</judge></p></header>
+  <judgmentBody><decision>
+   <paragraph><num>I.</num><content><p><span style="font-weight:bold">Overview</span></p></content></paragraph>
+   <paragraph eId="para_7"><num>7.</num><intro><p>The paragraph ends here.</p></intro>
+    <subparagraph><num style="font-weight:bold">II.</num><content>
+     <p><span style="font-weight:bold;text-decoration-line:underline">Procedural Chronology</span></p>
+    </content></subparagraph>
+   </paragraph>
+   <paragraph eId="para_8"><num>8.</num><content><p>The next paragraph.</p></content></paragraph>
+  </decision></judgmentBody>
+ </judgment>
+</akomaNtoso>"""
+
+
+def test_parse_judgment_splits_embedded_headings_from_preceding_paragraph():
+    text, _, _, segments = parse_judgment(HEADING_JUDGMENT)
+    blocks = [(s.kind, text[s.char_start:s.char_end]) for s in segments]
+    assert ("heading", "I. Overview") in blocks
+    assert ("paragraph", "7. The paragraph ends here.") in blocks
+    assert ("heading", "II. Procedural Chronology") in blocks
+    assert not any("ends here" in block and "Procedural Chronology" in block
+                   for _, block in blocks)
+    assert judgment_judges(HEADING_JUDGMENT) == ["THE HONOURABLE MR JUSTICE SAINI"]
 
 
 ATOM_TNA = b"""<?xml version="1.0" encoding="utf-8"?>

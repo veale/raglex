@@ -343,6 +343,13 @@ class UKLegislationAdapter(BaseAdapter):
             cur.as_at = stub.hints.get("version_date")
             cur.status = str(CanonStatus.CONSOLIDATED)   # a dated point-in-time snapshot
         else:
+            # legislation.gov.uk occasionally communicates whole-instrument currency
+            # only in the canonical title (for example "Race Relations Act 1976
+            # (Repealed)") while the AKN exposes no separate document-status field.
+            # That explicit publisher label is stronger than leaving the UI/MCP at
+            # "currency unconfirmed".
+            if re.search(r"\((?:repealed|revoked)\)\s*$", title, re.IGNORECASE):
+                cur.status = str(CanonStatus.REPEALED)
             outstanding = summary.get("outstanding", 0)
             cur.unapplied_count = outstanding
             cur.up_to_date = (outstanding == 0)

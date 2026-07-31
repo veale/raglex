@@ -4,7 +4,7 @@ the new text; the facade job + the reparse hook fix the stored ``citations`` off
 
 from __future__ import annotations
 
-from raglex.citations.reanchor import reanchor
+from raglex.citations.reanchor import aligned_span, reanchor
 from raglex.config import Config
 from raglex.core.models import DocType, ExtractedVia, Record
 from raglex.facade import Facade
@@ -77,6 +77,15 @@ def test_unlocatable_left_untouched():
     assert updates == [] and unlocatable == 1
 
 
+def test_read_side_alignment_finds_nearby_drift_but_never_guesses_far_away():
+    text = "prefix inserted here. The court applied Article 13 GDPR to the processing."
+    raw = "Article 13 GDPR"
+    actual = text.index(raw)
+    assert aligned_span(text, raw, actual - 12, actual - 12 + len(raw)) == (
+        actual, actual + len(raw))
+    assert aligned_span(text, "not present", actual, actual + 11) is None
+
+
 # ── facade job + reparse hook ─────────────────────────────────────────────────
 def _config(tmp_path) -> Config:
     return Config(
@@ -135,3 +144,34 @@ def test_reanchor_is_idempotent(tmp_path):
     # a second pass finds nothing left to move
     res2 = facade.reanchor_source(source="drifty")
     assert res2["offsets_fixed"] == 0 and res2["docs_reanchored"] == 0
+
+
+def test_reanchor_source_can_limit_a_mixed_source_by_court(tmp_path):
+    facade = Facade(_config(tmp_path))
+    with facade._open() as (cat, _rs, ts):
+        cnil_text = _seed_drifted_doc(cat, ts, stable_id="cnil/1")
+        _seed_drifted_doc(cat, ts, stable_id="court/1")
+        cat.conn.execute("UPDATE documents SET court='CNIL' WHERE stable_id='cnil/1'")
+        cat.conn.execute("UPDATE documents SET court='Cour de cassation' WHERE stable_id='court/1'")
+        # Relation spans are the copy used by mention previews/static editions.
+        raw = "[1968] FSR 415"
+        old = "He discussed Coco v Clarke [1968] FSR 415 and Saltman (1948) 65 RPC 203."
+        for sid in ("cnil/1", "court/1"):
+            cat.conn.execute(
+                "INSERT INTO relations "
+                "(src_id,raw_citation_string,context_start,context_end,resolution_status) "
+                "VALUES (?,?,?,?,?)",
+                (sid, raw, old.index(raw), old.index(raw) + len(raw), "pending"))
+        cat.commit()
+
+    result = facade.reanchor_source(source="drifty", court="CNIL")
+    assert result["court"] == "CNIL" and result["total"] == 1
+    with facade._open() as (cat, _rs, _ts):
+        cnil = cat.conn.execute(
+            "SELECT context_start,context_end FROM relations WHERE src_id='cnil/1'"
+        ).fetchone()
+        other = cat.conn.execute(
+            "SELECT context_start,context_end FROM relations WHERE src_id='court/1'"
+        ).fetchone()
+    assert cnil_text[cnil["context_start"]:cnil["context_end"]] == raw
+    assert cnil_text[other["context_start"]:other["context_end"]] != raw

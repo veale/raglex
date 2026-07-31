@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+import re
 from typing import Iterator
 from xml.etree import ElementTree as ET
 
@@ -149,6 +150,102 @@ def _iter_text(elem: ET.Element) -> Iterator[str]:
             yield child.tail.strip()
 
 
+def _direct_child(elem: ET.Element, name: str) -> ET.Element | None:
+    return next((child for child in elem if _localname(child.tag) == name), None)
+
+
+def _compact_text(elem: ET.Element | None) -> str:
+    return " ".join(_iter_text(elem)) if elem is not None else ""
+
+
+def _fully_styled_heading(elem: ET.Element) -> bool:
+    """Whether a short structural unit is formatted wholly as a heading.
+
+    Find Case Law's LegalDocML converter commonly places the *next* heading in a
+    ``<subparagraph>`` at the end of the preceding numbered paragraph.  It is not
+    safe to treat every subparagraph as a heading (most are ordinary (a)/(b) list
+    items), so require the text-bearing ``p`` itself, or its sole text child, to
+    carry bold/italic/underline formatting.
+    """
+    p = next((e for e in elem.iter() if _localname(e.tag) == "p"), None)
+    if p is None:
+        return False
+    style = (p.get("style") or "").lower()
+    styled = ("font-weight:bold", "font-style:italic", "text-decoration-line:underline")
+    if any(token in style for token in styled):
+        return True
+    substantive = [
+        child for child in p
+        if _compact_text(child) and _localname(child.tag) not in {"marker"}
+    ]
+    outside = (p.text or "").strip() or any((c.tail or "").strip() for c in p)
+    if len(substantive) != 1 or outside:
+        return False
+    child_style = (substantive[0].get("style") or "").lower()
+    return any(token in child_style for token in styled)
+
+
+def _is_embedded_heading(elem: ET.Element) -> bool:
+    if _localname(elem.tag) != "subparagraph":
+        return False
+    content = _direct_child(elem, "content")
+    heading = _compact_text(content)
+    host = content if content is not None else elem
+    return bool(heading and len(heading) <= 240 and _fully_styled_heading(host))
+
+
+def _text_skipping(elem: ET.Element, excluded: set[int]) -> str:
+    """Compact element text while omitting selected structural descendants."""
+    out: list[str] = []
+
+    def visit(node: ET.Element) -> None:
+        if id(node) in excluded:
+            return
+        if node.text and node.text.strip():
+            out.append(node.text.strip())
+        for child in node:
+            visit(child)
+            if child.tail and child.tail.strip():
+                out.append(child.tail.strip())
+
+    visit(elem)
+    return " ".join(out)
+
+
+def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
+    """LegalDocML paragraphs with embedded end-headings split into distinct blocks."""
+    blocks: list[tuple[str, str, str]] = []
+    numbered = [e for e in body.iter() if _localname(e.tag) == "paragraph"]
+    for n, paragraph in enumerate(numbered, 1):
+        embedded = [e for e in paragraph.iter() if _is_embedded_heading(e)]
+        excluded = {id(e) for e in embedded}
+        label_node = _direct_child(paragraph, "num")
+        label = _compact_text(label_node) or f"para {n}"
+        main = _text_skipping(paragraph, excluded).strip()
+
+        # An unnumbered wrapper paragraph carrying a Roman-numeral, wholly styled
+        # title is itself a heading (the first "I. Overview" in many FCL files).
+        roman_heading = bool(
+            paragraph.get("eId") is None
+            and re.fullmatch(r"[IVXLC]+\.?", label, re.IGNORECASE)
+            and len(main) <= 260
+            and _fully_styled_heading(paragraph)
+        )
+        blocks.append((label, "heading" if roman_heading else "paragraph", main))
+        for heading in embedded:
+            h_label = _compact_text(_direct_child(heading, "num"))
+            h_text = _compact_text(heading)
+            blocks.append((h_label or h_text, "heading", h_text))
+    return blocks
+
+
+def judgment_judges(xml_bytes: bytes) -> list[str]:
+    """Judges identified by LegalDocML's semantic ``<judge>`` elements."""
+    root = ET.fromstring(xml_bytes)
+    names = [_compact_text(e) for e in root.iter() if _localname(e.tag) == "judge"]
+    return list(dict.fromkeys(name for name in names if name))
+
+
 def parse_judgment(
     xml_bytes: bytes,
 ) -> tuple[str, list[TypedRelation], str | None, list[Segment]]:
@@ -188,7 +285,7 @@ def parse_judgment(
             )
 
     body = next((e for e in root.iter() if _localname(e.tag) == "judgmentBody"), root)
-    blocks = blocks_by_localname(body, {"paragraph"}, kind="paragraph", label_child="num")
+    blocks = _judgment_blocks(body)
     if not blocks:
         blocks = blocks_by_localname(body, {"p"}, kind="paragraph", counter_label="para")
     if not blocks:
@@ -264,6 +361,11 @@ class UKCaseLawAdapter(BaseAdapter):
         resp = self._client.get(stub.raw_url)
         raw = resp.content
         text, relations, ncn, segments = parse_judgment(raw)
+        judges = judgment_judges(raw)
+        extra = {"contenthash": stub.hints["contenthash"]} if stub.hints.get("contenthash") else {}
+        if judges:
+            extra["judges"] = judges
+            extra["judge"] = judges[0]
         return Record(
             source=self.source,
             stable_id=stub.stable_id,
@@ -284,5 +386,5 @@ class UKCaseLawAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             # the feed's contenthash rides along so the next crawl can tell a revised
             # judgment (hash changed upstream) from one we already hold
-            extra={"contenthash": stub.hints["contenthash"]} if stub.hints.get("contenthash") else {},
+            extra=extra,
         )

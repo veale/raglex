@@ -711,6 +711,48 @@ def test_multi_article_lists_link_every_article_to_the_instrument():
     # so the list pass must resolve the Charter itself
     cs = extract_citations("Articles 4 and 6 of the Charter of Fundamental Rights")
     assert {c.pinpoint for c in cs if c.candidate_id == "12012P"} == {"Article 4", "Article 6"}
+
+    # Nested points and an Oxford comma occur in amending acts and GDPR judgments.
+    cs = extract_citations(
+        "Article 50(7), Article 56(6), and Article 72(3) "
+        "of Regulation (EU) 2024/1689"
+    )
+    assert {c.pinpoint for c in cs if c.candidate_id == "32024R1689"} == {
+        "Article 50(7)", "Article 56(6)", "Article 72(3)",
+    }
+    cs = extract_citations("Articles 6(1)(c), 6(1)(e) and 9(2)(h) of the GDPR")
+    assert {c.pinpoint for c in cs
+            if c.candidate_id == "32016R0679" and c.pinpoint} == {
+        "Article 6(1)(c)", "Article 6(1)(e)", "Article 9(2)(h)",
+    }
+
+
+def test_that_act_carry_forward_keeps_nested_pinpoint():
+    cs = extract_citations(
+        "The Data Protection Act 2018 applies (see section 3(9) of that Act)."
+    )
+    assert any(c.candidate_id == "ukpga/2018/12" and c.pinpoint == "s. 3(9)"
+               for c in cs)
+
+
+def test_single_instrument_guidance_title_supplies_default_for_orphan_articles():
+    from raglex.citations.stage import _home_of
+
+    doc = {
+        "doc_type": "guidance",
+        "title": "Guidelines on transparency obligations under Article 50 of the AI Act",
+        "meta_json": "{}",
+    }
+    assert _home_of(doc) == ("32024R1689", "regulation")
+    cs = extract_citations(
+        "Regulation (EU) 2024/1689 is the governing law. Directive 2011/83/EU is "
+        "relevant to consumers. Article 50(2) requires a disclosure.",
+        home_id="32024R1689", home_kind="regulation",
+    )
+    pin = next(c for c in cs if c.raw == "Article 50(2)")
+    assert pin.candidate_id == "32024R1689"
+
+
 def test_eu_directive_suffix_is_preserved_and_that_directive_range_expands():
     text = ("Directive 2000/31/EC applies. Articles 12 to 15 of that Directive "
             "provide the relevant safeguards.")

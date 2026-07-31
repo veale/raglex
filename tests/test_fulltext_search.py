@@ -183,6 +183,15 @@ def test_the_network_view_of_nothing_is_nothing(catalogue):
     assert catalogue.cited_by_documents([]) == []
 
 
+def test_fts_index_tolerates_converter_nul_without_changing_offsets(catalogue):
+    text = "before\x00after"
+    assert catalogue.put_doc_fts("nul-doc", text) == 1
+    row = catalogue.conn.execute(
+        "SELECT char_start, char_end FROM doc_fts WHERE doc_id = ?", ("nul-doc",)
+    ).fetchone()
+    assert (row["char_start"], row["char_end"]) == (0, len(text))
+
+
 # -- the settings the Search page writes ---------------------------------------
 def test_the_search_settings_are_registered(tmp_path):
     """SettingsStore.update silently ignores keys it doesn't know, so an

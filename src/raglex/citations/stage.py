@@ -86,6 +86,24 @@ def _home_of(doc) -> tuple[str | None, str | None]:
         default = _meta_of(doc).get("citation_default_instrument")
         if isinstance(default, dict) and default.get("id"):
             return str(default["id"]), str(default.get("kind") or "named")
+        # Existing guidance may predate that metadata field. A title which itself
+        # deterministically cites exactly one instrument is equally explicit:
+        # "Guidelines … under Article 50 of the AI Act" cannot sensibly let later
+        # orphaned Article 50 references drift to the last directive in a footnote.
+        if doc["doc_type"] == str(DocType.GUIDANCE):
+            from .extractor import grammar_citations
+
+            title_cites = [
+                c for c in grammar_citations(str(doc["title"] or ""))
+                if c.candidate_id and c.entity_kind in {
+                    "act", "regulation", "directive", "decision", "treaty",
+                    "eu_instrument", "named",
+                }
+            ]
+            candidates = list(dict.fromkeys(c.candidate_id for c in title_cites))
+            if len(candidates) == 1:
+                host = next(c for c in title_cites if c.candidate_id == candidates[0])
+                return candidates[0], host.entity_kind or "named"
         return None, None
     sid = str(doc["stable_id"] or "")
     if not sid:

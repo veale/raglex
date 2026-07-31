@@ -325,7 +325,7 @@ class SourceOption:
 class SourceInfo:
     key: str
     label: str
-    kind: str           # caselaw | legislation | scrape
+    kind: str           # caselaw | administrative | legislation | guidance | scrape
     jurisdiction: str   # GB | EU | NL
     keyword_search: bool  # True: keywords are searched in the source API (precise);
     #                       False: keywords post-filter what's harvested (any-term match)
@@ -349,6 +349,7 @@ JURISDICTION_LABELS: dict[str, str] = {
 KIND_LABELS: dict[str, str] = {
     "legislation": "Legislation",
     "caselaw": "Case law",
+    "administrative": "Administrative decisions",
     "guidance": "Guidance and regulatory material",
     "preparatory": "Preparatory and policy material",
     "scrape": "Other harvested material",
@@ -1149,7 +1150,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("ELI id", "LEGITEXT/LEGIARTI id", "legifrance.gouv.fr URL"),
     ),
     "fr-cnil": SourceInfo(
-        "fr-cnil", "France — CNIL deliberations (Légifrance)", "guidance", "FR", False,
+        "fr-cnil", "France — CNIL deliberations (Légifrance)", "administrative", "FR", False,
         "The French DPA's deliberations, harvested through the same Légifrance/PISTE "
         "client (fund CNIL) — a high-relevance addition to the EDPB/ICO guidance layer.",
         (), ("CNILTEXT id",),
@@ -1250,7 +1251,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("ECLI:FR:CC:…",),
     ),
     "fr-dila-cnil": SourceInfo(
-        "fr-dila-cnil", "DILA CNIL decisions bulk (France)", "guidance", "FR", False,
+        "fr-dila-cnil", "DILA CNIL decisions bulk (France)", "administrative", "FR", False,
         "Offline DILA CNIL archive of data-protection authority decisions.",
         (SourceOption("path", "Path to CNIL archive", "/data/corpora/dila/CNIL"),),
         ("CNIL decision id",),

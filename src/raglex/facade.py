@@ -27,6 +27,26 @@ from .citations.snowball import TARGETED_ADAPTERS as _SNOWBALL_TARGETED
 
 log = logging.getLogger("raglex.facade")
 
+# The bounded French grammar-refresh scope requested for the EU digital acquis.
+# These are base CELEX identities (citations resolve to them even when the reader
+# defaults to a dated consolidation).  Keep this explicit and reviewable: selecting
+# every sector-3 instrument would turn a focused 8k-document repair back into a
+# multi-million-document French rescan.
+EU_DIGITAL_ACQUIS_IDS = (
+    # data protection / data economy
+    "31995L0046", "32016R0679", "32016L0680", "32002L0058",
+    "32018R1807", "32019L1024", "32022R0868", "32023R2854",
+    # platforms, intermediary services, markets and media
+    "32000L0031", "32019R1150", "32022R1925", "32022R2065",
+    "32010L0013", "32018L1972", "32024R1083", "32024R0903",
+    # digital consumer acquis
+    "32005L0029", "32006L0114", "32011L0083", "32017R2394",
+    "32019L0770", "32019L0771", "32019L2161", "32019L0882",
+    # copyright, cyber and emerging technology
+    "32001L0029", "32019L0790", "32021R0784", "32022L2555",
+    "32022L2557", "32024R1689", "32024R2847",
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -1982,12 +2002,24 @@ class Facade:
                         text = None
                 snippets = []
                 if text:
+                    from .citations.reanchor import aligned_span
+
                     for r in g["_rels"]:
                         cs, ce = r["context_start"], r["context_end"]
                         if cs is None:
                             continue
-                        a = max(0, cs - 90)
-                        b = min(len(text), (ce or cs) + 200)
+                        aligned = aligned_span(
+                            text, r["raw_citation_string"], cs, ce)
+                        if aligned is None:
+                            # Do not confidently highlight unrelated bytes when an old
+                            # parser projection has drifted and the raw citation cannot
+                            # be confirmed nearby.  The surrounding preview remains useful.
+                            aligned_cs = max(0, min(int(cs), len(text)))
+                            aligned_ce = aligned_cs
+                        else:
+                            aligned_cs, aligned_ce = aligned
+                        a = max(0, aligned_cs - 90)
+                        b = min(len(text), aligned_ce + 200)
                         # offsets of the citation itself within the snippet, so the
                         # tray can mark the words that actually made the connection
                         # ("Arbitration Act s 7"). context_start/end is the matched
@@ -1995,15 +2027,15 @@ class Facade:
                         window = text[a:b]
                         lead = len(window) - len(window.lstrip())
                         body = window.strip()
-                        ms = min(max(0, cs - a - lead), len(body))
-                        me = min(max(ms, (ce or cs) - a - lead), len(body))
+                        ms = min(max(0, aligned_cs - a - lead), len(body))
+                        me = min(max(ms, aligned_ce - a - lead), len(body))
                         # the anchor labels WHERE IN THE CITING DOCUMENT the passage
                         # sits, so the reader can place the quote. Never fall back to
                         # dst_anchor: that is the paragraph of the *cited* document the
                         # user just clicked, so every snippet would be labelled with
                         # the thing they already know.
                         snippets.append({"anchor": r["src_anchor"], "text": body,
-                                         "start": cs,
+                                         "start": aligned_cs,
                                          "mark": [ms, me] if me > ms else None,
                                          "raw": r["raw_citation_string"]})
                 g["snippets"] = snippets[:8]
@@ -3142,6 +3174,11 @@ class Facade:
         # national competition / financial regulators
         "ie-ccpc-mergers", "uk-cma", "uk-fca-notices", "it-agcm",
     }
+    # Mixed bulk sources need a body-level discriminator: ``fr-dila`` carries courts,
+    # legislation, constitutional decisions *and* CNIL deliberations under one source
+    # key.  CNIL is a regulator, not a court, so its decisions belong beside other DPA
+    # administrative decisions even though DILA stores them with doc_type ``decision``.
+    _ADMIN_COURTS = {"cnil"}
     # The only source whose PREPARATORY documents are legislative travaux (Commission
     # proposals, impact assessments) rather than reports. Everything else that files as
     # preparatory — a Law Commission report, a Scottish Law Commission paper — is a REPORT,
@@ -3178,7 +3215,8 @@ class Facade:
         # filed as (BAILII's Irish DPC case studies arrive as "judgment"); for the other
         # regulators only the DECIDING documents count, so an EDPB commentary stays
         # commentary rather than being announced as a decision.
-        if (court or "").lower().startswith("dpa-"):
+        court_key = (court or "").lower()
+        if court_key.startswith("dpa-") or court_key in self._ADMIN_COURTS:
             return "administrative"
         if source in self._ADMIN_SOURCES and doc_type in self._ADMIN_DOC_TYPES:
             return "administrative"
@@ -3416,6 +3454,7 @@ class Facade:
         Deriving the clause from the constants is the fix that stays fixed: adding a
         source to ``_ADMIN_SOURCES`` now moves it in the filter as well as the label."""
         admin_sources = sorted(self._ADMIN_SOURCES)
+        admin_courts = sorted(self._ADMIN_COURTS)
         admin_types = sorted(self._ADMIN_DOC_TYPES)
         travaux = sorted(self._TRAVAUX_SOURCES)
         # mirrors _doc_kind's order: a DPA's whole output, then an admin body's
@@ -3424,11 +3463,16 @@ class Facade:
         # NULL, so `NOT (…)` is NULL too and the row is silently dropped. Every
         # judgment with no recorded court would have vanished from the cases slice.
         admin_sql = ("(COALESCE(lower(d.court), '') LIKE 'dpa-%'"
+                     + (f" OR COALESCE(lower(d.court), '') IN "
+                        f"({','.join('?' * len(admin_courts))})"
+                        if admin_courts else "")
                      + (f" OR (d.source IN ({','.join('?' * len(admin_sources))})"
                         f" AND d.doc_type IN ({','.join('?' * len(admin_types))}))"
                         if admin_sources and admin_types else "")
                      + ")")
-        admin_params = (admin_sources + admin_types) if (admin_sources and admin_types) else []
+        admin_params = list(admin_courts)
+        if admin_sources and admin_types:
+            admin_params += admin_sources + admin_types
 
         if kind == "administrative":
             return admin_sql, list(admin_params)
@@ -5849,7 +5893,8 @@ class Facade:
 
         updates: list[tuple[int, int, int]] = []
         rel_updates: list[tuple[int, int, int]] = []
-        docs_changed = unlocatable = 0
+        changed_docs: set[str] = set()
+        unlocatable = 0
         texts: dict[str, str] = {}
         for sid, ph in id_to_hash.items():
             try:
@@ -5864,18 +5909,22 @@ class Facade:
             unlocatable += miss
             if ups:
                 updates.extend(ups)
-                docs_changed += 1
+                changed_docs.add(sid)
         for sid, rows in rel_by_src.items():
             text = texts.get(sid)
             if text is None:
                 continue
-            ups, _miss = reanchor(text, rows)
+            ups, miss = reanchor(text, rows)
+            unlocatable += miss
+            if ups:
+                changed_docs.add(sid)
             rel_updates.extend(ups)
         cat.reanchor_citation_offsets(updates, commit=False)
         cat.reanchor_relation_offsets(rel_updates, commit=False)
-        return len(updates) + len(rel_updates), docs_changed, unlocatable
+        return len(updates) + len(rel_updates), len(changed_docs), unlocatable
 
-    def reanchor_source(self, *, source: str, after_stable_id: str = "",
+    def reanchor_source(self, *, source: str, court: str | None = None,
+                        after_stable_id: str = "",
                         on_progress=None, cancel_check=None) -> dict:
         """Re-anchor a whole source's stored citation offsets to its CURRENT text — the
         cheap, reliable repair for a corpus that was reparsed (text regenerated) without
@@ -5885,10 +5934,13 @@ class Facade:
         resolved targets are all still correct; only ``char_start``/``char_end`` move. One
         citations SELECT + one batched UPDATE per chunk; keyset-paginated and resumable
         from the ``after_stable_id`` checkpoint."""
+        court_sql = " AND lower(COALESCE(court, '')) = lower(?)" if court else ""
+        court_params = [court] if court else []
         with self._open() as (cat, _rs, ts):
             total = cat.conn.execute(
                 "SELECT count(*) AS n FROM documents WHERE source=? AND payload_hash IS NOT NULL "
-                "AND stable_id > ?", (source, after_stable_id or "")).fetchone()["n"]
+                f"AND stable_id > ?{court_sql}",
+                (source, after_stable_id or "", *court_params)).fetchone()["n"]
             done = fixed = docs_changed = unlocatable = 0
             cursor = after_stable_id or ""
             batch = 2000
@@ -5898,7 +5950,8 @@ class Facade:
                 chunk = [dict(r) for r in cat.conn.execute(
                     "SELECT stable_id, payload_hash FROM documents "
                     "WHERE source=? AND payload_hash IS NOT NULL AND stable_id > ? "
-                    "ORDER BY stable_id LIMIT ?", (source, cursor, batch)).fetchall()]
+                    f"{court_sql} ORDER BY stable_id LIMIT ?",
+                    (source, cursor, *court_params, batch)).fetchall()]
                 if not chunk:
                     break
                 f, dc, miss = self._reanchor_chunk(
@@ -5912,7 +5965,8 @@ class Facade:
                 _progress(on_progress, stage=f"re-anchoring {source}", done=done, total=total,
                           item=cursor, _checkpoint={"phase": "reanchor", "source": source,
                                                     "after_stable_id": cursor})
-        return {"source": source, "total": total, "docs_reanchored": docs_changed,
+        return {"source": source, "court": court, "total": total,
+                "docs_reanchored": docs_changed,
                 "offsets_fixed": fixed, "unlocatable": unlocatable}
 
     def _enrich_cited(self, cat, rs, ts, doc_ids, *, limit: int = 100,
@@ -5985,51 +6039,28 @@ class Facade:
             return {"stable_id": "echr/convention", "created": True, "source": "headings-stub"}
 
     def import_echr_convention(self) -> dict:
-        """Fetch the European Convention on Human Rights (ETS No. 5) — an official, freely
-        reproducible treaty — from Wikisource and store its **full text**, segmented by
-        Article (the citable unit), so "Article 10 of the Convention" deep-links to the real
-        Article 10. Reproducible: re-run to refresh."""
-        import re as _re
+        """Fetch the current official English ECHR text and store article-level structure.
 
-        from bs4 import BeautifulSoup
-
+        Paragraphs and lettered points are separate citable segments (``Article 5(1)(a)``),
+        while their canonical article family remains ``Article 5`` for the citator.
+        """
         from .core.http import build_client
-        from .core.segmentation import assemble
+        from .formats.echr_pdf import (
+            OFFICIAL_ECHR_CONVENTION_URL,
+            parse_echr_convention_pdf,
+        )
 
         client = build_client(timeout=45)
-        resp = client.get("https://en.wikisource.org/w/api.php", params={
-            "action": "parse", "format": "json", "formatversion": "2", "prop": "text",
-            "page": "European_Convention_for_the_Protection_of_Human_Rights_and_Fundamental_Freedoms",
-        })
-        soup = BeautifulSoup(resp.json()["parse"]["text"], "html.parser")
-        for junk in soup.select("sup.reference, .mw-editsection, style, .toc, table.ws-noexport"):
-            junk.decompose()
-        blocks: list[tuple[str, str, str]] = []
-        label, kind, buf = "Preamble", "section", []
-        _ART = _re.compile(r"^Article\s+(\d+)\s*[–-]\s*(.+)$")
-        for el in soup.find_all(["h2", "h3", "h4", "p", "li"]):
-            txt = _re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip().rstrip("¹²³ ")
-            if not txt:
-                continue
-            if el.name in ("h2", "h3", "h4"):
-                if buf:
-                    blocks.append((label, kind, "\n".join(buf)))
-                m = _ART.match(txt)
-                if m:
-                    label, kind, buf = f"Article {m.group(1)}", "article", [f"Article {m.group(1)} — {m.group(2)}"]
-                else:
-                    label, kind, buf = txt, "section", []
-            else:
-                buf.append(txt)
-        if buf:
-            blocks.append((label, kind, "\n".join(buf)))
-        n_articles = sum(1 for b in blocks if b[1] == "article")
-        if n_articles < 10:
-            raise ValueError(f"ECHR parse looks wrong ({n_articles} articles)")
+        resp = client.get(OFFICIAL_ECHR_CONVENTION_URL)
+        resp.raise_for_status()
+        parsed = parse_echr_convention_pdf(resp.content)
         with self._open() as (cat, _rs, ts):
-            self._store_echr_convention(cat, ts, assemble(blocks))
-        return {"stable_id": "echr/convention", "created": True, "source": "wikisource",
-                "articles": n_articles}
+            self._store_echr_convention(cat, ts, parsed)
+        return {
+            "stable_id": "echr/convention", "created": True, "source": "ECHR official PDF",
+            "articles": len({s.label.split("(", 1)[0] for s in parsed[1]
+                             if s.label.startswith("Article ")}),
+        }
 
     def _store_echr_convention(self, cat, ts, parsed) -> None:
         from .core.models import DocType, ExtractedVia, Record
@@ -6043,7 +6074,8 @@ class Facade:
             text=text, segments=segments, raw_bytes=text.encode("utf-8"), raw_ext="txt",
             extracted_via=ExtractedVia.STRUCTURED,
             extra={"treaty": "ECHR", "ets": "5", "source_url":
-                   "https://en.wikisource.org/wiki/European_Convention_for_the_Protection_of_Human_Rights_and_Fundamental_Freedoms"},
+                   "https://rm.coe.int/1680a2353d", "is_authoritative": True,
+                   "as_amended": "Protocol No. 15, in force 2021-08-01"},
         )
         rec.ensure_payload_hash()
         text_path = str(ts.put(rec.payload_hash, text))
@@ -9267,19 +9299,42 @@ class Facade:
             cat.delete_alias(phrase)
             return {"phrase": phrase, "deleted": True}
 
-    def apply_rules(self, *, source: str | None = None, run_id: str | None = None,
+    def apply_rules(self, *, source: str | None = None,
+                    sources: list[str] | None = None,
+                    source_prefix: str | None = None,
+                    target_ids: list[str] | None = None,
+                    document_ids: list[str] | None = None,
+                    run_id: str | None = None,
                     on_progress=None, cancel_check=None) -> dict:
         """Re-extract document text with the current grammars + user rules — the "re-scan the
         corpus for new potential citations" action. Run this after a new adapter/grammar
         lands (e.g. the law-report grammars, ECHR app numbers) so already-stored docs pick
         them up. ``source`` scopes it (e.g. just ``uk-caselaw``) — reports are cited by case
-        law, so a scoped re-scan is far faster than the whole corpus. Heavy → run as a job."""
+        law, so a scoped re-scan is far faster than the whole corpus. ``target_ids`` narrows
+        further to documents already observed citing one of those targets; this is how a
+        French EU-article upgrade revisits the digital-acquis worklist without scanning
+        millions of unrelated DILA records. ``document_ids`` is the exact, bounded repair
+        path used by the reader refinement queue. Heavy → run as a job."""
         from .citations import extract_documents_parallel
 
         with self._open() as (cat, _rs, ts):
             aliases = cat.named_alias_map()
-            ids = cat.text_document_ids(source=source,
-                                        exclude_extraction_run_id=run_id)
+            if document_ids is not None:
+                requested = list(dict.fromkeys(str(i) for i in document_ids if i))
+                # Confirm extractable held documents rather than trusting arbitrary ids.
+                ids = cat.held_text_document_ids(requested)
+            elif target_ids:
+                ids = cat.text_document_ids_citing(
+                    target_ids,
+                    sources=sources or ([source] if source else None),
+                    source_prefix=source_prefix,
+                    exclude_extraction_run_id=run_id,
+                )
+            else:
+                # Preserve the old single-source/full-corpus contract. Multiple sources
+                # only have meaning with a bounded target worklist.
+                ids = cat.text_document_ids(
+                    source=source, exclude_extraction_run_id=run_id)
             ex = extract_documents_parallel(
                 cat, ts, ids, aliases=aliases, run_id=run_id,
                 stage="re-scanning citations",

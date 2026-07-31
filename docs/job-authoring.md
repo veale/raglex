@@ -29,6 +29,13 @@ Every runner receives `on_progress` and `cancel_check`. Follow this contract:
 10. Never infer that a job is dead solely because item progress is quiet. The job
     manager maintains a separate process lease. The UI reports a live but quiet
     phase as `working · quiet phase`; only an expired lease is `worker stopped`.
+11. A parser or grammar change does not automatically justify a whole-source scan.
+    When existing citation observations can identify the affected worklist, select by
+    target ids and jurisdiction/source first. For example,
+    `scope=fr-eu-digital` re-extracts only French documents already observed citing the
+    reviewed `EU_DIGITAL_ACQUIS_IDS`; it must never fall back to all DILA documents.
+    Offset-only drift uses `reanchor-citations`, optionally narrowed by court/body, and
+    does not re-run grammars at all.
 
 The job manager supplies a universal `starting {kind}` event and preserves the
 runner's last real progress event at completion. That is a safety net, not a

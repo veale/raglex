@@ -41,6 +41,24 @@ def test_french_eu_instruments_resolve_to_celex():
     assert cites["directive 95/46/CE"].candidate_id == "31995L0046"
 
 
+def test_french_eu_articles_keep_pinpoints_before_numeric_instrument():
+    cites = extract_citations(
+        "L'article 13 du règlement (UE) 2016/679 s'applique. "
+        "Les articles 3, 4, 5, 6 et 12 du règlement (UE) n° 2016/679 aussi. "
+        "Voir l'article 14, paragraphe 5, sous a), du règlement (UE) 2016/679."
+    )
+    got = {(c.candidate_id, c.pinpoint, c.method) for c in cites}
+    assert {
+        ("32016R0679", "Article 13", "fr_eu_articles"),
+        ("32016R0679", "Article 3", "fr_eu_articles"),
+        ("32016R0679", "Article 4", "fr_eu_articles"),
+        ("32016R0679", "Article 5", "fr_eu_articles"),
+        ("32016R0679", "Article 6", "fr_eu_articles"),
+        ("32016R0679", "Article 12", "fr_eu_articles"),
+        ("32016R0679", "Article 14(5)(a)", "fr_eu_articles"),
+    } <= got
+
+
 def test_french_echr_article_list_is_not_donated_to_later_domestic_code():
     text = ("articles 3 et 8 de la convention européenne de sauvegarde des droits "
             "de l'homme et des libertés fondamentales ainsi que les dispositions "
@@ -61,6 +79,14 @@ def test_french_code_article_list_expands_every_pinpoint():
     ]
 
 
+def test_french_article_list_scan_is_bounded_on_non_french_eu_text():
+    # This shape previously triggered catastrophic backtracking in both the code and
+    # ECHR list expressions when no French host followed an otherwise valid Article.
+    text = ("Article 8 has effect. Article 13 may apply. " * 2_000)
+    assert not [c for c in extract_citations(text)
+                if c.method in {"fr_code_articles", "fr_echr_articles"}]
+
+
 def test_legifrance_native_identifiers_are_preserved():
     cite = _one("https://www.legifrance.gouv.fr/juri/id/JURITEXT000051856547",
                 "fr_legifrance_id")
@@ -74,6 +100,43 @@ def test_fr_sources_and_candidates_leave_other_bucket():
     pending = classify_candidate("fr:code:cciv:L112-1", "act")
     assert held.category == "fr-caselaw"
     assert pending.category == "fr-legislation"
+
+
+def test_digital_acquis_refresh_selector_only_returns_relevant_french_text(catalogue):
+    for sid, source in (
+        ("fr/gdpr", "fr-dila"),
+        ("fr/ordinary", "fr-dila"),
+        ("de/gdpr", "de-rii"),
+    ):
+        catalogue.upsert_document(Record(
+            source=source, stable_id=sid, doc_type=DocType.JUDGMENT,
+            title=sid, text="text", extracted_via=ExtractedVia.STRUCTURED,
+        ))
+    for sid, candidate in (
+        ("fr/gdpr", "32016R0679"),
+        ("fr/ordinary", "32004L0038"),
+        ("de/gdpr", "32016R0679"),
+    ):
+        catalogue.add_citations(sid, [{
+            "raw": candidate, "entity_kind": "regulation",
+            "candidate_id": candidate, "pinpoint": None,
+            "char_start": 0, "char_end": len(candidate),
+            "method": "test", "confidence": 1.0,
+        }])
+    assert catalogue.text_document_ids_citing(
+        ["32016R0679"], source_prefix="fr-") == ["fr/gdpr"]
+
+
+def test_exact_flagged_document_worklist_preserves_order(catalogue):
+    for stable_id in ("flag/b", "flag/a"):
+        catalogue.upsert_document(Record(
+            source="user-import", stable_id=stable_id, doc_type=DocType.COMMENTARY,
+            title=stable_id, text="Article 6 GDPR",
+            extracted_via=ExtractedVia.STRUCTURED,
+        ))
+    assert catalogue.held_text_document_ids(
+        ["missing", "flag/b", "flag/a", "flag/b"]
+    ) == ["flag/b", "flag/a"]
 
 
 def test_migration_mints_aliases_for_already_imported_french_nodes(catalogue):

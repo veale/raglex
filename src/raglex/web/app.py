@@ -330,7 +330,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/legislation/echr-convention")
     def import_echr_ep() -> dict:
-        """(Re)import the European Convention on Human Rights full text from Wikisource."""
+        """(Re)import the official ECHR Convention PDF with article/paragraph anchors."""
         return facade.import_echr_convention()
 
     @app.get("/legislation/changes")
@@ -368,10 +368,56 @@ def create_app(config: Config | None = None) -> FastAPI:
     def job_rescan_ep(payload: dict = Body(default={})) -> dict:
         """Re-extract every document with the current grammars/rules (picks up new grammars
         like the law reports) — as a progress-tracked background job. Optional ``source``
-        scopes it (e.g. just uk-caselaw), far faster since reports are cited by case law."""
+        scopes it (e.g. just uk-caselaw), far faster since reports are cited by case law.
+        ``scope={fr,de,nl}-eu-digital`` is a deliberately bounded digital-acquis refresh:
+        only national documents already observed citing one of the reviewed EU digital-law
+        CELEX ids, never the complete (and sometimes multi-million-record) corpus."""
         p = payload or {}
-        label = f"re-scan {p['source']} for new citations" if p.get("source") else "re-scan corpus for new citations"
-        return _start_job("rescan-citations", label, {"source": p["source"]} if p.get("source") else {})
+        if p.get("document_ids") is not None:
+            document_ids = list(dict.fromkeys(
+                str(i) for i in (p.get("document_ids") or [])
+                if isinstance(i, str) and i
+            ))[:1000]
+            return _start_job(
+                "rescan-citations",
+                f"repair citations in {len(document_ids)} flagged documents",
+                {"document_ids": document_ids},
+                queue=bool(p.get("queue")),
+            )
+        digital_scopes = {
+            "fr-eu-digital": {
+                "label": "re-scan French EU digital-acquis citations",
+                "source_prefix": "fr-",
+            },
+            "de-eu-digital": {
+                "label": "re-scan German EU digital-acquis citations",
+                "sources": ["de-rii", "de-neuris"],
+            },
+            "nl-eu-digital": {
+                "label": "re-scan Dutch EU digital-acquis citations",
+                "sources": ["nl-rechtspraak"],
+            },
+        }
+        if p.get("scope") in digital_scopes:
+            from ..facade import EU_DIGITAL_ACQUIS_IDS
+
+            scope = digital_scopes[p["scope"]]
+            return _start_job(
+                "rescan-citations",
+                scope["label"],
+                {
+                    **{k: v for k, v in scope.items() if k != "label"},
+                    "target_ids": list(EU_DIGITAL_ACQUIS_IDS),
+                },
+                queue=bool(p.get("queue")),
+            )
+        label = f"re-scan {p['source']} for new citations" if p.get("source") \
+            else "re-scan corpus for new citations"
+        return _start_job(
+            "rescan-citations", label,
+            {"source": p["source"]} if p.get("source") else {},
+            queue=bool(p.get("queue")),
+        )
 
     @app.post("/jobs/rescan")
     def job_rescan_full_ep(payload: dict = Body(default={})) -> dict:
@@ -715,8 +761,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         source = (payload or {}).get("source")
         if not source:
             return {"error": "source is required"}
-        return _start_job("reanchor-citations", f"re-anchor {source} citations",
-                          {"source": str(source)}, queue=bool(payload.get("queue")))
+        court = (payload or {}).get("court")
+        label = f"re-anchor {source} citations"
+        if court:
+            label += f" ({court})"
+        return _start_job("reanchor-citations", label,
+                          {"source": str(source), **({"court": str(court)} if court else {})},
+                          queue=bool(payload.get("queue")))
 
     @app.post("/jobs/match-reports")
     def job_match_reports_ep() -> dict:
