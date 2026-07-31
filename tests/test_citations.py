@@ -597,6 +597,21 @@ def test_digital_regulation_names_resolve_with_subsection_pinpoints():
     assert all(c.candidate_id != "32016L0680" for c in extract_citations("she led the team"))
 
 
+def test_bare_dsa_needs_legal_context_not_a_duty_solicitor_scheme():
+    assert not any(
+        citation.candidate_id == "32022R2065"
+        for citation in extract_citations(
+            "The detainee obtained advice under a Duty Solicitor Advice (DSA) scheme."
+        )
+    )
+    assert any(
+        citation.candidate_id == "32022R2065"
+        for citation in extract_citations(
+            "Article 34 DSA applies, as does the DSA."
+        )
+    )
+
+
 def test_eu_guidance_links_eu_law_and_case_law_but_not_domestic_statute(catalogue, tmp_path):
     # An EDPB guidance document links EU legislation (CELEX), CJEU + ECHR case law
     # (ECLI) and English/Irish case-law neutral citations — all unambiguous — but a

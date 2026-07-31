@@ -643,7 +643,7 @@ def instrument_at(text: str) -> tuple[str | None, str | None]:
 # ever written that way in those languages; a bare "AVG" in an Ontario judgment is a
 # corporate name ("ASU AVG"), not the GDPR. The determiners therefore span the
 # languages the acronym actually appears in, so "de AVG" and "der DSGVO" still link.
-_NEEDS_DETERMINER = {"LED", "AVG", "DSGVO", "RGPD"}
+_NEEDS_DETERMINER = {"LED", "AVG", "DSGVO", "RGPD", "DSA"}
 _DETERMINER_RE = re.compile(
     r"(?i)\b(?:the|of|de|het|der|die|das|dem|den|des|la|le|les|du|del|el|il)\s+$")
 
