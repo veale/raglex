@@ -601,7 +601,9 @@ def test_bare_dsa_needs_legal_context_not_a_duty_solicitor_scheme():
     assert not any(
         citation.candidate_id == "32022R2065"
         for citation in extract_citations(
-            "The detainee obtained advice under a Duty Solicitor Advice (DSA) scheme."
+            "The detainee obtained advice under a Duty Solicitor Advice (DSA) scheme.",
+            # A durable alias may predate the ambiguity gate; it must not bypass it.
+            aliases={"DSA": "32022R2065"},
         )
     )
     assert any(

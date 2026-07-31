@@ -956,6 +956,14 @@ def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
     for phrase, target in sorted(aliases.items(), key=lambda kv: -len(kv[0])):
         if not phrase or not target:
             continue
+        # Protected statutory abbreviations are owned by deterministic grammars.  A
+        # user/legacy alias for ``DSA`` must not bypass the grammar's context gate and
+        # turn Duty Solicitor Advice, the CDSA or RFDSA into Digital Services Act links.
+        # The same rule prevents an old alias row from overriding the canonical target
+        # of GDPR/DSGVO/AI Act.  Spelled-out and context-qualified forms remain covered
+        # by those grammars (and distinct phrases such as ``UK GDPR`` are not protected).
+        if _protected_shorthand_target(phrase):
+            continue
         # \b only guards against mid-word matches when the adjacent phrase character
         # is itself a word character. On a non-word edge — e.g. an alias like "(UK)
         # GDPR" — a bare \b demands a boundary that never exists there, so the phrase
