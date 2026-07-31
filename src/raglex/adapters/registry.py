@@ -29,7 +29,9 @@ from .ca_legislation import CanadaFederalAdapter
 from .canlii import CanLIIAdapter
 from .courtlistener import CourtListenerAdapter
 from .courtlistener_bulk import CourtListenerBulkAdapter
+from .berec import BERECAdapter
 from .dma import DMACasesAdapter
+from .eu_dma_policy import DMAAnnualReportsAdapter, DMAConsultationsAdapter
 from .hk_legislation import HKLegislationAdapter
 from .nz_legislation import NZLegislationAdapter
 from .sg_legislation import SGLegislationAdapter
@@ -283,6 +285,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "ie-dpc": IrishDPCAdapter,
     "ie-dpc-guidance": IrishDPCGuidanceAdapter,
     "nl-ap": APDocumentsAdapter,
+    "eu-berec": BERECAdapter,
+    "dma-consultations": DMAConsultationsAdapter,
+    "dma-annual-reports": DMAAnnualReportsAdapter,
     # national DPA guidance libraries (§ eu_dpa_guidance)
     "fr-cnil-guidance": CNILGuidanceAdapter,
     "es-aepd-guias": AEPDGuidanceAdapter,
@@ -602,6 +607,34 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "('doc. web n. 10241943'). The adoption date is parsed from the measure's "
         "title, which is where the Garante puts it.",
         (), ("doc web number", "10241943"),
+    ),
+    "eu-berec": SourceInfo(
+        "eu-berec", "BEREC document register (EU electronic communications)",
+        "guidance", "EU", False,
+        "BEREC's whole /all-documents tree, category by category: opinions, guidelines, "
+        "common positions, recommendations, reports and decisions, plus the BEREC "
+        "Office's administrative papers. Each document keeps its BoR number (BoR (26) "
+        "88_1) as an alias so the number as cited resolves. The site's rss.xml is a NEWS "
+        "feed carrying no documents, so keep-current re-reads the newest page of each "
+        "category and stops at the cursor.",
+        (), ("BoR document number", "BoR (26) 88_1"),
+    ),
+    "dma-consultations": SourceInfo(
+        "dma-consultations", "DMA public consultations (European Commission)",
+        "guidance", "EU", False,
+        "The Digital Markets Act consultation surface: draft guidelines, compliance and "
+        "reporting templates, and the published submissions. Backfill walks the index "
+        "(which keeps the closed consultations); keep-current reads the consultations "
+        "RSS feed. Documents are keyed on the Commission document UUID, so anything "
+        "also published on another Commission site is one document, not two.",
+        (), ("Commission document UUID",),
+    ),
+    "dma-annual-reports": SourceInfo(
+        "dma-annual-reports", "DMA annual reports (Article 35 DMA)",
+        "guidance", "EU", False,
+        "The Commission's Article 35 DMA annual reports to the Parliament and Council on "
+        "the implementation of the Regulation. One page, one report a year.",
+        (), ("Commission document UUID",),
     ),
     "it-agcm": SourceInfo(
         "it-agcm", "Italy AGCM weekly decision bulletins", "guidance", "IT", False,
@@ -1414,6 +1447,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
     "nl-ap": "early-stop",
+    "eu-berec": "early-stop", "dma-consultations": "early-stop",
+    "dma-annual-reports": "full-walk",
     "fr-cnil-guidance": "full-walk", "es-aepd-guias": "full-walk",
     "dk-datatilsynet": "full-walk", "de-dsk": "full-walk",
     "be-gba": "full-walk", "it-garante": "full-walk",
