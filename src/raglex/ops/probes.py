@@ -491,6 +491,7 @@ _UK_LEG_PREFIXES = (
 
 def _irish_to_uk_legislation_sql(
     table: str = "relations", target: str = "dst_id", provenance: str = "extracted_via",
+    machine: tuple[str, ...] = ("regex", "inferred"),
 ) -> tuple[str, list]:
     """``(from/where, params)`` for machine-made Irish-court → UK-legislation rows.
 
@@ -503,13 +504,20 @@ def _irish_to_uk_legislation_sql(
     courts = sorted(IRISH_COURTS)
     like = " OR ".join([f"x.{target} LIKE ?"] * len(_UK_LEG_PREFIXES))
     court_qs = ",".join("?" * len(courts))
+    # The two tables record provenance in different vocabularies — relations carry
+    # extracted_via ('regex' | 'inferred' | 'manual' | 'structured'), citations carry the
+    # GRAMMAR that matched ('uk_statute_named', 'carry_forward', 'shorthand_global', …).
+    # Filtering the citations table for 'regex' matched nothing, so the first run of this
+    # repair reported citations_deleted: 0 and left every observation row in place.
+    machine_qs = ",".join("?" * len(machine))
+    negate = "NOT " if machine == ("manual",) else ""
     sql = f"""
     FROM {table} x JOIN documents s ON s.stable_id = x.src_id
     WHERE ({like})
       AND (s.source = 'ie-caselaw' OR lower(COALESCE(s.court, '')) IN ({court_qs}))
-      AND x.{provenance} IN ('regex', 'inferred')
+      AND x.{provenance} {negate}IN ({machine_qs})
     """
-    return sql, [f"{p}%" for p in _UK_LEG_PREFIXES] + courts
+    return sql, [f"{p}%" for p in _UK_LEG_PREFIXES] + courts + list(machine)
 
 
 def probe_irish_case_cites_uk_legislation(cat) -> ProbeResult:
@@ -680,8 +688,10 @@ def repair_irish_case_cites_uk_legislation(cat) -> dict:
     After repair, run rebuild-citation-counts: the roll-up still holds the phantom
     occurrences until it is rebuilt."""
     edge_sql, edge_params = _irish_to_uk_legislation_sql()
+    # Everything the machine wrote — i.e. everything that is not a hand-made link.
     cite_sql, cite_params = _irish_to_uk_legislation_sql(
-        table="citations", target="candidate_id", provenance="method")
+        table="citations", target="candidate_id", provenance="method",
+        machine=("manual",))
     with cat._atomic():
         edges = cat.conn.execute(
             f"DELETE FROM relations WHERE relation_id IN "

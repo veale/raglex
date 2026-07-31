@@ -592,9 +592,12 @@ _PG_SCHEMA_READY: set[str] = set()
 # "section 13", and German material uses "§ 13" — all the same provision. Every coarse
 # anchor guard normalises through this, so a query can never miss an edge merely because
 # the corpus and the caller spell the unit differently.
-ANCHOR_NORM_SQL = (
-    "lower(replace(replace(replace(COALESCE(dst_anchor, ''), ' ', ''), '.', ''), '§', ''))"
-)
+def anchor_norm_sql(column: str = "dst_anchor") -> str:
+    return (f"lower(replace(replace(replace(COALESCE({column}, ''), ' ', ''), "
+            "'.', ''), '§', ''))")
+
+
+ANCHOR_NORM_SQL = anchor_norm_sql()
 
 
 def _now() -> str:
@@ -1382,22 +1385,61 @@ class Catalogue:
     ) -> list:
         """Literal citations to mapped previous provisions, decorated with lineage.
 
-        Anchor matching is deliberately exact apart from case/space: citation extraction
-        emits canonical ``Article N``/``section N`` anchors, while loose numeric matching
-        would leak citations between unrelated provisions.
+        Anchor matching folds case, spaces and punctuation and nothing else. Citation
+        extraction emits canonical ``Article N`` / ``s. N`` anchors, so looser numeric
+        matching would leak citations between unrelated provisions — but an exact string
+        comparison was too tight in the other direction: the corpus stores ``Sch. 2`` and
+        an editor writes ``Sch 2``, and a full-stop silently voided the mapping.
 
-        A mapping written against the base act also applies to its dated versions (see
-        :meth:`_mapping_doc_ids`): reading the DPA 2018 as amended must still show what
-        the DPA 1998 provision it succeeded was cited for.
+        BOTH SIDES travel their version family. A mapping written against the base act
+        applies to its dated versions (:meth:`_mapping_doc_ids`), and — the half that
+        made the DPA retrofit surface nothing at all — a mapping written against a dated
+        snapshot of the OLD act picks up the citations filed against its base. The 260
+        DPA 1998 → 2018 mappings name ``ukpga/1998/29@2015-01-01``; every judgment cites
+        ``ukpga/1998/29``. Nothing joined, and the reader showed an empty panel.
         """
         ids = self._mapping_doc_ids(current_doc_id)
-        params: list = list(ids)
+        id_qs = ",".join("?" * len(ids))
+        mapping_params: list = list(ids)
         anchor_sql = ""
         if current_anchor:
             anchor_sql = " AND lower(trim(pm.current_anchor)) = lower(trim(?))"
-            params.append(current_anchor)
-        params.append(max(1, min(int(limit), 5000)))
-        id_qs = ",".join("?" * len(ids))
+            mapping_params.append(current_anchor)
+        # Which previous documents are in play, and therefore whose version families
+        # need expanding. Small — a law has a handful of mapped predecessors, not a
+        # handful of thousands — so this stays one extra round trip, not a per-row join.
+        previous_ids = [
+            str(row["previous_doc_id"]) for row in self.conn.execute(
+                f"SELECT DISTINCT previous_doc_id FROM provision_mappings pm "
+                f"WHERE pm.current_doc_id IN ({id_qs}){anchor_sql}",
+                tuple(mapping_params),
+            ).fetchall() if row["previous_doc_id"]
+        ]
+        if not previous_ids:
+            return []
+        family: dict[str, list[str]] = {}
+        for previous_id in previous_ids:
+            related = {previous_id}
+            base = self.consolidation_base_for(previous_id)
+            if base:
+                related.add(base)
+            for version_id, _date in self.legislative_versions(base or previous_id):
+                related.add(version_id)
+            family[previous_id] = sorted(related)
+        # One branch per mapped predecessor, so a family stays tied to the mapping row it
+        # belongs to. A flat "target IN (everything)" would let a citation of one old act
+        # satisfy a mapping written about a different one whenever their anchors agree —
+        # and "s. 7" agrees across half the statute book.
+        clauses, join_params = [], []
+        for previous_id, group in family.items():
+            qs = ",".join("?" * len(group))
+            clauses.append(f"(pm.previous_doc_id = ? AND "
+                           f"(r.dst_id IN ({qs}) OR r.candidate_id IN ({qs})))")
+            join_params.extend([previous_id, *group, *group])
+        anchor_match = (f"{anchor_norm_sql('r.dst_anchor')} = "
+                        f"{anchor_norm_sql('pm.previous_anchor')}")
+        family_sql = " OR ".join(clauses)
+        params = [*join_params, *mapping_params, max(1, min(int(limit), 5000))]
         return self.conn.execute(
             f"""
             SELECT r.*, pm.mapping_id, pm.current_anchor AS inherited_current_anchor,
@@ -1411,8 +1453,8 @@ class Catalogue:
                    d.title AS inherited_from_title
             FROM provision_mappings pm
             JOIN relations r
-              ON (r.dst_id = pm.previous_doc_id OR r.candidate_id = pm.previous_doc_id)
-             AND lower(trim(r.dst_anchor)) = lower(trim(pm.previous_anchor))
+              ON ({family_sql})
+             AND {anchor_match}
             LEFT JOIN documents d ON d.stable_id = pm.previous_doc_id
             WHERE pm.current_doc_id IN ({id_qs})
               {anchor_sql}
