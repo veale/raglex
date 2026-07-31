@@ -43,36 +43,110 @@ _LAW_NAMES = {
     "WIA": "Wet werk en inkomen naar arbeidsvermogen",
     "WAO": "Wet op de arbeidsongeschiktheidsverzekering",
     "WW": "Werkloosheidswet", "ZW": "Ziektewet",
+    # Dutch data-protection statutes. The AP's decisions are grounded in these as much
+    # as in the AVG itself: the UAVG carries the national derogations (including the
+    # Article 33 blacklist licence), the Wpg/Wjsg are the LED-side regimes for police
+    # and criminal-justice data, and the Wbp is the pre-2018 Act the older decisions
+    # and every appeal against them are still argued under.
+    "Wpg": "Wet politiegegevens",
+    "Wjsg": "Wet justitiële en strafvorderlijke gegevens",
+    "Wbp": "Wet bescherming persoonsgegevens",
 }
-_LAW_ALT = "|".join(sorted((re.escape(x) for x in (*_LAW_NAMES, *_LAW_NAMES.values())),
-                           key=len, reverse=True))
+# Surface forms that are not the canonical title and not a plain abbreviation. The AP
+# spells the UAVG out in full on first use in nearly every decision.
+_LAW_ALIASES = {
+    "Uitvoeringswet Algemene verordening gegevensbescherming": "Uitvoeringswet AVG",
+    "Uitvoeringswet AVG": "Uitvoeringswet AVG",
+}
+_LAW_ALT = "|".join(sorted(
+    (re.escape(x) for x in (*_LAW_NAMES, *_LAW_NAMES.values(), *_LAW_ALIASES)),
+    key=len, reverse=True))
+
+_NL_ORDINALS = {
+    "eerste": "1", "tweede": "2", "derde": "3", "vierde": "4", "vijfde": "5",
+    "zesde": "6", "zevende": "7", "achtste": "8", "negende": "9", "tiende": "10",
+}
+_NL_ORDINAL_ALT = "|".join(_NL_ORDINALS)
+
+# Dutch statutory drafting numbers a provision in words *after* the article, and the
+# authorities quote it in full: ``artikel 6, eerste lid, aanhef en onder f, van de
+# AVG``. Both parts are optional and both are separated by commas, which is exactly
+# what the old pattern could not cross — it demanded whitespace before the instrument
+# name, so every reference carrying a *lid* fell through to the heuristic carry-forward
+# and lost its sub-article pincite. ``aanhef en`` ("opening words and") is apparatus,
+# not a pinpoint: it says the opening words are read together with point (f).
+_NL_LID = rf"(?:\s*,?\s*(?P<lid>\d+|{_NL_ORDINAL_ALT})\s+lid)?"
+_NL_ONDER = r"(?:\s*,?\s*(?:aanhef\s+en\s+)?onder\s+(?P<onder>[a-z])\b)?"
+# What sits between the provision and the instrument it belongs to. The comma is the
+# load-bearing part: Dutch closes the *lid* clause with one ("artikel 5, tweede lid,
+# AVG"), and "van de" is only present about half the time.
+_NL_OF = r"\s*,?\s*(?:(?:van\s+)?(?:de|het)\s+)?"
 
 # In Dutch, AVG is the GDPR. ``artikel 15 AVG`` otherwise has exactly the shape
 # accepted by the deliberately broad German-law parser and becomes the phantom
 # ``de/gesetz/avg``. Capture the Dutch construction first and keep the EU article
 # anchor in the same language-neutral form as Formex.
+#
+# The spelled-out name is accepted too, but never when the *Uitvoeringswet* Algemene
+# verordening gegevensbescherming is what is being cited: that is the national
+# implementing Act, a different instrument that happens to end in the same six words.
 AVG_ARTICLE_RE = re.compile(
     r"\b(?:art(?:ikel)?\.?)\s+(?P<article>\d{1,3}[a-z]?"
     r"(?:\(\d+[a-z]?\))*)"
-    r"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?"
-    r"\s+(?:van\s+de\s+)?(?-i:AVG)\b",
+    rf"{_NL_LID}{_NL_ONDER}{_NL_OF}"
+    r"(?:(?-i:AVG)|(?<!Uitvoeringswet\s)"
+    r"Algemene\s+verordening\s+gegevensbescherming)\b",
     re.I,
 )
 
 
-def avg_citations(text: str) -> list[Citation]:
-    out: list[Citation] = []
-    for match in AVG_ARTICLE_RE.finditer(text):
-        pinpoint = f"Article {match.group('article')}"
-        if match.group("lid"):
-            pinpoint += f", lid {match.group('lid')}"
-        out.append(Citation(
-            raw=match.group(0), entity_kind="regulation",
-            candidate_id="32016R0679", pinpoint=pinpoint,
-            char_start=match.start(), char_end=match.end(),
-            method="nl_avg_article", confidence=1.0,
-        ))
+def _eu_pin(article: str, lid: str | None = None, onder: str | None = None) -> str:
+    """``6`` + ``eerste`` + ``f`` → ``Article 6(1)(f)`` — the Formex anchor vocabulary
+    the rest of the corpus uses for EU provisions, so a Dutch decision's pincite lands
+    on the same GDPR article node as an English or German one."""
+    out = f"Article {article}"
+    if lid:
+        out += f"({_NL_ORDINALS.get(lid.casefold(), lid)})"
+    if onder:
+        out += f"({onder.casefold()})"
     return out
+
+
+def avg_citations(text: str) -> list[Citation]:
+    return [Citation(
+        raw=m.group(0), entity_kind="regulation", candidate_id="32016R0679",
+        pinpoint=_eu_pin(m.group("article"), m.group("lid"), m.group("onder")),
+        char_start=m.start(), char_end=m.end(),
+        method="nl_avg_article", confidence=1.0,
+    ) for m in AVG_ARTICLE_RE.finditer(text)]
+
+
+# Dutch implementing law and the AP's decisions under it refer to the GDPR as "de
+# verordening" once it has been introduced — ``Onverminderd artikel 10 van de
+# verordening mogen persoonsgegevens…``. Standing alone that is ambiguous (every EU
+# regulation is "de verordening"), so it is only read as the GDPR in a document that
+# names the AVG somewhere: that is the definition the phrase is pointing back to.
+# Without this the reference reached the generic carry-forward, which attached it to
+# whichever statute was last named — usually the UAVG, i.e. the wrong instrument.
+_DEFINED_AVG_RE = re.compile(
+    r"\b(?-i:AVG)\b|\bAlgemene\s+verordening\s+gegevensbescherming\b", re.I)
+VERORDENING_ARTICLE_RE = re.compile(
+    r"\b(?:art(?:ikel)?\.?)\s+(?P<article>\d{1,3}[a-z]?)"
+    rf"{_NL_LID}{_NL_ONDER}"
+    r"\s*,?\s*van\s+de\s+verordening\b",
+    re.I,
+)
+
+
+def verordening_citations(text: str) -> list[Citation]:
+    if not _DEFINED_AVG_RE.search(text or ""):
+        return []
+    return [Citation(
+        raw=m.group(0), entity_kind="regulation", candidate_id="32016R0679",
+        pinpoint=_eu_pin(m.group("article"), m.group("lid"), m.group("onder")),
+        char_start=m.start(), char_end=m.end(),
+        method="nl_verordening_article", confidence=.93,
+    ) for m in VERORDENING_ARTICLE_RE.finditer(text)]
 
 
 def _pin(article: str | None, paragraph: str | None = None,
@@ -117,10 +191,11 @@ def juriconnect_citations(text: str) -> list[Citation]:
     return out
 
 
-# ``artikel 6:162 BW``, ``art. 8:42, eerste lid, Awb`` and ``artikel 10 Grondwet``.
+# ``artikel 6:162 BW``, ``art. 8:42, eerste lid, Awb``, ``artikel 10 Grondwet`` and
+# ``artikel 33, vierde lid, aanhef en onder c, UAVG``.
 LAW_REFERENCE_RE = re.compile(
     rf"\b(?:art(?:ikel)?\.?\s+)(?P<article>\d{{1,3}}(?:[:.]\d{{1,4}})?[a-z]?)"
-    rf"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?"
+    rf"{_NL_LID}{_NL_ONDER}"
     rf"(?:\s*,?\s*(?:van\s+)?(?:de|het)?\s*)?(?P<law>(?:Wet\s+)?(?:{_LAW_ALT}))\b", re.I)
 
 
@@ -129,11 +204,14 @@ def law_citations(text: str) -> list[Citation]:
     for m in LAW_REFERENCE_RE.finditer(text):
         raw_law = m.group("law")
         short = re.sub(r"(?i)^Wet\s+(?=[A-Z]{2,6}$)", "", raw_law)
-        title = _LAW_NAMES.get(next((k for k in _LAW_NAMES
-                                     if k.casefold() == short.casefold()), ""), raw_law)
+        title = _LAW_ALIASES.get(
+            next((k for k in _LAW_ALIASES if k.casefold() == raw_law.casefold()), ""),
+            _LAW_NAMES.get(next((k for k in _LAW_NAMES
+                                 if k.casefold() == short.casefold()), ""), raw_law))
         out.append(Citation(
             raw=m.group(0), entity_kind="act", candidate_id=law_name_alias(title),
-            pinpoint=_pin(m.group("article"), m.group("lid")), char_start=m.start(),
+            pinpoint=_pin(m.group("article"), m.group("lid"), m.group("onder")),
+            char_start=m.start(),
             char_end=m.end(), method="nl_law_reference", confidence=.97,
         ))
     return out
@@ -204,10 +282,7 @@ _NL_DIRECTIVE_ARTICLES_BEFORE = re.compile(
     r"\s*,?\s*(?:van\s+)?(?:de|het)?\s*)$",
     re.I,
 )
-_NL_ORDINAL = {
-    "eerste": "1", "tweede": "2", "derde": "3",
-    "vierde": "4", "vijfde": "5",
-}
+_NL_ORDINAL = _NL_ORDINALS
 
 
 def eu_directive_citations(text: str) -> list[Citation]:
@@ -266,6 +341,7 @@ def ljn_citations(text: str) -> list[Citation]:
 
 
 def dutch_citations(text: str) -> list[Citation]:
-    return (avg_citations(text) + juriconnect_citations(text) + law_citations(text)
+    return (avg_citations(text) + verordening_citations(text)
+            + juriconnect_citations(text) + law_citations(text)
             + host_before_citations(text) + echr_citations(text)
             + eu_directive_citations(text) + ljn_citations(text))

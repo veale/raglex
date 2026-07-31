@@ -2,7 +2,12 @@
 the §5b resolver links later. Grammars are the extensibility surface."""
 
 from .courts import KNOWN_COURTS, Court, lookup
-from .extractor import CitationExtractor, extract_citations, grammar_citations
+from .extractor import (
+    CitationExtractor,
+    all_grammar_citations,
+    extract_citations,
+    grammar_citations,
+)
 from .grammars import GRAMMARS, Grammar, register
 from .llm_extractor import LLMCitationExtractor
 from .models import Citation
@@ -14,6 +19,7 @@ from .stage import (ExtractStats, extract_corpus, extract_document,
 __all__ = [
     "extract_citations",
     "grammar_citations",
+    "all_grammar_citations",
     "CitationExtractor",
     "LLMCitationExtractor",
     "KNOWN_COURTS",

@@ -948,6 +948,28 @@ def grammar_citations(text: str) -> list[Citation]:
     return found
 
 
+def all_grammar_citations(text: str) -> list[Citation]:
+    """Every deterministic grammar, including the language-specific ones.
+
+    ``grammar_citations`` covers only the registered (largely anglophone) grammars, so
+    a caller using it to ask "does this document cite any law at all?" answers *no* for
+    a document written in Dutch, French, German or Italian — its citations live in the
+    per-language modules that ``extract_citations`` adds separately. Continental
+    regulator sources are gated on exactly that question, so they need the full set.
+    Overlaps are not resolved here: the callers count, they don't link.
+    """
+    from .danish import danish_citations
+    from .dutch import dutch_citations
+    from .french import french_citations
+    from .german import german_citations
+    from .italian import italian_citations
+    from .spanish import spanish_citations
+
+    return (grammar_citations(text) + french_citations(text) + dutch_citations(text)
+            + italian_citations(text) + spanish_citations(text)
+            + danish_citations(text) + german_citations(text))
+
+
 def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
     """Citations from user-defined shorthand *rules* ("UK GDPR" → a document id):
     every occurrence of a phrase becomes a link to its target, so the rule propagates
@@ -1094,6 +1116,13 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     cites += dutch_citations(text)
     from .italian import italian_citations
     cites += italian_citations(text)
+    # Spanish and Danish are narrow, instrument-named grammars (RGPD/LOPDGDD,
+    # databeskyttelsesforordningen/-loven) with no overlap with the broad German
+    # abbreviation parser, so their order relative to it does not matter.
+    from .spanish import spanish_citations
+    cites += spanish_citations(text)
+    from .danish import danish_citations
+    cites += danish_citations(text)
     # German references are normalised before linking and may expand to several exact
     # targets (ranges, i.V.m., repeated Nr./Abs. clauses), which the one-match/one-edge
     # grammar interface cannot represent.

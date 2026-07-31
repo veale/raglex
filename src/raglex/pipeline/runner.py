@@ -488,14 +488,18 @@ class Pipeline:
         # keep the fetched bytes/text and content hash as a durable processed row,
         # but suppress it from search unless a grammar sees a case or legislation.
         if record.extra.get("require_recognized_legal_citation"):
-            from ..citations.extractor import grammar_citations
+            from ..citations.extractor import all_grammar_citations
 
             legal_kinds = {
                 "case", "opinion", "act", "regulation", "directive", "decision",
                 "treaty", "eu_instrument",
             }
+            # The full grammar set, not just the registered (anglophone) ones: a Dutch
+            # DPA decision cites "artikel 5 AVG" and a French one "article 6 du RGPD",
+            # neither of which the English grammars see — so the gate used to exclude
+            # every continental regulator document from search for citing nothing.
             legal = [
-                c for c in grammar_citations(record.text or "")
+                c for c in all_grammar_citations(record.text or "")
                 if c.entity_kind in legal_kinds
             ]
             # Authoritative structured provision metadata is stronger than a grammar

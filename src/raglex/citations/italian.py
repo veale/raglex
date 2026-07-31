@@ -118,7 +118,7 @@ def eu_directive_citations(text: str) -> list[Citation]:
 
 
 def italian_citations(text: str) -> list[Citation]:
-    out: list[Citation] = eu_directive_citations(text)
+    out: list[Citation] = eu_directive_citations(text) + data_protection_citations(text)
     for host_re, candidate in _HOSTS:
         for host in host_re.finditer(text):
             before_start = max(0, host.start() - 180)
@@ -167,4 +167,70 @@ def italian_citations(text: str) -> list[Citation]:
                     char_end=run_abs + end, method="it_legislation_article_list",
                     confidence=.98,
                 ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Data protection: the Garante's own citation habits
+# ---------------------------------------------------------------------------
+#
+# The vocabulary above is the AGCM's — consumer and competition law. The Garante writes
+# a different citation entirely: ``art. 5, par. 1, lett. a), del Regolamento`` and
+# ``art. 122 del Codice``, naming each instrument once in full and referring to it by a
+# bare noun thereafter. Both bare forms are ambiguous corpus-wide — "il Codice" is the
+# Codice del consumo in an AGCM bulletin — so each is only read this way in a document
+# that has introduced that instrument.
+
+PRIVACY_CODE_ID = "it/dlgs/2003/196"
+GDPR_ID = "32016R0679"
+
+# ``regolamento (UE) 2016/679``, and the two acronyms Italian authors mix freely.
+_IT_GDPR_INTRO = re.compile(
+    r"\bregolamento\s*\(\s*UE\s*\)\s*2016\s*/\s*679\b|\b(?:RGPD|GDPR)\b", re.I)
+# ``d.lgs. 30 giugno 2003, n. 196`` / ``d.lgs. 196/2003`` / the full title.
+_IT_PRIVACY_CODE_INTRO = re.compile(
+    r"\bcodice\s+in\s+materia\s+di\s+protezione\s+dei\s+dati\s+personali\b|"
+    r"\b(?:decreto\s+legislativo|d\.?\s*lgs\.?)\s*(?:30\s+giugno\s+)?2003\s*,?\s*"
+    r"n?\.?\s*196\b|\bd\.?\s*lgs\.?\s*n?\.?\s*196\s*/\s*2003\b", re.I)
+
+# ``art. 5, par. 1, lett. a), del Regolamento`` — paragraph, comma and lettered point,
+# each optional, each closed by a comma. ``par.`` is the EU-instrument spelling and
+# ``comma`` the domestic one; the Garante uses whichever matches the instrument.
+_IT_DP_ARTICLE = (
+    r"\b(?:artt?\.|articoli?)\s*(?P<article>\d{1,3}(?:-(?:bis|ter|quater|quinquies))?)"
+    r"(?:\s*,?\s*(?:par(?:agrafo)?\.?|comma)\s*(?P<para>\d{1,2}))?"
+    r"(?:\s*,?\s*(?:lett(?:era)?\.?)\s*(?P<letter>[a-z])\)?)?"
+    r"(?:\s*,?\s*(?:punto)\s*(?P<point>\d{1,2})\)?)?"
+    r"\s*,?\s*(?:del|dell['’]|della)\s+"
+)
+_IT_DP_GDPR_RE = re.compile(_IT_DP_ARTICLE + r"(?-i:Regolamento)\b", re.I)
+_IT_DP_CODE_RE = re.compile(_IT_DP_ARTICLE + r"(?-i:Codice)\b", re.I)
+
+
+def _formex_pin(article: str, para: str | None, letter: str | None,
+                point: str | None) -> str:
+    out = f"Article {article}"
+    for part in (para, letter, point):
+        if part:
+            out += f"({part.casefold()})"
+    return out
+
+
+def data_protection_citations(text: str) -> list[Citation]:
+    out: list[Citation] = []
+    if _IT_GDPR_INTRO.search(text or ""):
+        out += [Citation(
+            raw=m.group(0), entity_kind="regulation", candidate_id=GDPR_ID,
+            pinpoint=_formex_pin(m.group("article"), m.group("para"),
+                                 m.group("letter"), m.group("point")),
+            char_start=m.start(), char_end=m.end(),
+            method="it_gdpr_article", confidence=.96,
+        ) for m in _IT_DP_GDPR_RE.finditer(text)]
+    if _IT_PRIVACY_CODE_INTRO.search(text or ""):
+        out += [Citation(
+            raw=m.group(0), entity_kind="act", candidate_id=PRIVACY_CODE_ID,
+            pinpoint=_pin(m.group("article"), m.group("para"), m.group("letter")),
+            char_start=m.start(), char_end=m.end(),
+            method="it_privacy_code_article", confidence=.96,
+        ) for m in _IT_DP_CODE_RE.finditer(text)]
     return out

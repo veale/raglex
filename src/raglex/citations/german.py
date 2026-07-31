@@ -57,8 +57,14 @@ def case_alias(court: str, docket: str) -> str:
 # ends on a law abbreviation.  This avoids the unbounded legal-regex failure mode that
 # previously wedged whole-corpus rescans.
 _PARA = r"\d{1,5}[a-z]?"
+# ``lit.`` (littera) is how German data-protection material points at a lettered point —
+# "Art. 6 Abs. 1 lit. f DSGVO" is the single most common citation in the field — and its
+# absence here did not merely lose the pinpoint: the pattern must run from § / Art. to a
+# law abbreviation, so an unrecognised sub-clause in between made the whole reference
+# unmatchable. Every "lit." citation in the corpus was invisible.
 _SUB = (r"(?:Abs(?:atz)?\.?|S(?:atz)?\.?|Nrn?\.?|Nummer|Buchst(?:abe)?\.?|"
-        r"Alt(?:ernative)?\.?|Halbs(?:atz)?\.?|HS\.?)\s*(?:\d+[a-z]?|[a-z]|[IVX]+)")
+        r"lit(?:t(?:era)?)?\.?|Alt(?:ernative)?\.?|Halbs(?:atz)?\.?|HS\.?)"
+        r"\s*(?:\d+[a-z]?|[a-z]|[IVX]+)")
 _TAIL = rf"(?:\s*(?:{_SUB}|[,;]|und\b|oder\b|bis\s+{_PARA}|[-–—]\s*{_PARA}|f{{1,2}}\.))*"
 _ONE = rf"(?:§§?|Art(?:ikel|\.)?)\s*{_PARA}{_TAIL}"
 _COMPACT_ONE = rf"(?:§|Art(?:ikel|\.)?)\s*{_PARA}\s+(?:[IVX]{{1,4}}|\(\d+\))\s+\d+"
@@ -72,7 +78,14 @@ _IVM = rf"(?:\s+i\.?\s*V\.?\s*m\.?\s+{_ONE})?"
 # of laws the corpus already holds. The book numeral itself is real (SGB V → sgb5, the
 # key gesetze-im-internet uses), so it stays — but not before an ordinal point, which
 # is an edition or a Halbsatz ("BGB 5. Aufl.", "BGB 1. Alt."), never a book.
-_LAW = r"(?-i:[A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9]*(?:\s+(?:[IVX]{1,4}|\d{1,2}(?!\.)))?)"
+# The internal hyphen is required, not cosmetic: German official usage writes the GDPR
+# as DS-GVO at least as often as DSGVO, and the TTDSG, DS-GVO-Anpassungsgesetze and the
+# Länder acts (LDSG-BW) all carry one. Without it the pattern stopped at the hyphen and
+# minted de/gesetz/ds — a phantom law that collected every GDPR article in every German
+# document. Only ONE hyphenated part is allowed, and it must look like an abbreviation
+# continuation, so an ordinary compound noun cannot be swallowed.
+_LAW = (r"(?-i:[A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9]*(?:-[A-ZÄÖÜ][A-Za-zÄÖÜäöüß0-9]*)?"
+        r"(?:\s+(?:[IVX]{1,4}|\d{1,2}(?!\.)))?)")
 LAW_REFERENCE_RE = re.compile(
     rf"(?P<raw>(?:{_COMPACT_ONE}|{_ONE}{_IVM})\s+(?P<law>{_LAW}))", re.IGNORECASE)
 
@@ -138,7 +151,8 @@ def _expand_compact(raw: str) -> str:
 
 
 def _canonical_parts(canonical: str) -> tuple[str, str] | None:
-    m = re.match(r"^(?P<prefix>§|Art\.)\s+(?P<body>.+?)\s+(?P<law>[A-ZÄÖÜ][\wÄÖÜäöüß]*(?:\s+\d+)?)$",
+    m = re.match(r"^(?P<prefix>§|Art\.)\s+(?P<body>.+?)\s+"
+                 r"(?P<law>[A-ZÄÖÜ][\wÄÖÜäöüß]*(?:-[A-ZÄÖÜ][\wÄÖÜäöüß]*)?(?:\s+\d+)?)$",
                  canonical)
     if not m:
         return None
@@ -159,6 +173,13 @@ def _eu_pinpoint(pinpoint: str) -> str:
     sub = re.search(r"(?i)\b(?:Abs(?:atz)?\.?|Nrn?\.?|Nummer)\s*(\d+[a-z]?)", pinpoint)
     if sub:
         out += f"({sub.group(1)})"
+    # The lettered point — "lit. f" / "Buchst. a" — is a real Formex anchor level, and
+    # in data-protection law it is usually the whole point of the citation: Article 6(1)
+    # lists six lawful bases and only (f) is legitimate interests.
+    letter = re.search(r"(?i)\b(?:lit(?:t(?:era)?)?\.?|Buchst(?:abe)?\.?)\s*([a-z])\b",
+                       pinpoint)
+    if letter:
+        out += f"({letter.group(1).casefold()})"
     return out
 
 
@@ -185,7 +206,9 @@ def law_citations(text: str) -> list[Citation]:
             if not parts:
                 continue
             law, pinpoint = parts
-            eu_id = _EU_LAW_IDS.get(re.sub(r"\s+", "", law).upper())
+            # DS-GVO / DSGVO / DS-GVO are one instrument; fold the separators away
+            # before the lookup so the spelling doesn't decide whether it resolves.
+            eu_id = _EU_LAW_IDS.get(re.sub(r"[\s.-]+", "", law).upper())
             found.append(Citation(
                 raw=raw, entity_kind="regulation" if eu_id else "act",
                 candidate_id=eu_id or law_id(law),
