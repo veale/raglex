@@ -195,9 +195,9 @@ export function App() {
   }, [restoreTo]);
 
   // open a document, optionally deep-linking to a pinpointed section (JADE-style)
-  const open = (id: string, anchor?: string) => {
+  const open = (id: string, anchor?: string, replace = false) => {
     if (!id) return;
-    pushBack();
+    if (!replace) pushBack();
     setDocId(id); setPinpoint(anchor || null); setTab("document");
   };
   const openGraph = (id: string) => {

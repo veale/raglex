@@ -68,7 +68,7 @@ def unzip_formex_contents(raw: bytes) -> list[bytes]:
 # Title children (the article's own num + heading) — its label, dropped from the
 # body; numbered paragraphs and list points start new lines (read as a list).
 _FMX_SKIP = {"ti.art", "sti.art"}
-_FMX_LINES = {"parag", "item"}
+_FMX_LINES = {"parag", "item", "ti.art", "sti.art"}
 
 
 def _label(article: ET.Element) -> str:
@@ -77,6 +77,32 @@ def _label(article: ET.Element) -> str:
     num = " ".join(element_text(ti).split()) if ti is not None else "Article"
     heading = " ".join(element_text(sti).split()) if sti is not None else ""
     return f"{num} {heading}".strip()
+
+
+def _act_articles(root: ET.Element) -> list[ET.Element]:
+    """The instrument's own articles, excluding quoted replacement legislation.
+
+    An amending article embeds the replacement text for another instrument as real
+    ``<ARTICLE>`` elements under ``<QUOT.S>``.  Walking every descendant promoted those
+    quotations into this act's provision index (UCPD Article 14 was followed by spurious
+    Articles 1, 3a and 9 belonging to other directives).  Keep the quoted text inside the
+    outer amendment body, but only the outer article is independently citable here.
+    """
+    parents: dict[ET.Element, ET.Element] = {
+        child: parent for parent in root.iter() for child in parent
+    }
+    out: list[ET.Element] = []
+    for article in (e for e in root.iter() if localname(e.tag) == "ARTICLE"):
+        parent = parents.get(article)
+        nested = False
+        while parent is not None:
+            if localname(parent.tag) in {"ARTICLE", "QUOT.S"}:
+                nested = True
+                break
+            parent = parents.get(parent)
+        if not nested:
+            out.append(article)
+    return out
 
 
 def _recital_blocks(root: ET.Element) -> list[tuple[str, str, str]]:
@@ -179,7 +205,7 @@ def parse_formex_legislation(raw: bytes) -> ParsedDoc:
     if ti is not None:
         title = " ".join(element_text(ti).split()) or None
 
-    articles = [e for e in root.iter() if localname(e.tag) == "ARTICLE"]
+    articles = _act_articles(root)
     # recitals first (preamble), then the enacting articles — in document order
     blocks: list[tuple[str, str, str]] = _recital_blocks(root)
     blocks += [(_label(a), "article", flow_text(a, skip_tags=_FMX_SKIP, line_tags=_FMX_LINES))

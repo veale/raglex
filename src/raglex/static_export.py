@@ -431,6 +431,22 @@ class StaticLawExporter:
                 if relation["extracted_via"] != "inferred"
                 and relation["src_id"] != stable_id
             ]
+            direct_keys = {
+                (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
+                for r in relations
+            }
+            for inherited in cat.version_inherited_mentions_for(
+                    stable_id, limit=20000):
+                projected = dict(inherited)
+                key = (
+                    projected["src_id"], projected["dst_anchor"],
+                    projected["context_start"], projected["context_end"],
+                )
+                if key in direct_keys:
+                    continue
+                projected["dst_id"] = stable_id
+                projected["is_version_inherited"] = True
+                relations.append(projected)
             provision_mappings = [dict(row) for row in cat.provision_mappings(stable_id)]
             for inherited in cat.inherited_mentions_for(stable_id, limit=5000):
                 projected = dict(inherited)
@@ -498,6 +514,9 @@ class StaticLawExporter:
                 mentions_by_key: dict[str, int] = {"all": len(source_relations)}
                 inherited_mentions_by_key: dict[str, int] = {
                     "all": sum(bool(r.get("is_inherited")) for r in source_relations)}
+                version_mentions_by_key: dict[str, int] = {
+                    "all": sum(bool(r.get("is_version_inherited"))
+                               for r in source_relations)}
                 labels_by_key: dict[str, set[str]] = {"all": set()}
                 target_keys: set[str] = set()
                 for relation in sorted(
@@ -517,6 +536,9 @@ class StaticLawExporter:
                         if relation.get("is_inherited"):
                             inherited_mentions_by_key[key] = \
                                 inherited_mentions_by_key.get(key, 0) + 1
+                        if relation.get("is_version_inherited"):
+                            version_mentions_by_key[key] = \
+                                version_mentions_by_key.get(key, 0) + 1
                         if label:
                             labels_by_key.setdefault(key, set()).add(label)
 
@@ -559,7 +581,9 @@ class StaticLawExporter:
                     "mentions": len(source_relations),
                     "mentions_by_key": mentions_by_key,
                     "inherited_mentions_by_key": inherited_mentions_by_key,
+                    "version_mentions_by_key": version_mentions_by_key,
                     "has_inherited": bool(inherited_mentions_by_key["all"]),
+                    "has_version_inherited": bool(version_mentions_by_key["all"]),
                     "labels_by_key": {
                         key: sorted(labels) for key, labels in labels_by_key.items()
                     },
@@ -1282,7 +1306,8 @@ _SCRIPT = r"""
     const details = [group.jurisdiction, kindNames[group.kind] || group.kind,
       group.court, group.source_label,
       `${number(mentionsForSelection)} ${mentionsForSelection === 1 ? "mention" : "mentions"}`,
-      group.inherited_mentions_by_key[state.key] ? "includes previous-law lineage" : null]
+      group.inherited_mentions_by_key[state.key] ? "includes previous-law lineage" : null,
+      group.version_mentions_by_key[state.key] ? "includes citations to the base act" : null]
       .filter(Boolean).map(esc).join(" · ");
     const excerpts = excerptsForSelection.length
       ? excerptsForSelection.map(snippetHtml).join("")

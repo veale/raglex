@@ -82,32 +82,27 @@ The general carry-forward grammar therefore remains useful, but a source receive
 document-wide home only when its adapter can prove a single governing instrument.
 Multi-decision registers deliberately receive none.
 
-## UCPD database audit (production, 30 July 2026)
+## UCPD database verification (production, 31 July 2026)
 
-The migrated database is healthy and the audit found:
+Production now holds the base act and all three Cellar sector-0 records. The reader
+correctly identifies `02005L0029-20220528` as the latest consolidation applicable today
+and `02005L0029-20260927` as a held future snapshot. The base act and both usable dated
+packages expose Annex I and Annex II as citable `annex` segments; the earliest 2005
+expression remains metadata-only where Cellar supplies no usable English manifestation.
 
-- `32005L0029` is held with full structured text, but only as document version 1.
-- No sector-0 UCPD consolidation and no archived `document_versions` row is held.
-- 2,517 graph edges from 523 documents resolve to the base UCPD. 1,988 carry a
-  provision/recital pinpoint; 1,595 are distinguishable inferred carry-forwards.
-- Citation observations and graph edges are not fully synchronized. Of 523 documents
-  with extracted UCPD observations, 514 also have a graph edge. Nine do not: the UCPD
-  itself is an intentionally suppressed self-link, leaving eight genuine relation-stage
-  backfill documents (six Irish cases, one Commission preparatory document and one UK SI).
-- No citation alias currently points to the UCPD. The normalizers emit its canonical
-  CELEX directly, so aliases are not required for the normal path.
-- Four structured corrigendum targets (`32005L0029R(01)`–`R(04)`) are pending because
-  the corrigenda themselves are not held.
-- The old CELLAR transposition predicate yielded zero UCPD measures. The corrected
-  current-CDM query returns 233 sector-7 entries across all EU Member States plus the
-  historical UK notifications (28 country codes in total). Those will become
-  `transposes` edges on the next UCPD import.
+Opening the base UCPD in the web reader or MCP now defaults to the 2022 consolidation and
+offers an explicit route to the original act. Literal citations remain attached to
+`32005L0029` as evidence, but the consolidation's read model projects those mentions onto
+the same Article/Recital anchor and combines them with direct citations to the dated
+expression. This also surfaces a citation to a newly inserted provision on the first
+consolidation that contains it. The projection is marked as version-inherited and is used
+by the API/MCP and static exporter; it is not another fabricated citation row.
 
-So the answer to “does everything that names the UCPD link to it?” is almost, but not
-yet completely: canonical extraction is sound, while eight non-self documents need
-their relation stage rerun. Nothing currently links to a consolidated UCPD because
-none is held; after the consolidation import, `applicable_version` backfills that
-second temporal link.
+A complete resumable sector-0 Cellar walk and a local all-held-EU annex repair are
+available as first-class jobs and scheduled maintenance. Opening a base EU act with no
+held version also starts a deduplicated targeted Cellar sync automatically. Targeted sync
+only processes that act's discovered versions; the source-wide unfinished citation
+backlog belongs exclusively to the full sector-0 sweep.
 
 Repeatable audit queries:
 

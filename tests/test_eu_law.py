@@ -143,6 +143,7 @@ def test_targeted_consolidation_sync_stamps_successful_lookup(tmp_path, monkeypa
         "celex": "32016R0679",
         "include_consolidations": "true",
     }
+    assert called["params"]["resume_unfinished"] is False
     with facade._open() as (cat, _rs, _ts):
         assert cat.document_meta("32016R0679")["consolidations_checked_at"]
 
@@ -259,6 +260,85 @@ def test_legislative_status_identifies_latest_and_historical_consolidations(tmp_
         ("02016R0679-20240101", "consolidation"),
         ("02016R0679-20180525", "consolidation"),
     ]
+
+
+def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
+    from raglex.core.models import ExtractedVia, ResolutionStatus, TypedRelation
+
+    f = _leg_facade(tmp_path)
+    current = "02016R0679-20240101"
+    with f._open() as (cat, _r, _t):
+        for sid, kind in (
+            (current, DocType.LEGISLATION),
+            ("case-base", DocType.JUDGMENT),
+            ("case-direct", DocType.JUDGMENT),
+        ):
+            cat.upsert_document(Record(
+                source="eu-legislation" if kind == DocType.LEGISLATION else "user-import",
+                stable_id=sid, doc_type=kind, title=sid,
+                extracted_via=ExtractedVia.STRUCTURED,
+            ))
+        cat.add_relations(current, [TypedRelation(
+            relationship_type=RelationshipType.CONSOLIDATES,
+            raw_citation_string="32016R0679", dst_id="32016R0679",
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+        cat.add_relations("case-base", [
+            TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string="GDPR Article 1", dst_id="32016R0679",
+                dst_anchor="Article 1", extracted_via=ExtractedVia.MANUAL,
+                resolution_status=ResolutionStatus.RESOLVED,
+            ),
+            # A provision introduced after the original text: its base-act identity is
+            # still useful, but the dated consolidation is where it can be read.
+            TypedRelation(
+                relationship_type=RelationshipType.MENTIONS,
+                raw_citation_string="GDPR Article 1a", dst_id="32016R0679",
+                dst_anchor="Article 1a", extracted_via=ExtractedVia.MANUAL,
+                resolution_status=ResolutionStatus.RESOLVED,
+            ),
+        ])
+        cat.add_relations("case-direct", [TypedRelation(
+            relationship_type=RelationshipType.APPLIES,
+            raw_citation_string=current, dst_id=current, dst_anchor="Article 2",
+            extracted_via=ExtractedVia.MANUAL,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+
+    base = f.get_document("32016R0679")
+    assert base["canonical_read"]["stable_id"] == current
+    consolidated = f.get_document(current)
+    assert consolidated["original_act"]["stable_id"] == "32016R0679"
+    assert consolidated["cited_by_count"] == 2
+    mentions = f.document_mentions(current)
+    assert set(mentions["by_anchor"]) == {"Article 1", "Article 1a", "Article 2"}
+    assert mentions["version_inheritance"]["from_base_act"] == "32016R0679"
+    assert mentions["by_anchor"]["Article 1a"][0]["version_inherited"] is True
+
+    redirected = f.lookup(
+        citation="32016R0679", cited_by=False, similar=False)
+    assert redirected["stable_id"] == current
+    assert redirected["requested_stable_id"] == "32016R0679"
+    original = f.lookup(
+        citation="32016R0679", cited_by=False, similar=False, original=True)
+    assert original["stable_id"] == "32016R0679"
+
+
+def test_formex_quoted_amendments_are_not_promoted_to_act_articles():
+    from raglex.formats.formex import parse_formex_legislation
+
+    raw = b"""<ACT><ENACTING.TERMS>
+      <ARTICLE><TI.ART>Article 14</TI.ART><P>Directive X is amended:</P>
+        <QUOT.S><ARTICLE><TI.ART>Article 1</TI.ART>
+          <P>The replacement purpose.</P></ARTICLE></QUOT.S>
+      </ARTICLE>
+      <ARTICLE><TI.ART>Article 15</TI.ART><P>Review.</P></ARTICLE>
+    </ENACTING.TERMS></ACT>"""
+    parsed = parse_formex_legislation(raw)
+    assert [s.label for s in parsed.segments] == ["Article 14", "Article 15"]
+    assert "Article 1 The replacement purpose." in parsed.text
 
 
 def test_implicit_repeal_is_not_a_repeal():

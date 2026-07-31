@@ -1210,6 +1210,30 @@ class Facade:
             "degraded": degraded,
         }
 
+    def canonical_read_target(self, stable_id: str, *, original: bool = False) -> dict:
+        """Resolve an ordinary legislation read to today's applicable consolidation.
+
+        Explicit dated versions are stable. ``original=True`` also keeps a base act
+        literal. The small provenance envelope lets web/MCP callers redirect without
+        concealing what the user or agent originally requested.
+        """
+        with self._open() as (cat, _rs, _ts):
+            doc = cat.get_document(stable_id)
+            if doc is None:
+                return {"requested_stable_id": stable_id, "stable_id": stable_id,
+                        "redirected": False}
+            if original or doc["doc_type"] != "legislation" \
+                    or cat.consolidation_base_for(stable_id):
+                return {"requested_stable_id": stable_id, "stable_id": stable_id,
+                        "redirected": False}
+            current = cat.applicable_consolidation(stable_id)
+        return {
+            "requested_stable_id": stable_id,
+            "stable_id": current[0] if current else stable_id,
+            "as_at": current[1] if current else None,
+            "redirected": bool(current),
+        }
+
     def get_document(self, stable_id: str) -> dict:
         """The reader/citator payload for one document. Cached (see _doc_cache): assembling
         a mega-authority's cited-by panel is expensive, and it's re-opened far more often
@@ -1242,6 +1266,15 @@ class Facade:
             doc = cat.get_document(stable_id)
             if doc is None:
                 return {"error": "not found", "stable_id": stable_id}
+            meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
+            version_base = (
+                cat.consolidation_base_for(stable_id)
+                if doc["doc_type"] == "legislation" else None
+            )
+            canonical_version = (
+                cat.applicable_consolidation(stable_id)
+                if doc["doc_type"] == "legislation" and not version_base else None
+            )
             rels = [dict(r) for r in cat.relations_for(stable_id)]
             suppressed = [r for r in rels if r["relationship_type"] == "suppressed"]
             # "Cited by" (JADE's reverse-citation gloss) — one row per citing document
@@ -1255,8 +1288,30 @@ class Facade:
             # (a prime suspect in the pool-exhaustion freezes). `inferred` edges
             # (heuristic carry-forwards) are excluded there and counted apart.
             ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
-            incoming = self._assemble_cited_by(
-                cat, cat.top_citing_edges(ids_self, limit=600), cap=200)
+            direct_edges = [dict(r) for r in cat.top_citing_edges(ids_self, limit=600)]
+            version_edges: list[dict] = []
+            for row in cat.version_inherited_mentions_for(stable_id, limit=5000):
+                projected = dict(row)
+                projected["version_inherited"] = True
+                projected["dst_id"] = stable_id
+                version_edges.append(projected)
+            # A citer can name both the base CELEX and the dated expression in the same
+            # passage. Prefer its literal direct-to-version edge and do not paint it twice.
+            seen_edges = {
+                (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
+                for r in direct_edges
+            }
+            version_edges = [
+                r for r in version_edges
+                if (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
+                not in seen_edges
+            ]
+            combined_edges = [*direct_edges, *version_edges]
+            combined_edges.sort(
+                key=lambda r: float(r.get("src_pagerank") or 0.0), reverse=True)
+            incoming = self._assemble_cited_by(cat, combined_edges, cap=200)
+            version_inherited_incoming = self._assemble_cited_by(
+                cat, version_edges, cap=200)
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
             mapping_rows = [dict(r) for r in cat.provision_mappings(stable_id)]
             inherited_edges = [dict(r) for r in cat.inherited_mentions_for(
@@ -1274,7 +1329,6 @@ class Facade:
                     inherited_by_mapping.get(int(row["mapping_id"]), set()))
             inferred_total = cat.inferred_citer_count(ids_self)
             preparatory_count = cat.citer_count_by_doc_type(ids_self, "preparatory")
-            meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
             # Summary line: distinct authorities this document cites, split into cases vs
             # statutory material by the citation's entity_kind (OSCOLA's two source families).
             _STATUTE = {"act", "regulation", "directive", "treaty", "eu_instrument"}
@@ -1324,12 +1378,33 @@ class Facade:
                 "relations": [r for r in rels if r["relationship_type"] != "suppressed"],
                 "suppressed_count": len(suppressed),
                 "incoming": incoming,
-                "cited_by_count": cited_by_total + len(
-                    inherited_citer_ids - direct_citer_ids),
+                "cited_by_count": (
+                    cat.version_combined_citer_count(stable_id)
+                    if version_base else cited_by_total + len(
+                        inherited_citer_ids - direct_citer_ids)
+                ),
                 "direct_cited_by_count": cited_by_total,
+                "version_inherited_incoming": version_inherited_incoming,
+                "version_inherited_cited_by_count": len({
+                    row["src_id"] for row in version_edges
+                }),
                 "inherited_incoming": inherited_incoming,
                 "inherited_cited_by_count": len(inherited_citer_ids),
                 "provision_mappings": mapping_rows,
+                # Reader/MCP canonicalisation is explicit and reversible. A base act
+                # opens at the latest consolidation applicable today; a dated snapshot
+                # never redirects merely because a newer/future one exists.
+                "canonical_read": (
+                    {"stable_id": canonical_version[0], "as_at": canonical_version[1],
+                     "requested_stable_id": stable_id}
+                    if canonical_version else None
+                ),
+                "original_act": (
+                    {"stable_id": version_base,
+                     "title": (cat.get_document(version_base) or {})["title"]
+                     if cat.get_document(version_base) else version_base}
+                    if version_base else None
+                ),
                 "preparatory_documents": {
                     "available": bool(preparatory_count),
                     "count": preparatory_count,
@@ -1671,7 +1746,26 @@ class Facade:
         could narrow to.
         """
         with self._open() as (cat, _rs, ts):
-            rels = [r for r in cat.relations_to(stable_id) if r["extracted_via"] != "inferred"]
+            rels = [
+                dict(r) for r in cat.relations_to(stable_id)
+                if r["extracted_via"] != "inferred"
+            ]
+            direct_keys = {
+                (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
+                for r in rels
+            }
+            version_base = cat.consolidation_base_for(stable_id)
+            for row in cat.version_inherited_mentions_for(stable_id, limit=20000):
+                projected = dict(row)
+                key = (
+                    projected["src_id"], projected["dst_anchor"],
+                    projected["context_start"], projected["context_end"],
+                )
+                if key in direct_keys:
+                    continue
+                projected["dst_id"] = stable_id
+                projected["version_inherited"] = True
+                rels.append(projected)
             if anchor and exact:
                 # A specific SUB-provision: the sub-paragraph mention badges want only the
                 # documents pinned to exactly this pinpoint (Article 47(1)), not the whole
@@ -1743,6 +1837,8 @@ class Facade:
                     "src_kind": self._doc_kind(sdoc["source"], sdoc["doc_type"], sdoc["court"]),
                     "src_doc_type": sdoc["doc_type"],
                     "authority": _authority(sid, sdoc), "count": len(rs),
+                    "version_inherited_count": sum(
+                        bool(r.get("version_inherited")) for r in rs),
                     "pagerank": _pagerank(sid, sdoc),
                     "anchors": anchors, "_rels": rs,
                 })
@@ -1872,11 +1968,18 @@ class Facade:
                         "src_id": r["src_id"],
                         "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)) if sdoc else None,
                         "authority": _authority(r["src_id"], sdoc),
+                        "version_inherited": bool(r.get("version_inherited")),
                     }
+                elif r.get("version_inherited"):
+                    seen[r["src_id"]]["version_inherited"] = True
             by_anchor = {lab: sorted(v.values(), key=lambda x: -x["authority"])
                          for lab, v in by_anchor.items()}
             end = (offset + limit) if limit else total_groups
             return {"target": stable_id, "anchor": anchor,
+                    "version_inheritance": (
+                        {"from_base_act": version_base}
+                        if version_base else None
+                    ),
                     "jurisdiction": want_j, "kind": kind,
                     "facets": facets,
                     "total": total_groups, "groups": page,
@@ -1937,13 +2040,18 @@ class Facade:
                     "note": ("Not held, so there is nothing in the corpus citing it. "
                              "lookup() it first (it will fetch the authority if it can), "
                              "then browse its citers here.")}
+        read_target = self.canonical_read_target(held)
+        held = read_target["stable_id"]
         # Cache per full arg tuple: loading a mega-authority's incoming edges costs seconds
         # (see cited_by_breakdown), and the whole point of this tool is to be re-called as
         # the agent pages / re-sorts / returns to the list — so the repeats must be instant.
         key = f"citing:{held}:{anchor}:{sort}:{jurisdiction}:{kind}:{offset}:{limit}:{int(snippets)}"
-        return self._cached(key, 180,
-                            lambda: self._citing_documents(held, anchor, sort, jurisdiction,
-                                                           kind, offset, limit, snippets))
+        def build() -> dict:
+            result = self._citing_documents(
+                held, anchor, sort, jurisdiction, kind, offset, limit, snippets)
+            result["read_target"] = read_target
+            return result
+        return self._cached(key, 180, build)
 
     def _citing_documents(self, held, anchor, sort, jurisdiction, kind, offset, limit,
                           snippets) -> dict:
@@ -2331,7 +2439,7 @@ class Facade:
     # -- the agent's front door: resolve a citation, fetch it if we can, return it -----
     def lookup(self, *, citation: str, pincite: str | None = None, context: int = 1,
                cited_by: bool = True, similar: bool = True, autofetch: bool = True,
-               full: bool = False) -> dict:
+               full: bool = False, original: bool = False) -> dict:
         """Resolve a citation (or a stable_id) and return one self-contained answer.
 
         This is the retrieval front door — it folds fetching in as a silent fallback rather
@@ -2403,9 +2511,26 @@ class Facade:
                 held_id, fetched = hr["document"], True
         # 3a. held → the rich answer
         if held_id:
-            return self._lookup_held(held_id, raw=raw, pincite=pincite, context=context,
-                                     cited_by=cited_by, similar=similar, fetched=fetched,
-                                     full=full, pincite_inferred=pincite_inferred)
+            requested_held_id = held_id
+            with self._open() as (cat, _rs, _ts):
+                if not original and not cat.consolidation_base_for(held_id):
+                    current = cat.applicable_consolidation(held_id)
+                    if current:
+                        held_id = current[0]
+            answer = self._lookup_held(
+                held_id, raw=raw, pincite=pincite, context=context,
+                cited_by=cited_by, similar=similar, fetched=fetched,
+                full=full, pincite_inferred=pincite_inferred,
+            )
+            if held_id != requested_held_id:
+                answer["requested_stable_id"] = requested_held_id
+                answer["canonical_read_redirected"] = True
+                answer["note"] = (
+                    f"Opened the latest consolidation applicable today ({held_id}) "
+                    f"instead of the base act ({requested_held_id}). "
+                    "Pass original=true to inspect the original/base text instead."
+                )
+            return answer
         # 3b. not held → external links (the agent reads / scrapes it itself)
         links = self.reference_links(ref=cand or raw, raw=raw)
         bucket = _candidate_jurisdiction(cand) if cand else None
@@ -2445,6 +2570,7 @@ class Facade:
             # every way this authority is cited — parallel citations & shorthands
             "also_cited_as": doc.get("also_cited_as"),
             "cited_by_count": doc.get("cited_by_count"),
+            "original_act": doc.get("original_act"),
         }
         # text: the pincited passage (+ context scale), a capped full read, or — by
         # default — a short preview plus the structural outline, so the agent decides what
@@ -5537,7 +5663,13 @@ class Facade:
             max_pages=None,
             options={"celex": base, "include_consolidations": "true"},
             force_full=True,
-            resume_unfinished=True,
+            # The adapter rediscovers this act's small, complete version set on every
+            # retry, and Pipeline carries any of THOSE held-but-unextracted records into
+            # extraction.  A source-wide unfinished scan here turns a three-version
+            # reader-triggered lookup into a ~20k-document EU citation backfill, making
+            # the targeted job look frozen and competing with the dedicated sector-0
+            # sweep.  Source-wide cursor recovery belongs to that sweep, not this sync.
+            resume_unfinished=False,
             on_progress=on_progress,
             cancel_check=cancel_check,
         )

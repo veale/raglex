@@ -2203,8 +2203,20 @@ function StaticExportMenu({ id }: { id: string }) {
   );
 }
 
-export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
-  const [doc, err, reload] = useAsync(() => api.document(id), [id]);
+export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string, replace?: boolean) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
+  const [displayId, setDisplayId] = useState(id);
+  const [showingOriginal, setShowingOriginal] = useState(false);
+  useEffect(() => {
+    setDisplayId(id);
+    setShowingOriginal(false);
+  }, [id]);
+  const [doc, err, reload] = useAsync(() => api.document(displayId), [displayId]);
+  const canonicalRead = doc?.canonical_read?.stable_id;
+  useEffect(() => {
+    if (!showingOriginal && canonicalRead && canonicalRead !== id) {
+      open(canonicalRead, pinpoint || undefined, true);
+    }
+  }, [canonicalRead, showingOriginal, id, pinpoint]);
   const [pinAnchor, setPinAnchor] = useState("");
   const [editing, setEditing] = useState(false);
   // Options (find-citing, graph, fix-metadata) and provenance metadata are hidden by default
@@ -2308,6 +2320,24 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
           </div>
         )}
       </div>
+      {doc.original_act && !showingOriginal && (
+        <div className="leg-version-state">
+          Reading the latest consolidation applicable today.{" "}
+          <button type="button" className="mini" onClick={() => {
+            setShowingOriginal(true);
+            setDisplayId(doc.original_act.stable_id);
+          }}>View the original act</button>
+        </div>
+      )}
+      {showingOriginal && (
+        <div className="leg-version-state">
+          Reading the original/base act.{" "}
+          <button type="button" className="mini" onClick={() => {
+            setShowingOriginal(false);
+            setDisplayId(id);
+          }}>Return to the applicable consolidation</button>
+        </div>
+      )}
       {d.doc_type === "legislation" && <LegStatusBanner id={d.stable_id} open={open} />}
       <div className="panel">
         <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}

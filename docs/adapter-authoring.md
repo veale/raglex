@@ -68,3 +68,17 @@ with an enumerable version series should expose a resumable full-series mode rat
 forcing one lookup per base act. For EU law this is the complete Cellar sector-0 sweep
 (`consolidations_only=true`); targeted sector-3 imports should use
 `include_consolidations=true`.
+
+The read model is also part of this contract. When a base act has a dated consolidation
+applicable today, ordinary web and MCP reads default to that consolidation and expose an
+explicit route back to the original text. A consolidation inherits literal mention edges
+to its base act with the same provision anchor, while preserving direct citations to the
+dated expression. Never rewrite the literal edge: project it at read/export time and mark
+it as version-inherited. This lets unchanged Articles share their citers and lets a newly
+inserted Article 1a surface on the first version that actually contains it.
+
+Formex amendment quotations require the same structural care as annexes. Replacement
+text for another instrument may contain genuine nested `<ARTICLE>` elements under
+`<QUOT.S>`; retain that prose inside the outer amending Article, but never promote those
+nested headings into the current act's provision index. Add a regression fixture whenever
+a structured source embeds one law inside another.

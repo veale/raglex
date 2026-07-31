@@ -1246,6 +1246,113 @@ class Catalogue:
             tuple(params),
         ).fetchall()
 
+    def consolidation_base_for(self, version_id: str) -> str | None:
+        """The base act represented by a dated consolidation, if ``version_id`` is one.
+
+        Read this from the durable lineage edge rather than reconstructing an identifier:
+        non-EU adapters also publish consolidations, and their ids do not follow CELEX.
+        """
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(dst_id, candidate_id) AS base_id
+            FROM relations
+            WHERE src_id = ? AND relationship_type = 'consolidates'
+              AND COALESCE(dst_id, candidate_id) IS NOT NULL
+            ORDER BY (resolution_status = 'resolved') DESC, relation_id
+            LIMIT 1
+            """,
+            (version_id,),
+        ).fetchone()
+        return str(row["base_id"]) if row and row["base_id"] else None
+
+    def applicable_consolidation(
+        self, base_id: str, on_date: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Latest held *consolidation* applicable on ``on_date``.
+
+        Point-in-time snapshots are intentionally excluded: opening an ordinary act may
+        default to its current consolidated text, but must never jump to an arbitrary
+        historical snapshot merely because one has been fetched.
+        """
+        cutoff = str(on_date or date.today().isoformat())[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
+            cutoff = date.today().isoformat()
+        rows = self.conn.execute(
+            """
+            SELECT d.stable_id, d.meta_json, r.dst_anchor
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE (r.dst_id = ? OR r.candidate_id = ?)
+              AND r.relationship_type = 'consolidates'
+            """,
+            (base_id, base_id),
+        ).fetchall()
+        versions = sorted({
+            (str(row["stable_id"]), version_date)
+            for row in rows
+            if (version_date := self._version_date(row)) and version_date <= cutoff
+        }, key=lambda item: (item[1], item[0]))
+        return versions[-1] if versions else None
+
+    def version_inherited_mentions_for(
+        self, version_id: str, *, limit: int = 5000,
+    ) -> list:
+        """Literal mentions of a consolidation's base act, projected onto the version.
+
+        The original relation is never rewritten.  Its anchor is retained, so matching
+        Articles/sections share their citers automatically and a citation to a provision
+        introduced only in the consolidation (for example Article 1a) can surface there
+        even though that anchor is absent from the enacted text.  Direct citations to the
+        dated version are combined by callers and take precedence when deduplicating.
+        """
+        base_id = self.consolidation_base_for(version_id)
+        if not base_id:
+            return []
+        return self.conn.execute(
+            """
+            SELECT r.*, ? AS version_inherited_from_id,
+                   ? AS version_inherited_current_id,
+                   d.title AS version_inherited_from_title,
+                   COALESCE(a.pagerank, 0) AS src_pagerank
+            FROM relations r
+            LEFT JOIN documents d ON d.stable_id = ?
+            LEFT JOIN doc_authority a ON a.doc_id = r.src_id
+            WHERE (r.dst_id = ? OR r.candidate_id = ?)
+              AND r.src_id NOT IN (?, ?)
+              AND r.relationship_type IN (
+                'mentions','interprets','applies','considers','follows',
+                'distinguishes','overrules','cites_for_fact'
+              )
+              AND r.extracted_via <> 'inferred'
+            ORDER BY src_pagerank DESC, r.relation_id
+            LIMIT ?
+            """,
+            (
+                base_id, version_id, base_id, base_id, base_id,
+                version_id, base_id, max(1, min(int(limit), 20000)),
+            ),
+        ).fetchall()
+
+    def version_combined_citer_count(self, version_id: str) -> int | None:
+        """Distinct direct-or-base citers for a consolidation; ``None`` for a base act."""
+        base_id = self.consolidation_base_for(version_id)
+        if not base_id:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT COUNT(DISTINCT src_id) AS n
+            FROM relations
+            WHERE (dst_id IN (?, ?) OR candidate_id = ?)
+              AND src_id NOT IN (?, ?)
+              AND relationship_type IN (
+                'mentions','interprets','applies','considers','follows',
+                'distinguishes','overrules','cites_for_fact'
+              )
+              AND extracted_via <> 'inferred'
+            """,
+            (version_id, base_id, base_id, version_id, base_id),
+        ).fetchone()
+        return int(row["n"] or 0)
+
     # -- extracted citations (§5, the audit/observation layer) -------------
     def add_citations(self, src_id: str, rows: list[dict], *, commit: bool = True) -> None:
         """Bulk-record extracted citations (one commit; ``commit=False`` for the

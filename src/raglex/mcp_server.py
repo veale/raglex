@@ -203,7 +203,7 @@ def build_server(config: Config | None = None) -> MCPServer:
     @mcp.tool(annotations=_FETCHING)
     def lookup(citation: str, pincite: Optional[str] = None, context: int = 1,
                full: bool = False, cited_by: bool = True, similar: bool = True,
-               autofetch: bool = True) -> dict:
+               autofetch: bool = True, original: bool = False) -> dict:
         """Resolve a CITATION, a statute-by-name, or a stable_id and return one
         self-contained answer. This is the front door — start here.
 
@@ -217,6 +217,10 @@ def build_server(config: Config | None = None) -> MCPServer:
         filter / sort every citer of that provision, call citing_documents(target, anchor)
         — see ``citing.browse``.
 
+        Legislation with a held consolidation opens at the latest version applicable today.
+        The reply identifies the base act; pass ``original=true`` to inspect its original
+        text instead. Explicit historical/future dated ids are never redirected.
+
         NO PINPOINT → metadata + a short text PREVIEW + the structural outline (so you can
         pick a provision to pincite), plus document-level ``cited_by``. ``full=true`` returns
         the whole (capped) text — prefer a pincite, it is exact and cheap. Also returned: the
@@ -227,7 +231,8 @@ def build_server(config: Config | None = None) -> MCPServer:
         can't be fetched do you get an external LII/BAILII URL to read yourself. You rarely
         need to harvest by hand."""
         return facade.lookup(citation=citation, pincite=pincite, context=context, full=full,
-                             cited_by=cited_by, similar=similar, autofetch=autofetch)
+                             cited_by=cited_by, similar=similar, autofetch=autofetch,
+                             original=original)
 
     @mcp.tool(annotations=_READ_ONLY)
     def citing_documents(target: str, anchor: Optional[str] = None, sort: str = "pagerank",
@@ -261,10 +266,15 @@ def build_server(config: Config | None = None) -> MCPServer:
                                      query=query, limit=limit)
 
     @mcp.tool(annotations=_READ_ONLY)
-    def get_document(stable_id: str) -> dict:
+    def get_document(stable_id: str, original: bool = False) -> dict:
         """Full document: metadata, tags, relations, attachments, and a
-        ``preparatory_documents`` availability/count flag when legislative history exists."""
-        return facade.get_document(stable_id)
+        ``preparatory_documents`` availability/count flag when legislative history exists.
+        Base legislation opens at today's applicable consolidation; pass
+        ``original=true`` for the original/base text."""
+        target = facade.canonical_read_target(stable_id, original=original)
+        result = facade.get_document(target["stable_id"])
+        result["read_target"] = target
+        return result
 
     @mcp.tool(annotations=_READ_ONLY)
     def preparatory_documents(stable_id: str, limit: int = 50) -> dict:
@@ -281,20 +291,29 @@ def build_server(config: Config | None = None) -> MCPServer:
         }
 
     @mcp.tool(annotations=_READ_ONLY)
-    def get_document_body(stable_id: str) -> dict:
+    def get_document_body(stable_id: str, original: bool = False) -> dict:
         """The document's full text + structural segments (legislation articles /
-        sections, judgment paragraphs) with their citable labels and levels."""
-        return facade.document_body(stable_id)
+        sections, judgment paragraphs) with their citable labels and levels. Base
+        legislation defaults to today's applicable consolidation; pass
+        ``original=true`` to read the original."""
+        target = facade.canonical_read_target(stable_id, original=original)
+        result = facade.document_body(target["stable_id"])
+        result["read_target"] = target
+        return result
 
     @mcp.tool(annotations=_READ_ONLY)
     def get_provision(stable_id: str, label: Optional[str] = None,
-                      char_start: Optional[int] = None, context: int = 1) -> dict:
+                      char_start: Optional[int] = None, context: int = 1,
+                      original: bool = False) -> dict:
         """ONE provision/paragraph of a document by its citable label ("Article 17",
         "s. 45", "[42]") — or by char offset — with N context segments either side and
         the heading breadcrumb. Prefer this over get_document_body when you need to
         quote a single provision exactly: it's pinpoint-accurate and token-cheap."""
-        return facade.get_provision(stable_id, label=label, char_start=char_start,
-                                    context=context)
+        target = facade.canonical_read_target(stable_id, original=original)
+        result = facade.get_provision(
+            target["stable_id"], label=label, char_start=char_start, context=context)
+        result["read_target"] = target
+        return result
 
     @mcp.tool(annotations=_READ_ONLY)
     def graph_neighbours(stable_id: str, relationship_types: Optional[list[str]] = None) -> dict:
