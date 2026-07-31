@@ -401,6 +401,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_hygiene = 0.0
         last_analyze = 0.0
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
+        last_static_bundle = time.time()  # nor republish the export folder on every restart
         last_eu_consolidations = time.time()  # explicit first backfill is queued at deploy
         last_eu_enrich = time.time()
         last_eu_case_names = time.time()  # credentialed webservice — wait a cadence too
@@ -599,6 +600,22 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     started = jobs.start("maintenance-run", "scheduled DB maintenance + repair", {})
                     if started.get("error"):
                         print(f"[watch] maintenance: {started['error']}")
+                # Republish the configured static editions into the export folder — OFF by
+                # default; enabled (and given its cadence) from Settings ▸ Static exports.
+                # Writes the folder only: a scheduled run has no browser to hand a zip to.
+                if (_sched_on("static-bundle")
+                        and time.time() - last_static_bundle
+                        >= (_sched_min("static-bundle") or 10080) * 60):
+                    last_static_bundle = time.time()
+                    from .static_bundle import load_config as _bundle_config
+                    if _bundle_config(f.config).get("items"):
+                        started = jobs.start(
+                            "static-bundle", "scheduled static export to folder",
+                            {"zip": False, "refresh": True})
+                        if started.get("error"):
+                            print(f"[watch] static bundle: {started['error']}")
+                        else:
+                            print("[watch] static bundle: rebuilding the export folder")
                 # Weekly reverse sweep of Cellar's finite sector-0 catalogue. This is more
                 # efficient than walking every base act and asking whether it happens to
                 # have consolidations; held rows deduplicate before any Formex download.

@@ -178,15 +178,31 @@ filters and public-source links; it makes no API requests when opened, so the fi
 used offline or copied directly to GitHub Pages. Where the public page supports it, excerpt
 links include a browser text fragment which attempts to scroll to and highlight the passage.
 PDF links use a page fragment when RagLex has a page anchor. Missing public copies remain in
-the results and are labelled as such. The Settings page's “Static exports” section controls
-the short HTML attribution beneath each exported title.
+the results and are labelled as such.
 
 Administrators can download the same edition from the document page's `…` menu. For a large
 instrument, `POST /export/static-law` starts a durable background build; poll its `job_id` at
 `GET /jobs/{job_id}`, then download from
 `GET /export/static-law.html?id=32016R0679`. Pass `{"id":"32016R0679","refresh":true}` to
-rebuild the saved edition from the current corpus. A cron job can instead run `export-static`
-with a fixed `--output` path before publishing that path to a static host.
+rebuild the saved edition from the current corpus. Static-export jobs skip the job queue, so
+a running import never delays one.
+
+The Settings page's “Static exports” panel builds a **set** of instruments as one small
+website: each row names a statute and the filename it saves as (`gdpr.html`), and every
+build also writes an `index.html` linking them all, with its own title and text. The panel
+holds the shared line shown beneath every exported title, and each row may add a second line
+of its own, beneath it, in that file only; every edition links back to the index. Both accept
+simple HTML (`<a>`, `<b>`, `<i>`, `<u>`, `<br>`) and the placeholders `<dateexported>`,
+`<datetimeexported>`, `<yearexported>` and `<count>`. Each index entry states the date its
+edition was exported.
+
+Every build writes the flat folder given as the export folder (by default
+`<data dir>/exports/site`, beside the catalogue and the stores), replacing same-named files
+in place; “Build and download ZIP” additionally hands the browser a zip of the whole set.
+Because the expensive half of a build (the citing documents and their excerpts) is cached as
+data, editing the shared line, a row's line or the index text needs only the quick re-render,
+not another pass over the corpus. `POST /export/bundle/build` does the same over the API, and
+enabling the `static-bundle` scheduler task republishes the folder on a cadence.
 
 For the web interface, run the API with `uv sync --extra web && uv run raglex serve`, which
 serves on port 8000, and then start the frontend with `cd frontend && npm install && npm run

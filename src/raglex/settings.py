@@ -243,6 +243,8 @@ _SYSTEM_KEYS = frozenset({
     "RAGLEX_ADMIN_PASSKEYS",    # registered WebAuthn credentials (JSON)
     "RAGLEX_MCP_CLIENTS",       # MCP OAuth dynamic-client registrations (JSON)
     "RAGLEX_SCHEDULE",          # per-task scheduler on/off + cadence overrides (JSON)
+    "RAGLEX_STATIC_BUNDLE",     # the static-export set: documents, filenames, notes (JSON)
+    "RAGLEX_STATIC_BUNDLE_LAST",  # last bundle run: when, where, what (JSON)
 })
 
 

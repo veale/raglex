@@ -39,6 +39,8 @@ TASKS: tuple[TaskSpec, ...] = (
     TaskSpec("analyze", True, 1440, "refresh Postgres planner statistics (ANALYZE)"),
     TaskSpec("gazetteer", True, 10080, "top up the statute gazetteer from legislation.gov.uk"),
     TaskSpec("maintenance", False, 1440, "serial DB maintenance + safe repair pass (off by default)"),
+    TaskSpec("static-bundle", False, 10080,
+             "rebuild the configured static editions into the export folder (off by default)"),
     TaskSpec("eu-consolidations", True, 10080,
              "walk Cellar sector-0 and import every dated EU consolidation"),
     TaskSpec("eu-legislation-enrich", False, 1440, "harvest EU act-to-act relationships (repeals/amends/legal-basis) from CELLAR"),

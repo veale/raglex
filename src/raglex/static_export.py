@@ -27,7 +27,7 @@ from .facade import Facade, _anchor_key, _oscola_cite, _row_meta
 
 _PDF_META_KEYS = ("pdf_url", "download_url", "bailii_pdf_url")
 _SOURCE_META_KEYS = ("url", "bailii_url", "gdprhub_url")
-_CACHE_VERSION = 4
+_CACHE_VERSION = 5  # v5 caches the data payload; the page renders from it on download
 
 _DEFAULT_ATTRIBUTION = (
     'Document generated from a dataset held and maintained by '
@@ -82,7 +82,7 @@ def _anchor_suffix(label: str | None) -> str | None:
 class _AttributionSanitiser(HTMLParser):
     """Allow simple editorial markup without letting a setting inject script."""
 
-    _tags = {"a", "em", "strong", "i", "b", "br"}
+    _tags = {"a", "em", "strong", "i", "b", "u", "br", "small"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -111,11 +111,37 @@ class _AttributionSanitiser(HTMLParser):
         self.parts.append(html.escape(data))
 
 
-def _attribution_html() -> str:
+def sanitise_editorial_html(text: str) -> str:
+    """Operator-authored markup, stripped to the handful of tags an editorial note needs."""
     parser = _AttributionSanitiser()
-    parser.feed(os.environ.get("RAGLEX_STATIC_EXPORT_ATTRIBUTION") or _DEFAULT_ATTRIBUTION)
+    parser.feed(text or "")
     parser.close()
     return "".join(parser.parts)
+
+
+def _attribution_html() -> str:
+    return sanitise_editorial_html(
+        os.environ.get("RAGLEX_STATIC_EXPORT_ATTRIBUTION") or _DEFAULT_ATTRIBUTION)
+
+
+def _attribution_block(
+    note: str | None = None, index_link: dict | None = None
+) -> str:
+    """The attribution paragraph, plus — when this edition is one item of a bundle — its
+    own line directly beneath, and a way back to the bundle's index page. All in the same
+    style, in that order, under the title."""
+    paragraphs = [f'<p class="attribution">{_attribution_html()}</p>']
+    note_html = sanitise_editorial_html((note or "").strip())
+    if note_html.strip():
+        paragraphs.append(f'<p class="attribution">{note_html}</p>')
+    if index_link and index_link.get("href"):
+        href = html.escape(str(index_link["href"]), quote=True)
+        label = html.escape(str(index_link.get("title") or "the index"))
+        paragraphs.append(
+            f'<p class="attribution return-to-index">Return to <a href="{href}">'
+            f"{label}</a>.</p>"
+        )
+    return "\n      ".join(paragraphs)
 
 
 def _flag_assets(jurisdictions: set[str]) -> dict[str, str]:
@@ -395,6 +421,7 @@ class StaticExport:
     documents: int
     mentions: int
     generated_at: str
+    title: str = ""
 
 
 class StaticLawExporter:
@@ -409,7 +436,34 @@ class StaticLawExporter:
         *,
         max_snippets: int = 4,
         progress: Callable[[int, int], None] | None = None,
+        note: str | None = None,
     ) -> StaticExport:
+        """The finished page. ``note`` is the per-edition editorial line a bundle adds
+        beneath the shared attribution."""
+        data = self.build_data(
+            stable_id, max_snippets=max_snippets, progress=progress)
+        display_title = data["law"]["title"]
+        return StaticExport(
+            html=render_static_html(data, note=note).encode("utf-8"),
+            filename=f"{_slug(display_title)[:80]}.html",
+            stable_id=stable_id,
+            documents=data["stats"]["documents"],
+            mentions=data["stats"]["mentions"],
+            generated_at=data["generated_at"],
+            title=display_title,
+        )
+
+    def build_data(
+        self,
+        stable_id: str,
+        *,
+        max_snippets: int = 4,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict:
+        """Everything the page shows, as data. Kept separate from rendering because it is
+        the expensive half (thousands of source texts) and therefore the half worth
+        caching: attribution, editorial notes and template changes then re-render for
+        free from a payload built hours ago."""
         max_snippets = max(1, min(int(max_snippets), 12))
         generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -693,16 +747,7 @@ class StaticLawExporter:
             },
             "flags": _flag_assets(jurisdictions),
         }
-        rendered = render_static_html(data)
-        filename = f"{_slug(display_title)[:80]}.html"
-        return StaticExport(
-            html=rendered.encode("utf-8"),
-            filename=filename,
-            stable_id=stable_id,
-            documents=len(groups),
-            mentions=len(relations),
-            generated_at=generated_at,
-        )
+        return data
 
     def write(
         self,
@@ -723,18 +768,21 @@ class StaticLawExporter:
 def static_export_cache_path(
     config: Config, stable_id: str, *, max_snippets: int = 4
 ) -> Path:
+    """Where the built PAYLOAD for one edition lives. It holds the expensive half \u2014 the
+    law, its citing documents and their excerpts \u2014 and the page is rendered from it on
+    download, so editing the attribution or an editorial note costs nothing."""
     identity = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()[:12]
     return (
         config.data_dir / "exports" / "cache"
         / (
             f"{_slug(stable_id)[:80]}-{identity}"
-            f"-v{_CACHE_VERSION}-snippets-{max(1, min(int(max_snippets), 12))}.html"
+            f"-v{_CACHE_VERSION}-snippets-{max(1, min(int(max_snippets), 12))}.data.json"
         )
     )
 
 
 def static_export_manifest_path(path: Path) -> Path:
-    return path.with_suffix(".json")
+    return path.with_name(path.name.removesuffix(".data.json") + ".meta.json")
 
 
 def static_export_status(
@@ -751,6 +799,21 @@ def static_export_status(
     return {**manifest, "ready": True, "_path": str(path)}
 
 
+def render_cached_export(
+    status: dict, *, note: str | None = None, index_link: dict | None = None
+) -> bytes:
+    """Render the page for a cached edition, applying the CURRENT attribution, this
+    edition's own note, and (for a bundle item) the way back to its index page.
+    ``status`` is a ready :func:`static_export_status`."""
+    payload = Path(status["_path"]).read_text(encoding="utf-8")
+    return render_static_page(
+        title=status.get("title") or status["stable_id"],
+        data_json=payload,
+        note=note,
+        index_link=index_link,
+    ).encode("utf-8")
+
+
 def build_static_export_cache(
     facade: Facade,
     stable_id: str,
@@ -759,7 +822,7 @@ def build_static_export_cache(
     on_progress: Callable[..., None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
-    """Build and atomically publish the cached artifact used by the download API."""
+    """Build and atomically publish the cached payload the download API renders from."""
     max_snippets = max(1, min(int(max_snippets), 12))
 
     def progress(done: int, total: int) -> None:
@@ -771,56 +834,78 @@ def build_static_export_cache(
                 item=f"{done:,} of {total:,} citing documents",
             )
 
-    result = StaticLawExporter(facade=facade).build(
+    data = StaticLawExporter(facade=facade).build_data(
         stable_id, max_snippets=max_snippets, progress=progress)
+    title = data["law"]["title"]
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     path = static_export_cache_path(
         facade.config, stable_id, max_snippets=max_snippets)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".html.tmp")
-    temporary.write_bytes(result.html)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(payload, encoding="utf-8")
     temporary.replace(path)
     manifest = {
         "stable_id": stable_id,
         "max_snippets": max_snippets,
-        "filename": result.filename,
-        "documents": result.documents,
-        "mentions": result.mentions,
-        "bytes": len(result.html),
-        "generated_at": result.generated_at,
+        "title": title,
+        "filename": f"{_slug(title)[:80]}.html",
+        "documents": data["stats"]["documents"],
+        "mentions": data["stats"]["mentions"],
+        "bytes": len(payload.encode("utf-8")),
+        "generated_at": data["generated_at"],
     }
     manifest_path = static_export_manifest_path(path)
-    manifest_temporary = manifest_path.with_suffix(".json.tmp")
+    manifest_temporary = manifest_path.with_suffix(".tmp")
     manifest_temporary.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest_temporary.replace(manifest_path)
     return manifest
 
 
-def _json_for_script(data: dict) -> str:
+def _escape_for_script(payload: str) -> str:
     # A source title or snippet containing ``</script>`` must remain inert data.
     return (
-        json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        payload
         .replace("</", "<\\/")
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
 
 
-def render_static_html(data: dict) -> str:
-    law = data["law"]
-    title = law["title"]
+def _json_for_script(data: dict) -> str:
+    return _escape_for_script(
+        json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+
+def render_static_page(
+    *, title: str, data_json: str, note: str | None = None,
+    index_link: dict | None = None,
+) -> str:
+    """Render the page around an already-serialised payload — the cached path, which
+    never re-parses a payload that may be tens of megabytes."""
     page = _HTML_TEMPLATE
     replacements = {
         "__PAGE_TITLE__": html.escape(f"{title} — citations", quote=True),
         "__TITLE__": html.escape(title),
-        "__ATTRIBUTION__": _attribution_html(),
+        "__ATTRIBUTION_BLOCK__": _attribution_block(note, index_link),
         "__STYLE__": _STYLE,
         "__SCRIPT__": _SCRIPT,
-        "__DATA__": _json_for_script(data),
+        "__DATA__": _escape_for_script(data_json),
     }
     for token, value in replacements.items():
         page = page.replace(token, value)
     return page
+
+
+def render_static_html(
+    data: dict, *, note: str | None = None, index_link: dict | None = None
+) -> str:
+    return render_static_page(
+        title=data["law"]["title"],
+        data_json=json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+        note=note,
+        index_link=index_link,
+    )
 
 
 _HTML_TEMPLATE = """<!doctype html>
@@ -837,7 +922,7 @@ _HTML_TEMPLATE = """<!doctype html>
     <button class="contents-toggle" id="contents-toggle" type="button" aria-expanded="true">[ contents ]</button>
     <div>
       <h1>__TITLE__</h1>
-      <p class="attribution">__ATTRIBUTION__</p>
+      __ATTRIBUTION_BLOCK__
     </div>
   </header>
   <div class="page">

@@ -64,8 +64,15 @@ MAX_CONCURRENT_JOBS = 6
 # dedups against a second whole-queue drain but no longer blocks the per-category buttons.
 DEDUP_KINDS = frozenset({
     "run-watch", "gap-scan", "harvest-source", "harvest-all", "static-export",
-    "sync-eu-consolidations",
+    "static-bundle", "sync-eu-consolidations",
 })
+
+# Jobs that must never sit behind a full queue. A static export is started by someone
+# waiting at the browser for the file (or by the schedule that keeps the published folder
+# current); making it queue behind a six-hour import means the download never arrives.
+# They're read-only passes over the corpus, so running one over the concurrency cap costs
+# little. Dedup still applies — a second click of the same export joins the first.
+QUEUE_EXEMPT_KINDS = frozenset({"static-export", "static-bundle"})
 
 # Resume is an explicit contract, not a blanket promise that "idempotent" means no
 # repeated work. ``checkpoint`` jobs stamp each completed document with a stable root
@@ -273,8 +280,15 @@ def _static_export(facade, params, on_progress, cancel_check):
     )
 
 
+def _static_bundle(facade, params, on_progress, cancel_check):
+    from .static_bundle import build_bundle
+
+    return build_bundle(facade, params, on_progress, cancel_check)
+
+
 RUNNERS: dict[str, Callable] = {
     "static-export": _static_export,
+    "static-bundle": _static_bundle,
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
         source=p.get("source"), sources=p.get("sources"),
         source_prefix=p.get("source_prefix"), target_ids=p.get("target_ids"),
@@ -491,7 +505,8 @@ class JobManager:
             root = root_job_id or job_id
             if policy == "checkpoint":
                 params["_resume_run_id"] = root
-            at_capacity = len(running) >= self._max_concurrent()
+            at_capacity = (len(running) >= self._max_concurrent()
+                           and kind not in QUEUE_EXEMPT_KINDS)
             status = "queued" if (queue or at_capacity) else "running"
             cat.create_job(job_id, kind, label, params, origin=self.origin,
                            root_job_id=root, resumed_from=resumed_from,

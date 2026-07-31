@@ -145,6 +145,16 @@ export interface Setting {
   key: string; label: string; secret: boolean; group: string; placeholder: string;
   set: boolean; source: string; display: string; kind?: string;
 }
+export interface StaticBundleItem {
+  stable_id: string; slug: string; title: string; note: string;
+}
+export interface StaticBundle {
+  items: StaticBundleItem[];
+  index_title: string; index_text: string; max_snippets: number;
+  output_dir: string; resolved_output_dir?: string;
+  last_run?: any;
+  schedule?: { name: string; enabled: boolean; every_minutes: number | null } | null;
+}
 
 export const api = {
   health: () => req<{ status: string }>("/health"),
@@ -444,6 +454,63 @@ export const api = {
   getSettings: () => req<{ settings: Setting[]; path: string }>("/settings"),
   saveSettings: (values: Record<string, string>) =>
     req<{ settings: Setting[] }>("/settings", { method: "POST", body: JSON.stringify(values) }),
+  // recurring scheduler tasks (enabled + cadence), e.g. the static-export folder refresh
+  scheduledTasks: () => req<any>("/scheduled-tasks"),
+  setScheduledTask: (body: Record<string, unknown>) =>
+    req<any>("/scheduled-tasks", { method: "POST", body: JSON.stringify(body) }),
+  // -- static export bundle (a set of editions + an index page) ---------------
+  bundleConfig: () => req<StaticBundle>("/export/bundle"),
+  saveBundleConfig: (body: Record<string, unknown>) =>
+    req<StaticBundle>("/export/bundle", { method: "POST", body: JSON.stringify(body) }),
+  // Build every configured edition, then (when a zip was asked for) download it. The
+  // build is a job because it reads thousands of source texts per statute; progress is
+  // reported per edition AND within one, so a long run stays legible.
+  buildBundle: async (
+    opts: { zip?: boolean; refresh?: boolean },
+    onProgress?: (p: { message: string; fraction: number }) => void,
+  ) => {
+    const zip = opts.zip !== false;
+    onProgress?.({ message: "Starting the export…", fraction: 0 });
+    const start = await req<any>("/export/bundle/build", {
+      method: "POST",
+      body: JSON.stringify({ zip, refresh: opts.refresh !== false }),
+    });
+    if (start.error) throw new Error(start.error);
+    let result: any = null;
+    if (start.job_id) {
+      while (true) {
+        const job = await req<any>(`/jobs/${encodeURIComponent(start.job_id)}`);
+        if (job.status === "done") { result = job.result; break; }
+        if (job.status === "error") throw new Error(job.result?.error || job.error || "The export failed");
+        if (job.status === "cancelled") throw new Error("The export was cancelled");
+        const p = job.progress || {};
+        const done = Number(p.done || 0), total = Number(p.total || 0);
+        // The bar counts editions; within one, the excerpt pass fills the step — so it
+        // keeps moving through the hours a single heavily-cited statute can take.
+        const sub = Number(p.sub_total || 0) > 0 ? Number(p.sub_done || 0) / Number(p.sub_total) : 0;
+        onProgress?.({
+          message: p.item ? String(p.item) : (job.status === "queued" ? "Waiting to start…" : "Preparing…"),
+          fraction: total > 0 ? Math.min(1, (done + sub) / total) : 0,
+        });
+        await new Promise((r) => window.setTimeout(r, 1000));
+      }
+    }
+    if (result?.error) throw new Error(result.error);
+    if (zip) {
+      onProgress?.({ message: "Downloading the zip…", fraction: 1 });
+      const res = await fetch(`${BASE}/export/bundle.zip`, { credentials: "include", headers: authHeaders() });
+      if (res.status === 401) window.dispatchEvent(new CustomEvent("raglex-unauthenticated"));
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const name = (res.headers.get("content-disposition") || "").match(/filename="([^"]+)"/i)?.[1]
+        || "raglex-static-export.zip";
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    }
+    return result || {};
+  },
   importUrl: (body: Record<string, string>) =>
     req<any>("/import/url", { method: "POST", body: JSON.stringify(body) }),
   importNote: (body: Record<string, string>) =>

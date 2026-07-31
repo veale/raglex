@@ -107,3 +107,29 @@ def test_max_concurrent_is_configurable(tmp_path, monkeypatch):
     assert jm._max_concurrent() == 3
     monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "not-a-number")
     assert jm._max_concurrent() == jobs_mod.MAX_CONCURRENT_JOBS   # falls back to the default
+
+
+def test_static_exports_skip_the_queue(tmp_path, monkeypatch):
+    """Someone is waiting at the browser for the file: a full queue must not hold it up."""
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "1")
+    gate = threading.Event()
+
+    def runner(f, p, cb, cancel):
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "test-job", runner)
+    monkeypatch.setitem(jobs_mod.RUNNERS, "static-export", runner)
+    monkeypatch.setitem(jobs_mod.RUNNERS, "static-bundle", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    jm.start("test-job", "a long import", {"n": 1})            # fills the only slot
+    waiting = jm.start("test-job", "another", {"n": 2})         # ordinary work waits
+    assert waiting.get("queued")
+    assert "queued" not in jm.start("static-export", "one edition", {"stable_id": "x"})
+    assert "queued" not in jm.start("static-bundle", "the whole set", {"zip": True})
+    with jm.facade._open() as (cat, _rs, _ts):
+        kinds = sorted(j["kind"] for j in cat.running_jobs())
+    assert kinds == ["static-bundle", "static-export", "test-job"]
+    jm.cancel(waiting["job_id"])   # don't let it promote into this test's teardown
+    gate.set()

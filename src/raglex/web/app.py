@@ -210,15 +210,18 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/export/static-law.html")
     def export_static_law_download_ep(id: str, max_snippets: int = 4):
-        """Download a completed, self-contained law-and-citations HTML file."""
-        from fastapi.responses import FileResponse
+        """Download a completed, self-contained law-and-citations HTML file.
 
-        from ..static_export import static_export_status
+        The page is rendered here from the cached payload, so the attribution (and, for a
+        bundle item, its own editorial line) is always the CURRENT one — editing either
+        never means rebuilding thousands of excerpts."""
+        from fastapi.responses import Response
+
+        from ..static_export import render_cached_export, static_export_status
 
         status = static_export_status(
             facade.config, id, max_snippets=max(1, min(int(max_snippets), 12)))
-        path = status.pop("_path", None)
-        if not status.get("ready") or not path:
+        if not status.get("ready") or not status.get("_path"):
             return JSONResponse(
                 {
                     "error": "static edition is not built",
@@ -226,15 +229,77 @@ def create_app(config: Config | None = None) -> FastAPI:
                 },
                 status_code=409,
             )
-        return FileResponse(
-            path,
-            media_type="text/html",
-            filename=status["filename"],
+        return Response(
+            content=render_cached_export(status),
+            media_type="text/html; charset=utf-8",
             headers={
                 "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{status["filename"]}"',
                 "X-Raglex-Export-Documents": str(status["documents"]),
                 "X-Raglex-Export-Mentions": str(status["mentions"]),
             },
+        )
+
+    # -- static bundle: a whole set of editions + an index, as a folder and a zip ----
+    @app.get("/export/bundle")
+    def export_bundle_config_ep() -> dict:
+        """The configured set, where it publishes, and what the last run did."""
+        from ..schedule import list_tasks
+        from ..static_bundle import last_run, load_config
+
+        task = next((t for t in list_tasks() if t["name"] == "static-bundle"), None)
+        return {**load_config(facade.config), "last_run": last_run(facade.config),
+                "schedule": task}
+
+    @app.post("/export/bundle")
+    def export_bundle_save_ep(payload: dict = Body(...)) -> dict:
+        """Save the set: documents, their filenames, their own lines, the index text."""
+        from ..settings import SettingsStore
+        from ..static_bundle import save_config
+
+        return save_config(
+            SettingsStore(facade.config.settings_path), payload or {}, facade.config)
+
+    @app.post("/export/bundle/build")
+    def export_bundle_build_ep(payload: dict = Body(default={})) -> dict:
+        """Build every configured edition as a job. Always writes the export folder;
+        ``zip`` additionally packs one for download. Static exports skip the job queue,
+        so a full harvest queue can't hold the download up."""
+        from ..static_bundle import load_config
+
+        if not load_config(facade.config).get("items"):
+            return JSONResponse(
+                {"error": "no documents are configured for the static bundle"},
+                status_code=422)
+        params = {
+            "zip": bool((payload or {}).get("zip", True)),
+            "refresh": bool((payload or {}).get("refresh", True)),
+        }
+        return _start_job(
+            "static-bundle",
+            "static export bundle" + ("" if params["refresh"] else " (re-render)"),
+            params,
+        )
+
+    @app.get("/export/bundle.zip")
+    def export_bundle_zip_ep():
+        """Download the zip written by the most recent build."""
+        from fastapi.responses import FileResponse
+
+        from ..static_bundle import last_run, zip_path
+
+        path = zip_path(facade.config)
+        if not path.is_file():
+            return JSONResponse(
+                {"error": "no bundle has been built",
+                 "hint": "POST /export/bundle/build, then poll its job id"},
+                status_code=409)
+        run = last_run()
+        return FileResponse(
+            path,
+            media_type="application/zip",
+            filename=run.get("zip_filename") or "raglex-static-export.zip",
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/coverage")

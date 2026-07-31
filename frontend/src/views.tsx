@@ -1,5 +1,5 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, UsCaselawBudget } from "./api";
+import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, UsCaselawBudget } from "./api";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
@@ -3484,6 +3484,217 @@ function CaseLawImportPanel() {
 }
 
 // --- Settings --------------------------------------------------------------
+// --- Static exports: a set of statutes published as one small website ------
+// Each row is one statute → one file (the operator's own filename, so links can be
+// written by hand: gdpr.html). The shared preamble sits beneath every title; a row's own
+// line sits directly under that, for this statute only. Building reads thousands of
+// source texts per statute, so it runs as a job — one that skips the queue, because
+// someone is waiting at the browser for the download.
+const BUNDLE_PLACEHOLDERS = "<dateexported> · <datetimeexported> · <yearexported> · <count>";
+
+function StaticExportsPanel({ attribution, onSavedSettings }:
+  { attribution?: Setting; onSavedSettings: () => void }) {
+  const [cfg, setCfg] = useState<StaticBundle | null>(null);
+  const [attrib, setAttrib] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [prog, setProg] = useState<{ message: string; fraction: number } | null>(null);
+  const [adding, setAdding] = useState(false);
+  const load = () => api.bundleConfig().then(setCfg).catch((e) => setMsg("error: " + e.message));
+  useEffect(() => { load(); }, []);
+  const items = cfg?.items || [];
+  const patch = (next: Partial<StaticBundle>) => { setCfg({ ...(cfg as StaticBundle), ...next }); setDirty(true); };
+  const setItem = (i: number, next: Partial<StaticBundleItem>) =>
+    patch({ items: items.map((it, n) => (n === i ? { ...it, ...next } : it)) });
+  const move = (i: number, delta: number) => {
+    const to = i + delta;
+    if (to < 0 || to >= items.length) return;
+    const next = items.slice();
+    [next[i], next[to]] = [next[to], next[i]];
+    patch({ items: next });
+  };
+
+  const save = async (): Promise<boolean> => {
+    if (!cfg) return false;
+    setMsg("");
+    try {
+      const saved = await api.saveBundleConfig({
+        items: cfg.items, index_title: cfg.index_title, index_text: cfg.index_text,
+        max_snippets: cfg.max_snippets, output_dir: cfg.output_dir,
+      });
+      if (attrib !== null && attribution && attribution.source !== "env") {
+        await api.saveSettings({ RAGLEX_STATIC_EXPORT_ATTRIBUTION: attrib });
+        onSavedSettings();
+      }
+      setCfg(saved); setDirty(false); setMsg("Saved.");
+      return true;
+    } catch (e: any) { setMsg("error: " + e.message); return false; }
+  };
+
+  const build = async (opts: { zip: boolean; refresh: boolean }) => {
+    if (!items.length) { setMsg("error: add at least one statute first"); return; }
+    setBusy(true); setMsg(""); setProg({ message: "Starting the export…", fraction: 0 });
+    try {
+      // Export what's on screen: unsaved edits are saved first, and a failure to save
+      // stops the build rather than quietly exporting the previous set.
+      if (dirty && !(await save())) { setBusy(false); setProg(null); return; }
+      const r = await api.buildBundle(opts, setProg);
+      setMsg(`✓ ${r.documents} editions${opts.zip ? " downloaded and" : ""} written to ${r.output_dir}`);
+      load();
+    } catch (e: any) { setMsg("error: " + e.message); }
+    finally { setBusy(false); setProg(null); }
+  };
+
+  const setSchedule = async (body: Record<string, unknown>) => {
+    try { await api.setScheduledTask({ name: "static-bundle", ...body }); load(); }
+    catch (e: any) { setMsg("error: " + e.message); }
+  };
+
+  if (!cfg) return <div className="panel"><p className="muted loading-pulse">Loading static exports…</p></div>;
+  const run = cfg.last_run || {};
+  const sched = cfg.schedule;
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Static exports <span className="muted">— publish a set of statutes as one small website</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Each statute below is built into <b>one self-contained HTML file</b> — its text, everything in the corpus that cites it,
+        excerpts and public source links — named as you choose, plus an <span className="kbd">index.html</span> linking them all.
+        Every file sits at one level, so the links work from a folder on disk, a static host, or an unzipped download.
+      </p>
+
+      <label>Shared text beneath every statute's title <span className="kbd">RAGLEX_STATIC_EXPORT_ATTRIBUTION</span>
+        {attribution?.source === "env" && <span className="muted"> · set via environment (overrides file)</span>}</label>
+      <textarea rows={4} disabled={!attribution || attribution.source === "env"}
+        placeholder={attribution?.placeholder}
+        value={attrib ?? (attribution?.source === "file" ? attribution.display : "")}
+        onChange={(e) => { setAttrib(e.target.value); setDirty(true); }} />
+      <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+        Simple HTML only: <span className="kbd">&lt;a href&gt;</span> <span className="kbd">&lt;b&gt;</span> <span className="kbd">&lt;i&gt;</span> <span className="kbd">&lt;u&gt;</span> <span className="kbd">&lt;br&gt;</span>.
+        Applied at download time, so editing it never means rebuilding anything.
+      </p>
+
+      <div className="row" style={{ gap: 10, alignItems: "flex-start", marginTop: 12, flexWrap: "wrap" }}>
+        <label style={{ flex: "1 1 220px" }}>Index page title
+          <input value={cfg.index_title} onChange={(e) => patch({ index_title: e.target.value })} /></label>
+        <label style={{ flex: "0 0 150px" }} title="Excerpts kept per citing document in every edition. More excerpts make bigger files.">Excerpts per document
+          <input type="number" min={1} max={12} value={cfg.max_snippets}
+            onChange={(e) => patch({ max_snippets: Math.max(1, Math.min(12, +e.target.value || 4)) })} /></label>
+      </div>
+      <label>Index page text</label>
+      <textarea rows={3} value={cfg.index_text} onChange={(e) => patch({ index_text: e.target.value })}
+        placeholder="Shown under the index title. Same simple HTML." />
+      <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+        Placeholders (here and in any statute's line): <span className="kbd">{BUNDLE_PLACEHOLDERS}</span> —
+        e.g. <span className="kbd">&lt;dateexported&gt;</span> becomes <b>{new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</b>.
+        Every entry in the index also states its own export date.
+      </p>
+
+      <table className="grid break-cells" style={{ marginTop: 12 }}>
+        <thead><tr>
+          <th style={{ width: "34%" }}>statute</th><th style={{ width: "17%" }}>saves as</th>
+          <th>its own line, under the shared text</th><th style={{ width: 78 }}></th>
+        </tr></thead>
+        <tbody>
+          {items.map((it, i) => (
+            <tr key={`${it.stable_id}-${i}`}>
+              <td>
+                <b>{it.title || it.stable_id}</b>
+                <div className="muted" style={{ fontSize: 11 }}>{it.stable_id}</div>
+              </td>
+              <td>
+                <div className="row" style={{ gap: 2, alignItems: "center", flexWrap: "nowrap" }}>
+                  <input value={it.slug} placeholder="gdpr" style={{ minWidth: 0 }}
+                    onChange={(e) => setItem(i, { slug: e.target.value })} />
+                  <span className="muted" style={{ fontSize: 11 }}>.html</span>
+                </div>
+              </td>
+              <td>
+                <textarea rows={2} value={it.note} onChange={(e) => setItem(i, { note: e.target.value })}
+                  placeholder="optional — appears on a new line below the shared text, in this file only" />
+              </td>
+              <td style={{ whiteSpace: "nowrap" }}>
+                <button className="mini" title="move up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>{" "}
+                <button className="mini" title="move down" disabled={i === items.length - 1} onClick={() => move(i, 1)}>↓</button>{" "}
+                <button className="mini" title="remove from the set"
+                  onClick={() => patch({ items: items.filter((_x, n) => n !== i) })}>✕</button>
+              </td>
+            </tr>
+          ))}
+          {!items.length && <tr><td colSpan={4} className="muted">No statutes yet — add one below.</td></tr>}
+        </tbody>
+      </table>
+
+      <div style={{ marginTop: 8 }}>
+        {adding ? (
+          <div className="row" style={{ alignItems: "center", gap: 6 }}>
+            <div style={{ flex: 1 }}>
+              <DocAutocomplete placeholder="find a statute by name — GDPR, Online Safety Act…"
+                onPick={(id, title) => {
+                  setAdding(false);
+                  if (items.some((it) => it.stable_id === id)) { setMsg("error: already in the set"); return; }
+                  patch({ items: [...items, { stable_id: id, title, slug: "", note: "" }] });
+                }} />
+            </div>
+            <button className="mini" onClick={() => setAdding(false)}>cancel</button>
+          </div>
+        ) : <button onClick={() => setAdding(true)}>+ Add a statute</button>}
+      </div>
+
+      <label style={{ marginTop: 12 }}>Export folder <span className="muted">— on the server, beside the database and stores; rewritten in place each run</span></label>
+      <input value={cfg.output_dir} placeholder={cfg.resolved_output_dir}
+        onChange={(e) => patch({ output_dir: e.target.value })} />
+      <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+        Currently <span className="kbd">{cfg.resolved_output_dir}</span>. Files with the same name are overwritten — no versioning, no confirmation.
+      </p>
+
+      <div className="row" style={{ marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <button className="primary" disabled={busy || !items.length}
+          title="Rebuild every statute from the corpus as it stands, write the export folder, and download a zip of the whole set."
+          onClick={() => build({ zip: true, refresh: true })}>
+          {busy ? "Exporting…" : "⇩ Build and download ZIP"}</button>
+        <button disabled={busy || !items.length}
+          title="Same rebuild, but only into the export folder on the server — nothing is downloaded."
+          onClick={() => build({ zip: false, refresh: true })}>⌸ Build to folder only</button>
+        <button disabled={busy || !items.length}
+          title="Re-render the pages from the last build's data — seconds, not hours. Use after editing the shared text, a statute's line, or the index text; it does NOT pick up new citing documents."
+          onClick={() => build({ zip: true, refresh: false })}>↻ Quick re-render (cached data)</button>
+        <button disabled={busy || !dirty} onClick={save}>Save without exporting</button>
+      </div>
+
+      {busy && prog && (
+        <div style={{ marginTop: 8 }}>
+          <div className="job-bar"><div style={{ width: `${Math.round(prog.fraction * 100)}%` }} /></div>
+          <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+            {Math.round(prog.fraction * 100)}% · {prog.message}
+          </p>
+          <p className="muted" style={{ fontSize: 11, margin: "2px 0 0" }}>
+            A heavily-cited statute reads every document that mentions it, which can take a long time. This runs ahead of the
+            job queue, and the Jobs panel shows the same progress if you navigate away — but leave this tab open for the download.
+          </p>
+        </div>
+      )}
+      {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
+
+      <div className="row" style={{ marginTop: 10, alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <label style={{ flex: "0 0 auto", display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}
+          title="Rebuild the export folder on a schedule. Scheduled runs write the folder only — there is no browser to hand a zip to.">
+          <input type="checkbox" checked={!!sched?.enabled}
+            onChange={(e) => setSchedule({ enabled: e.target.checked })} />
+          Rebuild the export folder automatically
+        </label>
+        {sched?.enabled && <FrequencySelect minutes={sched.every_minutes || 10080}
+          onChange={(m) => setSchedule({ every_minutes: m })} />}
+        <span className="muted" style={{ fontSize: 12 }}>
+          {run.finished_at
+            ? `Last export: ${new Date(run.finished_at).toLocaleString()} — ${run.documents || 0} editions → ${run.output_dir}`
+            : "Not exported yet."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function SettingsView() {
   const [settings, setSettings] = useState<Setting[]>([]);
   const [path, setPath] = useState("");
@@ -3500,9 +3711,14 @@ export function SettingsView() {
       .catch((e) => setLoadErr(String(e?.message || e))).finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
-  const groups = [...new Set(settings.map((s) => s.group))];
+  // "Static exports" is edited on its own panel below (the text that sits beneath every
+  // exported statute belongs next to the set it applies to), so it isn't listed twice.
+  const groups = [...new Set(settings.map((s) => s.group))].filter((g) => g !== "Static exports");
   return (
     <div>
+      <StaticExportsPanel
+        attribution={settings.find((s) => s.key === "RAGLEX_STATIC_EXPORT_ATTRIBUTION")}
+        onSavedSettings={load} />
       <div className="panel">
         {health && <p className={health.healthy ? "ok" : "err"}>Embedding provider: {health.provider}/{health.model} ({health.dimensions}d) — {health.healthy ? "ready ✓" : "needs an API key ✗"}</p>}
         {loading && !settings.length && <p className="muted loading-pulse">Loading settings…</p>}
