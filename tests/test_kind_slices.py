@@ -35,6 +35,11 @@ SPECIMENS = [
     ("edpb", "guidance", None),
     ("edpb", "opinion", None),
     ("ie-dpc", "decision", "dpa-ie"),
+    # a DPA's guidance is guidance, not an administrative decision…
+    ("ie-dpc-guidance", "guidance", "dpa-ie"),
+    ("nl-ap", "decision", "dpa-nl"),
+    # …and its annual report is a report, which files as preparatory
+    ("nl-ap", "preparatory", "dpa-nl"),
     ("uk-cma", "decision", None),
     ("gdprhub", "judgment", "dpa-de"),
     ("uk-judiciary", "guidance", "judiciary"),

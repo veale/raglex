@@ -53,6 +53,14 @@ from .eu_ombudsman import EUOmbudsmanAdapter
 from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
 from .eu_dgcomp import DGCompAntitrustAdapter
 from .eu_consumer_guidance import EUConsumerGuidanceAdapter
+from .eu_dpa_guidance import (
+    AEPDGuidanceAdapter,
+    CNILGuidanceAdapter,
+    DSKGuidanceAdapter,
+    DatatilsynetGuidanceAdapter,
+    GBAGuidanceAdapter,
+    GaranteGuidanceAdapter,
+)
 from .eu_regulator_registers import (
     ESMASanctionsAdapter,
     ESAsBoardOfAppealAdapter,
@@ -60,7 +68,7 @@ from .eu_regulator_registers import (
 )
 from .hol import HouseOfLordsAdapter
 from .ie_caselaw import IrishCaseLawAdapter
-from .ie_dpc import IrishDPCAdapter
+from .ie_dpc import IrishDPCAdapter, IrishDPCGuidanceAdapter
 from .ie_tax_appeals import IrishTaxAppealsAdapter
 from .ie_revenue_tdm import IrishRevenueTDMAdapter
 from .ie_ccpc_mergers import IrishCCPCMergerAdapter
@@ -68,6 +76,7 @@ from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nl_acm_guidance import ACMGuidanceAdapter
+from .nl_ap import APDocumentsAdapter
 from .it_agcm import AGCMBulletinAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
 from .uk_caselaw import UKCaseLawAdapter
@@ -272,6 +281,15 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # opinion per PDF, grouped by case_citation, the lead owning the bare slug.
     "ie-caselaw": IrishCaseLawAdapter,
     "ie-dpc": IrishDPCAdapter,
+    "ie-dpc-guidance": IrishDPCGuidanceAdapter,
+    "nl-ap": APDocumentsAdapter,
+    # national DPA guidance libraries (§ eu_dpa_guidance)
+    "fr-cnil-guidance": CNILGuidanceAdapter,
+    "es-aepd-guias": AEPDGuidanceAdapter,
+    "dk-datatilsynet": DatatilsynetGuidanceAdapter,
+    "de-dsk": DSKGuidanceAdapter,
+    "be-gba": GBAGuidanceAdapter,
+    "it-garante": GaranteGuidanceAdapter,
     "ie-tax-appeals": IrishTaxAppealsAdapter,
     "ie-revenue-tdm": IrishRevenueTDMAdapter,
     "ie-ccpc-mergers": IrishCCPCMergerAdapter,
@@ -343,6 +361,7 @@ JURISDICTION_LABELS: dict[str, str] = {
     "GB": "United Kingdom", "EU": "European Union", "CoE": "Council of Europe",
     "IE": "Ireland", "FR": "France", "DE": "Germany", "NL": "Netherlands",
     "IT": "Italy", "AU": "Australia", "CA": "Canada", "NZ": "New Zealand",
+    "ES": "Spain", "DK": "Denmark", "BE": "Belgium",
     "SG": "Singapore", "HK": "Hong Kong", "IN": "India", "US": "United States",
     "": "Other",
 }
@@ -517,6 +536,72 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "consumer protection, price display and sustainability claims. Detail-page HTML "
         "and official PDF attachments are combined; the small catalogue is fully "
         "rechecked so revisions retaining their original publication date are caught.",
+    ),
+    "nl-ap": SourceInfo(
+        "nl-ap", "Dutch DPA (Autoriteit Persoonsgegevens) documents",
+        "guidance", "NL", False,
+        "The AP's whole publication register in one feed: fines and other sanctions, "
+        "blacklist licence decisions, Woo decisions, its legislative-advice opinions "
+        "(wetgevingstoetsen), policy rules, normative interpretations, guidance and "
+        "annual reports. The card names no document type, so the register's own "
+        "document_type facet is swept in parallel and each item is recorded with the "
+        "NARROWEST type that claims it plus the full path (Besluit \u2192 Sanctie \u2192 "
+        "Boete). Most items are two-step \u2014 a summary page over the operative PDF \u2014 "
+        "and both are kept. Backfill pages the view; keep-current polls the daily "
+        "publication RSS feed.",
+        (), ("autoriteitpersoonsgegevens.nl document URL",),
+    ),
+    "fr-cnil-guidance": SourceInfo(
+        "fr-cnil-guidance", "CNIL guidance (France — médiathèque)",
+        "guidance", "FR", False,
+        "The CNIL's whole published médiathèque: guides, lignes directrices, "
+        "recommandations, fiches pratiques and référentiels, keyed on the CNIL's own "
+        "collection type. Each row is rendered twice (grid + list) and is deduplicated "
+        "to one document; the upload folder supplies the publication month the "
+        "catalogue itself does not print.",
+        (), ("cnil.fr publication URL",),
+    ),
+    "es-aepd-guias": SourceInfo(
+        "es-aepd-guias", "AEPD guías (Spain)", "guidance", "ES", False,
+        "The Agencia Española de Protección de Datos' guías y herramientas: the "
+        "official PDF guides with their publication dates, covering the RGPD and the "
+        "Spanish LOPDGDD.",
+        (), ("aepd.es guía URL",),
+    ),
+    "dk-datatilsynet": SourceInfo(
+        "dk-datatilsynet", "Datatilsynet guidance (Denmark)", "guidance", "DK", False,
+        "Datatilsynet's vejledninger. The library is one flat hub page rather than a "
+        "listing view, so it is read whole and each PDF keeps the topic heading it sits "
+        "under. Includes the Danish preparatory materials the authority itself points "
+        "to for databeskyttelsesloven.",
+        (), ("datatilsynet.dk PDF URL",),
+    ),
+    "de-dsk": SourceInfo(
+        "de-dsk", "Datenschutzkonferenz (Germany — joint DPA positions)",
+        "guidance", "DE", False,
+        "The German supervisory authorities' joint output: Orientierungshilfen, "
+        "Kurzpapiere and Beschlüsse. This is where German data-protection practice is "
+        "actually settled — the federal BfDI publishes little standalone interpretation "
+        "and the Länder authorities mostly link here. An Orientierungshilfe and its "
+        "Anhang are kept as one document.",
+        (), ("datenschutzkonferenz-online.de PDF URL",),
+    ),
+    "be-gba": SourceInfo(
+        "be-gba", "Belgian DPA (APD/GBA) publications", "guidance", "BE", False,
+        "The Autorité de protection des données' recommendations, advice "
+        "(avis/adviezen) and documentation from its publication register. The register "
+        "prints a year rather than a date, which is recorded as such rather than "
+        "presented as a precise one.",
+        (), ("autoriteprotectiondonnees.be publication URL",),
+    ),
+    "it-garante": SourceInfo(
+        "it-garante", "Garante per la protezione dei dati personali (Italy)",
+        "guidance", "IT", False,
+        "The Garante's linee guida and provvedimenti, keyed on the doc web number — "
+        "the authority's own permanent identifier, the one Italian practitioners cite "
+        "('doc. web n. 10241943'). The adoption date is parsed from the measure's "
+        "title, which is where the Garante puts it.",
+        (), ("doc web number", "10241943"),
     ),
     "it-agcm": SourceInfo(
         "it-agcm", "Italy AGCM weekly decision bulletins", "guidance", "IT", False,
@@ -766,6 +851,17 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "Articles facet becomes structured links to GDPR articles or, where explicitly "
         "prefixed S, sections of the Irish Data Protection Act 2018.",
         (), ("DPC inquiry reference",),
+    ),
+    "ie-dpc-guidance": SourceInfo(
+        "ie-dpc-guidance", "Irish Data Protection Commission guidance",
+        "guidance", "IE", False,
+        "The DPC's guidance library as the Commission itself indexes it, keeping its "
+        "topical sections (General Guidance, Technological issues, GDPR requirements, "
+        "Direct marketing/Electoral, COVID-19) as tags. Most items are published "
+        "two-step — a short landing page over a 'Full Guidance Note' PDF — so both are "
+        "pulled and concatenated. The hub's EDPB accordion is skipped: those documents "
+        "are held under the edpb source.",
+        (), ("dataprotection.ie guidance URL",),
     ),
     "ie-tax-appeals": SourceInfo(
         "ie-tax-appeals", "Irish Tax Appeals Commission determinations",
@@ -1317,6 +1413,10 @@ INCREMENTAL_MODE: dict[str, str] = {
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
+    "nl-ap": "early-stop",
+    "fr-cnil-guidance": "full-walk", "es-aepd-guias": "full-walk",
+    "dk-datatilsynet": "full-walk", "de-dsk": "full-walk",
+    "be-gba": "full-walk", "it-garante": "full-walk",
     "it-agcm": "early-stop",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
     "eu-ombudsman": "full-walk",
@@ -1339,6 +1439,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "eu-digital-strategy": "early-stop",   # newest-first listing → stop at the cursor
     "uk-cat": "full-walk",
     "ie-dpc": "full-walk",
+    "ie-dpc-guidance": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
     "echr": "targeted", "au-nsw": "targeted",
     # bulk / local-file seeds (no live path)

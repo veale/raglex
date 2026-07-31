@@ -3754,14 +3754,21 @@ class Facade:
         # COALESCE is load-bearing: court is nullable, and `NULL LIKE 'dpa-%'` is
         # NULL, so `NOT (…)` is NULL too and the row is silently dropped. Every
         # judgment with no recorded court would have vanished from the cases slice.
-        admin_sql = ("(COALESCE(lower(d.court), '') LIKE 'dpa-%'"
+        # _doc_kind gives GUIDANCE (and the reports filed as 'preparatory') precedence
+        # over the administrative bucket, and the clause has to say so too. Without this
+        # a DPA's guidance satisfies both slices at once, because the court test below
+        # matches a data-protection authority's whole output regardless of doc type. It
+        # only became reachable when a DPA guidance library was first harvested — until
+        # then every dpa-* document was a decision.
+        admin_sql = ("(d.doc_type NOT IN ('guidance', 'preparatory')"
+                     " AND (COALESCE(lower(d.court), '') LIKE 'dpa-%'"
                      + (f" OR COALESCE(lower(d.court), '') IN "
                         f"({','.join('?' * len(admin_courts))})"
                         if admin_courts else "")
                      + (f" OR (d.source IN ({','.join('?' * len(admin_sources))})"
                         f" AND d.doc_type IN ({','.join('?' * len(admin_types))}))"
                         if admin_sources and admin_types else "")
-                     + ")")
+                     + "))")
         admin_params = list(admin_courts)
         if admin_sources and admin_types:
             admin_params += admin_sources + admin_types
