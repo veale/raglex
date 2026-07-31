@@ -654,6 +654,15 @@ def _eu_acronym(m: "re.Match[str]") -> Normalised:
         pre = m.string[max(0, m.start("name") - 12):m.start("name")]
         if not _DETERMINER_RE.search(pre):
             return None, None, DROP
+    if name == "DSA" and not m.group("art"):
+        # UK immigration judgments use DSA for the Duty Solicitor Advice scheme:
+        # phrases such as "both the DSA scheme" satisfy the determiner rule above
+        # but are still plainly not the Digital Services Act.
+        after = m.string[m.end("name"):m.end("name") + 24]
+        if re.match(
+            r"(?i)^\s+(?:scheme|surgery|session|appointment)\b", after,
+        ):
+            return None, None, DROP
     return (_name_to_celex(name),
             f"Article {m.group('art')}" if m.group("art") else None, None)
 
