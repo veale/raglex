@@ -913,3 +913,34 @@ def test_bare_statutory_instrument_series_form_resolves_on_its_own():
         "the Privacy and Electronic Communications (EC Directive) Regulations 2003, "
         "SI 2003/2426 applies.")
     assert [c.candidate_id for c in named] == ["uksi/2003/2426"]
+
+
+def test_framework_decisions_take_the_f_descriptor_not_d():
+    """"Council Framework Decision 2008/977/JHA" is CELEX 32008F0977, not …D0977.
+
+    Matching only the word "Decision" built an id that does not exist. On the live
+    corpus 659 citations resolved to the resulting empty stub while the real act,
+    harvested correctly under 32008F0977, held three.
+    """
+    by = {c.candidate_id: c for c in extract_citations(
+        "Council Framework Decision 2008/977/JHA of 27 November 2008 on the protection "
+        "of personal data, and Council Decision 2008/615/JHA on cross-border cooperation.")}
+    assert "32008F0977" in by                 # framework decision → F
+    assert "32008D0615" in by                 # an ordinary Council Decision stays D
+    assert "32008D0977" not in by
+
+
+def test_an_issuing_body_before_the_instrument_keeps_the_pinpoint():
+    """"Article 3 of COUNCIL Directive 93/13/EEC" silently lost its Article.
+
+    The pattern allowed "of the" before the instrument kind but not the body that
+    issued it, so the pinpoint fell outside the match and the edge landed on the whole
+    directive — for one of the commonest citation forms in EU and UK material.
+    """
+    by = {c.raw: c for c in extract_citations(
+        "Article 3 of Council Directive 93/13/EEC, Article 5 of Commission Implementing "
+        "Regulation (EU) 2015/1998, and recital 12 of Council Directive 93/13/EEC.")}
+    pinpoints = {(c.candidate_id, c.pinpoint) for c in by.values()}
+    assert ("31993L0013", "Article 3") in pinpoints
+    assert ("32015R1998", "Article 5") in pinpoints
+    assert ("31993L0013", "Recital 12") in pinpoints

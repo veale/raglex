@@ -49,7 +49,13 @@ def register(grammar: Grammar) -> None:
 
 
 # -- helpers ----------------------------------------------------------------
-_DESCRIPTOR = {"regulation": "R", "directive": "L", "decision": "D"}
+# CELEX sector-3 descriptors. A FRAMEWORK decision is "F", not "D" — the third-pillar
+# instruments were numbered separately — so "Council Framework Decision 2008/977/JHA on
+# the protection of personal data" is 32008F0977. Matching only the word "Decision" built
+# 32008D0977, an id that does not exist: 659 citations resolved to an empty stub the
+# bare-CELEX path then created, while the real act sat beside it holding three.
+_DESCRIPTOR = {"regulation": "R", "directive": "L", "decision": "D",
+               "framework decision": "F"}
 
 
 def _eu_celex(kind: str, a: str, b: str) -> str | None:
@@ -58,7 +64,7 @@ def _eu_celex(kind: str, a: str, b: str) -> str | None:
     'Regulation 1612/68') the convention differs by instrument — **directives put
     the year first**, regulations put it second — and a 2-digit year ≥31 is 19xx,
     else 20xx."""
-    desc = _DESCRIPTOR.get(kind.lower())
+    desc = _DESCRIPTOR.get(re.sub(r"\s+", " ", kind).strip().lower())
     if not desc:
         return None
     if re.fullmatch(r"(19|20)\d{2}", a):
@@ -552,8 +558,8 @@ register(Grammar(
     "eu_instrument_numeric", "regulation",
     re.compile(
         r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?"
-        r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
-        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC))?\b",
+        r"(?:(?:Council|Commission|European\s+Parliament\s+and\s+(?:of\s+the\s+)?Council)\s+)?(?:(?:Implementing|Delegated)\s+)?(?P<kind>(?:Framework\s+)?(?:Regulation|Directive|Decision))\s*(?:\((?:EU|EC|EEC)\)\s*)?"
+        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC|JHA|CFSP|PESC|Euratom))?\b",
         re.IGNORECASE,
     ),
     lambda m: (
@@ -626,8 +632,8 @@ def instrument_at(text: str) -> tuple[str | None, str | None]:
     m = re.match(rf"(?P<name>{_EU_ACRONYMS})\b", text)
     if m:
         return _name_to_celex(m.group("name")), "regulation"
-    m = re.match(r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
-                 r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC))?\b", text, re.IGNORECASE)
+    m = re.match(r"(?:(?:Council|Commission|European\s+Parliament\s+and\s+(?:of\s+the\s+)?Council)\s+)?(?:(?:Implementing|Delegated)\s+)?(?P<kind>(?:Framework\s+)?(?:Regulation|Directive|Decision))\s*(?:\((?:EU|EC|EEC)\)\s*)?"
+                 r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC|JHA|CFSP|PESC|Euratom))?\b", text, re.IGNORECASE)
     if m:
         return _eu_celex(m.group("kind"), m.group("a"), m.group("b")), m.group("kind").lower()
     return None, None
@@ -727,8 +733,8 @@ register(Grammar(
     "recital_eu_numeric", "regulation",
     re.compile(
         _RECITAL + r"\s+(?:of\s+)?(?:the\s+)?"
-        r"(?P<kind>Regulation|Directive|Decision)\s*(?:\((?:EU|EC|EEC)\)\s*)?"
-        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC))?\b",
+        r"(?:(?:Council|Commission|European\s+Parliament\s+and\s+(?:of\s+the\s+)?Council)\s+)?(?:(?:Implementing|Delegated)\s+)?(?P<kind>(?:Framework\s+)?(?:Regulation|Directive|Decision))\s*(?:\((?:EU|EC|EEC)\)\s*)?"
+        r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC|JHA|CFSP|PESC|Euratom))?\b",
         re.IGNORECASE,
     ),
     lambda m: (_eu_celex(m.group("kind"), m.group("a"), m.group("b")),

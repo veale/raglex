@@ -36,6 +36,20 @@ _UNIT_TAGS = {"section", "article", "rule", "regulation", "paragraph", "judgment
 # Pass-through wrappers.
 _PASS_TAGS = {"akomantoso", "act", "bill", "doc", "judgment", "body", "mainbody", "hcontainer"}
 
+# An Act's operative unit is <section>; a STATUTORY INSTRUMENT's is
+# <hcontainer name="regulation"> (or "rule"/"article"), which has no dedicated AKN tag.
+# Those fell through to the generic pass-through, so the walk descended past the
+# regulation and segmented its child <paragraph> elements instead — every SI in the
+# corpus came out as a run of "s. (1)", "s. (2)", "s. (1A)" …, carrying no regulation
+# number at all and repeating those same labels once per regulation. PECR held 237 such
+# segments, so no citation of "regulation 6" could ever land on anything.
+#
+# The unit is named the way its own instrument is cited: OSCOLA pinpoints an SI by
+# "reg 6", rules of court by "r 3.1".
+_HCONTAINER_UNITS = {
+    "regulation": "reg.", "rule": "r.", "article": "art.", "section": "s.",
+}
+
 # Schedules live in <hcontainer name="schedule">, and their citable units are
 # <paragraph>, not <section>. Without this the units were labelled by the generic
 # "section" rule and a schedule came out as "s. 1", "s. 2" … — restarting the
@@ -58,8 +72,12 @@ def _child_text(elem: ET.Element, name: str) -> str | None:
     return " ".join(element_text(child).split()) or None
 
 
-def _label(elem: ET.Element, kind: str, ctx: dict | None = None) -> str:
-    num = _child_text(elem, "num") or ""
+def _label(elem: ET.Element, kind: str, ctx: dict | None = None,
+           unit: str = "s.") -> str:
+    # An Act's <num> is "1"; an SI's is "1." — the same provision number, punctuated
+    # differently by the source. Drop the trailing stop so one instrument's labels don't
+    # read "reg. 6." while another's read "s. 6".
+    num = (_child_text(elem, "num") or "").strip().rstrip(".").strip()
     heading = _child_text(elem, "heading") or ""
     label = f"{num} {heading}".strip()
     # inside a schedule, cite OSCOLA-style: "Sch 1 para 1" / "Sch 1 Pt 1 para 1"
@@ -70,8 +88,8 @@ def _label(elem: ET.Element, kind: str, ctx: dict | None = None) -> str:
         if num:
             pin += f" para {num.strip()}"
         return f"{pin} {heading}".strip() if heading else pin
-    if kind == "section" and num and not num.lower().startswith(("s", "art")):
-        label = f"s. {label}"
+    if kind == "section" and num and not num.lower().startswith(("s", "art", "reg", "r.")):
+        label = f"{unit} {label}"
     return label or kind
 
 
@@ -204,6 +222,15 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
                     lab = f"Sch {num} {heading}".strip() if num else header
                     blocks.append((lab, "schedule", header, level))
                 _walk(child, level + 1, blocks, dict(ctx, schedule=num, part=None))
+            elif role in _HCONTAINER_UNITS and not ctx.get("schedule"):
+                # An SI's regulation: a citable unit in its own right, so emit it whole
+                # rather than descending to its sub-paragraphs. (Inside a schedule the
+                # paragraph rule above already governs, and must keep doing so.)
+                text = flow_text(child, skip_tags=_AKN_SKIP, line_tags=_AKN_LINES)
+                if text.strip():
+                    blocks.append((
+                        _label(child, "section", ctx, unit=_HCONTAINER_UNITS[role]),
+                        "section", text, level))
             else:
                 _walk(child, level, blocks, ctx)
 

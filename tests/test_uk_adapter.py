@@ -175,3 +175,41 @@ def test_filtered_court_can_have_an_independent_cursor_source():
     )
     assert adapter.source == "uk-iac"
     assert adapter.court == "ukut/iac"
+
+
+def test_statutory_instrument_regulations_are_citable_units():
+    """PECR held 237 segments labelled "s. (1)", "s. (2)", "s. (1A)" … and nothing else.
+
+    An Act's operative unit is <section>; a statutory instrument's is
+    <hcontainer name="regulation">, which has no dedicated AKN tag and so fell through
+    to the generic pass-through. The walk descended PAST the regulation and segmented
+    its child <paragraph> elements instead, losing every regulation number and repeating
+    the same handful of labels once per regulation — so no citation of "regulation 6"
+    could land anywhere. Affected every SI in the corpus, not one document.
+    """
+    from raglex.formats.akoma_ntoso import parse_akn
+
+    xml = b"""<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+    <act name="uksi"><body eId="body">
+      <hcontainer name="regulation" eId="regulation-1"><heading>Citation</heading>
+        <num>1.</num><content><p>These Regulations may be cited as the PECR 2003.</p></content></hcontainer>
+      <hcontainer name="regulation" eId="regulation-6"><heading>Confidentiality of communications</heading>
+        <num>6.</num>
+        <paragraph eId="regulation-6-1"><num>(1)</num><content><p>A person shall not store information.</p></content></paragraph>
+        <paragraph eId="regulation-6-2"><num>(2)</num><content><p>Paragraph (1) applies.</p></content></paragraph>
+      </hcontainer>
+      <hcontainer name="schedule"><num>SCHEDULE 1</num><heading>Modifications</heading>
+        <paragraph><num>1</num><content><p>Schedule paragraph text.</p></content></paragraph></hcontainer>
+    </body></act></akomaNtoso>"""
+
+    parsed = parse_akn(xml)
+    labels = [s.label for s in parsed.segments]
+    assert labels == ["reg. 1 Citation", "reg. 6 Confidentiality of communications",
+                      "Sch 1 Modifications", "Sch 1 para 1"]
+    # the regulation is emitted whole, sub-paragraphs included — not as separate units
+    reg6 = next(s for s in parsed.segments if s.label.startswith("reg. 6"))
+    body = parsed.text[reg6.char_start:reg6.char_end]
+    assert "shall not store information" in body and "Paragraph (1) applies" in body
+    # and it is findable by the pinpoint a judgment would actually use
+    from raglex.facade import _anchor_key
+    assert _anchor_key("regulation 6") == _anchor_key(reg6.label) == "reg:6"

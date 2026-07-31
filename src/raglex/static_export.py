@@ -931,12 +931,23 @@ class StaticLawExporter:
                 "provision_mappings": provision_mappings,
                 "inherited_recitals": (
                     {
-                        key: inherited_recitals[key]
-                        for key in (
-                            "count", "source_stable_id", "source_title",
-                            "source_url", "base_stable_id", "source_is_base_act",
-                            "unchanged", "virtual", "note",
-                        )
+                        **{
+                            key: inherited_recitals[key]
+                            for key in (
+                                "count", "source_stable_id", "source_title",
+                                "source_url", "base_stable_id", "source_is_base_act",
+                                "unchanged", "virtual", "note",
+                            )
+                        },
+                        # The source's citable stem. Printing the official title in full
+                        # put a 40-word sentence — "…on the protection of natural persons
+                        # with regard to the processing of personal data and on the free
+                        # movement of such data, and repealing Directive 95/46/EC (Text
+                        # with EEA relevance)" — inside a one-line provenance note.
+                        "source_label": _short_instrument_title(
+                            inherited_recitals.get("source_title") or "",
+                            fallback=str(inherited_recitals.get("source_stable_id") or ""),
+                        ),
                     }
                     if inherited_recitals else None
                 ),
@@ -1528,9 +1539,13 @@ _SCRIPT = r"""
         `<a href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">${esc(link.label)} →</a>`).join(" · ")
     : `<span class="no-source">No public copy recorded</span>`;
   const inheritedRecitals = data.law.inherited_recitals;
+  // The short form, with the official title on hover — a provenance note is a
+  // footnote, not a place to reprint 40 words of instrument title.
+  const recitalSourceName = inheritedRecitals?.source_label
+    || inheritedRecitals?.source_title || inheritedRecitals?.source_stable_id || "";
   const recitalSource = inheritedRecitals?.source_url
-    ? `<a href="${esc(inheritedRecitals.source_url)}" target="_blank" rel="noopener noreferrer">${esc(inheritedRecitals.source_title || inheritedRecitals.source_stable_id)} →</a>`
-    : esc(inheritedRecitals?.source_title || inheritedRecitals?.source_stable_id || "");
+    ? `<a href="${esc(inheritedRecitals.source_url)}" title="${esc(inheritedRecitals.source_title || "")}" target="_blank" rel="noopener noreferrer">${esc(recitalSourceName)} →</a>`
+    : `<span title="${esc(inheritedRecitals?.source_title || "")}">${esc(recitalSourceName)}</span>`;
   sourceNote.innerHTML = lawLinks + (inheritedRecitals
     ? `<br><span class="muted">${esc(inheritedRecitals.note)} Source: ${recitalSource}</span>`
     : "");

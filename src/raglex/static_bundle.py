@@ -292,9 +292,15 @@ _WORDART_STYLE = """
   -moz-osx-font-smoothing: grayscale;
 }
 .wordart.rainbow {
-  transform: scale(1, 1.5);
-  -webkit-transform: scale(1, 1.5);
-  margin: .5em 0 .75em;
+  /* css-wordart's rainbow is scale(1, 1.5) — tall and narrow, which is faithful to the
+     original but reads as cramped at heading size. Widened, and anchored at the left so
+     the extra width grows into the page rather than overflowing both margins. */
+  transform: scale(1.12, 1.4);
+  -webkit-transform: scale(1.12, 1.4);
+  transform-origin: left center;
+  -webkit-transform-origin: left center;
+  letter-spacing: .015em;
+  margin: .5em 0 .9em;
 }
 .wordart.rainbow .text {
   position: relative;
