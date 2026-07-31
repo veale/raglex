@@ -528,6 +528,15 @@ def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_p
     assert provision["segments"][0]["inherited"] is True
     assert provision["inherited_recitals"]["source_stable_id"] == base_id
 
+    # A dated sector-0 CELEX is also a stable id even though it contains neither "/"
+    # nor ":". MCP lookup must accept it directly and expose the same virtual recitals.
+    mcp = facade.lookup(
+        citation=version_id, cited_by=False, similar=False, full=True,
+    )
+    assert mcp["stable_id"] == version_id
+    assert mcp["recital_outline"] == ["Recital 1", "Recital 2"]
+    assert mcp["recitals_text"].startswith("Consumer protection")
+
     page = StaticLawExporter(config).build(version_id).html.decode()
     assert "Recitals are inherited unchanged from the original act" in page
     assert "Member States shall prohibit unfair practices." in page

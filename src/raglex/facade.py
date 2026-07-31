@@ -2313,7 +2313,7 @@ class Facade:
             cand = fc.value if fc else None
         with self._open() as (cat, _rs, _ts):
             held = cat.find_document_id(cand) if cand else None
-            if held is None and cand is None and ("/" in raw or ":" in raw):
+            if held is None:
                 if cat.get_document(raw) is not None:
                     held, cand = raw, raw
             return held, cand
@@ -2783,8 +2783,12 @@ class Facade:
             cand = fc.value if fc else None
         with self._open() as (cat, _rs, _ts):
             held_id = cat.find_document_id(cand) if cand else None
-            if held_id is None and cand is None and ("/" in raw or ":" in raw):
-                # maybe the agent passed a stable_id straight through
+            if held_id is None:
+                # Maybe the agent passed a stable_id straight through.  Do not require
+                # slash/colon punctuation: dated consolidated CELEX ids are canonical
+                # stable ids too (for example ``02005L0029-20220528``).  Check even
+                # when a permissive citation grammar proposed another candidate: an
+                # exact held stable id is stronger evidence.
                 if cat.get_document(raw) is not None:
                     held_id, cand = raw, raw
             if held_id is None:
