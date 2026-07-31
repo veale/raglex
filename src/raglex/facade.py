@@ -1306,13 +1306,17 @@ class Facade:
                 if (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
                 not in seen_edges
             ]
-            combined_edges = [*direct_edges, *version_edges]
+            combined_edges = self._collapse_version_citers(
+                cat, [*direct_edges, *version_edges])
             combined_edges.sort(
                 key=lambda r: float(r.get("src_pagerank") or 0.0), reverse=True)
             incoming = self._assemble_cited_by(cat, combined_edges, cap=200)
+            collapsed_version_edges = self._collapse_version_citers(cat, version_edges)
             version_inherited_incoming = self._assemble_cited_by(
-                cat, version_edges, cap=200)
+                cat, collapsed_version_edges, cap=200)
             cited_by_total = cat.cited_by_stats(ids_self)["documents"]
+            version_cited_by_total = cat.cited_by_family_count(
+                [*ids_self, *([version_base] if version_base else [])])
             mapping_rows = [dict(r) for r in cat.provision_mappings(stable_id)]
             inherited_edges = [dict(r) for r in cat.inherited_mentions_for(
                 stable_id, limit=1200)]
@@ -1378,15 +1382,13 @@ class Facade:
                 "relations": [r for r in rels if r["relationship_type"] != "suppressed"],
                 "suppressed_count": len(suppressed),
                 "incoming": incoming,
-                "cited_by_count": (
-                    cat.version_combined_citer_count(stable_id)
-                    if version_base else cited_by_total + len(
-                        inherited_citer_ids - direct_citer_ids)
-                ),
+                "cited_by_count": version_cited_by_total + len(
+                    inherited_citer_ids - direct_citer_ids),
                 "direct_cited_by_count": cited_by_total,
+                "version_cited_by_count": version_cited_by_total,
                 "version_inherited_incoming": version_inherited_incoming,
                 "version_inherited_cited_by_count": len({
-                    row["src_id"] for row in version_edges
+                    row["src_id"] for row in collapsed_version_edges
                 }),
                 "inherited_incoming": inherited_incoming,
                 "inherited_cited_by_count": len(inherited_citer_ids),
@@ -1453,6 +1455,59 @@ class Facade:
 
     _TREATMENT_RANK = {"overrules": 0, "distinguishes": 1, "applies": 2, "follows": 3,
                        "considers": 4, "mentions": 5}
+
+    @staticmethod
+    def _collapse_version_citers(cat, edge_rows) -> list[dict]:
+        """Collapse repeated incoming evidence from snapshots of one citing act.
+
+        Consolidated texts reproduce most of their base act verbatim. Extracting each
+        snapshot is still correct and auditable, but displaying every snapshot as a
+        separate citer makes a third statute appear increasingly cited whenever Cellar
+        publishes another version. For each citing lineage choose the latest member
+        applicable today that actually carries this target citation. If only future
+        members carry it, choose the earliest future member. Non-versioned documents are
+        untouched. The stored relation rows are never deleted or rewritten.
+        """
+        rows = [dict(r) for r in edge_rows]
+        families = cat.consolidation_families_for([r["src_id"] for r in rows])
+        if not families:
+            return rows
+        today = datetime.now(timezone.utc).date().isoformat()
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            family = families.get(row["src_id"])
+            grouped.setdefault(family[0] if family else row["src_id"], []).append(row)
+        out: list[dict] = []
+        for family_id, family_rows in grouped.items():
+            dated = {
+                row["src_id"]: families[row["src_id"]][1]
+                for row in family_rows if row["src_id"] in families
+            }
+            applicable = sorted(
+                ((d, sid) for sid, d in dated.items() if d and d <= today),
+            )
+            if applicable:
+                chosen = applicable[-1][1]
+            elif any(row["src_id"] == family_id for row in family_rows):
+                chosen = family_id
+            else:
+                future = sorted((d or "9999-99-99", sid) for sid, d in dated.items())
+                chosen = future[0][1] if future else family_rows[0]["src_id"]
+            selected = [row for row in family_rows if row["src_id"] == chosen]
+            # Exact repeats inside a package can still occur through parallel structured
+            # and extracted edges; keep one evidential occurrence per passage/anchor/type.
+            seen: set[tuple] = set()
+            for row in selected:
+                key = (
+                    row["dst_id"], row["dst_anchor"], row["relationship_type"],
+                    row["context_start"], row["context_end"],
+                    row["raw_citation_string"],
+                )
+                if key not in seen:
+                    seen.add(key)
+                    row["citing_version_family"] = family_id
+                    out.append(row)
+        return out
 
     def _assemble_cited_by(self, cat, edge_rows, *, cap: int = 200) -> list[dict]:
         """Fold raw citing edges into the panel's one-row-per-citing-document shape.
@@ -1766,6 +1821,7 @@ class Facade:
                 projected["dst_id"] = stable_id
                 projected["version_inherited"] = True
                 rels.append(projected)
+            rels = self._collapse_version_citers(cat, rels)
             if anchor and exact:
                 # A specific SUB-provision: the sub-paragraph mention badges want only the
                 # documents pinned to exactly this pinpoint (Article 47(1)), not the whole

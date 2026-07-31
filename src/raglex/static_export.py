@@ -455,6 +455,7 @@ class StaticLawExporter:
                 projected["dst_anchor"] = projected["inherited_current_anchor"]
                 projected["is_inherited"] = True
                 relations.append(projected)
+            relations = self.facade._collapse_version_citers(cat, relations)
 
             def relation_keys(relation) -> list[str]:
                 anchor = relation["dst_anchor"]

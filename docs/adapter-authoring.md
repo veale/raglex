@@ -77,6 +77,13 @@ dated expression. Never rewrite the literal edge: project it at read/export time
 it as version-inherited. This lets unchanged Articles share their citers and lets a newly
 inserted Article 1a surface on the first version that actually contains it.
 
+Apply lineage in both directions. When a consolidated act cites a third instrument,
+do not show the base act and every dated snapshot as separate citers of that third
+instrument. Keep every per-version relation as evidence, but collapse the citing family
+at read/export time, preferring the latest applicable member that actually carries the
+citation. Version discovery must not inflate user-facing mention counts merely by
+reproducing unchanged text.
+
 Formex amendment quotations require the same structural care as annexes. Replacement
 text for another instrument may contain genuine nested `<ARTICLE>` elements under
 `<QUOT.S>`; retain that prose inside the outer amending Article, but never promote those

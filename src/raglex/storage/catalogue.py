@@ -1265,6 +1265,32 @@ class Catalogue:
         ).fetchone()
         return str(row["base_id"]) if row and row["base_id"] else None
 
+    def consolidation_families_for(
+        self, version_ids: list[str],
+    ) -> dict[str, tuple[str, str | None]]:
+        """Batch ``version_id -> (base_id, version_date)`` for citing-side collapse."""
+        ids = list(dict.fromkeys(str(i) for i in version_ids if i))
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"""
+            SELECT r.src_id, r.src_id AS stable_id,
+                   COALESCE(r.dst_id, r.candidate_id) AS base_id,
+                   d.meta_json, r.dst_anchor
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.src_id IN ({qs}) AND r.relationship_type = 'consolidates'
+              AND COALESCE(r.dst_id, r.candidate_id) IS NOT NULL
+            """,
+            ids,
+        ).fetchall()
+        out: dict[str, tuple[str, str | None]] = {}
+        for row in rows:
+            out[str(row["src_id"])] = (
+                str(row["base_id"]), self._version_date(row),
+            )
+        return out
+
     def applicable_consolidation(
         self, base_id: str, on_date: str | None = None,
     ) -> tuple[str, str] | None:
@@ -2034,6 +2060,48 @@ class Catalogue:
         ]
         return eligible[-1] if eligible else None
 
+    def applicable_legislative_versions(
+        self, base_ids: list[str], on_date: str | None = None,
+    ) -> dict[str, tuple[str, str]]:
+        """Batch form of :meth:`applicable_legislative_version`.
+
+        Citation extraction can encounter hundreds of targets in one document. Asking
+        the lineage table once per citation saturated production PostgreSQL as sector-0
+        coverage grew; one set query makes targets without versions cheap too.
+        """
+        ids = list(dict.fromkeys(str(i) for i in base_ids if i))
+        if not ids:
+            return {}
+        cutoff = str(on_date or date.today().isoformat())[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
+            cutoff = date.today().isoformat()
+        out: dict[str, tuple[str, str]] = {}
+        # Stay below SQLite's common 999-bind ceiling as well as keeping PostgreSQL plans
+        # compact for citation-dense Commission documents.
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            qs = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""
+                SELECT COALESCE(r.dst_id, r.candidate_id) AS base_id,
+                       d.stable_id, d.meta_json, r.dst_anchor
+                FROM relations r JOIN documents d ON d.stable_id = r.src_id
+                WHERE COALESCE(r.dst_id, r.candidate_id) IN ({qs})
+                  AND r.relationship_type IN ('consolidates', 'point_in_time_of')
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                version_date = self._version_date(row)
+                if not version_date or version_date > cutoff:
+                    continue
+                base_id = str(row["base_id"])
+                candidate = (str(row["stable_id"]), version_date)
+                if base_id not in out or (version_date, candidate[0]) > \
+                        (out[base_id][1], out[base_id][0]):
+                    out[base_id] = candidate
+        return out
+
     def refresh_applicable_version_links(
         self, base_id: str, *, commit: bool = True,
     ) -> int:
@@ -2225,6 +2293,37 @@ class Catalogue:
             "AND relationship_type <> 'cited_by'",  # reverse-oriented scaffold
             (dst_id,),
         ).fetchall()
+
+    def cited_by_family_count(self, ids: list[str]) -> int:
+        """Distinct citing documents after collapsing consolidated citing lineages."""
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return 0
+        qs = ",".join("?" * len(ids))
+        row = self.conn.execute(
+            f"""
+            WITH citers AS (
+              SELECT DISTINCT r.src_id
+              FROM relations r
+              WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+                AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+                AND r.relationship_type IN (
+                  'mentions','interprets','applies','considers','follows',
+                  'distinguishes','overrules','cites_for_fact'
+                )
+            ),
+            lineage AS (
+              SELECT src_id, COALESCE(dst_id, candidate_id) AS base_id
+              FROM relations
+              WHERE relationship_type = 'consolidates'
+                AND COALESCE(dst_id, candidate_id) IS NOT NULL
+            )
+            SELECT COUNT(DISTINCT COALESCE(lineage.base_id, citers.src_id)) AS n
+            FROM citers LEFT JOIN lineage ON lineage.src_id = citers.src_id
+            """,
+            ids,
+        ).fetchone()
+        return int(row["n"] or 0)
 
     def authority_counts(self, ids: list[str]) -> dict[str, int]:
         """How often each id is itself cited — from the ``citation_counts`` roll-up, keyed by

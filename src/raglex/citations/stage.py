@@ -138,12 +138,17 @@ def _attach_applicable_versions(catalogue: Catalogue, doc, edges: dict) -> dict:
             context_start=row["context_start"],
             context_end=row["context_end"],
         ))
+    applicable_by_base = catalogue.applicable_legislative_versions(
+        [
+            rel.dst_id for rel in source_relations
+            if str(rel.relationship_type) in versionable_types and rel.dst_id
+        ],
+        reference_date,
+    )
     for rel in source_relations:
         if str(rel.relationship_type) not in versionable_types or not rel.dst_id:
             continue
-        applicable = catalogue.applicable_legislative_version(
-            rel.dst_id, reference_date,
-        )
+        applicable = applicable_by_base.get(rel.dst_id)
         if not applicable:
             continue
         version_id, version_date = applicable

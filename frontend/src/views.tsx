@@ -2345,7 +2345,8 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
       </div>
       {(doc.incoming || []).length > 0 &&
         <div id="cited-by-panel"><CitedByPanel id={d.stable_id} incoming={doc.incoming}
-          count={doc.direct_cited_by_count ?? doc.cited_by_count} inferred={doc.inferred_by_count} /></div>}
+          count={doc.version_cited_by_count ?? doc.direct_cited_by_count ?? doc.cited_by_count}
+          inferred={doc.inferred_by_count} /></div>}
       {(doc.inherited_incoming || []).length > 0 &&
         <InheritedProvisionMentions incoming={doc.inherited_incoming}
           mappings={doc.provision_mappings || []} open={open} />}

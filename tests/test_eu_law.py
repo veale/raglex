@@ -270,6 +270,7 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
     with f._open() as (cat, _r, _t):
         for sid, kind in (
             (current, DocType.LEGISLATION),
+            ("32000L0001", DocType.LEGISLATION),
             ("case-base", DocType.JUDGMENT),
             ("case-direct", DocType.JUDGMENT),
         ):
@@ -306,6 +307,15 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
             extracted_via=ExtractedVia.MANUAL,
             resolution_status=ResolutionStatus.RESOLVED,
         )])
+        repeated = dict(
+            relationship_type=RelationshipType.MENTIONS,
+            raw_citation_string="Directive 2000/1 Article 3",
+            dst_id="32000L0001", dst_anchor="Article 3",
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )
+        cat.add_relations("32016R0679", [TypedRelation(**repeated)])
+        cat.add_relations(current, [TypedRelation(**repeated)])
 
     base = f.get_document("32016R0679")
     assert base["canonical_read"]["stable_id"] == current
@@ -324,6 +334,13 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
     original = f.lookup(
         citation="32016R0679", cited_by=False, similar=False, original=True)
     assert original["stable_id"] == "32016R0679"
+
+    # The same embedded citation in the base and consolidated text is one citing
+    # legislative lineage in the third law's mentions, represented by today's version.
+    third_mentions = f.document_mentions("32000L0001")
+    assert third_mentions["total"] == 1
+    assert third_mentions["groups"][0]["src_id"] == current
+    assert f.get_document("32000L0001")["cited_by_count"] == 1
 
 
 def test_formex_quoted_amendments_are_not_promoted_to_act_articles():
