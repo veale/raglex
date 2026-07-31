@@ -377,6 +377,101 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
     assert f.get_document("32000L0001")["cited_by_count"] == 1
 
 
+def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_path):
+    from raglex.config import Config
+    from raglex.core.models import (
+        ExtractedVia, ResolutionStatus, Segment, TypedRelation,
+    )
+    from raglex.facade import Facade
+    from raglex.static_export import StaticLawExporter
+
+    config = Config(
+        data_dir=tmp_path, catalogue_path=tmp_path / "recitals.sqlite",
+        raw_dir=tmp_path / "raw-recitals", text_dir=tmp_path / "text-recitals",
+        settings_path=tmp_path / "recitals.json",
+        embed_provider="local-hashing", embed_model=None,
+    )
+    facade = Facade(config)
+    base_id = "32005L0029"
+    version_id = "02005L0029-20220528"
+    base_text = (
+        "Consumer protection follows Directive 84/450/EEC.\n\n"
+        "Member States shall prohibit unfair practices.\n\n"
+        "Article 1 Purpose\nThis Directive protects consumers."
+    )
+    recital_2 = base_text.index("Member States")
+    article_1 = base_text.index("Article 1")
+    version_text = "Article 1 Purpose\nThis Directive protects consumers as amended."
+
+    with facade._open() as (cat, _rawstore, textstore):
+        records = [
+            Record(
+                source="eu-legislation", stable_id=base_id,
+                doc_type=DocType.LEGISLATION, title="Original UCPD",
+                text=base_text, raw_bytes=base_text.encode(),
+                segments=[
+                    Segment("Recital 1", 0, recital_2 - 2, kind="recital"),
+                    Segment("Recital 2", recital_2, article_1 - 2, kind="recital"),
+                    Segment("Article 1 Purpose", article_1, len(base_text), kind="article"),
+                ],
+                extracted_via=ExtractedVia.STRUCTURED,
+            ),
+            Record(
+                source="eu-legislation", stable_id=version_id,
+                doc_type=DocType.LEGISLATION, title="Consolidated UCPD",
+                text=version_text, raw_bytes=version_text.encode(),
+                segments=[
+                    Segment("Article 1 Purpose", 0, len(version_text), kind="article"),
+                ],
+                relations=[TypedRelation(
+                    relationship_type=RelationshipType.CONSOLIDATES,
+                    raw_citation_string=base_id, dst_id=base_id,
+                    extracted_via=ExtractedVia.STRUCTURED,
+                    resolution_status=ResolutionStatus.RESOLVED,
+                )],
+                extracted_via=ExtractedVia.STRUCTURED,
+            ),
+        ]
+        for record in records:
+            record.ensure_payload_hash()
+            path = textstore.put(record.payload_hash, record.text or "")
+            textstore.put_segments(record.payload_hash, record.segments)
+            cat.upsert_document(record, text_path=str(path))
+            if record.relations:
+                cat.add_relations(record.stable_id, record.relations)
+        directive_start = base_text.index("Directive 84/450/EEC")
+        cat.add_citations(base_id, [{
+            "raw": "Directive 84/450/EEC", "entity_kind": "directive",
+            "candidate_id": "31984L0450", "pinpoint": None,
+            "char_start": directive_start,
+            "char_end": directive_start + len("Directive 84/450/EEC"),
+            "method": "test", "confidence": 1.0,
+        }])
+
+    body = facade.document_body(version_id)
+    inherited = body["inherited_recitals"]
+    assert inherited["source_stable_id"] == base_id
+    assert [segment["label"] for segment in inherited["segments"]] == [
+        "Recital 1", "Recital 2",
+    ]
+    assert inherited["citations"][0]["candidate_id"] == "31984L0450"
+    assert inherited["text"][
+        inherited["citations"][0]["char_start"]:
+        inherited["citations"][0]["char_end"]
+    ] == "Directive 84/450/EEC"
+    assert "Consumer protection" not in body["text"]
+
+    provision = facade.get_provision(version_id, label="Recital 2", context=0)
+    assert provision["segments"][0]["text"].startswith("Member States")
+    assert provision["segments"][0]["inherited"] is True
+    assert provision["inherited_recitals"]["source_stable_id"] == base_id
+
+    page = StaticLawExporter(config).build(version_id).html.decode()
+    assert "Recitals are inherited unchanged from the original act" in page
+    assert "Member States shall prohibit unfair practices." in page
+    assert "inherited-recital" in page
+
+
 def test_formex_quoted_amendments_are_not_promoted_to_act_articles():
     from raglex.formats.formex import parse_formex_legislation
 

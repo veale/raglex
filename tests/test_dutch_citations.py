@@ -69,6 +69,21 @@ def test_dutch_echr_title_resolves_with_lid_pinpoint():
     assert cite.pinpoint == "Artikel 6, lid tweede"
 
 
+def test_dutch_eu_directive_names_and_article_lists_resolve_to_celex():
+    cites = _nl(
+        "De artikelen 5, 6 en 7 van de Richtlijn oneerlijke handelspraktijken "
+        "zijn relevant. Zie ook artikel 3, tweede lid, van Richtlijn (EU) 2019/770."
+    )
+    assert {
+        cite.pinpoint for cite in cites
+        if cite.candidate_id == "32005L0029" and cite.pinpoint
+    } == {"Article 5", "Article 6", "Article 7"}
+    assert any(
+        cite.candidate_id == "32019L0770" and cite.pinpoint == "Article 3(2)"
+        for cite in cites
+    )
+
+
 def test_dated_juriconnect_does_not_collapse_to_current_work():
     cite = _nl("jci1.3:c:BWBR0002221&hoofdstuk=I&artikel=1&lid=2&z=2015-01-01&g=2015-01-01")[0]
     assert cite.candidate_id == "BWBR0002221@2015-01-01"

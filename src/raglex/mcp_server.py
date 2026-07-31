@@ -295,7 +295,9 @@ def build_server(config: Config | None = None) -> MCPServer:
         """The document's full text + structural segments (legislation articles /
         sections, judgment paragraphs) with their citable labels and levels. Base
         legislation defaults to today's applicable consolidation; pass
-        ``original=true`` to read the original."""
+        ``original=true`` to read the original. A consolidation's unchanged recitals
+        are returned separately as ``inherited_recitals`` with original-act provenance;
+        they are live projections, not copied consolidation text."""
         target = facade.canonical_read_target(stable_id, original=original)
         result = facade.document_body(target["stable_id"])
         result["read_target"] = target
@@ -306,9 +308,11 @@ def build_server(config: Config | None = None) -> MCPServer:
                       char_start: Optional[int] = None, context: int = 1,
                       original: bool = False) -> dict:
         """ONE provision/paragraph of a document by its citable label ("Article 17",
-        "s. 45", "[42]") — or by char offset — with N context segments either side and
-        the heading breadcrumb. Prefer this over get_document_body when you need to
-        quote a single provision exactly: it's pinpoint-accurate and token-cheap."""
+        "Recital 47", "s. 45", "[42]") — or by char offset — with N context segments
+        either side and the heading breadcrumb. A recital requested from a consolidation
+        transparently reads the unchanged recital from its original act and reports that
+        provenance. Prefer this over get_document_body when you need to quote a single
+        provision exactly: it's pinpoint-accurate and token-cheap."""
         target = facade.canonical_read_target(stable_id, original=original)
         result = facade.get_provision(
             target["stable_id"], label=label, char_start=char_start, context=context)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from .grammars import _eu_celex
 from .models import Citation
 
 CONSUMER_CODE_ID = "it/dlgs/2005/206"
@@ -48,8 +49,76 @@ def _pin(article: str, comma: str | None = None, letter: str | None = None) -> s
     return out
 
 
-def italian_citations(text: str) -> list[Citation]:
+_IT_DIRECTIVE_HOST = re.compile(
+    r"\b(?:(?P<ucpd>direttiva\s+sulle\s+pratiche\s+commerciali\s+sleali)|"
+    r"direttiva\s*(?:\((?:UE|CE|CEE)\)\s*)?"
+    r"(?P<a>\d{2,4})\s*/\s*(?P<b>\d{1,4})"
+    r"(?P<footnote>1[0-9])?(?:\s*/?\s*(?:UE|CE|CEE))?)\b",
+    re.I,
+)
+
+
+def eu_directive_citations(text: str) -> list[Citation]:
+    """Italian directive hosts and their governed article lists.
+
+    AGCM PDFs sometimes glue a footnote number to the UCPD number
+    (``direttiva 2005/2915``, where 15 is the footnote). That exact observed form
+    is treated as Directive 2005/29/EC rather than minting a phantom instrument.
+    """
     out: list[Citation] = []
+    for host in _IT_DIRECTIVE_HOST.finditer(text):
+        a, b = host.group("a"), host.group("b")
+        candidate = "32005L0029" if (
+            host.group("ucpd")
+            or (a == "2005" and (
+                (b == "29" and host.group("footnote")) or b == "2915"
+            ))
+        ) else _eu_celex("directive", a, b)
+        if not candidate:
+            continue
+        out.append(Citation(
+            raw=host.group(0), entity_kind="directive", candidate_id=candidate,
+            pinpoint=None, char_start=host.start(), char_end=host.end(),
+            method="it_eu_directive", confidence=1.0,
+        ))
+        before_start = max(0, host.start() - 180)
+        governed = _ARTICLE_BEFORE.search(text[before_start:host.start()])
+        if not governed:
+            continue
+        run = governed.group("run")
+        run_start = before_start + governed.start("run")
+        numbers = [
+            number for number in re.finditer(r"\d+[a-z]*(?:-[a-z]+)?", run, re.I)
+            if not re.search(
+                r"(?:comma|lettera)\s*$",
+                run[max(0, number.start() - 12):number.start()], re.I)
+        ]
+        for index, number in enumerate(numbers):
+            start = (
+                before_start + governed.start("whole")
+                if index == 0 else run_start + number.start()
+            )
+            end = run_start + number.end()
+            out.append(Citation(
+                raw=text[start:end], entity_kind="directive",
+                candidate_id=candidate,
+                pinpoint=_pin(
+                    number.group(0),
+                    governed.group("comma") if index == 0 else None,
+                    governed.group("letter") if index == 0 else None,
+                ),
+                char_start=start, char_end=end,
+                method=(
+                    "it_eu_directive_article"
+                    if index == 0 else "it_eu_directive_article_list"
+                ),
+                confidence=.99,
+            ))
+    return out
+
+
+def italian_citations(text: str) -> list[Citation]:
+    out: list[Citation] = eu_directive_citations(text)
     for host_re, candidate in _HOSTS:
         for host in host_re.finditer(text):
             before_start = max(0, host.start() - 180)

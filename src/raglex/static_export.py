@@ -432,6 +432,25 @@ class StaticLawExporter:
             if not segments:
                 segments = synthesise_numbered_segments(target_text)
             sections = _law_sections(target_text, segments)
+            inherited_recitals = self.facade._inherited_recitals(
+                cat, textstore, stable_id, include_citations=False)
+            if inherited_recitals:
+                from types import SimpleNamespace
+
+                recital_sections = _law_sections(
+                    inherited_recitals["text"],
+                    [SimpleNamespace(**{
+                        key: segment[key]
+                        for key in (
+                            "label", "kind", "level", "char_start", "char_end",
+                        )
+                    }) for segment in inherited_recitals["segments"]],
+                )
+                for section in recital_sections:
+                    section["inherited_recital"] = True
+                    section["source_stable_id"] = \
+                        inherited_recitals["source_stable_id"]
+                sections = [*recital_sections, *sections]
 
             relations = [
                 dict(relation) for relation in cat.relations_to(stable_id)
@@ -649,6 +668,16 @@ class StaticLawExporter:
                 "links": target_links,
                 "sections": sections,
                 "provision_mappings": provision_mappings,
+                "inherited_recitals": (
+                    {
+                        key: inherited_recitals[key]
+                        for key in (
+                            "count", "source_stable_id", "source_title",
+                            "source_url", "unchanged", "virtual", "note",
+                        )
+                    }
+                    if inherited_recitals else None
+                ),
             },
             "groups": groups,
             "index": index,
@@ -1140,7 +1169,13 @@ _SCRIPT = r"""
     ? data.law.links.map((link) =>
         `<a href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">${esc(link.label)} →</a>`).join(" · ")
     : `<span class="no-source">No public copy recorded</span>`;
-  sourceNote.innerHTML = lawLinks;
+  const inheritedRecitals = data.law.inherited_recitals;
+  const recitalSource = inheritedRecitals?.source_url
+    ? `<a href="${esc(inheritedRecitals.source_url)}" target="_blank" rel="noopener noreferrer">${esc(inheritedRecitals.source_title || inheritedRecitals.source_stable_id)} →</a>`
+    : esc(inheritedRecitals?.source_title || inheritedRecitals?.source_stable_id || "");
+  sourceNote.innerHTML = lawLinks + (inheritedRecitals
+    ? `<br><span class="muted">Recitals are inherited unchanged from the original act (${recitalSource}); they are displayed here without being copied into this consolidated expression.</span>`
+    : "");
   $("law").appendChild(sourceNote);
 
   const nav = $("contents-nav");
@@ -1169,7 +1204,7 @@ _SCRIPT = r"""
 
     const article = document.createElement("section");
     article.id = section.id;
-    article.className = `law-section level-${Math.min(2, Number(section.level || 0))}`;
+    article.className = `law-section level-${Math.min(2, Number(section.level || 0))}${section.inherited_recital ? " inherited-recital" : ""}`;
     const heading = document.createElement("h2");
     heading.textContent = section.label;
     if (count) {

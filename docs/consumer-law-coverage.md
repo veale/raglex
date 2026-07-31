@@ -75,8 +75,8 @@ Live-document samples on 30 July 2026:
 | CMA207 | Mostly orphan `Section 225`, `section 226`, etc. after the regime is introduced once | CMA207 is an allow-listed DMCCA guide, so 207 carry-forward occurrences resolve to DMCCA 2024; 221/233 total citations target it |
 | Commission UCPD notice | Hundreds of bare `Article N` and `Recital N` references, interspersed with other EU acts | The title names exactly one governing Directive, so 538 carry-forwards reset to UCPD after sentence boundaries; 549/1,323 citations target UCPD |
 | General Commission consumer pages | Mixed directives/regulations and occasional orphan Articles | No page-wide default unless the title names exactly one Directive; only local explicit/carry-forward context is used |
-| ACM guidance | Dutch `artikel 6:193a BW`, host-first `Burgerlijk Wetboek Boek 6 … artikel 193h`, `artikel 15 AVG`, and article lists | Native Dutch host grammar; colon/dot articles are not truncated; `AVG` maps to GDPR rather than a German-law abbreviation; Dutch lists expand one edge per Article |
-| AGCM bulletins | `articoli 20, 21 e 22 del Codice del consumo`; later decisions restart numbering under other laws | Explicit article lists resolve to `it/dlgs/2005/206`; all generic carry-forward is discarded at bulletin scope to prevent cross-decision leakage |
+| ACM guidance | Dutch `artikel 6:193a BW`, host-first `Burgerlijk Wetboek Boek 6 … artikel 193h`, `artikel 15 AVG`, `artikelen 5, 6 en 7 van de Richtlijn oneerlijke handelspraktijken`, and numbered EU Directives | Native Dutch host grammar; colon/dot articles are not truncated; `AVG` maps to GDPR rather than a German-law abbreviation; Dutch lists expand one edge per Article and named/numbered UCPD references resolve to `32005L0029` |
+| AGCM bulletins | `articoli 20, 21 e 22 del Codice del consumo`, Italian UCPD names/numbers, and PDF artefacts such as `direttiva 2005/2915` (footnote 15 glued to 2005/29); later decisions restart numbering under other laws | Explicit article lists resolve to `it/dlgs/2005/206` or the printed EU Directive; the observed glued UCPD footnote resolves deterministically; all generic carry-forward is discarded at bulletin scope to prevent cross-decision leakage |
 
 The general carry-forward grammar therefore remains useful, but a source receives a
 document-wide home only when its adapter can prove a single governing instrument.
@@ -97,6 +97,12 @@ the same Article/Recital anchor and combines them with direct citations to the d
 expression. This also surfaces a citation to a newly inserted provision on the first
 consolidation that contains it. The projection is marked as version-inherited and is used
 by the API/MCP and static exporter; it is not another fabricated citation row.
+
+Because sector-0 expressions omit the preamble, each consolidation also exposes the
+base act's unchanged recital segments as a virtual, clearly labelled section. The recital
+text and its outgoing links are read from `32005L0029`; `Recital N` incoming mentions are
+already projected by the same version-inheritance mechanism. Nothing is copied into the
+dated expression and no mention count is multiplied by the number of consolidations.
 
 A complete resumable sector-0 Cellar walk and a local all-held-EU annex repair are
 available as first-class jobs and scheduled maintenance. Opening a base EU act with no

@@ -1374,11 +1374,16 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
   const [doc, docErr, reload] = useAsync(() => api.document(id), [id]);
   const [body, , reloadBody] = useAsync(() => api.documentBody(id), [id]);
   const segs = (body?.segments || []) as any[];
+  const inheritedRecitals = body?.inherited_recitals;
+  const recitalSegs = (inheritedRecitals?.segments || []) as any[];
   // jump to the pinpointed paragraph/section once the full text has rendered
   useEffect(() => {
     if (!body?.text) return;
-    const idx = matchSegIndex(segs, anchor);
-    const el = idx >= 0 ? document.getElementById("peek-seg-" + idx) : null;
+    const recitalIdx = matchSegIndex(recitalSegs, anchor);
+    const idx = recitalIdx < 0 ? matchSegIndex(segs, anchor) : -1;
+    const el = recitalIdx >= 0
+      ? document.getElementById("peek-recital-" + recitalIdx)
+      : idx >= 0 ? document.getElementById("peek-seg-" + idx) : null;
     if (el) setTimeout(() => { el.scrollIntoView({ behavior: "smooth", block: "start" }); el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 2000); }, 60);
   }, [body, anchor]);
   // Three non-happy paths, each with a REAL affordance (a dead "Open full" on a
@@ -1408,6 +1413,26 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
         <button style={{ marginTop: 4 }} onClick={() => openFull(id, anchor)}>open full ↗</button>
       </div>
       {!body?.text && doc && <p className="muted">No text yet (metadata only).</p>}
+      {inheritedRecitals?.text && recitalSegs.length > 0 && (
+        <>
+          <p className="leg-version-state">
+            Unchanged recitals inherited from the original act.
+          </p>
+          <div className="reader">
+            {recitalSegs.map((s, i) => {
+              const sb = segBody(
+                inheritedRecitals.text, s, inheritedRecitals.citations || [], onCite);
+              return (
+                <div className={`seg lvl${Math.min(s.level, 2)} kind-recital`}
+                     key={i} id={"peek-recital-" + i}>
+                  {sb.showLabel && <span className="seg-label">{s.label}</span>}
+                  <span className="seg-body">{sb.body}</span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
       {body?.text && segs.length > 0 && (
         <div className={`reader${CASE_DOC_TYPES.has(body.doc_type) ? " has-rails" : ""}`}>
           {segs.map((s, i) => {
@@ -1727,8 +1752,12 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   // "Article 17"), scroll to the matching segment.
   useEffect(() => {
     if (!body || !pinpoint) return;
-    const idx = matchSegIndex(body.segments || [], pinpoint);
-    if (idx >= 0) setTimeout(() => scrollToSeg(segId(body.segments[idx].label)), 80);
+    const allSegments = [
+      ...(body.inherited_recitals?.segments || []),
+      ...(body.segments || []),
+    ];
+    const idx = matchSegIndex(allSegments, pinpoint);
+    if (idx >= 0) setTimeout(() => scrollToSeg(segId(allSegments[idx].label)), 80);
   }, [body, pinpoint]);
   if (!body) return <p className="muted">Loading text…</p>;
   if (!body.text && !rawKind) return (
@@ -1745,6 +1774,10 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   );
   const segs = body.segments as { label: string; kind: string; level: number; char_start: number; char_end: number }[];
   const cites = body.citations || [];
+  const inheritedRecitals = body.inherited_recitals;
+  const recitalSegs = (inheritedRecitals?.segments || []) as {
+    label: string; kind: string; level: number; char_start: number; char_end: number
+  }[];
   // The pinned line shows CURATED commentary links (analyses/summarises/annotations)
   // anchored to this paragraph. Plain citation edges (mentions etc.) are excluded —
   // the "Mentioned by" roll-up below already owns those, and showing both painted
@@ -1754,6 +1787,45 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   const pinned = (label: string) => (incoming || []).filter(
     (r) => r.dst_anchor === label && !CITE_TYPES.has(r.relationship_type));
   const isCase = CASE_DOC_TYPES.has(body.doc_type);
+  const recitalContent = inheritedRecitals?.text && recitalSegs.length > 0 ? (
+    <div className="inherited-recitals">
+      <div className="leg-version-state">
+        <b>Unchanged recitals from the original act.</b>{" "}
+        They are displayed live here and are not copied into this consolidated expression.
+        {inheritedRecitals.source_url && <>{" "}
+          <a href={inheritedRecitals.source_url} target="_blank" rel="noreferrer">
+            View original act ↗</a></>}
+      </div>
+      <div className="reader">
+        {recitalSegs.map((s, i) => {
+          const sb = segBody(
+            inheritedRecitals.text, s, inheritedRecitals.citations || [], onCite);
+          const mb = mentionsFor(s.label);
+          return (
+            <div className={`seg lvl${Math.min(s.level, 2)} kind-recital`
+                   + (mb && mb.list.length ? " has-mentions" : "")}
+                 key={i} id={segId(s.label)}>
+              {canWrite && <a className="seg-plus"
+                title="Link commentary or an authority to this recital"
+                onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>}
+              {sb.showLabel && <span className="seg-label">{s.label}</span>}
+              <span className="seg-body">{sb.body}</span>
+              {pinned(s.label).map((r, j) => (
+                <div className="pinned" key={j}>💬 {r.relationship_type}:{" "}
+                  <DocLink id={r.src_id}
+                    onOpen={() => peek.push({ kind: "doc", id: r.src_id })}>
+                    {r.src_title || r.src_id}</DocLink>
+                  {r.src_anchor && <span className="muted"> ({r.src_anchor})</span>}
+                </div>
+              ))}
+              {mb && mb.list.length > 0
+                && <MentionedBy list={mb.list} target={id} anchor={s.label} />}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
   const content = !body.text ? null : (!segs || segs.length === 0)
     ? <div className="reader"><div className="seg"><div className="seg-body">
         {body.lines && body.lines.length > 1
@@ -1835,15 +1907,26 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     ? <Suspense fallback={<p className="muted loading-pulse">loading viewer…</p>}>
         {rawKind === "pdf" ? <PdfPane id={id} onCite={onCite} /> : <HtmlPane id={id} />}
       </Suspense>
-    : content;
+    : <>{recitalContent}{content}</>;
+  const navPrefix = inheritedRecitals?.text
+    ? inheritedRecitals.text + "\n\n" : "";
+  const navSegs = [
+    ...recitalSegs,
+    ...(segs || []).map((segment) => ({
+      ...segment,
+      char_start: segment.char_start + navPrefix.length,
+      char_end: segment.char_end + navPrefix.length,
+    })),
+  ];
+  const navText = navPrefix + (body.text || "");
   const mentionAnchors = new Set(
-    (segs || []).filter((s) => { const mb = mentionsFor(s.label); return mb && mb.list.length > 0; })
+    navSegs.filter((s) => { const mb = mentionsFor(s.label); return mb && mb.list.length > 0; })
       .map((s) => s.label));
   return (
     <SelectionShorthand docId={id} onLinked={reloadBody}>
       <div className="doc-layout">
-        <DocNav segs={segs || []} text={body.text || ""} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
-        <MobileJumpNav segs={segs || []} />
+        <DocNav segs={navSegs} text={navText} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
+        <MobileJumpNav segs={navSegs} />
         <div className="doc-main" ref={readerRef}>{chips}{pdfBanner}{tabs}{main}</div>
         {view === "text" && body.text && (
           <Minimap containerRef={readerRef} segs={segs || []} cites={cites}

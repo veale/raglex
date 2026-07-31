@@ -1282,7 +1282,7 @@ class Facade:
         return view
 
     def _get_document_uncached(self, stable_id: str) -> dict:
-        with self._open() as (cat, _rs, _ts):
+        with self._open() as (cat, _rs, ts):
             doc = cat.get_document(stable_id)
             if doc is None:
                 return {"error": "not found", "stable_id": stable_id}
@@ -1385,6 +1385,11 @@ class Facade:
                     disp = display_citation(al)
                 if disp not in also_cited:
                     also_cited.append(disp)
+            inherited_recitals = (
+                self._inherited_recitals(
+                    cat, ts, stable_id, include_citations=False)
+                if version_base else None
+            )
             return {
                 "document": dict(doc),
                 "oscola": _oscola_cite(doc, meta),  # this document's own OSCOLA citation
@@ -1426,6 +1431,16 @@ class Facade:
                      "title": (cat.get_document(version_base) or {})["title"]
                      if cat.get_document(version_base) else version_base}
                     if version_base else None
+                ),
+                "inherited_recitals": (
+                    {
+                        key: inherited_recitals[key]
+                        for key in (
+                            "count", "source_stable_id", "source_title",
+                            "source_url", "unchanged", "virtual", "note",
+                        )
+                    }
+                    if inherited_recitals else None
                 ),
                 "preparatory_documents": {
                     "available": bool(preparatory_count),
@@ -1703,9 +1718,135 @@ class Facade:
                 })
         return out
 
+    def _inherited_recitals(
+        self, cat, ts, stable_id: str, *, include_citations: bool = True,
+    ) -> dict | None:
+        """Return a consolidation's unchanged base-act recitals as a virtual body.
+
+        EUR-Lex consolidated expressions omit the preamble because amendments do not
+        rewrite recitals.  Copying those recitals into every dated expression would
+        duplicate text and citation edges, so readers instead project the base act's
+        recital segments at read time.  Offsets and outgoing citation spans are rebased
+        onto a compact recital-only string; the stored consolidation remains untouched.
+        Incoming mentions need no copying either:
+        ``version_inherited_mentions_for`` already projects base-act anchors (including
+        ``Recital N``) onto every consolidation.
+        """
+        base_id = cat.consolidation_base_for(stable_id)
+        if not base_id:
+            return None
+        target = cat.get_document(stable_id)
+        if target is not None and target["payload_hash"]:
+            target_segments = ts.get_segments(target["payload_hash"])
+            if any(
+                (segment.kind or "").casefold() == "recital"
+                or re.match(r"^\s*recitals?\b", segment.label or "", re.I)
+                for segment in target_segments
+            ):
+                return None
+        base = cat.get_document(base_id)
+        if base is None or not base["payload_hash"]:
+            return None
+        try:
+            source_text = ts.get(base["payload_hash"])
+        except OSError:
+            return None
+        source_segments = ts.get_segments(base["payload_hash"])
+        recital_segments = [
+            segment for segment in source_segments
+            if (segment.kind or "").casefold() == "recital"
+            or re.match(r"^\s*recitals?\b", segment.label or "", re.I)
+        ]
+        if not recital_segments:
+            return None
+
+        source_citations = (
+            list(cat.citations_for(base_id)) if include_citations else [])
+        text_parts: list[str] = []
+        segments: list[dict] = []
+        citations: list[dict] = []
+        cursor = 0
+        for segment in sorted(
+                recital_segments, key=lambda item: (item.char_start, item.char_end)):
+            source_start = max(0, min(int(segment.char_start), len(source_text)))
+            source_end = max(source_start, min(int(segment.char_end), len(source_text)))
+            body = source_text[source_start:source_end].strip()
+            if not body:
+                continue
+            if text_parts:
+                text_parts.append("\n\n")
+                cursor += 2
+            start = cursor
+            text_parts.append(body)
+            cursor += len(body)
+            segments.append({
+                "label": segment.label,
+                "kind": "recital",
+                "level": segment.level,
+                "char_start": start,
+                "char_end": cursor,
+                "inherited": True,
+                "source_stable_id": base_id,
+            })
+
+            # ``strip`` may remove whitespace before the segment body. Account for it
+            # when rebasing exact citation/highlight spans.
+            raw_body = source_text[source_start:source_end]
+            leading = len(raw_body) - len(raw_body.lstrip())
+            content_source_start = source_start + leading
+            content_source_end = content_source_start + len(body)
+            for citation in source_citations:
+                citation_start = citation["char_start"]
+                citation_end = citation["char_end"]
+                if citation_start is None or citation_end is None:
+                    continue
+                if not (content_source_start <= citation_start
+                        and citation_end <= content_source_end):
+                    continue
+                candidate = citation["candidate_id"]
+                resolved = self._resolved_target(
+                    cat, candidate, citation["raw"])
+                citations.append({
+                    "char_start": start + citation_start - content_source_start,
+                    "char_end": start + citation_end - content_source_start,
+                    "raw": citation["raw"],
+                    "candidate_id": candidate,
+                    "pinpoint": citation["pinpoint"],
+                    "entity_kind": citation["entity_kind"],
+                    "resolved_id": resolved,
+                    "method": citation["method"],
+                    "state": (
+                        "resolved" if resolved
+                        else ("pending" if candidate else "maybe")
+                    ),
+                    "inherited": True,
+                    "source_stable_id": base_id,
+                })
+
+        if not segments:
+            return None
+        return {
+            "text": "".join(text_parts),
+            "segments": segments,
+            "citations": citations,
+            "count": len(segments),
+            "source_stable_id": base_id,
+            "source_title": base["title"] or base_id,
+            "source_url": base["landing_url"],
+            "unchanged": True,
+            "virtual": True,
+            "note": (
+                "Recitals are inherited unchanged from the original act; "
+                "they are displayed here without being copied into this "
+                "consolidated expression."
+            ),
+        }
+
     def document_body(self, stable_id: str) -> dict:
         """The document's extracted text + structural segments (§6b) for the reader.
-        Segments carry kind/level so legislation renders as a hierarchy."""
+        Segments carry kind/level so legislation renders as a hierarchy. Consolidated
+        EU expressions also expose ``inherited_recitals``: a virtual, provenance-marked
+        projection of the original act's unchanged recitals and their citation links."""
         with self._open() as (cat, _rs, ts):
             doc = cat.get_document(stable_id)
             if doc is None or not doc["payload_hash"]:
@@ -1786,6 +1927,8 @@ class Facade:
                 # PDF on bailii.org the reader can offer (source_url is the landing page)
                 "external_pdf": meta.get("bailii_pdf_url"),
                 "source_url": doc["landing_url"] or meta.get("bailii_url"),
+                "inherited_recitals": self._inherited_recitals(
+                    cat, ts, stable_id) if doc["doc_type"] == "legislation" else None,
             }
 
     # How the "See all mentions" tray orders citing documents. PageRank is the
@@ -2659,6 +2802,7 @@ class Facade:
             "also_cited_as": doc.get("also_cited_as"),
             "cited_by_count": doc.get("cited_by_count"),
             "original_act": doc.get("original_act"),
+            "inherited_recitals": doc.get("inherited_recitals"),
         }
         # text: the pincited passage (+ context scale), a capped full read, or — by
         # default — a short preview plus the structural outline, so the agent decides what
@@ -2675,7 +2819,25 @@ class Facade:
             body = self.document_body(held_id)
             text = body.get("text") or ""
             segs = body.get("segments") or []
+            inherited_recitals = body.get("inherited_recitals")
             out["segment_count"] = len(segs)
+            if inherited_recitals:
+                # Keep the original act's immutable preamble separate from the
+                # consolidated expression text, but make it fully discoverable to
+                # agents and available through get_provision("Recital N").
+                out["inherited_recitals"] = {
+                    key: inherited_recitals.get(key)
+                    for key in (
+                        "count", "source_stable_id", "source_title",
+                        "source_url", "unchanged", "virtual", "note",
+                    )
+                }
+                out["recital_outline"] = [
+                    segment.get("label")
+                    for segment in inherited_recitals.get("segments", [])
+                ]
+                if full:
+                    out["recitals_text"] = inherited_recitals.get("text")
             if full:
                 out["text"] = text[:self._LOOKUP_FULL_CHARS]
                 if len(text) > self._LOOKUP_FULL_CHARS:
@@ -2836,6 +2998,54 @@ class Facade:
                         if segs[i].char_start <= char_start:
                             idx = i
                             break
+            if idx < 0 and label and re.match(r"^\s*recitals?\b", label, re.I):
+                inherited = self._inherited_recitals(
+                    cat, ts, stable_id, include_citations=False)
+                if inherited:
+                    from types import SimpleNamespace
+
+                    virtual_segments = [
+                        SimpleNamespace(**{
+                            key: segment[key]
+                            for key in ("label", "kind", "level",
+                                        "char_start", "char_end")
+                        })
+                        for segment in inherited["segments"]
+                    ]
+                    virtual_idx = _match_segment(virtual_segments, label)
+                    if virtual_idx >= 0:
+                        lo = max(0, virtual_idx - context)
+                        hi = min(
+                            len(virtual_segments), virtual_idx + context + 1)
+                        virtual_text = inherited["text"]
+                        return {
+                            "stable_id": stable_id,
+                            "title": doc["title"],
+                            "segments": [
+                                {
+                                    "label": segment.label,
+                                    "kind": segment.kind,
+                                    "level": segment.level,
+                                    "char_start": segment.char_start,
+                                    "char_end": segment.char_end,
+                                    "focus": i == virtual_idx,
+                                    "text": virtual_text[
+                                        segment.char_start:segment.char_end
+                                    ].strip(),
+                                    "inherited": True,
+                                }
+                                for i, segment in enumerate(
+                                    virtual_segments[lo:hi], start=lo)
+                            ],
+                            "path": ["Inherited unchanged recitals"],
+                            "inherited_recitals": {
+                                key: inherited[key]
+                                for key in (
+                                    "source_stable_id", "source_title",
+                                    "source_url", "unchanged", "virtual", "note",
+                                )
+                            },
+                        }
             if idx < 0 and segs:
                 return {"error": "no matching segment", "stable_id": stable_id,
                         "labels_sample": [s.label for s in segs[:40] if s.label]}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from .grammars import _eu_celex
 from .models import Citation
 
 
@@ -184,6 +185,77 @@ def echr_citations(text: str) -> list[Citation]:
     ) for m in _NL_ECHR_RE.finditer(text)]
 
 
+# ACM publications use the Dutch name as often as the instrument number:
+# ``Richtlijn oneerlijke handelspraktijken`` and ``Richtlijn 2005/29/EG``.
+# Capture the host separately and walk backwards for governed article lists so
+# orphan-looking ``artikelen 5, 6 en 7 van de Richtlijn …`` all retain a CELEX.
+_NL_DIRECTIVE_HOST = re.compile(
+    r"\b(?:(?P<ucpd>Richtlijn\s+oneerlijke\s+handelspraktijken)|"
+    r"Richtlijn\s*(?:\((?:EU|EG|EEG)\)\s*)?"
+    r"(?P<a>\d{2,4})\s*/\s*(?P<b>\d{1,4})"
+    r"(?:\s*/?\s*(?:EU|EG|EEG))?)\b",
+    re.I,
+)
+_NL_DIRECTIVE_ARTICLES_BEFORE = re.compile(
+    r"(?P<whole>\bartikel(?:en)?\.?\s+"
+    r"(?P<run>\d{1,3}[a-z]?(?:\s*,\s*\d{1,3}[a-z]?)*"
+    r"(?:\s+(?:en|of)\s+\d{1,3}[a-z]?)*)"
+    r"(?:\s*,?\s*(?P<lid>\d+|eerste|tweede|derde|vierde|vijfde)\s+lid)?"
+    r"\s*,?\s*(?:van\s+)?(?:de|het)?\s*)$",
+    re.I,
+)
+_NL_ORDINAL = {
+    "eerste": "1", "tweede": "2", "derde": "3",
+    "vierde": "4", "vijfde": "5",
+}
+
+
+def eu_directive_citations(text: str) -> list[Citation]:
+    out: list[Citation] = []
+    for host in _NL_DIRECTIVE_HOST.finditer(text):
+        candidate = (
+            "32005L0029" if host.group("ucpd")
+            else _eu_celex("directive", host.group("a"), host.group("b"))
+        )
+        if not candidate:
+            continue
+        out.append(Citation(
+            raw=host.group(0), entity_kind="directive", candidate_id=candidate,
+            pinpoint=None, char_start=host.start(), char_end=host.end(),
+            method="nl_eu_directive", confidence=1.0,
+        ))
+        before_start = max(0, host.start() - 180)
+        before = text[before_start:host.start()]
+        governed = _NL_DIRECTIVE_ARTICLES_BEFORE.search(before)
+        if not governed:
+            continue
+        run = governed.group("run")
+        run_start = before_start + governed.start("run")
+        numbers = list(re.finditer(r"\d{1,3}[a-z]?", run, re.I))
+        lid = governed.group("lid")
+        lid_number = _NL_ORDINAL.get((lid or "").casefold(), lid)
+        for index, number in enumerate(numbers):
+            pinpoint = f"Article {number.group(0)}"
+            if lid_number and len(numbers) == 1:
+                pinpoint += f"({lid_number})"
+            start = (
+                before_start + governed.start("whole")
+                if index == 0 else run_start + number.start()
+            )
+            end = run_start + number.end()
+            out.append(Citation(
+                raw=text[start:end], entity_kind="directive",
+                candidate_id=candidate, pinpoint=pinpoint,
+                char_start=start, char_end=end,
+                method=(
+                    "nl_eu_directive_article"
+                    if index == 0 else "nl_eu_directive_article_list"
+                ),
+                confidence=.99,
+            ))
+    return out
+
+
 LJN_RE = re.compile(r"\b(?:LJN|LJ[N]?[- ]?nummer|ELRO)\s*[:.= -]*\s*(?P<id>[A-Z]{2}\s*\d{4})\b", re.I)
 
 
@@ -195,4 +267,5 @@ def ljn_citations(text: str) -> list[Citation]:
 
 def dutch_citations(text: str) -> list[Citation]:
     return (avg_citations(text) + juriconnect_citations(text) + law_citations(text)
-            + host_before_citations(text) + echr_citations(text) + ljn_citations(text))
+            + host_before_citations(text) + echr_citations(text)
+            + eu_directive_citations(text) + ljn_citations(text))

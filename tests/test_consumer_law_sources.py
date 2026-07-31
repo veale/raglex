@@ -70,6 +70,18 @@ def test_italian_consumer_code_articles_expand_and_orphans_can_follow():
     assert {"Articolo 20", "Articolo 21", "Articolo 22", "Articolo 24"} <= pins
 
 
+def test_italian_ucpd_articles_and_glued_pdf_footnote_resolve():
+    cites = extract_citations(
+        "Gli articoli 6, 7 e 8 della direttiva 2005/29/CE sono applicabili. "
+        "Si veda inoltre la direttiva 2005/2915 sulle pratiche sleali."
+    )
+    ucpd = [cite for cite in cites if cite.candidate_id == "32005L0029"]
+    assert {"Articolo 6", "Articolo 7", "Articolo 8"} <= {
+        cite.pinpoint for cite in ucpd
+    }
+    assert any(cite.raw == "direttiva 2005/2915" for cite in ucpd)
+
+
 def test_guidance_default_instrument_is_opt_in_metadata():
     home = _home_of({
         "doc_type": "guidance", "stable_id": "notice",

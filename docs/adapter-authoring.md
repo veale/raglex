@@ -97,6 +97,14 @@ dated expression. Never rewrite the literal edge: project it at read/export time
 it as version-inherited. This lets unchanged Articles share their citers and lets a newly
 inserted Article 1a surface on the first version that actually contains it.
 
+EU consolidated expressions commonly omit the original preamble. Do not copy recitals
+into every stored expression and do not manufacture duplicate citation rows. Preserve
+base-act recitals as `recital` segments; the shared read model projects them as a
+provenance-marked virtual section on every consolidation that lacks recital segments.
+Reader, MCP provision lookup and static export must all use that projection. Incoming
+`Recital N` mentions follow the same version-inheritance rule as Article mentions, while
+outgoing links printed inside a recital are read live from the base act.
+
 Apply lineage in both directions. When a consolidated act cites a third instrument,
 do not show the base act and every dated snapshot as separate citers of that third
 instrument. Keep every per-version relation as evidence, but collapse the citing family
