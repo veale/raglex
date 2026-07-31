@@ -371,7 +371,11 @@ def create_app(config: Config | None = None) -> FastAPI:
         scopes it (e.g. just uk-caselaw), far faster since reports are cited by case law.
         ``scope={fr,de,nl}-eu-digital`` is a deliberately bounded digital-acquis refresh:
         only national documents already observed citing one of the reviewed EU digital-law
-        CELEX ids, never the complete (and sometimes multi-million-record) corpus."""
+        CELEX ids, never the complete (and sometimes multi-million-record) corpus.
+        ``scope=eu-digital`` is the same worklist without the national filter — every
+        document in the corpus, in any jurisdiction, already observed citing one of those
+        instruments (~23k). That is the right scope after a change to citation grammars or
+        the shorthand rules, which apply everywhere rather than to one country's reports."""
         p = payload or {}
         if p.get("document_ids") is not None:
             document_ids = list(dict.fromkeys(
@@ -385,6 +389,10 @@ def create_app(config: Config | None = None) -> FastAPI:
                 queue=bool(p.get("queue")),
             )
         digital_scopes = {
+            # no source filter: the acquis citer set across every jurisdiction held
+            "eu-digital": {
+                "label": "re-scan EU digital-acquis citations (all jurisdictions)",
+            },
             "fr-eu-digital": {
                 "label": "re-scan French EU digital-acquis citations",
                 "source_prefix": "fr-",

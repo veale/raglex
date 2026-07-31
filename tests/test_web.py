@@ -249,6 +249,28 @@ def test_backfill_source_job_requires_a_source_and_queues_uncapped(client):
     assert "everything" in jobs["harvest-source"]["label"]
 
 
+def test_eu_digital_scope_rescans_every_jurisdiction(client):
+    """``scope=eu-digital`` is the acquis citer worklist with no national filter — what a
+    change to the citation grammars or the shorthand rules needs, since those apply
+    corpus-wide rather than to one country's reports."""
+    from raglex.facade import EU_DIGITAL_ACQUIS_IDS
+
+    # the reviewed list spans the acquis and keeps the Data Protection Directive, which
+    # predates it by 15 years but is still what the older case law cites
+    assert "31995L0046" in EU_DIGITAL_ACQUIS_IDS
+    assert {"32022R2065", "32016R0679", "32022R1925"} <= set(EU_DIGITAL_ACQUIS_IDS)
+
+    r = client.post("/jobs/rescan-citations", json={"scope": "eu-digital"}).json()
+    assert "error" not in r and r.get("job_id")
+    for _ in range(200):
+        job = client.get(f"/jobs/{r['job_id']}").json()
+        if job["status"] in {"done", "error", "cancelled"}:
+            break
+        time.sleep(0.02)
+    assert job["status"] == "done", job
+    assert "all jurisdictions" in job["label"]
+
+
 def test_settings_endpoint_masks_and_persists(client, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     client.post("/settings", json={"OPENROUTER_API_KEY": "sk-abc-9999", "ZOTERO_LIBRARY_ID": "7"})

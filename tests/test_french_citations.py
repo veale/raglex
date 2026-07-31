@@ -125,6 +125,10 @@ def test_digital_acquis_refresh_selector_only_returns_relevant_french_text(catal
         }])
     assert catalogue.text_document_ids_citing(
         ["32016R0679"], source_prefix="fr-") == ["fr/gdpr"]
+    # ...and with no national filter it is the corpus-wide acquis worklist: the scope
+    # for a change to grammars or shorthand rules, which apply in every jurisdiction.
+    assert catalogue.text_document_ids_citing(
+        ["32016R0679"]) == ["de/gdpr", "fr/gdpr"]
 
 
 def test_exact_flagged_document_worklist_preserves_order(catalogue):

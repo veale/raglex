@@ -45,6 +45,13 @@ EU_DIGITAL_ACQUIS_IDS = (
     # copyright, cyber and emerging technology
     "32001L0029", "32019L0790", "32021R0784", "32022L2555",
     "32022L2557", "32024R1689", "32024R2847",
+    # trust services, network security and communications privacy — the older
+    # instruments national courts still cite heavily (Data Retention survives its own
+    # annulment in the case law; NIS1 predates NIS2; the 2009 amendment is where the
+    # ePrivacy consent rule actually lives)
+    "32014R0910", "32024R1183", "32019R0881", "32016L1148",
+    "32018R1725", "32006L0024", "32015R2120", "32013L0040",
+    "32009L0136",
 )
 
 
