@@ -1151,6 +1151,13 @@ table { width: 100%; }
 .leg-status-line { margin: 2px 0; }
 .leg-status-line a, .leg-status-articles a { cursor: pointer; }
 .leg-status-articles { margin-top: 5px; font-size: 12px; }
+.leg-version-state {
+  margin: 7px 0 5px; padding: 8px 10px; border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  line-height: 1.45;
+}
+.leg-version-state a { cursor: pointer; }
 /* header: status chip + native token + flags */
 .leg-status-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 2px; }
 .leg-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;

@@ -1054,11 +1054,18 @@ class Facade:
         <CELEX>" shows before the repealing act is harvested."""
         from .eu_law import is_consolidation, consolidation_base, consolidation_date
         from .leg_currency import Currency, Provision, more_severe, status_meta, CanonStatus
+        cons_base = consolidation_base(stable_id)
+        is_cons = bool(is_consolidation(stable_id))
+        pit_match = re.fullmatch(r"(.+)@(\d{4}-\d{2}-\d{2})", stable_id)
+        pit_base = pit_match.group(1) if pit_match else None
+        pit_date = pit_match.group(2) if pit_match else None
+        lineage_base = cons_base or pit_base or stable_id
         qs = ",".join("?" * len(self._LEG_CHANGE_TYPES))
         with self._open() as (cat, _rs, _ts):
             doc = cat.get_document(stable_id)
             meta = _row_meta(doc) if doc is not None else {}
             source = (doc["source"] if doc is not None else None)
+            held_versions = cat.legislative_versions(lineage_base)
             # editorial-lag backlog (UK unapplied effects), if this act is on the re-check queue
             eff = cat.conn.execute(
                 "SELECT outstanding FROM effects_refresh WHERE stable_id = ?", (stable_id,)).fetchone()
@@ -1093,8 +1100,37 @@ class Facade:
         edge_status = ("repealed" if repealed_by else
                        "amended" if amended_by else
                        "corrected" if corrected_by else None)
-        cons_base = consolidation_base(stable_id)
-        is_cons = bool(is_consolidation(stable_id))
+        # A consolidation's own incoming edge set does not contain its siblings. Build the
+        # version message from every held lineage expression so the reader can tell whether
+        # this snapshot is historical, future, or the latest one actually held by RagLex.
+        consolidation_versions = [
+            {"stable_id": sid, "as_at": version_date}
+            for sid, version_date in held_versions if is_consolidation(sid)
+        ]
+        consolidations = sorted(set(consolidations) | {
+            row["stable_id"] for row in consolidation_versions
+        })
+        today = datetime.now(timezone.utc).date().isoformat()
+        latest_held = consolidation_versions[-1] if consolidation_versions else None
+        applicable_versions = [
+            row for row in consolidation_versions if row["as_at"] <= today
+        ]
+        latest_applicable = applicable_versions[-1] if applicable_versions else None
+        if pit_match:
+            version_state = "point_in_time"
+        elif is_cons and (consolidation_date(stable_id) or "") > today:
+            version_state = "future_consolidation"
+        elif is_cons and latest_applicable and \
+                latest_applicable["stable_id"] == stable_id:
+            version_state = "latest_applicable_consolidation"
+        elif is_cons and latest_applicable:
+            version_state = "historical_consolidation"
+        elif is_cons:
+            version_state = "unverified_consolidation"
+        elif latest_applicable:
+            version_state = "base_with_consolidation"
+        else:
+            version_state = "base_without_consolidation"
         # Native currency the adapter/format parser stowed (FR états, DE force, NL WTI, UK
         # status). Merge it with the edge-derived picture: the more-severe of the two wins, so a
         # source that says "repealed" is never hidden behind a mild edge signal, and vice-versa.
@@ -1154,6 +1190,13 @@ class Facade:
             "is_consolidation": is_cons,
             "consolidation_of": cons_base,
             "as_at": consolidation_date(stable_id) or native.as_at,
+            "is_point_in_time": bool(pit_match),
+            "point_in_time_of": pit_base,
+            "point_in_time_date": pit_date,
+            "version_state": version_state,
+            "latest_held_consolidation": latest_held,
+            "latest_applicable_consolidation": latest_applicable,
+            "consolidation_versions": consolidation_versions,
             "point_in_time_capable": bool(native.point_in_time_capable),
             "unapplied_count": unapplied, "up_to_date": up_to_date,
             "by_article": by_article, "provisions": provisions,
@@ -6020,16 +6063,29 @@ class Facade:
                     "title": doc["title"] if doc else None}
 
     def legislation_versions(self, *, stable_id: str) -> dict:
-        """Point-in-time versions of a piece of legislation already in the corpus
-        (``{id}@{date}`` docs), for the versioning interface."""
-        base = _act_level(stable_id.split("@")[0])
+        """Held dated expressions of legislation: UK point-in-time records and EU
+        consolidation snapshots, all linked back to the undated/base instrument."""
+        from .eu_law import consolidation_base, is_consolidation
+
+        base = consolidation_base(stable_id) or _act_level(stable_id.split("@")[0])
         with self._open() as (cat, _rs, _ts):
-            rows = cat.list_documents(query=f"{base}@", limit=1000)
-            versions = sorted(
-                [{"stable_id": r["stable_id"], "date": r["stable_id"].split("@", 1)[1],
-                  "title": r["title"]} for r in rows if r["stable_id"].startswith(f"{base}@")],
-                key=lambda v: v["date"], reverse=True)
-            return {"base_id": base, "versions": versions}
+            base_doc = cat.get_document(base)
+            versions = []
+            for sid, version_date in reversed(cat.legislative_versions(base)):
+                row = cat.get_document(sid)
+                versions.append({
+                    "stable_id": sid,
+                    "date": version_date,
+                    "title": row["title"] if row is not None else None,
+                    "kind": "consolidation" if is_consolidation(sid) else "point_in_time",
+                })
+            return {
+                "base_id": base,
+                "versions": versions,
+                "can_fetch_point_in_time": bool(
+                    base_doc is not None and base_doc["source"] == "uk-legislation"
+                ),
+            }
 
     def outstanding_effects(self, *, limit: int = 500) -> list[dict]:
         """Legislation we hold that has *unapplied amendments* — changes the editors

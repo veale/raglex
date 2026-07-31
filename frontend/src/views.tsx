@@ -3610,6 +3610,12 @@ function BackfillPanel() {
 
   async function run() {
     if (!source) { setMsg("pick a source"); return; }
+    if (source === "eu-legislation"
+        && /^(?:1|true|yes)$/i.test(srcOpts.include_consolidations?.trim() || "")
+        && !srcOpts.celex?.trim()) {
+      setMsg("✗ dated consolidations require explicit sector-3 CELEX ids (for the UCPD: 32005L0029)");
+      return;
+    }
     setBusy(true); setMsg("");
     const opts = Object.fromEntries(Object.entries(srcOpts).filter(([, v]) => v.trim()));
     try {
@@ -3660,6 +3666,13 @@ function BackfillPanel() {
             placeholder={`${o.label}${o.placeholder ? ` — ${o.placeholder}` : ""}`} style={{ minWidth: 210 }} />
         ))}
       </div>}
+      {source === "eu-legislation" && <p className="muted" style={{ fontSize: 12, marginTop: 7 }}>
+        <b>Consolidations are a targeted pull, not part of the whole sector-3 walk.</b>
+        {" "}For the UCPD enter <span className="kbd">32005L0029</span> in CELEX ids and
+        <span className="kbd">true</span> in Fetch dated consolidations. Importing them
+        automatically adds the base/version links and retrofits applicable-version links
+        onto citations already in the database.
+      </p>}
       {msg && <p className={msg.startsWith("✗") ? "err" : "ok"} style={{ wordBreak: "break-word" }}>{msg}</p>}
     </div>
   );
@@ -5609,10 +5622,33 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   if (s.repealed_by?.length) lines.push(<span key="rep"><b>Repealed / recast</b> by {links(s.repealed_by)}</span>);
   if (s.amended_by?.length) lines.push(<span key="am"><b>Amended</b> by {links(s.amended_by)}</span>);
   if (s.corrected_by?.length) lines.push(<span key="corr">Corrected by {links(s.corrected_by)}</span>);
-  if (s.is_consolidation) lines.push(<span key="cons">Consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""} of {s.consolidation_of ? links([s.consolidation_of]) : "its base act"}</span>);
-  else if (s.consolidations?.length) lines.push(<span key="consav">Consolidated version(s): {links(s.consolidations)}</span>);
   if (s.repeals?.length) lines.push(<span key="rps" className="muted">Repeals / recasts {links(s.repeals)}</span>);
   if (s.legal_basis?.length) lines.push(<span key="lb" className="muted">Legal basis: {links(s.legal_basis)}</span>);
+
+  let versionNotice: any;
+  if (s.is_point_in_time) {
+    versionNotice = <><b>Point-in-time text{s.point_in_time_date ? ` as at ${s.point_in_time_date}` : ""}.</b>
+      {" "}This is not the undated/current record{s.point_in_time_of ? <>; base instrument: {links([s.point_in_time_of])}</> : "."}</>;
+  } else if (s.version_state === "future_consolidation") {
+    versionNotice = <><b>Future consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""}.</b>
+      {" "}It is not yet the latest applicable text
+      {s.latest_applicable_consolidation ? <>; latest applicable consolidation held by RagLex: {links([s.latest_applicable_consolidation.stable_id])}</> : "."}</>;
+  } else if (s.version_state === "latest_applicable_consolidation") {
+    versionNotice = <><b>Latest applicable consolidation held by RagLex{s.as_at ? ` — ${s.as_at}` : ""}.</b>
+      {s.latest_held_consolidation?.stable_id !== id && <> A newer future snapshot is also held: {links([s.latest_held_consolidation.stable_id])}.</>}</>;
+  } else if (s.version_state === "historical_consolidation") {
+    versionNotice = <><b>Historical consolidated snapshot{s.as_at ? ` — ${s.as_at}` : ""}.</b>
+      {" "}A newer applicable consolidation is held: {links([s.latest_applicable_consolidation.stable_id])}.</>;
+  } else if (s.version_state === "unverified_consolidation") {
+    versionNotice = <><b>Consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""}.</b>
+      {" "}RagLex cannot confirm from its held version set that this is the latest.</>;
+  } else if (s.version_state === "base_with_consolidation") {
+    versionNotice = <><b>This is the base act, not a dated consolidated snapshot.</b>
+      {" "}Latest applicable consolidation held by RagLex: {links([s.latest_applicable_consolidation.stable_id])}.</>;
+  } else {
+    versionNotice = <><b>This is an undated legislation record, not a dated snapshot.</b>
+      {" "}RagLex currently holds no dated consolidation for this act.</>;
+  }
 
   const provisions = (s.provisions || []) as any[];
   const dates = [
@@ -5624,7 +5660,7 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
 
   // Stay quiet only when there is genuinely nothing to say: plainly in force, no dates, no
   // amendments, no provisions, and a confirmed (non-degraded) status.
-  const nothingToReport = !lines.length && !provisions.length && !dates && !unapplied
+  const nothingToReport = !versionNotice && !lines.length && !provisions.length && !dates && !unapplied
     && (s.status === "in_force") && !s.degraded && !s.point_in_time_capable;
   if (nothingToReport) return null;
 
@@ -5641,6 +5677,7 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
         {s.point_in_time_capable && <span className="muted leg-pit">point-in-time available</span>}
         {s.degraded && <span className="muted" title="status inferred from absence of recorded changes; not confirmed by the source">· unconfirmed</span>}
       </div>
+      {versionNotice && <div className="leg-version-state">{versionNotice}</div>}
       {dates && <div className="leg-status-line muted">{dates}</div>}
       {lines.map((b, i) => <div key={i} className="leg-status-line">{b}</div>)}
       {provisions.length > 0 && (
@@ -5737,14 +5774,14 @@ export function VersionPanel({ id, open }: { id: string; open: (id: string, a?: 
   };
   return (
     <div className="panel">
-      <h3>Point-in-time versions <span className="muted">— a citing case read the text as it stood then, not today's (possibly repealed) version</span></h3>
-      <div className="row" style={{ flexWrap: "wrap", alignItems: "center" }}>
+      <h3>Dated versions <span className="muted">— consolidations and point-in-time text linked to this instrument</span></h3>
+      {data?.can_fetch_point_in_time && <div className="row" style={{ flexWrap: "wrap", alignItems: "center" }}>
         <input value={date} onChange={(e) => setDate(e.target.value)} placeholder="YYYY-MM-DD" style={{ maxWidth: 150 }} />
         <button onClick={fetchAt}>Show as at this date</button>
         {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</span>}
-      </div>
+      </div>}
       {versions.length > 0 && <p className="muted" style={{ marginTop: 6 }}>held versions: {versions.map((v: any) => (
-        <DocLink key={v.stable_id} id={v.stable_id} onOpen={() => open(v.stable_id)} style={{ marginRight: 10 }}>{v.version_date || v.stable_id}</DocLink>
+        <DocLink key={v.stable_id} id={v.stable_id} onOpen={() => open(v.stable_id)} style={{ marginRight: 10 }}>{v.date || v.stable_id}</DocLink>
       ))}</p>}
     </div>
   );

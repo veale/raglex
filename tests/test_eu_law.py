@@ -118,6 +118,46 @@ def test_legislative_status_marks_repealed_from_incoming_edge(tmp_path):
     assert cons["is_consolidation"] and cons["consolidation_of"] == "32016R0679" and cons["as_at"] == "2018-05-25"
 
 
+def test_legislative_status_identifies_latest_and_historical_consolidations(tmp_path):
+    from raglex.core.models import ExtractedVia, ResolutionStatus, TypedRelation
+
+    f = _leg_facade(tmp_path)
+    with f._open() as (cat, _r, _t):
+        for sid in (
+            "02016R0679-20180525",
+            "02016R0679-20240101",
+            "02016R0679-20990101",
+        ):
+            cat.upsert_document(Record(
+                source="eu-legislation", stable_id=sid,
+                doc_type=DocType.LEGISLATION, title=sid,
+                extracted_via=ExtractedVia.STRUCTURED,
+            ))
+            cat.add_relations(sid, [TypedRelation(
+                relationship_type=RelationshipType.CONSOLIDATES,
+                raw_citation_string="32016R0679", dst_id="32016R0679",
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )])
+
+    base = f.legislative_status("32016R0679")
+    assert base["version_state"] == "base_with_consolidation"
+    assert base["latest_applicable_consolidation"]["stable_id"] == "02016R0679-20240101"
+    assert base["latest_held_consolidation"]["stable_id"] == "02016R0679-20990101"
+    historical = f.legislative_status("02016R0679-20180525")
+    assert historical["version_state"] == "historical_consolidation"
+    latest = f.legislative_status("02016R0679-20240101")
+    assert latest["version_state"] == "latest_applicable_consolidation"
+    future = f.legislative_status("02016R0679-20990101")
+    assert future["version_state"] == "future_consolidation"
+    versions = f.legislation_versions(stable_id="32016R0679")
+    assert [(v["stable_id"], v["kind"]) for v in versions["versions"]] == [
+        ("02016R0679-20990101", "consolidation"),
+        ("02016R0679-20240101", "consolidation"),
+        ("02016R0679-20180525", "consolidation"),
+    ]
+
+
 def test_implicit_repeal_is_not_a_repeal():
     """CELLAR marks an act that supersedes a REFERENCE to another as "implicitly
     repealing" it. By that predicate Directive 2005/29 is implicitly repealed by five

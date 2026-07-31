@@ -492,7 +492,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("ECLI:NL:…",),
     ),
     "nl-acm-guidance": SourceInfo(
-        "nl-acm-guidance", "Netherlands ACM guidance (Leidraden)", "guidance", "NL", False,
+        "nl-acm-guidance", "ACM guidance (Netherlands — Leidraden)", "guidance", "NL", False,
         "The complete official ACM guidance series for businesses, including online "
         "consumer protection, price display and sustainability claims. Detail-page HTML "
         "and official PDF attachments are combined; the small catalogue is fully "
