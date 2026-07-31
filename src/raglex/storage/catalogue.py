@@ -1310,18 +1310,27 @@ class Catalogue:
     def applicable_consolidation(
         self, base_id: str, on_date: str | None = None,
     ) -> tuple[str, str] | None:
-        """Latest held *consolidation* applicable on ``on_date``.
+        """Latest held *readable* consolidation applicable on ``on_date``.
 
         Point-in-time snapshots are intentionally excluded: opening an ordinary act may
         default to its current consolidated text, but must never jump to an arbitrary
         historical snapshot merely because one has been fetched.
+
+        A TEXTLESS version is skipped, not returned. Consolidations are published
+        language by language, so a version can be held only as a metadata record with no
+        text to fetch at all — the DSA's sole consolidation (02022R2065-20221027) exists
+        in eight languages, none of them English, so every read of the DSA redirected to
+        a blank page while the base act sat complete beside it. A transient harvest
+        failure leaves an identical shape. Falling back to the newest version that does
+        have text (or, failing that, to the base act) keeps the read useful; nothing is
+        concealed, because ``legislative_status`` still reports every held version.
         """
         cutoff = str(on_date or date.today().isoformat())[:10]
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
             cutoff = date.today().isoformat()
         rows = self.conn.execute(
             """
-            SELECT d.stable_id, d.meta_json, r.dst_anchor
+            SELECT d.stable_id, d.meta_json, d.has_text, r.dst_anchor
             FROM relations r JOIN documents d ON d.stable_id = r.src_id
             WHERE (r.dst_id = ? OR r.candidate_id = ?)
               AND r.relationship_type = 'consolidates'
@@ -1331,7 +1340,8 @@ class Catalogue:
         versions = sorted({
             (str(row["stable_id"]), version_date)
             for row in rows
-            if (version_date := self._version_date(row)) and version_date <= cutoff
+            if row["has_text"]
+            and (version_date := self._version_date(row)) and version_date <= cutoff
         }, key=lambda item: (item[1], item[0]))
         return versions[-1] if versions else None
 

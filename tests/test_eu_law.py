@@ -312,6 +312,9 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
             cat.upsert_document(Record(
                 source="eu-legislation" if kind == DocType.LEGISLATION else "user-import",
                 stable_id=sid, doc_type=kind, title=sid,
+                # only a version that HAS text is a read target (see the textless
+                # test below); the base act redirects here on that basis.
+                text="Article 1" if sid == current else None,
                 extracted_via=ExtractedVia.STRUCTURED,
             ))
         cat.add_relations(current, [TypedRelation(
@@ -376,6 +379,64 @@ def test_consolidation_inherits_base_mentions_and_is_the_default_read(tmp_path):
     assert third_mentions["total"] == 1
     assert third_mentions["groups"][0]["src_id"] == current
     assert f.get_document("32000L0001")["cited_by_count"] == 1
+
+
+def test_textless_consolidation_is_never_the_read_target(tmp_path):
+    """A version held without text must not capture the read.
+
+    EUR-Lex consolidates language by language: the DSA's only consolidation
+    (02022R2065-20221027) exists in eight languages, none of them English, so it is
+    held as a metadata record with no text at all. Redirecting there served a blank
+    page for an act whose base text the corpus holds in full.
+    """
+    from raglex.core.models import ExtractedVia, ResolutionStatus, TypedRelation
+
+    f = _leg_facade(tmp_path)
+    older, newest = "02016R0679-20180525", "02016R0679-20240101"
+    with f._open() as (cat, _r, _t):
+        for sid, text in ((older, "Article 1"), (newest, None)):
+            cat.upsert_document(Record(
+                source="eu-legislation", stable_id=sid,
+                doc_type=DocType.LEGISLATION, title=sid, text=text,
+                extracted_via=ExtractedVia.STRUCTURED,
+                extra={"metadata_only": True} if text is None else {},
+            ))
+            cat.add_relations(sid, [TypedRelation(
+                relationship_type=RelationshipType.CONSOLIDATES,
+                raw_citation_string="32016R0679", dst_id="32016R0679",
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )])
+
+    # the newest version is skipped; the newest READABLE one takes the read
+    assert f.get_document("32016R0679")["canonical_read"]["stable_id"] == older
+    assert f.lookup(
+        citation="32016R0679", cited_by=False, similar=False)["stable_id"] == older
+    # ...and it is still reported as a held version, so nothing is concealed
+    status = f.legislative_status("32016R0679")
+    assert newest in status["consolidations"]
+    assert status["latest_applicable_consolidation"]["stable_id"] == newest
+
+    # no readable version at all → the base act itself is the read
+    with f._open() as (cat, _r, _t):
+        cat.upsert_document(Record(
+            source="eu-legislation", stable_id=older,
+            doc_type=DocType.LEGISLATION, title=older,
+            extracted_via=ExtractedVia.STRUCTURED, extra={"metadata_only": True},
+        ))
+        # re-upsert re-derives edges from the record: keep the lineage edge, so the
+        # case under test is "both versions textless", not "no version at all".
+        cat.add_relations(older, [TypedRelation(
+            relationship_type=RelationshipType.CONSOLIDATES,
+            raw_citation_string="32016R0679", dst_id="32016R0679",
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+    f._invalidate_caches()
+    assert f.get_document("32016R0679")["canonical_read"] is None
+    assert f.lookup(
+        citation="32016R0679", cited_by=False,
+        similar=False)["stable_id"] == "32016R0679"
 
 
 def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_path):
