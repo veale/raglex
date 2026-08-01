@@ -6327,6 +6327,13 @@ class Facade:
                 fmt = hinted if hinted in {
                     "akn", "bwb", "formex-legislation", "lawmaker-html",
                     "govuk-govspeak",
+                    # An EUR-Lex HTML page is HTML the byte sniffer cannot tell from any
+                    # other page, so without the durable hint a reparse fell through to
+                    # "no structural format" and did nothing. That is 22,637 instruments —
+                    # every EU act with no Formex rendition — permanently unable to pick
+                    # up a parser fix, including the one that gives their annexes their
+                    # own segments.
+                    "eurlex-html",
                 } else _sniff_format(raw)
                 if fmt is None:
                     return {"stable_id": stable_id, "reparsed": False, "reason": "no structural format"}
@@ -12344,11 +12351,18 @@ class Facade:
     # -- feedback (Bugs / Feature requests from the app's feedback box) --------
     def submit_feedback(self, *, kind: str, message: str, page: str | None = None,
                         url: str | None = None, metadata: dict | None = None) -> dict:
-        """Record a Bug / Feature-request from the feedback box, with whatever page context
-        the client captured (route, doc id, query, role, user-agent) as JSON metadata."""
+        """Record a Bug / Feature-request / Improvement into the review queue, with whatever
+        page context the client captured (route, doc id, query, role, user-agent) as JSON
+        metadata.
+
+        ``improvement`` is the engineering-observation kind: an agent working through MCP
+        sees the corpus from an angle no one using the UI does — which anchor forms fail,
+        which idioms a grammar misses, where a tool's contract fights the task — and that
+        belongs in the same queue a human's bug report does, not in a chat log.
+        """
         import json as _json
         k = (kind or "bug").strip().lower()
-        if k not in ("bug", "feature"):
+        if k not in ("bug", "feature", "improvement"):
             k = "bug"
         msg = (message or "").strip()
         if not msg:

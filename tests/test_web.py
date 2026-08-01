@@ -402,3 +402,27 @@ def test_a_body_too_large_to_return_comes_back_as_its_first_window(client, monke
     monkeypatch.setattr(Facade, "_BODY_DEFAULT_WINDOW", 10_000_000)
     assert "window" not in client.get(
         "/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()
+
+
+def test_agent_feedback_lands_in_the_human_review_queue(client):
+    """An agent's finding must go where a human's bug report goes — a report that only
+    appears in a chat reply dies with the conversation."""
+    r = client.post("/feedback", json={
+        "kind": "improvement", "page": "mcp:ukpga/1998/29",
+        "message": "citing_documents(anchor='s. 7') returns 0 though the rows carry it.",
+        "metadata": {"source": "mcp-agent", "about": "ukpga/1998/29"}})
+    assert r.json()["submitted"] is True
+    queue = client.get("/feedback", params={"status": "open"}).json()
+    row = next(f for f in queue if f["page"] == "mcp:ukpga/1998/29")
+    # the engineering kind survives rather than being coerced to "bug"
+    assert row["kind"] == "improvement"
+    assert row["metadata"]["source"] == "mcp-agent"
+    # …and it is filterable as its own kind
+    assert any(f["kind"] == "improvement"
+               for f in client.get("/feedback", params={"kind": "improvement"}).json())
+
+
+def test_an_unknown_feedback_kind_still_falls_back_to_bug(client):
+    client.post("/feedback", json={"kind": "nonsense", "message": "something odd"})
+    assert any(f["message"] == "something odd" and f["kind"] == "bug"
+               for f in client.get("/feedback").json())

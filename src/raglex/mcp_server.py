@@ -65,7 +65,14 @@ _INSTRUCTIONS = (
     "that would actually appear in the text, or for a name or citation.\n\n"
     "Everything that CHANGES the corpus — harvesting, imports, watches, aliases, settings, "
     "repairs — is behind the single maintenance(op, args) tool. Call maintenance('help') "
-    "only when you actually need to modify the corpus."
+    "only when you actually need to modify the corpus.\n\n"
+    "IF SOMETHING HERE IS WRONG OR IN YOUR WAY, SAY SO with report_feedback(). It files "
+    "into the same queue the maintainers read for human bug reports. You work these tools "
+    "directly against real questions, so you see failures — a grammar that misses an "
+    "idiom, a pinpoint that resolves to the wrong unit, a tool whose shape fights the "
+    "task — that no one using the web app ever will. Report them at the level of the "
+    "system rather than the symptom; a finding you only mention in your reply dies with "
+    "the conversation."
 )
 
 
@@ -194,6 +201,46 @@ def build_server(config: Config | None = None) -> MCPServer:
         case-law / legislation / guidance is HELD and what can be FETCHED on demand. Read
         this first to know what the corpus can be relied on for."""
         return facade.holdings_overview()
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, openWorldHint=False,
+                                          idempotentHint=False))
+    def report_feedback(message: str, kind: str = "improvement",
+                        about: Optional[str] = None) -> dict:
+        """File a bug, a limitation, or an engineering suggestion into the SAME review
+        queue the maintainers read — the one human bug reports and system errors land in.
+        Please use it.
+
+        You see this corpus from an angle nobody using the web app does: you hit the tool
+        contracts, the anchor forms, the citation grammars and the jurisdiction gates
+        directly, hundreds of times, against real questions. That is exactly the vantage
+        point from which the useful reports come — and if you only mention a problem in
+        your reply, it dies with the conversation.
+
+        REPORT AT THE LEVEL OF THE SYSTEM, not the symptom. The valuable report is
+        "``citing_documents(anchor=…)`` returns 0 for UK sections even though the rows'
+        own ``cites_provisions`` carry those exact strings — the anchor filter looks like
+        it resolves against title-bearing segment labels before filtering", not "search
+        didn't work". So say, in a few sentences:
+
+        * what you were trying to do, and the call you made (arguments included);
+        * what came back, and what you expected instead;
+        * why it matters — what it would have cost a reader who trusted the answer;
+        * where the fault seems to sit, if you can tell.
+
+        Worth reporting: a grammar that misses an idiom a real instrument uses; a pinpoint
+        form that silently resolves to the wrong unit or to its parent; a tool whose
+        contract fights the task (wrong granularity, no pagination, a filter that cannot
+        express the question); metadata that is confidently wrong; a result you could not
+        tell was incomplete. Batch several findings into one report if you have them.
+
+        ``kind``: "improvement" (a limitation or a design suggestion — the default),
+        "bug" (it is wrong or broken), "feature" (something absent). ``about`` is an
+        optional stable_id or tool name the report concerns.
+        """
+        return facade.submit_feedback(
+            kind=kind, message=message, page=f"mcp:{about}" if about else "mcp",
+            metadata={"source": "mcp-agent", "about": about} if about else
+            {"source": "mcp-agent"})
 
     @mcp.tool(annotations=_READ_ONLY)
     def jurisdictions() -> list[dict]:
