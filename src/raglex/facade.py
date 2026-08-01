@@ -7764,7 +7764,7 @@ class Facade:
         and the directory paths feed it the same stream."""
         from .adapters.bailii_html import parse_bailii_html
         from .adapters.uk_caselaw import court_from_slug
-        from .citations import extract_citations, extract_document
+        from .citations import extract_citations
         from .citations.courts import IRISH_COURTS
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
@@ -7936,22 +7936,26 @@ class Facade:
                 if n % 100 == 0:
                     cat.commit()
             cat.commit()
-            for i, sid in enumerate(to_extract):
-                if cancel_check and cancel_check():
-                    break
-                _progress(on_progress, stage="extracting citations",
-                          done=i + 1, total=len(to_extract), item=sid)
-                try:
-                    extract_document(cat, ts, sid)
-                    st["extracted"] += 1
-                except Exception:  # noqa: BLE001
-                    pass
-                if i % 100 == 0:
-                    cat.commit()
+            # The pooled extractor, not a serial loop. A zip of BAILII pages or a
+            # Westlaw export is exactly the scale where the serial shape costs most:
+            # one core of N, the named-alias map rebuilt from the DB per document,
+            # and a progress callback per document. The pool batches its own commits.
+            from .citations import extract_documents_parallel
+            ex = extract_documents_parallel(
+                cat, ts, to_extract, aliases=cat.named_alias_map(),
+                on_progress=on_progress, cancel_check=cancel_check)
+            st["extracted"] = ex.processed
             cat.commit()
-            _progress(on_progress, stage="resolving citations", done=0, total=0)
-            resolved = Resolver(cat).run()
-        st["resolved_edges"] = resolved.resolved
+            resolved_edges = 0
+            if ex.cancelled:
+                # Don't grind through the (long, un-interruptible) resolve after a
+                # cancel — the rows are committed, and the bulk post-process job
+                # resolves them later. Say plainly that the pass stopped early.
+                st["cancelled"] = True
+            else:
+                _progress(on_progress, stage="resolving citations", done=0, total=0)
+                resolved_edges = Resolver(cat).run().resolved
+        st["resolved_edges"] = resolved_edges
         st["files"] = files
         self._invalidate_caches()
         return st
@@ -8954,7 +8958,6 @@ class Facade:
         identity ladder (citation-keyed, not FCL-slug-keyed) and the richer metadata."""
         from .adapters.uk_caselaw import court_from_slug
         from .adapters.westlaw_rtf import parse_westlaw_rtf, westlaw_identity
-        from .citations import extract_document
         from .citations.courts import IRISH_COURTS
         from .citations.name_variants import name_variants
         from .core.models import AddedBy, DocType, ExtractedVia, Record, sha256_bytes
@@ -9125,22 +9128,26 @@ class Facade:
                 if n % 100 == 0:
                     cat.commit()
             cat.commit()
-            for i, sid in enumerate(to_extract):
-                if cancel_check and cancel_check():
-                    break
-                _progress(on_progress, stage="extracting citations",
-                          done=i + 1, total=len(to_extract), item=sid)
-                try:
-                    extract_document(cat, ts, sid)
-                    st["extracted"] += 1
-                except Exception:  # noqa: BLE001
-                    pass
-                if i % 100 == 0:
-                    cat.commit()
+            # The pooled extractor, not a serial loop. A zip of BAILII pages or a
+            # Westlaw export is exactly the scale where the serial shape costs most:
+            # one core of N, the named-alias map rebuilt from the DB per document,
+            # and a progress callback per document. The pool batches its own commits.
+            from .citations import extract_documents_parallel
+            ex = extract_documents_parallel(
+                cat, ts, to_extract, aliases=cat.named_alias_map(),
+                on_progress=on_progress, cancel_check=cancel_check)
+            st["extracted"] = ex.processed
             cat.commit()
-            _progress(on_progress, stage="resolving citations", done=0, total=0)
-            resolved = Resolver(cat).run()
-        st["resolved_edges"] = resolved.resolved
+            resolved_edges = 0
+            if ex.cancelled:
+                # Don't grind through the (long, un-interruptible) resolve after a
+                # cancel — the rows are committed, and the bulk post-process job
+                # resolves them later. Say plainly that the pass stopped early.
+                st["cancelled"] = True
+            else:
+                _progress(on_progress, stage="resolving citations", done=0, total=0)
+                resolved_edges = Resolver(cat).run().resolved
+        st["resolved_edges"] = resolved_edges
         # second pass: the Acts, each imported under its legislation.gov.uk id
         for filename, data in leg_entries:
             if cancel_check and cancel_check():
