@@ -1392,6 +1392,35 @@ main { min-width: 0; padding-top: .9rem; }
   color: var(--link);
   text-decoration: underline;
 }
+/* The provision's "Mentioned by …" line: small, quiet, and set as prose, so naming three
+   authorities under a heading costs the law no room. */
+.mentions-line {
+  max-width: 46rem;
+  margin: 0 0 .5rem;
+  color: var(--quiet);
+  font-size: .88rem;
+  line-height: 1.45;
+}
+.mentions-line .via-line { display: inline; }
+.cite-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--link);
+  font: inherit;
+  text-align: left;
+}
+.cite-link:hover, .cite-link:focus-visible {
+  border: 0;
+  outline: 0;
+  color: var(--link);
+  text-decoration: underline;
+}
+.cite-link.see-all { font-weight: 700; white-space: nowrap; }
+/* the row a name was followed to */
+.result.focused { background: #faf6e2; box-shadow: 0 0 0 .35rem #faf6e2; }
 .source-note {
   margin: 0 0 .9rem;
   padding: 0;
@@ -1516,6 +1545,8 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
 .result {
   padding: .85rem 0 .95rem;
   border-bottom: 1px solid var(--faint-rule);
+  /* the dialog head is sticky, so a row scrolled to by name must clear it */
+  scroll-margin-top: 4.5rem;
 }
 .result h3 { margin: 0; font-size: 1.08rem; font-weight: 500; line-height: 1.3; }
 .result time { color: var(--quiet); white-space: nowrap; }
@@ -1565,6 +1596,10 @@ body.sidebar-closed .page-head > div { grid-column: 1; }
 }
 @media print {
   .contents-toggle, .contents, .mention-ref, dialog { display: none !important; }
+  /* The names are the SENTENCE, not decoration on it — hiding the buttons would print
+     "Mentioned by , and 18 more". They stay, as ink; only the way in goes. */
+  .cite-link { color: var(--ink); text-decoration: none; }
+  .cite-link.see-all { display: none; }
   .page-head, .page { display: block; padding-left: 0; padding-right: 0; }
   body { background: white; }
 }
@@ -1665,6 +1700,78 @@ _SCRIPT = r"""
     return badges;
   }
 
+  // How many citers a provision names before it stops naming and starts counting.
+  const NAMED_CITERS = 3;
+
+  // "Mentioned by FT v DW EU:C:2023:811, Proceedings brought by J.M EU:C:2023:501 and 18
+  // more. See all mentions" — the line a reader can actually use, in place of a badge
+  // that only ever said how many there were.
+  //
+  // Documents reaching this provision through a PREDECESSOR instrument are kept out of
+  // that sentence and given their own: they are not authority on this text, they are
+  // authority on the text it replaced, and running the two together is the mistake the
+  // whole inherited-mentions split exists to prevent.
+  function mentionsLine(key, label) {
+    const ids = data.index[key] || [];
+    if (!ids.length) return null;
+    const groups = ids.map((id) => data.groups[id]).filter(Boolean);
+    const directOf = (g) => Number(g.mentions_by_key[key] || 0)
+      - Number(g.inherited_mentions_by_key[key] || 0);
+    const direct = groups.filter((g) => directOf(g) > 0);
+
+    const p = document.createElement("p");
+    p.className = "mentions-line";
+    const add = (text) => p.appendChild(document.createTextNode(text));
+    // A named citer opens the list AND scrolls to its own row — the name is a way in,
+    // not a decoration.
+    const cite = (g, text) => {
+      const a = document.createElement("button");
+      a.type = "button";
+      a.className = "cite-link";
+      a.textContent = text || g.cite;
+      a.title = g.title && g.title !== g.cite ? g.title : "open where it cites this";
+      a.addEventListener("click", () => openMentions(key, label, "all", g.id));
+      p.appendChild(a);
+    };
+
+    if (direct.length) {
+      add("Mentioned by ");
+      const named = direct.slice(0, NAMED_CITERS);
+      named.forEach((g, i) => {
+        if (i) add(i === named.length - 1 && direct.length <= NAMED_CITERS ? " and " : ", ");
+        cite(g);
+      });
+      const rest = direct.length - named.length;
+      if (rest > 0) add(` and ${number(rest)} more`);
+      add(". ");
+      const all = document.createElement("button");
+      all.type = "button";
+      all.className = "cite-link see-all";
+      all.textContent = "See all mentions";
+      all.addEventListener("click", () => openMentions(key, label, "all"));
+      p.appendChild(all);
+    }
+
+    // …and then, per predecessor, the ones that only got here through it.
+    for (const { law, count: n } of previousFor(key)) {
+      const sentence = document.createElement("span");
+      sentence.className = "via-line";
+      sentence.appendChild(document.createTextNode(
+        direct.length ? " Also mentioned by " : "Mentioned by "));
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "cite-link";
+      b.textContent = `${number(n)} ${n === 1 ? "document" : "documents"} citing a similar provision in ${law.label}`;
+      b.title = lawTitle(law.id);
+      b.addEventListener("click", () => openMentions(
+        key, `${label} — via ${law.label}`, law.id));
+      sentence.appendChild(b);
+      sentence.appendChild(document.createTextNode("."));
+      p.appendChild(sentence);
+    }
+    return p.childNodes.length ? p : null;
+  }
+
   function appendBadges(host, key, label, count) {
     for (const badge of mentionBadges(key, label, count)) {
       const button = document.createElement("button");
@@ -1690,8 +1797,13 @@ _SCRIPT = r"""
     article.className = `law-section level-${Math.min(2, Number(section.level || 0))}${section.inherited_recital ? " inherited-recital" : ""}`;
     const heading = document.createElement("h2");
     heading.textContent = section.label;
-    appendBadges(heading, section.key, section.label, count);
     article.appendChild(heading);
+    // At the PROVISION, who cites it is worth naming; inside it, it is not. So the
+    // heading carries a prose line of the leading citers and the subsections keep their
+    // terse [N mentions] badge — a case name set against a numbered sub-paragraph breaks
+    // the law's own shape, which is the thing the reader came for.
+    const line = mentionsLine(section.key, section.label);
+    if (line) article.appendChild(line);
     for (const paragraph of section.paragraphs || [{ text: section.text, indent: 0, marks: [] }]) {
       const body = document.createElement("p");
       body.className = `law-paragraph indent-${Math.min(3, Number(paragraph.indent || 0))}`;
@@ -1735,7 +1847,7 @@ _SCRIPT = r"""
     ? `<img class="flag-icon" src="${data.flags[jurisdiction]}" alt="">` : "";
 
   const state = { key: "all", label: "All mentions", limit: 40, facet: null, route: "all" };
-  function openMentions(key, label, route = "all") {
+  function openMentions(key, label, route = "all", focusId = null) {
     state.key = key;
     state.label = label;
     state.limit = 40;
@@ -1745,8 +1857,22 @@ _SCRIPT = r"""
     state.route = routeIsLive(key, route) ? route : "all";
     $("mentions-title").textContent = label;
     $("sort-filter").value = "authority";
+    // Following a name must land ON that document, not at the top of a list it happens
+    // to be somewhere inside — so page far enough to include it before rendering.
+    if (focusId) {
+      const at = (data.index[key] || []).findIndex(
+        (id) => (data.groups[id] || {}).id === focusId);
+      if (at >= state.limit) state.limit = at + 20;
+    }
     renderResults();
     $("mentions-dialog").showModal();
+    if (focusId) {
+      const row = $("results").querySelector(`[data-doc="${CSS.escape(focusId)}"]`);
+      if (row) {
+        row.classList.add("focused");
+        row.scrollIntoView({ block: "start" });
+      }
+    }
   }
 
   function routeIsLive(key, route) {
@@ -1936,7 +2062,7 @@ _SCRIPT = r"""
         state.key, lawId,
         "This document cited the earlier provision —"))
       .join("");
-    return `<article class="result">
+    return `<article class="result" data-doc="${esc(group.id)}">
       <div class="result-head"><h3>${heading}</h3>${group.date ? `<time>${esc(group.date.slice(0, 4))}</time>` : ""}</div>
       <p class="result-meta">${flagHtml(group.jurisdiction)} ${details}</p>${targets}${compare}${excerpts}
       <p class="source-links">${links}</p>

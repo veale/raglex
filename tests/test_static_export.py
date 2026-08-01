@@ -374,3 +374,26 @@ def test_static_export_escapes_script_terminators_and_sanitises_attribution(
     assert "<strong>Maintained</strong>" in page
     assert "<script>alert(1)</script>" not in page
     assert 'href="javascript:' not in page
+
+
+# -- the provision's "Mentioned by …" line ----------------------------------
+def test_provision_headings_name_their_citers_and_subsections_do_not():
+    """At the provision, who cites it is worth naming; inside it, it is not — a case name
+    set against a numbered sub-paragraph breaks the law's own shape, which is the thing
+    the reader came for. So the heading gets prose and the paragraphs keep [N mentions]."""
+    from raglex.static_export import _SCRIPT, _STYLE
+
+    # the heading builds the prose line, not a badge row
+    assert "const line = mentionsLine(section.key, section.label);" in _SCRIPT
+    assert "appendBadges(heading," not in _SCRIPT
+    # …and a numbered paragraph still gets its terse badge
+    assert "appendBadges(body, mark.key, mark.label" in _SCRIPT
+    # passthrough citers are a separate sentence, never folded into the first
+    assert "Also mentioned by " in _SCRIPT
+    assert "citing a similar provision in " in _SCRIPT
+    # a named citer opens the list AT its own row
+    assert 'openMentions(key, label, "all", g.id)' in _SCRIPT
+    assert 'data-doc="${esc(group.id)}"' in _SCRIPT
+    # small, quiet prose — and the names survive printing even though the buttons don't
+    assert ".mentions-line {" in _STYLE and "font-size: .88rem" in _STYLE
+    assert ".cite-link { color: var(--ink); text-decoration: none; }" in _STYLE
