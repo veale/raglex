@@ -42,6 +42,7 @@ SINGLETON_KINDS = frozenset({
     "backfill-eu-stubs",
     "rebuild-citation-counts", "rebuild-authority", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
+    "rescan-matching",
     "suggest-matches", "classify-guidance",
     # one relation-range cursor over the whole graph — two would double-resolve ranges
     "finish-bulk-postprocess",
@@ -101,7 +102,8 @@ RESUME_POLICIES = {
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 # All three write the citations table; a re-anchor and a rescan of the SAME source must
 # not run at once (they'd race the same offsets), but disjoint sources may.
-_SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations"})
+_SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations",
+                         "rescan-matching"})
 
 
 # Kinds that GROW the corpus (new documents/edges) and therefore stale the derived layers —
@@ -299,6 +301,12 @@ def _static_bundle(facade, params, on_progress, cancel_check):
 RUNNERS: dict[str, Callable] = {
     "static-export": _static_export,
     "static-bundle": _static_bundle,
+    # Re-extract everything whose TEXT matches a query. The scope a citation fix needs:
+    # when a grammar or shorthand changes, the documents to re-read are the ones that
+    # MENTION the thing, which is exactly what the edges do not yet record.
+    "rescan-matching": lambda f, p, cb, cancel: f.rescan_matching(
+        query=p.get("query") or "", exact=bool(p.get("exact", True)),
+        limit=int(p.get("limit") or 20000), on_progress=cb, cancel_check=cancel),
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
         source=p.get("source"), sources=p.get("sources"),
         source_prefix=p.get("source_prefix"), target_ids=p.get("target_ids"),

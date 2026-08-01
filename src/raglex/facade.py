@@ -4760,15 +4760,75 @@ class Facade:
         # A corpus-wide roll-up; it doesn't move between page loads.
         return self._cached(f"frontier:{limit}:{only_unharvestable}", 300, _compute)["rows"]
 
-    def refresh_statute_gazetteer(self) -> dict:
-        """Top up the statute gazetteer from the legislation.gov.uk feeds (current +
-        previous year) into the data-dir extra list — so newly passed acts confirm by
-        name without a package release. Run weekly by the scheduler; cheap and no-op
-        when nothing new has been enacted."""
+    def refresh_statute_gazetteer(self, *, years: list[int] | None = None) -> dict:
+        """Top up the statute gazetteer from the legislation.gov.uk feeds into the
+        data-dir extra list — so acts confirm by name without a package release. Run
+        weekly by the scheduler; cheap and no-op when nothing new has been enacted.
+
+        ``years`` backfills a specific span. The weekly run covers only the current and
+        previous year, which leaves the SEAM between the vendored lists and the
+        self-updating top-up permanently unfilled: the Investigatory Powers Act 2016
+        (Royal Assent 29 November) fell in exactly that gap and was unreachable by its
+        own name, while the 2000 and 2024 Acts either side of it resolved fine.
+        """
         from .citations.statute_gazetteer import refresh_from_feeds
 
-        n = refresh_from_feeds(self.config.data_dir / "statutes_extra.lst")
-        return {"added": n}
+        clean = tuple(sorted({int(y) for y in years})) if years else None
+        n = refresh_from_feeds(self.config.data_dir / "statutes_extra.lst", years=clean)
+        return {"added": n, "years": list(clean) if clean else "current+previous"}
+
+    def rescan_matching(self, *, query: str, exact: bool = True, limit: int = 20000,
+                        on_progress=None, cancel_check=None) -> dict:
+        """Re-extract every document whose TEXT matches a free-text query.
+
+        The scope a citation fix actually needs. When a grammar, alias or shorthand
+        changes, the documents to re-read are the ones that MENTION the thing — which is
+        precisely what the edges do not yet record, so they cannot be found by walking
+        the graph. Searching the text finds them; ``citing_documents`` would only return
+        the ones already resolved, i.e. the ones that least need re-reading.
+
+        Supports the full query syntax (quoted phrases, OR, -exclusion, NEAR/n), and
+        several queries separated by ``|||`` are unioned — one pass over the union
+        rather than one pass per phrase, so a document naming three of the Acts is
+        re-extracted once.
+        """
+        from .citations import extract_document
+
+        queries = [q.strip() for q in str(query or "").split("|||") if q.strip()]
+        if not queries:
+            return {"error": "a query is required"}
+        ids: dict[str, None] = {}
+        per_query: dict[str, int] = {}
+        for one in queries:
+            rows = (self.freetext_search(one, exact=exact, limit=limit)
+                    .get("results") or [])
+            per_query[one] = len(rows)
+            for row in rows:
+                sid = row.get("stable_id") or row.get("id")
+                if sid:
+                    ids[sid] = None
+        total = len(ids)
+        done = failed = 0
+        with self._open() as (cat, _rs, ts):
+            for stable_id in ids:
+                if cancel_check and cancel_check():
+                    break
+                try:
+                    extract_document(cat, ts, stable_id)
+                    done += 1
+                except Exception:  # noqa: BLE001 — one bad document must not end the run
+                    failed += 1
+                if on_progress and (done + failed) % 25 == 0:
+                    on_progress(stage="re-extracting", done=done + failed, total=total,
+                                item=f"{done + failed:,} of {total:,} documents")
+            if on_progress:
+                on_progress(stage="resolving", done=total, total=total,
+                            item="linking the new candidates")
+            resolved = Resolver(cat).run()
+        self._invalidate_caches()
+        return {"queries": per_query, "documents": total,
+                "re_extracted": done, "failed": failed,
+                "resolved": getattr(resolved, "resolved", None)}
 
     def rebuild_citation_counts(self, *, on_progress=None) -> dict:
         """Refresh the snowball's frequency roll-up + the Explore-homepage roll-ups it shares a

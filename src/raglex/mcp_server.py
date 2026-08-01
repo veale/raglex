@@ -448,6 +448,36 @@ def build_server(config: Config | None = None) -> MCPServer:
             "backfill-ag-names", "AG names for held Opinions", {"limit": limit})
 
     @admin
+    def rescan_matching(query: str, exact: bool = True, limit: int = 20000) -> dict:
+        """Re-extract every document whose TEXT matches a free-text query, as a job.
+
+        This is the scope a citation fix needs. When a grammar, alias or shorthand
+        changes, the documents to re-read are the ones that MENTION the thing — and that
+        is exactly what the edges do not yet record, so they cannot be found by walking
+        the graph. citing_documents would return only the ones already resolved: the ones
+        that least need re-reading.
+
+        Full query syntax (quoted phrases, OR, -exclusion, NEAR/n). Several queries
+        separated by ``|||`` are unioned, so a document naming three of them is
+        re-extracted once. Example:
+        ``rescan_matching('"Data Protection Act 2018"|||"Investigatory Powers Act 2016"')``
+        """
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "rescan-matching", f"re-extract documents matching {query[:60]}",
+            {"query": query, "exact": exact, "limit": limit})
+
+    @admin
+    def refresh_statute_gazetteer(years: Optional[list[int]] = None) -> dict:
+        """Top up the UK statute-title gazetteer from legislation.gov.uk.
+
+        The weekly scheduled run covers the current and previous year only, which leaves
+        the seam between the vendored lists and the self-updating top-up unfilled —
+        the Investigatory Powers Act 2016 sat in exactly that gap and was unreachable by
+        its own name. Pass ``years`` to backfill a span, e.g. [2014, 2015, 2016, 2017]."""
+        return facade.refresh_statute_gazetteer(years=years)
+
+    @admin
     def rebuild_authority() -> dict:
         """Recompute the citation-network PageRank roll-up (batch; run after large
         imports or resolution sweeps so ranking/citator/related stay current)."""
