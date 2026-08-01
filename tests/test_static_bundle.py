@@ -105,7 +105,10 @@ def test_index_groups_by_jurisdiction_and_states_both_counts():
     )
     assert 'href="gdpr.html"' in page                       # relative, one level, no dirs
     # Both totals, and the citation count is the bigger one: a document can cite twice.
-    assert "Last updated: 27 May 2026 · 1,200 citing documents · 4,800 citations" in page
+    # One sentence, in commas — the annotation reads as prose, not as a field list.
+    assert ("Last updated 27 May 2026, cited by 1,200 documents, "
+            "4,800 citations in all.") in page
+    assert "·" not in page.split("<body")[1]                # no dotted fields in the list
     assert "<h2>" in page and "European Union" in page and "United Kingdom" in page
     assert '<span class="export-short">GDPR:</span>' in page
     assert "The <b>consolidated</b> text." in page          # per-item line, simple markup
@@ -120,7 +123,23 @@ def test_index_falls_back_when_an_edition_has_no_jurisdiction():
           "mentions": 3, "exported": "27 May 2026"}],
         title="Statutes", intro="")
     assert "Other instruments" in page
-    assert "Last updated: 27 May 2026 · 3 citing documents · 3 citations" in page
+    assert "Last updated 27 May 2026, cited by 3 documents, 3 citations in all." in page
+
+
+def test_blank_lines_in_the_settings_prose_become_paragraphs():
+    """A textarea carries no markup, so its blank lines are the only structure the
+    writer has: they must survive into the page."""
+    page = render_index_html(
+        [{"filename": "x.html", "title": "Some Instrument", "documents": 1,
+          "mentions": 1, "exported": "27 May 2026",
+          "note": "First line.\nStill the first paragraph.\n\nA second paragraph."}],
+        title="Statutes",
+        intro="An opening line.\n\nA second thought entirely.")
+    assert page.count('<p class="attribution">') == 2
+    assert "An opening line." in page and "A second thought entirely." in page
+    assert page.count('<p class="export-note">') == 2
+    assert "First line.<br>Still the first paragraph." in page
+    assert "<p class=\"export-note\">A second paragraph.</p>" in page
 
 
 def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
@@ -132,7 +151,7 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
     save_config(settings, {
         "items": [
             {"stable_id": "ukpga/2023/50", "slug": "osa", "title": "Online Safety Act 2023",
-             "note": "Only <i>this</i> file says so."},
+             "short": "OSA", "note": "Only <i>this</i> file says so."},
             {"stable_id": "ukpga/2018/12", "slug": "dpa", "title": "Data Protection Act 2018"},
         ],
         "index_title": "Statutes",
@@ -160,8 +179,13 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
     assert 'Return to <a href="index.html">Statutes</a>.' in dpa
     assert osa.index("Only <i>this</i>") < osa.index("Return to")
 
+    # The tab, not the <h1>: the short name the operator gave the law, and the set.
+    assert "<title>Crossreferenced OSA - Statutes</title>" in osa
+    assert "<title>Crossreferenced Data Protection Act 2018 - Statutes</title>" in dpa
+
     index = (out / "index.html").read_text(encoding="utf-8")
     assert '<a href="osa.html">' in index and '<a href="dpa.html">' in index
+    assert "<title>Statutes</title>" in index
 
     with zipfile.ZipFile(result["zip"]) as archive:
         assert sorted(archive.namelist()) == ["dpa.html", "index.html", "osa.html"]

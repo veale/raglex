@@ -33,8 +33,9 @@ from .static_export import (
     _STYLE,
     _flag_assets,
     build_static_export_cache,
+    cached_export_page_title,
+    editorial_paragraphs,
     render_cached_export,
-    sanitise_editorial_html,
     static_export_status,
 )
 
@@ -344,25 +345,27 @@ _INDEX_TEMPLATE = """<!doctype html>
   <meta name="color-scheme" content="light">
   <title>__PAGE_TITLE__</title>
   <style>__STYLE____WORDART_STYLE__
-.export-group { margin: 0 0 2.2rem; max-width: 52rem; }
+.export-group { margin: 0 0 1.3rem; max-width: 52rem; }
 .export-group h2 {
   display: flex;
   align-items: center;
   gap: .5rem;
-  margin: 0 0 .2rem;
-  padding-bottom: .35rem;
+  margin: 0 0 .15rem;
+  padding-bottom: .2rem;
   border-bottom: 1px solid var(--ink);
   font-size: 1.15rem;
   font-weight: 500;
 }
 .export-group h2 .flag-icon { width: 1.1em; height: 1.1em; }
 .export-list { list-style: none; margin: 0; padding: 0; max-width: 52rem; }
-.export-list li { padding: 1.1rem 0; border-bottom: 1px dotted var(--faint-rule); }
-.export-list li:last-child { border-bottom: 0; }
+/* No rule between items: the bold short name already starts each one, and a ruled row
+   per instrument turned a reading list into a table. */
+.export-list li { padding: .55rem 0 0; }
 .export-list a { font-size: 1.15rem; }
 .export-short { font-weight: 700; }
-.export-meta { margin: .3rem 0 0; color: var(--quiet); font-size: .95rem; }
-.export-note { margin: .45rem 0 0; color: var(--quiet); font-size: 1rem; line-height: 1.45; }
+/* The annotations read as prose continuing the item's own line — the law's ink, the
+   law's size, and stacked at ordinary line spacing rather than as separated blocks. */
+.export-meta, .export-note { margin: 0; color: var(--ink); font-size: 1rem; }
 </style>
 </head>
 <body class="sidebar-closed">
@@ -396,8 +399,8 @@ def render_index_html(
     from html import escape
 
     generated_at = generated_at or _now()
-    intro_html = sanitise_editorial_html(
-        apply_placeholders(intro, when=generated_at, count=len(entries)))
+    intro_paragraphs = editorial_paragraphs(
+        apply_placeholders(intro, when=generated_at, count=len(entries)), "attribution")
     flags = _flag_assets({
         str(entry.get("jurisdiction") or "") for entry in entries
         if entry.get("jurisdiction")
@@ -413,19 +416,22 @@ def render_index_html(
         icon = f'<img class="flag-icon" src="{escape(flag, quote=True)}" alt="">' if flag else ""
         rows = []
         for entry in group:
+            # One sentence, not a row of dotted fields: the same facts read as the
+            # annotation they are.
             meta = [
-                "Last updated: "
+                "Last updated "
                 + str(entry.get("exported") or format_export_date(generated_at))
             ]
             if entry.get("documents"):
-                meta.append(f"{int(entry['documents']):,} citing documents")
+                meta.append(f"cited by {int(entry['documents']):,} documents")
             # Always more than the document count once anything cites a law twice, and it
             # is the number a reader of the edition itself will see.
             if entry.get("mentions"):
-                meta.append(f"{int(entry['mentions']):,} citations")
-            note_html = sanitise_editorial_html(
+                meta.append(f"{int(entry['mentions']):,} citations in all")
+            note_paragraphs = editorial_paragraphs(
                 apply_placeholders(entry.get("note") or "", when=generated_at,
-                                   count=len(entries)))
+                                   count=len(entries)),
+                "export-note")
             short = str(entry.get("short") or "").strip()
             # "DSA: Regulation (EU) 2022/2065 …" — the operator's own shorthand, bold, and
             # only here: inside an edition the instrument speaks under its full name.
@@ -436,9 +442,9 @@ def render_index_html(
             rows.append(
                 "          <li>\n"
                 f'            <a href="{escape(entry["filename"], quote=True)}">{label}</a>\n'
-                f'            <p class="export-meta">{escape(" · ".join(meta))}</p>\n'
-                + (f'            <p class="export-note">{note_html}</p>\n'
-                   if note_html.strip() else "")
+                f'            <p class="export-meta">{escape(", ".join(meta))}.</p>\n'
+                + "".join(f"            {paragraph}\n"
+                          for paragraph in note_paragraphs)
                 + "          </li>"
             )
         blocks.append(
@@ -462,7 +468,7 @@ def render_index_html(
     for token, value in {
         "__PAGE_TITLE__": escape(title, quote=True),
         "__TITLE__": heading,
-        "__INTRO__": f'<p class="attribution">{intro_html}</p>' if intro_html.strip() else "",
+        "__INTRO__": "\n      ".join(intro_paragraphs),
         "__STYLE__": _STYLE,
         "__WORDART_STYLE__": _WORDART_STYLE if wordart else "",
         "__ITEMS__": "\n".join(blocks),
@@ -600,7 +606,12 @@ def build_bundle(
         # not a scatter of files, however a reader arrived at this one.
         html_bytes = render_cached_export(
             status, note=item.get("note"),
-            index_link={"href": "index.html", "title": config["index_title"]})
+            index_link={"href": "index.html", "title": config["index_title"]},
+            # "Crossreferenced AI Act - UCL Digital Laws": a tab, a bookmark and a
+            # browser history entry all get the short name plus the set it belongs to,
+            # never the instrument's 40-word official title.
+            page_title=cached_export_page_title(
+                status, short=item.get("short"), index_title=config["index_title"]))
         filename = f"{item['slug']}.html"
         files.append((filename, html_bytes))
         entries.append({

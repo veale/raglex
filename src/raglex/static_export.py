@@ -166,6 +166,23 @@ def sanitise_editorial_html(text: str) -> str:
     return "".join(parser.parts)
 
 
+def editorial_paragraphs(text: str | None, css_class: str) -> list[str]:
+    """Prose typed into one of the settings textareas, as paragraphs.
+
+    A textarea has no markup, so the line breaks ARE the structure a writer intends: a
+    blank line starts a new paragraph, a single newline is a line break inside one. Split
+    before sanitising is wrong (the sanitiser is what escapes the text), so split first
+    and sanitise each block.
+    """
+    out: list[str] = []
+    for block in re.split(r"\n[ \t]*\n", (text or "").strip()):
+        body = sanitise_editorial_html(block.strip()).strip()
+        if not body:
+            continue
+        out.append(f'<p class="{css_class}">{body.replace(chr(10), "<br>")}</p>')
+    return out
+
+
 def _attribution_html() -> str:
     return sanitise_editorial_html(
         os.environ.get("RAGLEX_STATIC_EXPORT_ATTRIBUTION") or _DEFAULT_ATTRIBUTION)
@@ -178,9 +195,7 @@ def _attribution_block(
     own line directly beneath, and a way back to the bundle's index page. All in the same
     style, in that order, under the title."""
     paragraphs = [f'<p class="attribution">{_attribution_html()}</p>']
-    note_html = sanitise_editorial_html((note or "").strip())
-    if note_html.strip():
-        paragraphs.append(f'<p class="attribution">{note_html}</p>')
+    paragraphs.extend(editorial_paragraphs(note, "attribution"))
     if index_link and index_link.get("href"):
         href = html.escape(str(index_link["href"]), quote=True)
         label = html.escape(str(index_link.get("title") or "the index"))
@@ -1025,8 +1040,23 @@ def static_export_status(
     return {**manifest, "ready": True, "_path": str(path)}
 
 
+def cached_export_page_title(
+    status: dict, *, short: str | None = None, index_title: str | None = None
+) -> str:
+    """``Crossreferenced AI Act - UCL Digital Laws`` — the short name of the law this
+    edition crossreferences, and the set it was published in. Falls back through the
+    operator's own shorthand, the instrument's short title, and finally its full one."""
+    name = (short or "").strip() or str(
+        status.get("short_title") or status.get("title") or status.get("stable_id") or ""
+    ).strip()
+    label = f"Crossreferenced {name}".strip()
+    index_title = (index_title or "").strip()
+    return f"{label} - {index_title}" if index_title else label
+
+
 def render_cached_export(
-    status: dict, *, note: str | None = None, index_link: dict | None = None
+    status: dict, *, note: str | None = None, index_link: dict | None = None,
+    page_title: str | None = None,
 ) -> bytes:
     """Render the page for a cached edition, applying the CURRENT attribution, this
     edition's own note, and (for a bundle item) the way back to its index page.
@@ -1037,6 +1067,7 @@ def render_cached_export(
         data_json=payload,
         note=note,
         index_link=index_link,
+        page_title=page_title or cached_export_page_title(status),
     ).encode("utf-8")
 
 
@@ -1109,13 +1140,18 @@ def _json_for_script(data: dict) -> str:
 
 def render_static_page(
     *, title: str, data_json: str, note: str | None = None,
-    index_link: dict | None = None,
+    index_link: dict | None = None, page_title: str | None = None,
 ) -> str:
     """Render the page around an already-serialised payload — the cached path, which
-    never re-parses a payload that may be tens of megabytes."""
+    never re-parses a payload that may be tens of megabytes.
+
+    ``page_title`` is what the browser tab and a bookmark carry. The <h1> is the
+    instrument's full official name, which is far too long for either, so a bundle passes
+    the short name it gave the law and the name of the set it belongs to.
+    """
     page = _HTML_TEMPLATE
     replacements = {
-        "__PAGE_TITLE__": html.escape(f"{title} — citations", quote=True),
+        "__PAGE_TITLE__": html.escape(page_title or f"{title} — citations", quote=True),
         "__TITLE__": html.escape(title),
         "__ATTRIBUTION_BLOCK__": _attribution_block(note, index_link),
         "__STYLE__": _STYLE,
@@ -1212,6 +1248,8 @@ _STYLE = r"""
   --rule: #aaa396;
   --faint-rule: #d7d0c3;
   --mark: #eadf8c;
+  --link: #142b7a;
+  --link-visited: #5d3267;
   --sidebar: 19rem;
 }
 * { box-sizing: border-box; }
@@ -1222,7 +1260,7 @@ body {
   color: var(--ink);
   font-family: Times, "Times New Roman", serif;
   font-size: 17px;
-  line-height: 1.52;
+  line-height: 1.42;
 }
 button, input, select {
   border: 1px solid var(--rule);
@@ -1237,30 +1275,31 @@ button:hover, button:focus-visible, input:focus, select:focus {
   outline: 1px solid var(--ink);
   outline-offset: 1px;
 }
-a { color: #142b7a; text-decoration-thickness: 1px; text-underline-offset: .16em; }
-a:visited { color: #5d3267; }
+a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: .16em; }
+a:visited { color: var(--link-visited); }
 .page-head {
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 52rem);
   gap: 2.7rem;
-  padding: 2.3rem 3rem 1.8rem;
+  padding: 1.5rem 3rem 1rem;
   border-bottom: 1px solid var(--ink);
 }
 .page-head h1 {
   margin: 0;
   max-width: 48rem;
-  font-size: clamp(1.8rem, 2.6vw, 2.35rem);
+  font-size: clamp(1.7rem, 2.4vw, 2.15rem);
   font-weight: 400;
   line-height: 1.08;
   text-wrap: balance;
 }
 .attribution {
   max-width: 52rem;
-  margin: 1rem 0 0;
+  margin: .55rem 0 0;
   color: var(--quiet);
   font-size: 1.05rem;
-  line-height: 1.45;
+  line-height: 1.4;
 }
+.attribution + .attribution { margin-top: .3rem; }
 .contents-toggle {
   justify-self: start;
   align-self: start;
@@ -1272,7 +1311,7 @@ a:visited { color: #5d3267; }
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 52rem);
   gap: 2.7rem;
-  padding: 0 3rem 5rem;
+  padding: 0 3rem 3rem;
   align-items: start;
 }
 .contents {
@@ -1280,7 +1319,7 @@ a:visited { color: #5d3267; }
   top: 0;
   max-height: 100vh;
   overflow: auto;
-  padding: 1.6rem .8rem 2rem 0;
+  padding: 1rem .8rem 1.2rem 0;
   border-right: 1px solid var(--rule);
 }
 .contents nav { margin-top: 0; }
@@ -1289,74 +1328,79 @@ a:visited { color: #5d3267; }
   width: 100%;
   justify-content: space-between;
   gap: .75rem;
-  padding: .35rem .9rem .35rem 0;
+  padding: .16rem .9rem .16rem 0;
   border: 0;
-  border-bottom: 1px dotted var(--faint-rule);
   background: transparent;
+  color: var(--link);
   text-align: left;
   text-decoration: none;
-  line-height: 1.25;
+  line-height: 1.22;
 }
+.contents a:visited { color: var(--link-visited); }
 .contents a:hover, .contents button:hover { text-decoration: underline; outline: 0; }
-.contents .count { color: var(--quiet); font-variant-numeric: tabular-nums; }
-.contents .all-mentions { margin-bottom: .8rem; border-bottom: 1px solid var(--ink); }
-main { min-width: 0; padding-top: 1.5rem; }
+.contents .count { color: inherit; font-variant-numeric: tabular-nums; }
+.contents .all-mentions { border-bottom: 1px solid var(--ink); }
+.contents .all-mentions + :not(.all-mentions) { margin-top: .45rem; }
+main { min-width: 0; padding-top: .9rem; }
 .law-section {
   position: relative;
-  padding: 1.2rem 0 1.7rem;
-  border-bottom: 1px solid var(--faint-rule);
+  padding: .55rem 0 .35rem;
   scroll-margin-top: 1rem;
 }
 .law-section h2 {
-  margin: 0 0 .75rem;
+  margin: 0 0 .3rem;
   max-width: 43rem;
-  font-size: 1.25rem;
-  line-height: 1.25;
+  font-size: 1.2rem;
+  line-height: 1.22;
   font-weight: 600;
 }
-.law-section.level-1 { margin-left: 1.4rem; }
-.law-section.level-2 { margin-left: 2.8rem; }
 .law-text {
   margin: 0;
   max-width: 46rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.law-section.level-1 { margin-left: 1.4rem; }
+.law-section.level-2 { margin-left: 2.8rem; }
 .law-paragraph {
   max-width: 46rem;
-  margin: 0 0 .8rem;
+  margin: 0 0 .35rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.law-paragraph:last-child { margin-bottom: 0; }
 .law-paragraph.indent-1 { margin-left: 1.45rem; }
 .law-paragraph.indent-2 { margin-left: 2.9rem; }
 .law-paragraph.indent-3 { margin-left: 4.35rem; }
+/* A mention badge does what a link does — it takes you somewhere — so it is inked like
+   one, everywhere it appears: a provision heading, a numbered paragraph, the route row
+   of the dialog, a comparison offered beside a result. */
 .mention-ref {
   display: inline;
   margin-left: .45rem;
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--quiet);
+  color: var(--link);
   font-weight: 700;
   font-size: .9rem;
   white-space: nowrap;
 }
-.mention-ref:hover {
+.mention-ref:hover, .mention-ref:focus-visible {
   border: 0;
   outline: 0;
-  color: var(--ink);
+  color: var(--link);
   text-decoration: underline;
 }
 .source-note {
-  margin: 1.5rem 0 2rem;
+  margin: 0 0 .9rem;
   padding: 0;
   color: var(--quiet);
 }
 dialog {
   width: min(58rem, calc(100vw - 2rem));
   max-height: calc(100vh - 2rem);
-  padding: 0 1.4rem 1.5rem;
+  padding: 0 1.4rem 1.1rem;
   border: 1px solid var(--ink);
   border-radius: 0;
   background: var(--paper-raised);
@@ -1371,11 +1415,11 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
   display: flex;
   justify-content: space-between;
   gap: 2rem;
-  padding: 1.25rem 0 .9rem;
+  padding: .9rem 0 .6rem;
   border-bottom: 1px solid var(--ink);
   background: var(--paper-raised);
 }
-.dialog-head h2 { margin: 0; font-size: 1.6rem; font-weight: 500; }
+.dialog-head h2 { margin: 0; font-size: 1.45rem; font-weight: 500; line-height: 1.2; }
 .dialog-head button {
   align-self: start;
   padding: .2rem .45rem;
@@ -1388,8 +1432,8 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: .65rem 1rem;
-  padding: 1rem 0;
+  gap: .5rem 1rem;
+  padding: .7rem 0;
   border-bottom: 1px solid var(--faint-rule);
 }
 .filters label { color: var(--quiet); font-size: 1rem; }
@@ -1406,7 +1450,7 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
   display: flex;
   flex-wrap: wrap;
   gap: .35rem .5rem;
-  padding: .9rem 0 0;
+  padding: .65rem 0 0;
 }
 .route-tokens:empty { display: none; }
 .route-token {
@@ -1441,17 +1485,17 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
    backdrop is darker — a reader must be able to tell which layer they are on. */
 #compare-dialog { width: min(72rem, calc(100vw - 2rem)); }
 #compare-dialog::backdrop { background: rgba(24, 23, 20, .58); }
-.compare-sub { margin: .3rem 0 0; color: var(--quiet); font-size: 1rem; }
+.compare-sub { margin: .25rem 0 0; color: var(--quiet); font-size: 1rem; }
 .compare-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0 2rem;
-  padding-top: 1.1rem;
+  padding-top: .8rem;
 }
 .compare-col { min-width: 0; }
 .compare-col + .compare-col { border-left: 1px solid var(--faint-rule); padding-left: 2rem; }
-.compare-col h3 { margin: 0 0 .2rem; font-size: 1.1rem; font-weight: 600; }
-.compare-col .compare-source { margin: 0 0 .8rem; color: var(--quiet); font-size: .95rem; }
+.compare-col h3 { margin: 0 0 .15rem; font-size: 1.1rem; font-weight: 600; }
+.compare-col .compare-source { margin: 0 0 .55rem; color: var(--quiet); font-size: .95rem; }
 .compare-text {
   margin: 0;
   white-space: pre-wrap;
@@ -1462,28 +1506,28 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
 .compare-missing { color: #7d322a; }
 .compare-note {
   grid-column: 1 / -1;
-  margin: 1.2rem 0 0;
-  padding-top: .8rem;
+  margin: .9rem 0 0;
+  padding-top: .6rem;
   border-top: 1px solid var(--faint-rule);
   color: var(--quiet);
   font-size: .95rem;
 }
-.compare-link { margin: .5rem 0 0; font-size: 1rem; }
+.compare-link { margin: .35rem 0 0; font-size: 1rem; }
 .result {
-  padding: 1.25rem 0 1.45rem;
-  border-bottom: 1px solid var(--rule);
+  padding: .85rem 0 .95rem;
+  border-bottom: 1px solid var(--faint-rule);
 }
-.result h3 { margin: 0; font-size: 1.08rem; font-weight: 500; line-height: 1.35; }
+.result h3 { margin: 0; font-size: 1.08rem; font-weight: 500; line-height: 1.3; }
 .result time { color: var(--quiet); white-space: nowrap; }
 .result-head { display: flex; justify-content: space-between; gap: 1.2rem; }
 .result-meta, .result-targets, .source-links {
-  margin: .3rem 0 0;
+  margin: .2rem 0 0;
   color: var(--quiet);
   font-size: 1rem;
 }
 .snippet {
-  margin: .85rem 0 0;
-  padding: .3rem 0 .3rem 1rem;
+  margin: .55rem 0 0;
+  padding: .15rem 0 .15rem 1rem;
   border-left: 2px solid var(--ink);
 }
 .snippet p { margin: 0; }
@@ -1491,8 +1535,8 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
 mark { padding: 0 .08em; background: var(--mark); color: inherit; }
 .source-links a + a::before { content: " · "; color: var(--quiet); text-decoration: none; }
 .no-source { color: #7d322a; }
-.more { display: block; margin: 1.4rem auto 0; padding: .3rem .7rem; background: transparent; }
-.empty { padding: 2rem 0; color: var(--quiet); }
+.more { display: block; margin: 1rem auto 0; padding: .3rem .7rem; background: transparent; }
+.empty { padding: 1.4rem 0; color: var(--quiet); }
 body.sidebar-closed .page-head, body.sidebar-closed .page { grid-template-columns: minmax(0, 52rem); }
 body.sidebar-closed .contents { display: none; }
 body.sidebar-closed .page-head, body.sidebar-closed .page { padding-left: max(2rem, calc((100vw - 52rem) / 2)); }
