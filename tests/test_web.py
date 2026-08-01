@@ -361,3 +361,23 @@ def test_metadata_edit_is_visible_immediately(client):
                     json={"title": "Corrected Title"})
     assert r.json()["updated"] is True
     assert client.get("/documents/ECLI:EU:C:2020:1").json()["document"]["title"] == "Corrected Title"
+
+
+def test_import_reads_the_citations_it_carries(client):
+    """An import that nothing has read is a document the graph cannot see. "Resolve
+    citations" does not do this — it resolves edges already extracted — so before the
+    import ran extraction there was no button the operator could have pressed."""
+    r = client.post(
+        "/import/files",
+        files=[("files", ("cop.html", b"<p>Providers must comply with Article 53(1)(a) "
+                                      b"AI Act and Annex XII AI Act.</p>", "text/html"))],
+        data={"items": '[{"title": "Code of Practice", "doc_type": "guidance", '
+                       '"jurisdiction": "eu"}]'},
+    )
+    body = r.json()
+    assert body["imported"] == 1
+    sid = body["documents"][0]["stable_id"]
+    doc = client.get(f"/documents/{sid}").json()
+    pins = {rel.get("dst_anchor") for rel in doc["relations"]}
+    assert "Article 53(1)(a)" in pins and "Annex XII" in pins
+    assert all(rel["dst_id"] == "32024R1689" for rel in doc["relations"])

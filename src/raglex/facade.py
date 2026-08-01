@@ -9760,14 +9760,40 @@ class Facade:
                 results.append({"index": index, "filename": item.get("filename"),
                                 "title": item.get("title"), "error": str(exc)[:300]})
         ok = [r for r in results if not r.get("error")]
+        # Read what they cite, and link it. Without this an import is a document the graph
+        # cannot see: three EU codes of practice arrived with 34 "AI Act" references
+        # between them and no edges at all, because nothing had ever read their text.
+        # "Resolve citations" does NOT do this — it resolves edges already extracted — so
+        # there was no button the operator could have pressed either.
+        #
+        # A drop is tens of documents, not the corpus, so it is affordable inline; the
+        # grammar pass runs under the usual wall-clock guard, so one pathological PDF
+        # costs its own extraction and not the request.
+        extracted = self._extract_imported([r["stable_id"] for r in ok if r.get("stable_id")])
         return {
             "imported": len(ok),
             "failed": len(results) - len(ok),
             "documents": results,
-            # Citation extraction is what makes an import part of the graph, and it is
-            # far too slow to run inline for a drop of twenty PDFs.
-            "next": "run Resolve citations (Operations) to link what these documents cite",
+            **extracted,
         }
+
+    def _extract_imported(self, ids: list[str]) -> dict:
+        """Citations out of freshly-imported documents, then resolve just those."""
+        if not ids:
+            return {}
+        try:
+            with self._open() as (cat, _rs, ts):
+                self._extract_ids(cat, ts, ids)
+                resolved = Resolver(cat).run_for_documents(ids)
+            self._invalidate_caches()
+            return {"citations_resolved": getattr(resolved, "resolved", 0),
+                    "next": "these documents are in the citation graph; run Embed / index "
+                            "(Operations) to make their full text searchable"}
+        except Exception as exc:  # noqa: BLE001 — the documents ARE imported; say so
+            log.exception("import: citation extraction failed")
+            return {"extraction_error": str(exc)[:300],
+                    "next": "imported, but reading their citations failed — re-run a "
+                            "rescan scoped to this source"}
 
     def import_options(self) -> dict:
         """The vocabularies the import form's dropdowns offer.
