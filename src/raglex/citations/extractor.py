@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from functools import lru_cache
 from typing import Protocol
 
 from .grammars import DROP, GRAMMARS
@@ -380,14 +381,17 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
     return defs
 
 
-def _link_shorthand_uses(
-    text: str, name: str, *, entity_kind: str | None, candidate_id: str | None,
-    abbrev: bool, out: list[Citation], occupied: list[tuple[int, int]],
-    after: int = -1, method: str = "shorthand", confidence: float = 0.7,
-) -> None:
-    """Append a citation for every later USE of ``name`` in ``text``, skipping spans an
-    existing citation already covers. ``after`` is the definition's position — only uses
-    beyond it count — and is -1 for a *stored* shorthand, which has no definition here."""
+@lru_cache(maxsize=8192)
+def _shorthand_use_re(name: str, abbrev: bool) -> "re.Pattern[str]":
+    """The compiled use-pattern for one shorthand, memoised across documents.
+
+    The same few hundred shorthands recur on every document of a bulk run, but the
+    pattern is rebuilt as a fresh string each call, so ``re``'s own 512-entry cache
+    thrashes and pays a full parse+compile per use — measured at ~17% of the parent's
+    serial half on a heavily-cited judgment, which is the ceiling on the whole
+    extraction pool. Keyed on exactly what the pattern depends on: the name and
+    whether it links bare.
+    """
     esc = re.escape(name)
     # case / opinion short-name uses always carry a pincite ("Suncor at para 30",
     # "Judgment in Digital Rights, paragraph 57"); an abbreviation links on a
@@ -417,7 +421,18 @@ def _link_shorthand_uses(
                 rf"|Sched(?:ule)?\.?\s*[IVXLC\d]+))\s+(?:of|to)\s+(?:the\s+)?)?"
                 rf"\b{esc}\b(?![\"”'\])])")
     year_act = bool(re.fullmatch(r"the\s+(?:18|19|20)\d{2}\s+Act", name, re.I))
-    use_re = re.compile(pat, re.IGNORECASE if (not abbrev or year_act) else 0)
+    return re.compile(pat, re.IGNORECASE if (not abbrev or year_act) else 0)
+
+
+def _link_shorthand_uses(
+    text: str, name: str, *, entity_kind: str | None, candidate_id: str | None,
+    abbrev: bool, out: list[Citation], occupied: list[tuple[int, int]],
+    after: int = -1, method: str = "shorthand", confidence: float = 0.7,
+) -> None:
+    """Append a citation for every later USE of ``name`` in ``text``, skipping spans an
+    existing citation already covers. ``after`` is the definition's position — only uses
+    beyond it count — and is -1 for a *stored* shorthand, which has no definition here."""
+    use_re = _shorthand_use_re(name, abbrev)
     for m in use_re.finditer(text):
         s, e = m.start(), m.end()
         if s <= after:   # only USES after the definition count
