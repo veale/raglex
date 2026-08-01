@@ -987,3 +987,48 @@ def test_one_reference_written_two_ways_is_one_citation():
     pins = {c.pinpoint for c in extract_citations(
         "Article 5 and Article 17 of Regulation (EU) 2016/679")}
     assert pins == {"Article 5", "Article 17"}
+
+
+def test_every_irish_source_is_gated_not_just_the_case_law_feed(catalogue, tmp_path):
+    """A Data Protection Commission inquiry is as Irish as a High Court judgment.
+
+    The gate named ie-caselaw and the Irish court codes, which missed six sources —
+    ie-dpc, ie-dpc-guidance, ie-ccpc-mergers, ie-revenue-tdm, ie-tax-appeals and
+    ie-legislation. So a DPC inquiry citing "section 133 of the Data Protection Act
+    2018", meaning the Oireachtas Act in an Irish statutory inquiry, linked to the UK
+    Act — and survived a repair that reported success.
+    """
+    from raglex.citations.stage import _is_irish_host
+
+    class _Doc(dict):
+        def __getitem__(self, key):
+            return super().get(key)
+
+    for source, stable_id, court in (
+        ("ie-dpc", "ie/dpc/inquiry-limerick-city-and-county-council", "dpa-ie"),
+        ("ie-dpc-guidance", "ie/dpc-guidance/1", None),
+        ("ie-ccpc-mergers", "ie/ccpc/m-24-001", None),
+        ("ie-revenue-tdm", "ie/revenue/tdm-01", None),
+        ("ie-tax-appeals", "ie/tax/2024-01", None),
+        ("ie-legislation", "ie/act/2018/7", None),
+        ("ie-caselaw", "iehc/2024/1", "iehc"),
+    ):
+        assert _is_irish_host(_Doc(source=source, stable_id=stable_id, court=court)), source
+
+    # …and nothing else is swept in.
+    for source, stable_id, court in (
+        ("uk-caselaw", "ewhc/admin/2024/1", "ewhc"),
+        ("edpb", "edpb/guidelines/1", None),
+        ("ie2-not-a-source", "iexx/1", None),
+    ):
+        assert not _is_irish_host(_Doc(source=source, stable_id=stable_id, court=court))
+
+    # End to end: the UK Act is refused inside a DPC inquiry.
+    ts = TextStore(tmp_path / "text")
+    text = ("The Commission relied on section 133 of the Data Protection Act 2018 and "
+            "Article 5 of Regulation (EU) 2016/679.")
+    _doc(catalogue, ts, "ie/dpc/inquiry-x", text, source="ie-dpc")
+    extract_document(catalogue, ts, "ie/dpc/inquiry-x")
+    dsts = {e["dst_id"] for e in catalogue.relations_for("ie/dpc/inquiry-x") if e["dst_id"]}
+    assert "ukpga/2018/12" not in dsts
+    assert "32016R0679" in dsts          # the EU citation is unambiguous and survives

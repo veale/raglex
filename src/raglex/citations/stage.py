@@ -681,7 +681,7 @@ def _gate_domestic_statute_names(doc, cites: list) -> list:
     487 Irish judgments in a 4,000-row sample, and the bare "s. 50A" pinpoints then
     carried forward off it. A guard that runs once is a guard the next stage undoes.
     """
-    if not (_is_irish_case(doc) or _is_eu_guidance(doc)):
+    if not (_is_irish_host(doc) or _is_eu_guidance(doc)):
         return cites
     return [
         replace(c, candidate_id=None)
@@ -693,18 +693,32 @@ def _gate_domestic_statute_names(doc, cites: list) -> list:
     ]
 
 
-def _is_irish_case(doc) -> bool:
-    """Is this document a judgment of an Irish court? Inside one, an "<X> Act 1963"
-    name is almost always an Act of the Oireachtas, so the UK statute-name heuristics
-    must not link it to UK legislation (EU instruments and case citations of any
-    jurisdiction are unaffected — those are fine cross-border). Symmetrically, an
-    Irish-statute name grammar (once Irish legislation is populated) must be gated
-    to Irish hosts, so a UK judgment never links Irish acts by name."""
+def _is_irish_host(doc) -> bool:
+    """Is this document IRISH — by any route, not just an Irish court?
+
+    Inside one, an "<X> Act 1963" name is almost always an Act of the Oireachtas, so the
+    UK statute-name heuristics must not link it to UK legislation (EU instruments and
+    case citations of any jurisdiction are unaffected — those are fine cross-border).
+
+    Keyed on the SOURCE PREFIX, not a list of sources. Naming ``ie-caselaw`` alone left
+    every Irish regulator out of the gate: a Data Protection Commission inquiry citing
+    "section 133 of the Data Protection Act 2018" — the Oireachtas Act, in an Irish
+    statutory inquiry — linked to the UK Act instead, and so did ie-ccpc-mergers,
+    ie-revenue-tdm, ie-tax-appeals and ie-dpc-guidance. Six sources missed because the
+    gate enumerated one.
+    """
     from .courts import IRISH_COURTS
 
+    source = str(doc["source"] or "").lower()
     court = (doc["court"] or "").lower()
-    prefix = (doc["stable_id"] or "").split("/", 1)[0].lower()
-    return doc["source"] == "ie-caselaw" or court in IRISH_COURTS or prefix in IRISH_COURTS
+    stable_id = str(doc["stable_id"] or "").lower()
+    prefix = stable_id.split("/", 1)[0]
+    return (source.startswith("ie-") or stable_id.startswith("ie/")
+            or court in IRISH_COURTS or prefix in IRISH_COURTS)
+
+
+# Kept as the old name for any caller that still uses it.
+_is_irish_case = _is_irish_host
 
 
 # EU regulatory guidance / DPA decisions (EDPB, Article 29 WP, the one-stop-shop

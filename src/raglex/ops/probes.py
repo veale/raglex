@@ -504,6 +504,13 @@ def _irish_to_uk_legislation_sql(
     courts = sorted(IRISH_COURTS)
     like = " OR ".join([f"x.{target} LIKE ?"] * len(_UK_LEG_PREFIXES))
     court_qs = ",".join("?" * len(courts))
+    # Every Irish host, not just the case-law feed. The first version of this probe
+    # named ie-caselaw and the court codes, which missed ie-dpc, ie-ccpc-mergers,
+    # ie-revenue-tdm, ie-tax-appeals, ie-dpc-guidance and ie-legislation — so a Data
+    # Protection Commission inquiry citing "section 133 of the Data Protection Act 2018"
+    # kept its link to the UK Act through a repair that reported success.
+    irish = "(s.source LIKE 'ie-%' OR s.stable_id LIKE 'ie/%' "
+    irish += f"OR lower(COALESCE(s.court, '')) IN ({court_qs}))"
     # The two tables record provenance in different vocabularies — relations carry
     # extracted_via ('regex' | 'inferred' | 'manual' | 'structured'), citations carry the
     # GRAMMAR that matched ('uk_statute_named', 'carry_forward', 'shorthand_global', …).
@@ -514,7 +521,7 @@ def _irish_to_uk_legislation_sql(
     sql = f"""
     FROM {table} x JOIN documents s ON s.stable_id = x.src_id
     WHERE ({like})
-      AND (s.source = 'ie-caselaw' OR lower(COALESCE(s.court, '')) IN ({court_qs}))
+      AND {irish}
       AND x.{provenance} {negate}IN ({machine_qs})
     """
     return sql, [f"{p}%" for p in _UK_LEG_PREFIXES] + courts + list(machine)
