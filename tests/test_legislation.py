@@ -643,3 +643,52 @@ def test_a_textless_consolidation_never_takes_over_the_read(tmp_path, monkeypatc
                         lambda self, sid: (REAL, "2025-01-01"))
     got = f.canonical_read_target(BASE)
     assert got["stable_id"] == REAL and got["redirected"] is True
+
+
+def test_a_ceilinged_body_window_starts_at_the_articles_not_the_recitals(tmp_path):
+    """An EU instrument opens with its recitals — the AI Act has 180, ~120k characters —
+    so a default window from character zero is entirely preamble and not one operative
+    provision. The recitals stay one call away at offset=0."""
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record, Segment
+    from raglex.facade import Facade
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                 embed_model=None)
+    f = Facade(cfg)
+    recitals = "".join(f"Recital {n} whereas something is so.\n" for n in range(1, 61))
+    articles = "".join(f"Article {n}\nAn operative provision.\n" for n in range(1, 11))
+    text = recitals + articles
+    segs, at = [], 0
+    for n in range(1, 61):
+        line = f"Recital {n} whereas something is so.\n"
+        segs.append(Segment(label=f"Recital {n}", char_start=at,
+                            char_end=at + len(line), kind="recital"))
+        at += len(line)
+    for n in range(1, 11):
+        line = f"Article {n}\nAn operative provision.\n"
+        segs.append(Segment(label=f"Article {n}", char_start=at,
+                            char_end=at + len(line), kind="article"))
+        at += len(line)
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source="eu-legislation", stable_id="32024R1689",
+                     doc_type=DocType.LEGISLATION, title="AI Act", text=text,
+                     raw_bytes=text.encode(), segments=segs,
+                     extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, text)))
+        ts.put_segments(rec.payload_hash, segs)
+        cat.commit()
+
+    body = f.document_body("32024R1689", max_chars=200)
+    w = body["window"]
+    assert w["defaulted"] is True and w["recitals_skipped"] == 60
+    assert body["text"].startswith("Article 1")
+    assert "Recital" not in body["text"]
+    assert "offset=0" in w["note"]
+    # …and the recitals really are one call away
+    assert f.document_body("32024R1689", offset=0, limit=200)["text"].startswith("Recital 1")
+    # no ceiling declared → the whole document, unwindowed
+    assert "window" not in f.document_body("32024R1689")

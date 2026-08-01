@@ -394,7 +394,10 @@ def build_server(config: Config | None = None) -> MCPServer:
         target = facade.canonical_read_target(stable_id, original=original)
         result = facade.document_body(
             target["stable_id"], offset=offset, limit=limit,
-            segments_only=segments_only)
+            segments_only=segments_only,
+            # the 1 MB ceiling is THIS transport's, so the auto-window is asked for here
+            # and nowhere else — the web reader has no ceiling and wants the whole act
+            max_chars=facade._BODY_DEFAULT_WINDOW)
         result["read_target"] = target
         return result
 

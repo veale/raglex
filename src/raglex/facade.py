@@ -2097,7 +2097,8 @@ class Facade:
     _BODY_DEFAULT_WINDOW = 120_000
 
     def document_body(self, stable_id: str, *, offset: int = 0,
-                      limit: int | None = None, segments_only: bool = False) -> dict:
+                      limit: int | None = None, segments_only: bool = False,
+                      max_chars: int | None = None) -> dict:
         """The document's extracted text + structural segments (§6b) for the reader.
         Segments carry kind/level so legislation renders as a hierarchy. Consolidated
         EU expressions also expose ``inherited_recitals``: a virtual, provenance-marked
@@ -2200,16 +2201,34 @@ class Facade:
                 # which still wants indenting
                 if not segs and "\n" in text:
                     flat_lines = _spans(text, 0)
-            # A caller who asked for no window and a document too big to return gets the
-            # FIRST PAGE, not a transport error. The Data Protection Act 2018 assembles to
-            # 2.4 MB — text plus 1,222 segments plus every inline citation — against a 1 MB
-            # tool ceiling, so the unwindowed call could not be answered at all, and the
-            # failure came back as a size error that names none of the ways through. The
-            # window it gets is explicit (``has_more``/``next_offset``, and
-            # ``defaulted: True``), so this can never read as the whole act.
+            # A caller BOUND BY A SIZE CEILING (``max_chars``) and asking for no window
+            # gets the FIRST PAGE rather than a transport error: the DPA 2018 assembles to
+            # 2.4 MB against the 1 MB MCP tool ceiling, so an unwindowed call could not be
+            # answered at all, and the failure named none of the ways through.
+            #
+            # ONLY that caller. This defaulted for everyone once, and the web reader — which
+            # has no ceiling, renders the whole act, and knows nothing about next_offset —
+            # silently began serving the first 120k characters of every long instrument.
+            # For the AI Act that is 180 recitals and not one article: the reader looked
+            # exactly as broken as the bug this was shipped alongside.
             defaulted = False
-            if text and not offset and limit is None and len(text) > self._BODY_DEFAULT_WINDOW:
-                limit, defaulted = self._BODY_DEFAULT_WINDOW, True
+            skipped_recitals = None
+            if (text and max_chars and not offset and limit is None
+                    and len(text) > max_chars):
+                limit, defaulted = max_chars, True
+                # …and it starts at the ARTICLES. An EU instrument opens with its
+                # recitals — the AI Act has 180 of them, ~120k characters, so a window
+                # from character zero is entirely preamble and not one operative
+                # provision. The recitals are worth reading and are one call away
+                # (offset=0); they are just not what "read me this regulation" means.
+                first_article = next(
+                    (s for s in segs if (s.get("kind") or "") not in ("recital", "header")),
+                    None)
+                if first_article and first_article["char_start"] > 0:
+                    recitals = [s for s in segs if (s.get("kind") or "") == "recital"]
+                    if recitals:
+                        offset = first_article["char_start"]
+                        skipped_recitals = len(recitals)
             window = None
             if text and (offset or limit):
                 # A character window, with segments/citations narrowed to what OVERLAPS
@@ -2224,9 +2243,15 @@ class Facade:
                     window["defaulted"] = True
                     window["note"] = (
                         f"{len(text):,} characters is too large to return whole, so this "
-                        "is the first window. Walk it with next_offset, or call "
+                        "is one window of it. Walk it with next_offset, or call "
                         "segments_only=True for the structure alone, or "
                         "get_provision(label=…) for one provision.")
+                    if skipped_recitals:
+                        window["starts_at"] = "first operative provision"
+                        window["recitals_skipped"] = skipped_recitals
+                        window["note"] += (
+                            f" It starts at the first operative provision: the {skipped_recitals} "
+                            "recitals before it are NOT included — read them with offset=0.")
                 segs = [s for s in segs
                         if s["char_end"] > start and s["char_start"] < end]
                 citations = [c for c in citations

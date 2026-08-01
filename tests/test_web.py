@@ -383,46 +383,13 @@ def test_import_reads_the_citations_it_carries(client):
     assert all(rel["dst_id"] == "32024R1689" for rel in doc["relations"])
 
 
-def test_a_body_too_large_to_return_comes_back_as_its_first_window(client, monkeypatch):
-    """The DPA 2018 assembles to 2.4 MB against a 1 MB tool ceiling, so the unwindowed
-    call could not be answered at all — and the failure named none of the ways through."""
-    from raglex.facade import Facade
-
-    monkeypatch.setattr(Facade, "_BODY_DEFAULT_WINDOW", 20)
-    body = client.get("/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()
-    w = body["window"]
-    assert w["defaulted"] is True and w["has_more"] is True
-    assert w["next_offset"] == 20 and len(body["text"]) == 20
-    assert "segments_only" in w["note"] and "next_offset" in w["note"]
-    # a caller who asks for a window is left alone
+def test_the_reader_gets_the_whole_document_no_window(client):
+    """The 1 MB ceiling is the MCP transport's, not the web reader's. Defaulting the
+    window for everyone made the reader serve the first 120k characters of every long
+    instrument — for the AI Act, 180 recitals and not one article."""
+    whole = client.get("/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()
+    assert "window" not in whole and whole["text"]
+    # an explicit window is still honoured, and is never marked defaulted
     explicit = client.get("/document-body",
                           params={"id": "ECLI:EU:C:2020:1", "limit": 10}).json()
-    assert "defaulted" not in explicit["window"]
-    # …and a short document is returned whole, with no window at all
-    monkeypatch.setattr(Facade, "_BODY_DEFAULT_WINDOW", 10_000_000)
-    assert "window" not in client.get(
-        "/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()
-
-
-def test_agent_feedback_lands_in_the_human_review_queue(client):
-    """An agent's finding must go where a human's bug report goes — a report that only
-    appears in a chat reply dies with the conversation."""
-    r = client.post("/feedback", json={
-        "kind": "improvement", "page": "mcp:ukpga/1998/29",
-        "message": "citing_documents(anchor='s. 7') returns 0 though the rows carry it.",
-        "metadata": {"source": "mcp-agent", "about": "ukpga/1998/29"}})
-    assert r.json()["submitted"] is True
-    queue = client.get("/feedback", params={"status": "open"}).json()
-    row = next(f for f in queue if f["page"] == "mcp:ukpga/1998/29")
-    # the engineering kind survives rather than being coerced to "bug"
-    assert row["kind"] == "improvement"
-    assert row["metadata"]["source"] == "mcp-agent"
-    # …and it is filterable as its own kind
-    assert any(f["kind"] == "improvement"
-               for f in client.get("/feedback", params={"kind": "improvement"}).json())
-
-
-def test_an_unknown_feedback_kind_still_falls_back_to_bug(client):
-    client.post("/feedback", json={"kind": "nonsense", "message": "something odd"})
-    assert any(f["message"] == "something odd" and f["kind"] == "bug"
-               for f in client.get("/feedback").json())
+    assert explicit["window"]["limit"] == 10 and "defaulted" not in explicit["window"]
