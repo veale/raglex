@@ -477,7 +477,7 @@ def extract_documents_parallel(
                 # instrument a bare "Article 50(2)" belongs to travels with the document
                 # Source-scoped shorthands travel with the document, not the run: a
                 # bulk rescan mixes sources in one pool.
-                worker.conn.send((text, aliases_for_document(doc, aliases),
+                worker.conn.send((text, aliases_for_document(doc, aliases, text),
                                   *_home_of(doc)))
             except (OSError, ValueError):
                 return False        # worker torn down — caller respawns
@@ -540,7 +540,7 @@ def extract_documents_parallel(
                         defs: list[dict] = []
                         _hid, _hkind = _home_of(doc)
                         cites = extract_citations(
-                            text, aliases=aliases_for_document(doc, aliases),
+                            text, aliases=aliases_for_document(doc, aliases, text),
                             defs_out=defs, home_id=_hid, home_kind=_hkind)
                         _finish(sid, doc, text, (cites, defs))
                     else:
@@ -615,12 +615,45 @@ _SOURCE_ALIASES: dict[str, dict[str, str]] = {
 }
 
 
-def aliases_for_document(doc, aliases: dict[str, str] | None) -> dict[str, str] | None:
-    """The corpus-wide shorthand rules plus any this document's SOURCE guarantees."""
-    scoped = _SOURCE_ALIASES.get((doc["source"] or "") if doc is not None else "")
-    if not scoped:
+# Conventional abbreviations that are only safe once the document has NAMED the Act in
+# full. A judgment writes "the Data Protection Act 2018 ('the DPA')" and then uses the
+# letters for forty pages; without this every one of those is an unresolved mention. The
+# full name appearing in the same document is what makes the expansion sound — a bare
+# "DPA" on its own could as easily be a deferred prosecution agreement, and outside this
+# gate it is left alone.
+_UNLOCKED_BY_FULL_NAME: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("data protection act 2018", "ukpga/2018/12", ("DPA", "DPA 18", "DPA 2018")),
+    ("data protection act 1998", "ukpga/1998/29", ("DPA 98", "DPA 1998")),
+    ("investigatory powers act 2016", "ukpga/2016/25", ("IPA", "IPA 16", "IPA 2016")),
+    ("regulation of investigatory powers act 2000", "ukpga/2000/23",
+     ("RIPA", "RIPA 00", "RIPA 2000")),
+    ("freedom of information act 2000", "ukpga/2000/36", ("FOIA", "FOIA 2000")),
+    ("human rights act 1998", "ukpga/1998/42", ("HRA", "HRA 1998")),
+)
+
+
+def aliases_for_document(doc, aliases: dict[str, str] | None,
+                         text: str | None = None) -> dict[str, str] | None:
+    """The corpus-wide shorthand rules, plus what this document's SOURCE guarantees, plus
+    the conventional abbreviations its own text has earned by naming the Act in full.
+
+    Both additions are per-document and must stay that way: a bulk rescan mixes sources
+    and subjects in one pool, so an alias map built once for the run would carry one
+    judgment's certainties into the next.
+    """
+    extra: dict[str, str] = {}
+    extra.update(_SOURCE_ALIASES.get((doc["source"] or "") if doc is not None else "", {}))
+    if text:
+        lowered = text.lower()
+        for full_name, target, abbreviations in _UNLOCKED_BY_FULL_NAME:
+            if full_name in lowered:
+                extra.update(dict.fromkeys(abbreviations, target))
+    if not extra:
         return aliases
-    return {**(aliases or {}), **scoped}
+    # The document's own source wins: inside an IPT judgment "IPA" is the 2016 Act
+    # whether or not the full name happens to appear.
+    return {**(aliases or {}), **extra,
+            **_SOURCE_ALIASES.get((doc["source"] or "") if doc is not None else "", {})}
 
 # UK domestic legislation, by the shape of its identifier. Gating on the TARGET rather
 # than on the grammar that produced it is what makes the guard below complete: a UK act
@@ -838,7 +871,7 @@ def extract_document(
         return 0
     if aliases is None:
         aliases = catalogue.named_alias_map()  # user shorthand rules (propagate)
-    aliases = aliases_for_document(doc, aliases)
+    aliases = aliases_for_document(doc, aliases, text)
     if llm is None:
         guarded = _GUARD.extract(text, aliases, _home_of(doc))
         cites, raw_defs = guarded if guarded is not None else (None, [])

@@ -216,7 +216,8 @@ class UKIPTAdapter(BaseAdapter):
                 landing_url=card["url"],
                 raw_url=card["url"],
                 title=card["title"] or None,
-                published_at=card["published"].isoformat() if card["published"] else None,
+                court="ukiptrib",
+                hint_date=card["published"],
                 hints={k: v for k, v in card.items() if v and k != "url"},
             )
 
@@ -240,7 +241,7 @@ class UKIPTAdapter(BaseAdapter):
                        or next((line for line in lines[:10] if _CASE_NO_RE.search(line)), None))
         decided = (_parse_date(next((line for line in lines[:20]
                                      if line.lower().startswith("date")), ""))
-                   or _parse_iso(stub.published_at or "")
+                   or stub.hint_date
                    or _parse_date(head))
         title = stub.title or (lines[1] if len(lines) > 1 else stable_id)
 

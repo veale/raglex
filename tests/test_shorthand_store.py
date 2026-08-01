@@ -107,12 +107,20 @@ def test_in_document_definition_beats_the_stored_one(catalogue, tmp_path):
 def test_statute_abbreviation_links_on_a_bare_mention(catalogue, tmp_path):
     # The asymmetry the owner asked for: an initialism hosted by a statute is
     # distinctive enough to link without a pincite — still only where the parent is cited.
+    #
+    # The well-known UK statutes now take a more direct route than the learned store:
+    # naming the Act in full unlocks its conventional abbreviations for that document
+    # (stage._UNLOCKED_BY_FULL_NAME), so "the DPA" resolves as a named alias. What
+    # matters is that the bare mention links to the Act, not which pass got there.
     ts = TextStore(tmp_path / "text")
     _run(catalogue, ts, "uksc/2020/1",
          'This turns on the Data Protection Act 2018 (the "DPA") throughout.')
     cites = _run(catalogue, ts, "uksc/2020/2",
                  "The Data Protection Act 2018 governs. Section 2 of the DPA is engaged.")
-    assert any(cid == "ukpga/2018/12" for cid, _ in _global(cites))
+    linked = {(c["candidate_id"], c["method"]) for c in cites}
+    assert any(cid == "ukpga/2018/12" for cid, _ in linked)
+    assert any(cid == "ukpga/2018/12" and method in ("named_alias", "shorthand_global")
+               for cid, method in linked)
 
 
 def test_common_initialism_needs_more_than_a_bare_mention(catalogue, tmp_path):

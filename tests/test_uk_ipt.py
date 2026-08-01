@@ -120,3 +120,34 @@ def test_the_full_act_names_resolve_everywhere():
         "the Investigatory Powers Act 2016 and the Regulation of Investigatory Powers "
         "Act 2000")}
     assert {"ukpga/2016/25", "ukpga/2000/23"} <= by
+
+
+def test_naming_an_act_in_full_unlocks_its_abbreviation_for_that_document():
+    """A judgment writes "the Data Protection Act 2018" once and "the DPA" for forty
+    pages. Without this every one of those is an unresolved mention.
+
+    The full name appearing in the SAME document is what makes it sound: a bare "DPA"
+    could as easily be a deferred prosecution agreement, so outside that gate the
+    letters are left alone.
+    """
+    from raglex.citations.stage import aliases_for_document
+
+    class _Doc(dict):
+        def __getitem__(self, key):
+            return super().get(key)
+
+    uk_case = _Doc(source="uk-caselaw")
+    unlocked = aliases_for_document(
+        uk_case, {}, "The claimant relied on the Data Protection Act 2018 throughout.")
+    assert unlocked["DPA"] == "ukpga/2018/12"
+    assert unlocked["DPA 18"] == unlocked["DPA 2018"] == "ukpga/2018/12"
+
+    # No full name, no expansion — the deferred-prosecution-agreement reading survives.
+    assert not aliases_for_document(
+        uk_case, {}, "A deferred prosecution agreement (DPA) was approved by the court.")
+
+    # A source that guarantees the shorthand does not need the full name at all.
+    assert aliases_for_document(_Doc(source="uk-ipt"), {}, "no full names here") == {
+        "RIPA": "ukpga/2000/23", "RIPA 2000": "ukpga/2000/23",
+        "IPA": "ukpga/2016/25", "IPA 2016": "ukpga/2016/25",
+    }
