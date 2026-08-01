@@ -122,11 +122,21 @@ def test_empty_conversion_falls_back_to_the_other_language_rendition():
     assert len(client.fetched) == 2                      # tried English, then the sibling
 
 
-def test_all_renditions_empty_is_still_transient():
-    """When nothing HUDOC holds converts, the reference must NOT be written off as absent
-    for 90 days — the conversion service does come back."""
-    from raglex.core.errors import FetchError
+def test_all_renditions_empty_is_recorded_as_absent_not_retried_for_ever():
+    """Reversal of an earlier decision, on the evidence.
 
+    This used to raise a TRANSIENT FetchError, reasoning that the conversion service
+    comes back. In production it does not, for this class of record: HUDOC answers 204
+    No Content for documents it holds only as metadata — 1980s Commission decisions have
+    no full text and never will — and this module already records elsewhere that a 204 is
+    PERMANENT (it is why the ``alt`` rendition walk exists at all). Calling it transient
+    froze the cursor and re-tried the same unconvertible records on every run: 1,689
+    warnings in three days, from one fingerprint.
+
+    A genuine outage is still transient, and still re-raises — it arrives as a 5xx or a
+    transport error from ``_body``, above. Reaching here means every rendition answered
+    affirmatively with nothing.
+    """
     class _NothingConverts(_EnglishConvertsToNothing):
         def get(self, url, **kw):
             class R:
@@ -135,12 +145,29 @@ def test_all_renditions_empty_is_still_transient():
 
     ad = ECHRAdapter(ids="ECLI:CE:ECHR:2012:1002JUD003321011", client=_NothingConverts())
     stub = next(iter(ad.discover(None)))
+    assert ad.fetch(stub) is None          # a genuine miss, filed as one
+
+
+def test_a_transient_failure_on_a_rendition_still_re_raises():
+    """The half that must not regress: an outage must never be filed as absence."""
+    from raglex.core.errors import FetchError
+
+    class _ServiceDown(_EnglishConvertsToNothing):
+        def get(self, url, **kw):
+            if "conversion" in url:
+                raise FetchError("HTTP 503", transient=True)
+            class R:
+                content = _TWO_LANGUAGES
+            return R()
+
+    ad = ECHRAdapter(ids="ECLI:CE:ECHR:2012:1002JUD003321011", client=_ServiceDown())
+    stub = next(iter(ad.discover(None)))
     try:
         ad.fetch(stub)
     except FetchError as exc:
-        assert exc.transient and "2 rendition(s)" in str(exc)
+        assert exc.transient
     else:
-        raise AssertionError("expected a transient FetchError")
+        raise AssertionError("a transient fetch failure must propagate, not return None")
 
 
 class _FakeFeed:
@@ -236,3 +263,24 @@ def test_echr_feed_walks_past_the_10000_row_ceiling():
     # got past where an unguarded ``start`` walk would have stopped
     assert len(stubs) > _FakeFeed.CEILING // 2
     assert any("kpdate:[" in q for q in feed.queries)
+
+
+def test_closed_archives_do_not_raise_a_stale_source_alert():
+    """"No new documents" is the CORRECT state for an archive that is closed.
+
+    The Article 29 Working Party wound up in 2018 and the House of Lords stopped being a
+    court in 2009; neither will ever yield again. Alerting "possible silent parser break"
+    on them is a standing false alarm, and permanent noise is how a review queue stops
+    being read. The registry already declares these modes, so the alert reads them from
+    there rather than keeping a second list that can drift.
+    """
+    from raglex.ops.alerts import _never_yields_again
+
+    assert _never_yields_again("a29wp") is True        # closed archive
+    assert _never_yields_again("uk-hol") is True       # closed archive
+    assert _never_yields_again("au-nsw") is True       # fetch-by-id only
+    assert _never_yields_again("au-caselaw") is True   # local-file seed
+    # a source with a live crawl must still be able to alert
+    assert _never_yields_again("uk-caselaw") is False
+    assert _never_yields_again("echr") is False        # now that it has a feed
+    assert _never_yields_again("edpb-oss") is False

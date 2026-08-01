@@ -1264,3 +1264,24 @@ def test_annex_guards_reject_the_sentence_end_and_named_host_forms():
     assert annex_pins(
         "Directive 2005/29/EC applies. The practice falls within Annex I, point 29."
     ) == {"Annex I, point 29"}
+
+
+def test_extraction_budget_scales_with_document_length():
+    """The guard must kill RUNAWAY extraction, not merely large documents.
+
+    A flat 90s wall-clock could not tell catastrophic backtracking (super-linear, never
+    finishes) from a document that is simply enormous, so it silently dropped the biggest
+    documents in the corpus — a CMA market investigation whose text is 19 MB, where the
+    grammar pass alone measures 48s, the Communications Act at 2 MB, and most of the Law
+    Commission's reports. Those documents cite the most, and they were the ones ending up
+    with no citations at all.
+    """
+    from raglex.citations.stage import _ExtractionGuard
+
+    base = _ExtractionGuard.timeout_s()
+    assert _ExtractionGuard.budget_for("x" * 50_000) == base + 0.5      # ordinary: as before
+    assert _ExtractionGuard.budget_for("x" * 2_000_000) > base * 1.2    # the Communications Act
+    assert _ExtractionGuard.budget_for("x" * 19_000_000) > 250          # the CMA investigation
+    # ...but still bounded, so a pathological document dies rather than hanging the pool
+    assert _ExtractionGuard.budget_for("x" * 10_000_000_000) <= 900
+    assert _ExtractionGuard.budget_for(None) == base

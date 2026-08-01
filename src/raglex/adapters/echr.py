@@ -17,6 +17,7 @@ fallback ``echr/<appno>`` slug. The application number(s) + itemid ride in ``ext
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import date as _date
 from typing import Iterator
@@ -28,6 +29,8 @@ from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..core.segmentation import assemble
+
+log = logging.getLogger(__name__)
 
 BASE = "https://hudoc.echr.coe.int"
 # Pull the rich HUDOC metadata, not just the bare keys — importance level, the
@@ -417,11 +420,19 @@ class ECHRAdapter(BaseAdapter):
                     lang = (alt.get("lang") or "").lower()[:2] or "en"
                     break
         if not text:
-            # Nothing HUDOC holds for this case converts. Still transient — the
-            # conversion service does come back — but now it means all renditions.
-            raise FetchError(f"empty HUDOC conversion for {stub.stable_id} "
-                             f"({1 + len(stub.hints.get('alt') or [])} rendition(s) tried)",
-                             transient=True)
+            # Every rendition converted to nothing, and none of them ERRORED — a
+            # transient failure re-raises above, so reaching here means HUDOC answered
+            # each one affirmatively with 204 No Content. That is absence, not an
+            # outage: this module already records that 204 is permanent (it is why the
+            # ``alt`` walk exists at all), and 1982 Commission decisions have no full
+            # text in HUDOC and never will. Calling it transient made the pipeline
+            # freeze the cursor and retry the same unconvertible records on every run
+            # for ever — 1,689 warnings in three days, and the same handful of
+            # documents blocking the queue each time. Returning None files it as a
+            # genuine miss, which is what it is.
+            log.info("no convertible rendition for %s (%d tried) — recording as absent",
+                     stub.stable_id, 1 + len(stub.hints.get("alt") or []))
+            return None
         # HUDOC dates come in two shapes: ``judgementdate`` as "25/05/2021 00:00:00" and
         # ``kpdate`` as ISO. Accept both — reading only the slashed form left every
         # judgment whose judgementdate is absent (HUDOC leaves it empty on some

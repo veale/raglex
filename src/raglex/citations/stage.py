@@ -272,6 +272,24 @@ class _ExtractionGuard:
     def timeout_s() -> float:
         return float(os.environ.get("RAGLEX_EXTRACT_TIMEOUT_S") or 90)
 
+    @staticmethod
+    def budget_for(text: str | None) -> float:
+        """The wall-clock budget for ONE document, scaled by its length.
+
+        The guard exists to kill RUNAWAY extraction — catastrophic backtracking, which is
+        super-linear and never finishes. A flat 90s does not distinguish that from a
+        document which is merely enormous, so it silently dropped the biggest documents
+        in the corpus: a CMA market investigation whose text is 19 MB (the grammar pass
+        alone is 48s), the Communications Act at 2 MB, half the Law Commission's reports.
+        Those documents cite the most, and they were the ones getting no citations at all.
+
+        Linear in length above the base, with a ceiling, so a genuinely pathological
+        document still dies — it just has to be pathological rather than long.
+        """
+        base = _ExtractionGuard.timeout_s()
+        ceiling = float(os.environ.get("RAGLEX_EXTRACT_TIMEOUT_MAX_S") or 900)
+        return min(base + len(text or "") / 100_000.0, max(base, ceiling))
+
     def extract(self, text: str, aliases: dict[str, str] | None,
                 home: tuple[str | None, str | None] = (None, None)):
         """``extract_citations`` under a wall-clock budget, as ``(citations, shorthand
@@ -287,7 +305,7 @@ class _ExtractionGuard:
             except Exception:  # spawn unavailable / worker torn down mid-send
                 self._kill()
                 return self._inproc(text, aliases, home)
-            if not self._conn.poll(self.timeout_s()):
+            if not self._conn.poll(self.budget_for(text)):
                 self._kill()
                 return None
             try:
@@ -481,7 +499,6 @@ def extract_documents_parallel(
             _emit(i, sid)
         return stats
 
-    budget = _ExtractionGuard.timeout_s()
     pool = [_PoolWorker() for _ in range(n_workers)]
     queue = iter(ids)
     done = 0
@@ -513,7 +530,7 @@ def extract_documents_parallel(
             worker.item = (sid, doc, text)
             worker.phase = _OP_EXTRACT
             worker.pending = None
-            worker.deadline = _time.monotonic() + budget
+            worker.deadline = _time.monotonic() + _ExtractionGuard.budget_for(text)
             return True
         return False
 
@@ -591,7 +608,7 @@ def extract_documents_parallel(
                 # the guarded cites ride along so a worker death mid-scan costs only
                 # the scan, not the grammar pass that produced them
                 w.pending = (cites, stored, exclude, defs)
-                w.deadline = _time.monotonic() + budget
+                w.deadline = _time.monotonic() + _ExtractionGuard.budget_for(text)
                 return
             from .extractor import attach_stored_shorthands
             cites = attach_stored_shorthands(text, cites, stored, exclude=exclude)
@@ -669,7 +686,9 @@ def extract_documents_parallel(
                     # staleness-scoped reruns converge (the guard's exact semantics)
                     sid = w.item[0]
                     log.warning("[cite-extract] %s: %s pass exceeded %.0fs budget "
-                                "— skipped", sid, w.phase, budget)
+                                "(%.1f MB) — skipped", sid, w.phase,
+                                _ExtractionGuard.budget_for(w.item[2]),
+                                len(w.item[2] or "") / 1e6)
                     w.kill()
                     pool[pool.index(w)] = w = _PoolWorker()
                     catalogue.mark_extracted(sid, run_id=run_id, commit=False)
@@ -1006,8 +1025,9 @@ def extract_document(
         if cites is None:
             # budget blown: keep whatever rows a previous run left, stamp so
             # staleness-scoped reruns converge instead of re-hitting the doc
-            log.warning("[cite-extract] %s: grammar pass exceeded %.0fs budget — skipped",
-                        stable_id, _GUARD.timeout_s())
+            log.warning("[cite-extract] %s: grammar pass exceeded %.0fs budget "
+                        "(%.1f MB) — skipped",
+                        stable_id, _GUARD.budget_for(text), len(text or "") / 1e6)
             catalogue.mark_extracted(stable_id, run_id=run_id)
             return 0
     else:  # the llm extractor is not picklable (and may call the network) — unguarded

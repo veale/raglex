@@ -64,6 +64,17 @@ def _days_since(iso: str | None) -> float | None:
     return (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
 
 
+def _never_yields_again(source_key: str) -> bool:
+    """Sources for which "no new documents" is the CORRECT state, not a symptom.
+
+    Read from the adapter registry rather than a second hand-kept list here, so a
+    source declared closed in one place cannot go on alerting from another.
+    """
+    from ..adapters.registry import INCREMENTAL_MODE
+
+    return INCREMENTAL_MODE.get(source_key) in {"closed", "bulk", "targeted"}
+
+
 def check_alerts(catalogue: Catalogue, thresholds: AlertThresholds | None = None) -> list[Alert]:
     t = thresholds or AlertThresholds()
     alerts: list[Alert] = []
@@ -74,8 +85,15 @@ def check_alerts(catalogue: Catalogue, thresholds: AlertThresholds | None = None
                 "adapter_failing", CRITICAL, sh.key,
                 f"{sh.key} has failed {sh.consecutive_failures} runs in a row",
             ))
-        # only flag staleness for sources that have produced before
-        if sh.documents > 0:
+        # only flag staleness for sources that have produced before — and that CAN
+        # produce again. A closed archive (the Article 29 Working Party wound up in
+        # 2018; the House of Lords stopped being a court in 2009) yields nothing new
+        # because there is nothing new, and a local-file seed yields nothing because
+        # no crawl runs. Alerting "possible silent parser break" on those is a
+        # standing false alarm — a29wp and uk-hol between them accounted for 75 of
+        # the 56 open error rows — and a queue with permanent noise in it stops
+        # being read at all.
+        if sh.documents > 0 and not _never_yields_again(sh.key):
             stale = _days_since(sh.last_yield_at)
             if stale is not None and stale >= t.stale_days:
                 alerts.append(Alert(
