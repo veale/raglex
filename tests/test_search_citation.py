@@ -217,3 +217,24 @@ def test_an_explicit_sort_still_wins(tmp_path):
     res = facade.search_corpus(query="code of practice", sort="date", facets=False)
     assert res["sort"] == "date"
     assert [i["stable_id"] for i in res["items"]][0] == "au/esafety/1"
+
+
+# -- a pinpoint's subdivision: found, or only its parent? --------------------
+def test_a_missing_subdivision_is_reported_not_asserted(tmp_path):
+    """Anchor keys fold to unit+number, so "s. 7(99)" matches the s. 7 segment. Returning
+    the parent is the right ANSWER — sections are rarely segmented below the section —
+    but it must not come back looking like an exact hit, which is how a bogus pinpoint
+    became indistinguishable from a real one."""
+    from raglex.core.models import Segment
+    from raglex.facade import _match_segment, _subdivision_note
+
+    text = "s. 7 Right of access to personal data.\nAn individual is entitled under (1)..."
+    segs = [Segment(label="s. 7 Right of access to personal data.",
+                    char_start=0, char_end=len(text), kind="section")]
+    # the subdivision IS in the provision's text → an exact match, no note
+    assert _subdivision_note("s. 7(1)", segs[_match_segment(segs, "s. 7(1)")], text) is None
+    # a bare section asks for no subdivision at all
+    assert _subdivision_note("s. 7", segs[_match_segment(segs, "s. 7")], text) is None
+    # …and one that is nowhere in it says so
+    note = _subdivision_note("s. 7(99)", segs[_match_segment(segs, "s. 7(99)")], text)
+    assert note and "(99)" in note and "parent provision" in note

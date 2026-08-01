@@ -763,6 +763,34 @@ def _anchor_sql_prefixes(anchor: str | None) -> list[str]:
     return [f"{spelling}{number}" for spelling in _ANCHOR_SPELLINGS.get(typ, (typ,))]
 
 
+_SUBDIVISION_RE = re.compile(r"\(([^()]{1,8})\)")
+
+
+def _subdivision_note(label: str | None, segment, text: str) -> str | None:
+    """Was a requested SUBDIVISION actually found, or only its parent provision?
+
+    Anchor keys deliberately fold to unit+number — "s. 7(1)(c)", "s. 7(99)" and "s. 7" all
+    key as ``s:7`` — because that is what makes a pinpoint match a segment whose label
+    carries a title. The cost is that a subsection which does not exist resolves to its
+    parent and is reported as a hit: ``s. 45(99)`` and ``s. 7(99)`` both came back
+    ``resolved: true``, so a bogus pinpoint was indistinguishable from a real one.
+
+    Sections are rarely segmented below the section, so returning the parent is the right
+    ANSWER — it just must not be presented as an exact match. Say so when the subdivision
+    appears neither in the segment's label nor anywhere in its text.
+    """
+    wanted = _SUBDIVISION_RE.findall(label or "")
+    if not wanted or segment is None:
+        return None
+    body = (segment.label or "") + " " + text[segment.char_start:segment.char_end]
+    missing = [w for w in wanted if f"({w})" not in body]
+    if not missing:
+        return None
+    return (f"{label} — the segment returned is {segment.label or 'this provision'}; "
+            f"({'), ('.join(missing)}) was not found within it, so this is the parent "
+            "provision rather than an exact match for the subdivision.")
+
+
 def _today_iso() -> str:
     from datetime import date as _date
 
@@ -3460,9 +3488,14 @@ class Facade:
                     level = segs[i].level
                 if level == 0:
                     break
-            return {"stable_id": stable_id, "title": doc["title"],
-                    "oscola": _oscola_cite(doc, _row_meta(doc)),
-                    "segments": out_segs, "path": list(reversed(path))}
+            out = {"stable_id": stable_id, "title": doc["title"],
+                   "oscola": _oscola_cite(doc, _row_meta(doc)),
+                   "segments": out_segs, "path": list(reversed(path))}
+            note = _subdivision_note(label, segs[idx], text)
+            if note:
+                out["anchor_exact"] = False
+                out["anchor_note"] = note
+            return out
 
     def decide_suggestions(self, *, items: list[dict]) -> dict:
         """Bulk tick/cross over near-miss suggestions — each item

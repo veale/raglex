@@ -1081,3 +1081,41 @@ def test_eu_short_name_pinpoint_forms(text, celex, pinpoint):
 def test_ambiguous_acronym_guards_survive_the_wider_pinpoint(text):
     """The wider prefix must not weaken the context these acronyms need to resolve."""
     assert _pin(text) == (None, None)
+
+
+# -- ECtHR OSCOLA: the case's OWN application number, not every one in its text ----
+def test_echr_oscola_prefers_the_assigned_application_number():
+    """HUDOC has two fields and only one is identity. `extractedappno` is scraped from
+    the JUDGMENT TEXT, so a Grand Chamber judgment's is every authority it cites — and
+    the extractor cannot tell an ECtHR application number from a CJEU case number. Delfi
+    carried ~70, including Google France (236/08) and Google Spain (131/12)."""
+    from raglex.citations.oscola import cite
+
+    doc = {"title": "CASE OF DELFI AS v. ESTONIA", "source": "echr", "court": "ECHR",
+           "doc_type": "judgment", "decision_date": "2015-06-16",
+           "stable_id": "ECLI:CE:ECHR:2015:0616JUD006456909"}
+    meta = {"appno": "64569/09", "doctypebranch": "GRANDCHAMBER", "kpdate": "2015-06-16",
+            "extractedappno": "64569/09;236/08;238/08;131/12;291/13;3111/10;3002/03"}
+    text = cite(doc, meta)["text"]
+    assert "App No 64569/09" in text
+    for cjeu in ("236/08", "131/12", "291/13"):
+        assert cjeu not in text
+
+
+def test_echr_oscola_caps_the_fallback_and_says_so():
+    """With no assigned number the extracted list is all there is — but it is a text
+    scrape, so it is capped and marked rather than printed entire."""
+    from raglex.citations.oscola import cite
+
+    doc = {"title": "CASE OF X v Y", "source": "echr", "court": "ECHR",
+           "doc_type": "judgment", "stable_id": "x"}
+    text = cite(doc, {"appno": "", "extractedappno": "1/11;2/22;3/33;4/44;5/55"})["text"]
+    assert "App Nos 1/11; 2/22; 3/33 and others" in text
+
+
+def test_echr_oscola_keeps_genuinely_joined_applications():
+    from raglex.citations.oscola import cite
+
+    doc = {"title": "CASE OF X v Y", "source": "echr", "court": "ECHR",
+           "doc_type": "judgment", "stable_id": "x"}
+    assert "App Nos 123/45; 678/90" in cite(doc, {"appno": "123/45; 678/90"})["text"]

@@ -269,6 +269,27 @@ _ECHR_PREFIXES = re.compile(
 _ECHR_FORMATION = {"GRANDCHAMBER": "GC", "CHAMBER": "Chamber", "COMMITTEE": "Committee"}
 
 
+# A citation lists the application numbers the case was brought under. Joined
+# applications are real and common, but they are a handful — never dozens.
+_MAX_APPNOS = 3
+
+
+def _echr_appno(meta: Mapping) -> tuple[str, int]:
+    """The case's OWN application number(s), and how many there were.
+
+    HUDOC offers two fields and only one of them is identity. ``appno`` is what the Court
+    assigned. ``extractedappno`` is every number a scraper pulled OUT OF THE JUDGMENT
+    TEXT — so for a Grand Chamber judgment it is every authority the case cites, and the
+    extractor cannot tell an ECtHR application number from a CJEU case number. Preferring
+    it gave Delfi AS v Estonia ~70 "application numbers" including Google France (236/08)
+    and Google Spain (131/12), presented as though Strasbourg had assigned them.
+    """
+    own = str(meta.get("appno") or "").strip()
+    raw = own or str(meta.get("extractedappno") or "").strip()
+    nums = [n.strip() for n in raw.split(";") if n.strip()]
+    return "; ".join(nums[:_MAX_APPNOS]), len(nums)
+
+
 def _echr_case(doc: Mapping, meta: Mapping) -> dict | None:
     meta = meta or {}
     name = (_get(doc, "title") or meta.get("docname") or "").strip()
@@ -276,7 +297,7 @@ def _echr_case(doc: Mapping, meta: Mapping) -> dict | None:
     name = _ECHR_PREFIXES.sub("", name)
     name = re.sub(r"\s+\d{2}\.\d{2}\.\d{2,4}\s*$", "", name).strip()
     name = re.sub(r"\bv\.\s", "v ", name)
-    appno = (meta.get("extractedappno") or meta.get("appno") or "").strip()
+    appno, appno_total = _echr_appno(meta)
     date = _fmt_date(meta.get("kpdate") or _get(doc, "decision_date"))
     formation = _ECHR_FORMATION.get(str(meta.get("doctypebranch") or "").upper().replace(" ", ""))
     if not name and not appno:
@@ -288,7 +309,9 @@ def _echr_case(doc: Mapping, meta: Mapping) -> dict | None:
         parts.append(_run(f" [{formation}]"))
     parts.append(_run(" ECtHR"))
     if appno:
-        parts.append(_run(f" App No {appno}"))
+        label = "App Nos" if appno_total > 1 else "App No"
+        more = " and others" if appno_total > _MAX_APPNOS else ""
+        parts.append(_run(f" {label} {appno}{more}"))
     if date:
         parts.append(_run(f" ({date})"))
     return _pack(parts)
