@@ -680,3 +680,47 @@ def test_implicit_repeal_edges_do_not_flip_the_status_banner(tmp_path, monkeypat
     assert st["status"] != "repealed"
     assert st["repealed_by"] == []
     assert st["implicitly_affected_by"] == ["32011L0083"]
+
+
+def test_projected_mentions_are_unbounded_for_callers_that_count(tmp_path):
+    """A bound on the projection deletes the long tail, not a random slice.
+
+    The projection is ordered by the citer's PageRank, so ``LIMIT n`` keeps the famous
+    citers and drops the obscure ones. That is the right trade for a paged reader and
+    exactly the wrong one for the static export, which PRINTS "[182 mentions]" as fact:
+    the GDPR's exported editions were built from 20,000 of its 87,558 projected mentions
+    and under-reported every provision. ``limit=None`` is the escape hatch, and a
+    silently-clamping ``min(limit, 20000)`` used to make it impossible to ask for more.
+    """
+    from raglex.core.models import (
+        DocType, ExtractedVia, Record, RelationshipType, ResolutionStatus, TypedRelation,
+    )
+
+    f = _leg_facade(tmp_path)
+    base, version = "32016R0679", "02016R0679-20160504"
+    with f._open() as (cat, _rs, _ts):
+        for sid in (base, version):
+            cat.upsert_document(Record(
+                source="eu-legislation", stable_id=sid, doc_type=DocType.LEGISLATION,
+                title=sid, extracted_via=ExtractedVia.STRUCTURED))
+        cat.conn.execute(
+            "INSERT INTO relations "
+            "(src_id,dst_id,candidate_id,relationship_type,resolution_status,dst_anchor) "
+            "VALUES (?,?,?,?,?,?)",
+            (version, base, base, "consolidates", "resolved", "2016-05-04"))
+        for n in range(25):
+            citer = f"case-{n:03d}"
+            cat.upsert_document(Record(
+                source="eu-cellar", stable_id=citer, doc_type=DocType.JUDGMENT,
+                title=citer, extracted_via=ExtractedVia.STRUCTURED))
+            cat.add_relations(citer, [TypedRelation(
+                relationship_type=RelationshipType.MENTIONS,
+                raw_citation_string="Article 28 GDPR", dst_id=base,
+                dst_anchor="Article 28", extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.RESOLVED)])
+        cat.conn.commit()
+
+        assert len(cat.version_inherited_mentions_for(version, limit=10)) == 10
+        assert len(cat.version_inherited_mentions_for(version, limit=None)) == 25
+        assert len(cat.version_inherited_mentions_for(
+            version, limit=None, anchor_prefixes=["article28"])) == 25

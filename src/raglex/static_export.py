@@ -30,7 +30,11 @@ _SOURCE_META_KEYS = ("url", "bailii_url", "gdprhub_url")
 # v5 caches the data payload; the page renders from it on download.
 # v6 names each predecessor instrument (direct vs via-previous-law counts) and records
 # the law's own jurisdiction, which the bundle index groups by.
-_CACHE_VERSION = 6
+# v7 drops the row caps on the projected/inherited mention queries. The SHAPE is
+# unchanged, but every v6 payload for a consolidation was built from a truncated set and
+# under-counts its citers, so they must not be re-rendered — hence a version bump rather
+# than a comment.
+_CACHE_VERSION = 7
 
 _DEFAULT_ATTRIBUTION = (
     'Document generated from a dataset held and maintained by '
@@ -680,8 +684,12 @@ class StaticLawExporter:
                 (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
                 for r in relations
             }
+            # Unbounded, unlike the reader's paged view: an edition PRINTS the counts,
+            # so a bound here is not a page size but a silent deletion — and because the
+            # projection is ordered by the citer's PageRank, what a bound deletes is
+            # precisely the obscure long tail an offline edition exists to preserve.
             for inherited in cat.version_inherited_mentions_for(
-                    stable_id, limit=20000):
+                    stable_id, limit=None):
                 projected = dict(inherited)
                 key = (
                     projected["src_id"], projected["dst_anchor"],
@@ -697,7 +705,7 @@ class StaticLawExporter:
             # says "12 mentions of a similar provision in Directive 95/46/EC", not "via
             # previous law", so each route needs an identity, not just a count.
             previous_laws: dict[str, dict] = {}
-            for inherited in cat.inherited_mentions_for(stable_id, limit=5000):
+            for inherited in cat.inherited_mentions_for(stable_id, limit=None):
                 projected = dict(inherited)
                 # Index the literal old-law citation under the CURRENT provision while
                 # retaining its route/provenance for the separate filter and explanation.

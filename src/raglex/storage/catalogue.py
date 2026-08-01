@@ -1412,7 +1412,7 @@ class Catalogue:
 
     def inherited_mentions_for(
         self, current_doc_id: str, *, current_anchor: str | None = None,
-        limit: int = 600,
+        limit: int | None = 600,
     ) -> list:
         """Literal citations to mapped previous provisions, decorated with lineage.
 
@@ -1479,7 +1479,11 @@ class Catalogue:
         )
         family_sql = " OR ".join(clauses)
         decided = decided_by_sql("s")
-        params = [*join_params, *mapping_params, max(1, min(int(limit), 5000))]
+        # ``limit=None`` means every row, for the callers that count rather than page
+        # (see :meth:`version_inherited_mentions_for`).
+        params = [*join_params, *mapping_params]
+        if limit is not None:
+            params.append(max(1, int(limit)))
         return self.conn.execute(
             f"""
             SELECT r.*, pm.mapping_id, pm.current_anchor AS inherited_current_anchor,
@@ -1513,7 +1517,7 @@ class Catalogue:
               )
               AND r.extracted_via <> 'inferred'
             ORDER BY r.relation_id
-            LIMIT ?
+            {"" if limit is None else "LIMIT ?"}
             """,
             tuple(params),
         ).fetchall()
@@ -1618,7 +1622,7 @@ class Catalogue:
         return versions[-1] if versions else None
 
     def version_inherited_mentions_for(
-        self, version_id: str, *, limit: int = 5000,
+        self, version_id: str, *, limit: int | None = 5000,
         anchor_exact: str | None = None, anchor_prefixes: list[str] | None = None,
     ) -> list:
         """Literal mentions of a consolidation's base act, projected onto the version.
@@ -1628,6 +1632,15 @@ class Catalogue:
         introduced only in the consolidation (for example Article 1a) can surface there
         even though that anchor is absent from the enacted text.  Direct citations to the
         dated version are combined by callers and take precedence when deduplicating.
+
+        ``limit=None`` means every row. Interactive readers pass a bound because they
+        show a page at a time and report the true total separately; anything that COUNTS
+        — the static export above all — must not, because the ordering here is
+        PageRank-descending and a bound therefore deletes the long tail specifically
+        rather than a random slice. The GDPR consolidation has 87,558 projectable
+        mentions: capped at 20,000, its exported editions lost three quarters of every
+        provision's citers, and the loss was invisible because the survivors were the
+        famous ones.
         """
         base_id = self.consolidation_base_for(version_id)
         if not base_id:
@@ -1671,13 +1684,13 @@ class Catalogue:
               AND r.extracted_via <> 'inferred'
               {anchor_sql}
             ORDER BY src_pagerank DESC, r.relation_id
-            LIMIT ?
+            {"" if limit is None else "LIMIT ?"}
             """,
             tuple((
                 base_id, version_id, base_id, base_id, base_id,
                 version_id, base_id,
             ) + tuple(anchor_params) + (
-                max(1, min(int(limit), 20000)),
+                () if limit is None else (max(1, int(limit)),)
             )),
         ).fetchall()
 
