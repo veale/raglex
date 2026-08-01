@@ -19,7 +19,7 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Iterator
 
 
@@ -318,6 +318,27 @@ def _doc_type(value: str | None, default: DocType) -> DocType:
         return DocType(value)
     except ValueError:
         return default
+
+
+def _import_jurisdiction_labels() -> tuple[tuple[str, str], ...]:
+    from .imports.service import JURISDICTIONS
+
+    return JURISDICTIONS
+
+
+_IMPORT_JURISDICTION_LABELS = _import_jurisdiction_labels()
+
+
+def _as_date(value: str | None) -> date | None:
+    """An ISO date typed into a form field, or nothing. A half-typed date must not fail
+    the import it was optional to."""
+    text = (value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _sniff_format(raw: bytes) -> str | None:
@@ -3534,6 +3555,14 @@ class Facade:
             pass
         if source in self._SOURCE_LABELS:
             return self._SOURCE_LABELS[source]
+        # A manual import declares its jurisdiction in its source key (uk-user-import),
+        # so name it that way rather than letting the prettifier say "UK User Import".
+        from .imports.service import jurisdiction_of_source
+
+        code = jurisdiction_of_source(source)
+        if code:
+            named = dict(_IMPORT_JURISDICTION_LABELS).get(code, code.upper())
+            return f"Manual imports ({named})"
         words = (source or "").replace("_", "-").split("-")
         # `capitalize()` LOWERCASES everything after the first letter, so a value that
         # is already a proper name comes back mangled — "Court of Justice" (which is
@@ -9677,14 +9706,121 @@ class Facade:
     def import_bytes(
         self, *, data: bytes, filename: str, doc_type: str = "commentary",
         title: str | None = None, link_to: str | None = None, relationship: str | None = None,
+        jurisdiction: str | None = None, court: str | None = None,
+        decision_date: str | None = None, citation: str | None = None,
+        language: str | None = None, tags: list[str] | None = None,
+        structure: str = "auto",
     ) -> dict:
         with self._open() as (cat, rs, ts):
             res = import_file(
                 cat, rs, ts, data=data, filename=filename,
                 doc_type=_doc_type(doc_type, DocType.COMMENTARY), title=title,
                 link_to=link_to, relationship=_rel_type(relationship),
+                jurisdiction=jurisdiction, court=court,
+                decision_date=_as_date(decision_date), citation=citation,
+                language=language, tags=tuple(tags or ()), structure=structure,
             )
             return asdict(res)
+
+    def import_many(self, items: list[dict]) -> dict:
+        """Import a batch of files, each with its own metadata row.
+
+        One failure is one row's failure: a corrupt PDF in the middle of a drop must not
+        cost the operator the other nine imports, so every item is reported individually
+        and the batch always returns 200.
+        """
+        results: list[dict] = []
+        for index, item in enumerate(items or []):
+            data = item.get("data")
+            if not isinstance(data, (bytes, bytearray)):
+                results.append({"index": index, "error": "no file content",
+                                "filename": item.get("filename")})
+                continue
+            try:
+                res = self.import_bytes(
+                    data=bytes(data), filename=item.get("filename") or "upload.bin",
+                    doc_type=item.get("doc_type") or "commentary",
+                    title=item.get("title"), link_to=item.get("link_to"),
+                    relationship=item.get("relationship"),
+                    jurisdiction=item.get("jurisdiction"), court=item.get("court"),
+                    decision_date=item.get("decision_date"),
+                    citation=item.get("citation"), language=item.get("language"),
+                    tags=item.get("tags"), structure=item.get("structure") or "auto",
+                )
+                results.append({"index": index, **res})
+            except Exception as exc:  # noqa: BLE001 — one bad file, not a bad batch
+                log.exception("import_many: %s failed", item.get("filename"))
+                results.append({"index": index, "filename": item.get("filename"),
+                                "title": item.get("title"), "error": str(exc)[:300]})
+        ok = [r for r in results if not r.get("error")]
+        return {
+            "imported": len(ok),
+            "failed": len(results) - len(ok),
+            "documents": results,
+            # Citation extraction is what makes an import part of the graph, and it is
+            # far too slow to run inline for a drop of twenty PDFs.
+            "next": "run Resolve citations (Operations) to link what these documents cite",
+        }
+
+    def import_options(self) -> dict:
+        """The vocabularies the import form's dropdowns offer.
+
+        Read from the live corpus wherever the corpus is the authority — the courts and
+        languages actually held, the tags actually in use — so the form never offers a
+        value the rest of the app would not recognise.
+        """
+        from .imports.service import JURISDICTIONS, STRUCTURE_CHOICES, import_source_key
+
+        held = {j["jurisdiction"]: j["documents"] for j in self.jurisdictions()}
+        # Courts the corpus actually holds, per jurisdiction bucket — so picking
+        # "United Kingdom" then offers UKSC, EWCA (Civ)… under the names the reader
+        # already sees everywhere else. This is the Explore page's own facet, so the
+        # labels are already disambiguated (a Canadian "FCA" is not the Australian one)
+        # and report series are already excluded; it is the leading courts by volume,
+        # not an exhaustive registry, which is why the field also takes free text.
+        courts: dict[str, list[dict]] = {}
+        for row in self._shape_ready().get("jurisdictions", []) or []:
+            entries = [
+                {"court": c["court"], "label": c.get("label") or c["court"],
+                 "documents": int(c.get("n") or 0)}
+                for c in (row.get("courts") or []) if c.get("court")
+            ]
+            if entries:
+                courts[str(row.get("jurisdiction"))] = entries
+        return {
+            "jurisdictions": [
+                {"code": code, "label": label, "source": import_source_key(code),
+                 "documents": held.get(label, 0)}
+                for code, label in JURISDICTIONS
+            ],
+            "doc_types": [t.value for t in DocType],
+            "relationships": [r.value for r in RelationshipType],
+            "structures": [{"value": v, "label": label} for v, label in STRUCTURE_CHOICES],
+            "courts_by_jurisdiction": courts,
+            "languages": self._held_languages(),
+            "tags": self._held_tags(),
+        }
+
+    def _held_languages(self) -> list[str]:
+        """Language codes already in the corpus. The dropdown is a picker over what the
+        corpus knows, but an import may legitimately be the first of its tongue — so the
+        UI keeps a free-text escape beside it."""
+        try:
+            with self._open() as (cat, _rs, _ts):
+                rows = cat.conn.execute(
+                    "SELECT DISTINCT language FROM documents "
+                    "WHERE language IS NOT NULL AND language <> '' "
+                    "ORDER BY language LIMIT 60").fetchall()
+            return [str(r[0]) for r in rows]
+        except Exception:  # noqa: BLE001 — a dropdown must never break the form
+            return []
+
+    def _held_tags(self) -> list[str]:
+        try:
+            with self._open() as (cat, _rs, _ts):
+                return sorted(cat.tag_counts().keys())
+        except Exception:  # noqa: BLE001
+            return []
 
     def import_base64(self, *, content_base64: str, filename: str, **kw) -> dict:
         """Posting mode for an agent that holds the bytes (e.g. a PDF it generated

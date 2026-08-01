@@ -285,3 +285,69 @@ def test_system_storage_reports_database_size(client):
     body = r.json()
     assert body["database_bytes"] > 0
     assert isinstance(body["tables"], list)
+
+
+# -- standalone import: the form's vocabularies, and a multi-file drop -------
+def test_import_options_offers_live_vocabularies(client):
+    """The dropdowns are built from the corpus, so they can never offer a value the
+    rest of the app would not recognise."""
+    data = client.get("/import/options").json()
+    codes = [j["code"] for j in data["jurisdictions"]]
+    assert "uk" in codes and "eu" in codes
+    assert {"code": "uk", "label": "United Kingdom", "source": "uk-user-import",
+            "documents": 0} in data["jurisdictions"]
+    assert "judgment" in data["doc_types"] and "commentary" in data["doc_types"]
+    assert [s["value"] for s in data["structures"]][0] == "auto"
+    assert "en" in data["languages"]                      # the fixture's own documents
+    # courts the corpus actually holds, under the names the reader already sees
+    eu = data["courts_by_jurisdiction"].get("European Union") or []
+    assert any(c["court"] == "Court of Justice" for c in eu)
+
+
+def test_import_files_labels_each_item_in_the_drop(client):
+    r = client.post(
+        "/import/files",
+        files=[("files", ("one.html", b"<p>The first note.</p>", "text/html")),
+               ("files", ("two.html", b"<p>The second note.</p>", "text/html"))],
+        data={"items": (
+            '[{"title": "First paper", "doc_type": "article", "jurisdiction": "uk",'
+            ' "court": "UKSC", "decision_date": "2024-03-01", "tags": ["seminar"]},'
+            ' {"title": "Second paper", "doc_type": "commentary", "jurisdiction": "ie"}]')},
+    )
+    body = r.json()
+    assert r.status_code == 200
+    assert body["imported"] == 2 and body["failed"] == 0
+    first, second = body["documents"]
+    assert (first["title"], first["doc_type"], first["source"]) == (
+        "First paper", "article", "uk-user-import")
+    assert first["jurisdiction"] == "uk" and first["tags"] == ["seminar"]
+    assert (second["title"], second["source"]) == ("Second paper", "ie-user-import")
+    # each row keeps its own identity in the corpus
+    held = client.get(f"/documents/{first['stable_id']}").json()["document"]
+    assert (held["court"], held["source"]) == ("UKSC", "uk-user-import")
+    assert str(held["decision_date"])[:10] == "2024-03-01"
+
+
+def test_import_files_reports_a_bad_row_without_losing_the_good_ones(client):
+    """A drop of twenty PDFs must not be lost to one of them."""
+    r = client.post(
+        "/import/files",
+        files=[("files", ("ok.html", b"<p>Fine.</p>", "text/html"))],
+        data={"items": '[{"title": "Fine", "doc_type": "not-a-type"}]'},
+    )
+    body = r.json()
+    # an unknown doc type falls back rather than failing the row
+    assert body["imported"] == 1 and body["documents"][0]["doc_type"] == "commentary"
+
+
+def test_single_file_import_still_takes_the_new_metadata(client):
+    r = client.post(
+        "/import/file",
+        files={"file": ("j.html", b"<p>A judgment about things.</p>", "text/html")},
+        data={"doc_type": "judgment", "title": "Smith v Jones", "jurisdiction": "us",
+              "citation": "410 U.S. 113", "tags": "seminar,us"},
+    )
+    body = r.json()
+    assert body["source"] == "us-user-import" and body["jurisdiction"] == "us"
+    assert sorted(body["tags"]) == ["seminar", "us"]
+    assert body["citation"] == "410 U.S. 113"

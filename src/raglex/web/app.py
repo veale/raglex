@@ -10,6 +10,7 @@ Facade, so the two never drift.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid as _uuid
@@ -1466,6 +1467,13 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.search(q, k=k, filters=filters or None)
 
     # -- write / augment ---------------------------------------------------
+    @app.get("/import/options")
+    def import_options_ep() -> dict:
+        """The vocabularies the import form offers — jurisdictions, doc types, the
+        courts and tags actually held, and the structure parsers. Read live so the form
+        can never offer a value the rest of the app would not recognise."""
+        return facade.import_options()
+
     @app.post("/import/file")
     async def import_file_ep(
         file: UploadFile = File(...),
@@ -1473,12 +1481,48 @@ def create_app(config: Config | None = None) -> FastAPI:
         title: str | None = Form(None),
         link_to: str | None = Form(None),
         relationship: str | None = Form(None),
+        jurisdiction: str | None = Form(None),
+        court: str | None = Form(None),
+        decision_date: str | None = Form(None),
+        citation: str | None = Form(None),
+        language: str | None = Form(None),
+        tags: str | None = Form(None),
+        structure: str = Form("auto"),
     ) -> dict:
         data = await file.read()
         return facade.import_bytes(
             data=data, filename=file.filename or "upload.bin", doc_type=doc_type,
             title=title, link_to=link_to, relationship=relationship,
+            jurisdiction=jurisdiction, court=court, decision_date=decision_date,
+            citation=citation, language=language, structure=structure,
+            tags=[t.strip() for t in (tags or "").split(",") if t.strip()],
         )
+
+    @app.post("/import/files")
+    async def import_files_ep(
+        files: list[UploadFile] = File(...),
+        items: str = Form("[]"),
+    ) -> dict:
+        """Import a drop of files, each with its own metadata row.
+
+        ``items`` is a JSON array parallel to ``files`` — the table the operator filled
+        in. A row may be absent or partial; anything missing falls back to the file's own
+        name and the defaults. One bad file fails one row, never the batch.
+        """
+        try:
+            rows = json.loads(items or "[]")
+            rows = rows if isinstance(rows, list) else []
+        except (ValueError, TypeError):
+            rows = []
+        batch = []
+        for index, upload in enumerate(files):
+            row = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
+            batch.append({
+                **row,
+                "data": await upload.read(),
+                "filename": upload.filename or f"upload-{index + 1}.bin",
+            })
+        return facade.import_many(batch)
 
     @app.post("/import/legislation-akn")
     async def import_legislation_akn_ep(

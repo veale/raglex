@@ -1,12 +1,13 @@
 """Manual import + attach/annotate (§1.9, §8).
 
-The design treats your own material — commentary PDFs, saved articles, textbook
-extracts, notes, LLM summaries — as **secondary documents that share the corpus
-model and graph** (§1.9). So a PDF/HTML you drop in becomes a ``document``
-(``added_by=user``), gets a typed ``relations`` edge to the case/statute it's
-about, and (optionally) embedded chunks — searchable and graph-linked alongside
-harvested law. Files that belong to a document but aren't themselves a document
-(an annotated copy, a scanned exhibit) attach via ``document_assets``.
+The design treats material you supply yourself — a commentary PDF, a saved
+article, a textbook extract, but equally a judgment or a statute no adapter can
+reach — as **documents that share the corpus model and graph** (§1.9). So a file
+you drop in becomes a ``document`` (``added_by=user``), optionally gets a typed
+``relations`` edge to the case/statute it's about, and is embedded and
+citation-extracted alongside harvested law. Files that belong to a document but
+aren't themselves a document (an annotated copy, a scanned exhibit) attach via
+``document_assets``.
 
 ``added_by`` keeps user/machine material visually and analytically separable from
 authoritative primary law (§10) — an LLM summary is never mistaken for a holding.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 
 from ..core.models import (
     AddedBy,
@@ -28,6 +30,7 @@ from ..core.models import (
     TypedRelation,
     sha256_bytes,
 )
+from ..core.segmentation import synthesise_numbered_segments
 from ..extraction import extract_bytes
 from ..storage import Catalogue, RawStore, TextStore
 
@@ -41,10 +44,85 @@ _DEFAULT_RELATIONSHIP = {
 }
 
 
+# --- where an imported document sits in the world ---------------------------
+# Every jurisdiction guard in the citation pipeline keys on the SOURCE PREFIX —
+# `_is_irish_host` on "ie-", `_allows_us_reporters` on "us-", the common-law
+# reporter allowance on "uk-"/"ie-"/"au-caselaw"…, and Facade._jurisdiction_of on
+# the same prefixes for every facet, filter and export in the UI. So a manual
+# import declares its jurisdiction by taking that prefix in its own source key:
+# a UK judgment you upload arrives as `uk-user-import` and is thereafter treated
+# exactly as a harvested UK judgment is. Nothing else needs to know about it.
+#
+# Codes match Facade._JURISDICTIONS; ``tests/test_import_metadata.py`` asserts
+# every one of them still round-trips to the label the rest of the app shows.
+JURISDICTIONS: tuple[tuple[str, str], ...] = (
+    ("uk", "United Kingdom"),
+    ("ie", "Ireland"),
+    ("eu", "European Union"),
+    ("echr", "Council of Europe"),
+    ("fr", "France"),
+    ("de", "Germany"),
+    ("nl", "Netherlands"),
+    ("it", "Italy"),
+    ("us", "United States"),
+    ("ca", "Canada"),
+    ("au", "Australia"),
+    ("nz", "New Zealand"),
+    ("sg", "Singapore"),
+    ("hk", "Hong Kong"),
+    ("in", "India"),
+)
+_JURISDICTION_CODES = {code for code, _label in JURISDICTIONS}
+BASE_SOURCE = "user-import"
+
+
+def import_source_key(jurisdiction: str | None) -> str:
+    """``uk`` → ``uk-user-import``; anything unrecognised → the unplaced default.
+
+    Deliberately a prefix on the existing source rather than a new column: it is what
+    makes the jurisdiction grammar gates, the facets and the export scoping apply to a
+    hand-uploaded document without any of them being taught a new concept.
+    """
+    code = (jurisdiction or "").strip().lower()
+    return f"{code}-{BASE_SOURCE}" if code in _JURISDICTION_CODES else BASE_SOURCE
+
+
+def jurisdiction_of_source(source: str | None) -> str | None:
+    """The code back out of a source key — ``uk-user-import`` → ``uk``."""
+    src = (source or "").lower()
+    if not src.endswith(BASE_SOURCE):
+        return None
+    code = src[: -len(BASE_SOURCE)].rstrip("-")
+    return code if code in _JURISDICTION_CODES else None
+
+
+# --- best-effort structure --------------------------------------------------
+# A flat PDF has no structure the way an Akoma Ntoso file does, but most legal
+# documents number themselves, and that numbering is the citable unit ("para 42",
+# "s 5"). Each parser below refuses to guess: it wants several units in strict
+# ascending order before it believes the numbering is numbering. When one finds
+# nothing the import still succeeds — it simply falls back to pages.
+STRUCTURE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("auto", "Best effort (by type)"),
+    ("paragraphs", "Paragraphs [42] / 42."),
+    ("sections", "Sections / articles"),
+    ("pages", "Pages (PDF)"),
+    ("none", "No structure"),
+)
+STRUCTURE_KEYS = {key for key, _label in STRUCTURE_CHOICES}
+
 # A numbered paragraph heading a line: "42. Where a controller …" — regulatory
 # guidance (EDPB/A29WP/Ofcom) numbers its paragraphs, and the paragraph, not the
 # page, is the citable unit ("Guidelines 05/2020, para 42").
 _PARA_LINE = re.compile(r"^(\d{1,3})\.\s+\S")
+
+# "Section 5", "Article 17", "Regulation 3", "s 5" / "s. 5A" at the head of a line —
+# the heading forms a statute-shaped document uses. The number is what must ascend.
+_SECTION_LINE = re.compile(
+    r"^[ \t]{0,8}(?:(?:Section|Article|Regulation|Rule|Clause|Para(?:graph)?|s\.?|art\.?|reg\.?)"
+    r"[ \t]+)(\d{1,4})([A-Z]{0,2})\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _numbered_para_segments(text: str) -> list[Segment]:
@@ -72,6 +150,72 @@ def _numbered_para_segments(text: str) -> list[Segment]:
     return segs
 
 
+def _section_segments(text: str) -> list[Segment]:
+    """Segments from statute-shaped headings ("Section 5", "Article 17", "s. 5A").
+
+    Same discipline as the paragraph parsers: the numbers must strictly ascend against
+    both neighbours and there must be several of them, so a passing "see article 6" in
+    running prose cannot invent a section break.
+    """
+    marks: list[tuple[int, str, int]] = []
+    for m in _SECTION_LINE.finditer(text):
+        marks.append((int(m.group(1)), m.group(0).strip(), m.start()))
+    ascending = [
+        row for i, row in enumerate(marks)
+        if (i == 0 or row[0] > marks[i - 1][0])
+        and (i + 1 == len(marks) or row[0] < marks[i + 1][0])
+    ]
+    if len(ascending) < 3:
+        return []
+    segs: list[Segment] = []
+    for i, (_n, label, at) in enumerate(ascending):
+        end = ascending[i + 1][2] if i + 1 < len(ascending) else len(text)
+        segs.append(Segment(label=label, char_start=at, char_end=end,
+                            kind="section", level=1))
+    return segs
+
+
+def _page_segments(page_spans) -> list[Segment]:
+    return [Segment(label=f"p. {no}", char_start=start, char_end=end, kind="page")
+            for no, start, end in (page_spans or [])]
+
+
+def structure_segments(structure: str, doc_type: DocType, extracted) -> list[Segment]:
+    """The segments an import gets, given what the operator asked for.
+
+    Every choice is best effort and every choice falls back to pages, because a parser
+    that finds nothing must not cost the reader their page anchors. ``auto`` reproduces
+    what the importer has always done, extended to judgments — which number their
+    paragraphs as surely as guidance does, and are pinpoint-cited by them.
+    """
+    text = extracted.text or ""
+    pages = _page_segments(extracted.page_spans)
+    if structure == "none":
+        return []
+    if structure == "pages":
+        return pages
+    found: list[Segment] = []
+    if text:
+        if structure == "sections":
+            found = _section_segments(text)
+        elif structure == "paragraphs":
+            # The bracketed "[42]" judgment form first, then the dotted "42. " form
+            # guidance uses — one option covers both, which is what "best effort" means.
+            found = synthesise_numbered_segments(text) or _numbered_para_segments(text)
+        elif doc_type == DocType.GUIDANCE:
+            found = _numbered_para_segments(text)
+        elif doc_type in _NUMBERED_DOC_TYPES:
+            found = synthesise_numbered_segments(text)
+        elif doc_type == DocType.LEGISLATION:
+            found = _section_segments(text)
+    return found or pages
+
+
+# Document types that number their own paragraphs, and are pinpoint-cited by that
+# number rather than by page ("[2019] UKSC 4 at [42]").
+_NUMBERED_DOC_TYPES = {DocType.JUDGMENT, DocType.DECISION, DocType.OPINION}
+
+
 @dataclass(slots=True)
 class ImportResult:
     stable_id: str
@@ -80,6 +224,13 @@ class ImportResult:
     linked_to: str | None = None
     relationship: str | None = None
     needs_ocr: bool = False
+    source: str = BASE_SOURCE
+    jurisdiction: str | None = None
+    title: str | None = None
+    segments: int = 0
+    structure: str = "auto"
+    tags: tuple[str, ...] = ()
+    citation: str | None = None
 
 
 def _surrogate_id(doc_type: DocType, payload_hash: str) -> str:
@@ -100,23 +251,30 @@ def import_file(
     link_to: str | None = None,
     relationship: RelationshipType | None = None,
     language: str | None = None,
+    jurisdiction: str | None = None,
+    court: str | None = None,
+    decision_date: date | None = None,
+    citation: str | None = None,
+    tags: tuple[str, ...] | list[str] = (),
+    structure: str = "auto",
 ) -> ImportResult:
-    """Import a user PDF/HTML/text file as a secondary document (§1.9)."""
+    """Import a user-supplied PDF/HTML/text file as a document (§1.9).
+
+    ``jurisdiction`` is the one field that changes how the rest of the pipeline treats
+    the result: it selects the source key, and every jurisdiction-sensitive citation
+    guard reads that key (see :func:`import_source_key`). ``citation`` registers the
+    document's own identifier as an alias, so edges elsewhere in the corpus that already
+    point at that citation resolve onto this upload.
+    """
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     extracted = extract_bytes(data, ext=ext)
     payload_hash = sha256_bytes(data)
     stable_id = _surrogate_id(doc_type, payload_hash)
+    structure = structure if structure in STRUCTURE_KEYS else "auto"
 
-    # Make pages addressable (a typeset handbook) so "pp. 45-47" fragment links
-    # are meaningful — each page becomes a Segment (§1.9, §6b). GUIDANCE prefers
-    # its numbered paragraphs when they're detectable: "Guidelines 05/2020,
-    # para 42" is how these documents are actually pinpoint-cited.
-    segments: list[Segment] = []
-    if doc_type == DocType.GUIDANCE and extracted.text:
-        segments = _numbered_para_segments(extracted.text)
-    if not segments:
-        for page_no, start, end in (extracted.page_spans or []):
-            segments.append(Segment(label=f"p. {page_no}", char_start=start, char_end=end, kind="page"))
+    # Make the document's own units addressable, so "para 42" / "pp. 45-47" fragment
+    # links are meaningful (§1.9, §6b).
+    segments = structure_segments(structure, doc_type, extracted)
 
     relations: list[TypedRelation] = []
     rel_type = None
@@ -133,11 +291,14 @@ def import_file(
             )
         )
 
+    citation = (citation or "").strip() or None
     record = Record(
-        source="user-import",
+        source=import_source_key(jurisdiction),
         stable_id=stable_id,
         doc_type=doc_type,
         title=title or filename,
+        court=(court or "").strip() or None,
+        decision_date=decision_date,
         language=language,
         source_language=language,
         raw_bytes=data,
@@ -148,15 +309,28 @@ def import_file(
         relations=relations,
         extracted_via=ExtractedVia.MANUAL,
         added_by=added_by,
-        extra={"engine": extracted.engine, "needs_ocr": extracted.needs_ocr},
+        extra={"engine": extracted.engine, "needs_ocr": extracted.needs_ocr,
+               "import_structure": structure,
+               **({"import_citation": citation} if citation else {})},
     )
 
     raw_path = str(rawstore.path_for(rawstore.put(data, ext=ext or "bin"), ext or "bin"))
     text_path = None
     if extracted.text and extracted.text.strip():
         text_path = str(textstore.put(payload_hash, extracted.text))
-        textstore.put_segments(payload_hash, segments)  # persist page anchors
+        textstore.put_segments(payload_hash, segments)  # persist the anchors
     catalogue.upsert_document(record, raw_path=raw_path, text_path=text_path)
+
+    # The citation the operator typed is how the REST of the corpus already refers to
+    # this document, so alias it: pending edges keyed on that citation now land here.
+    if citation:
+        catalogue.put_alias(citation.casefold(), stable_id, source="user-import")
+
+    applied: list[str] = []
+    for tag in tags or ():
+        tag = str(tag).strip()
+        if tag and tag_document(catalogue, stable_id, tag):
+            applied.append(tag)
 
     return ImportResult(
         stable_id=stable_id,
@@ -165,6 +339,13 @@ def import_file(
         linked_to=link_to,
         relationship=rel_type.value if rel_type else None,
         needs_ocr=extracted.needs_ocr,
+        source=record.source,
+        jurisdiction=jurisdiction_of_source(record.source),
+        title=record.title,
+        segments=len(segments),
+        structure=structure,
+        tags=tuple(applied),
+        citation=citation,
     )
 
 

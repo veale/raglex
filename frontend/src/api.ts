@@ -145,6 +145,35 @@ export interface Setting {
   key: string; label: string; secret: boolean; group: string; placeholder: string;
   set: boolean; source: string; display: string; kind?: string;
 }
+// The import form's vocabularies, read live from the corpus so the dropdowns can never
+// offer a value the rest of the app would not recognise.
+export interface ImportOptions {
+  // `source` is what the item will be stored under (uk → uk-user-import) — which is what
+  // makes every jurisdiction-sensitive citation grammar apply to it.
+  jurisdictions: { code: string; label: string; source: string; documents: number }[];
+  doc_types: string[];
+  relationships: string[];
+  structures: { value: string; label: string }[];
+  // leading courts by volume, per jurisdiction bucket — not an exhaustive registry,
+  // so the field takes free text too
+  courts_by_jurisdiction: Record<string, { court: string; label: string; documents: number }[]>;
+  languages: string[];
+  tags: string[];
+}
+export interface ImportItem {
+  title?: string; doc_type?: string; jurisdiction?: string; court?: string;
+  decision_date?: string; citation?: string; language?: string; link_to?: string;
+  relationship?: string; structure?: string; tags?: string[];
+}
+export interface ImportedDoc {
+  index: number; stable_id?: string; title?: string | null; doc_type?: string;
+  source?: string; jurisdiction?: string | null; chars?: number; segments?: number;
+  structure?: string; tags?: string[]; citation?: string | null;
+  linked_to?: string | null; needs_ocr?: boolean; filename?: string; error?: string;
+}
+export interface ImportBatchResult {
+  imported: number; failed: number; documents: ImportedDoc[]; next?: string;
+}
 export interface StaticBundleItem {
   stable_id: string; slug: string; title: string; note: string;
   // Operator's own shorthand ("DSA"), shown bold before the full name on the index page
@@ -542,6 +571,15 @@ export const api = {
     fd.append("file", file);
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
     return postForm("/import/file", fd);
+  },
+  importOptions: () => req<ImportOptions>("/import/options"),
+  // One request for the whole drop: the files in order, and a parallel array of the
+  // rows the operator filled in for them.
+  importFiles: async (files: File[], items: ImportItem[]) => {
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
+    fd.append("items", JSON.stringify(items));
+    return postForm("/import/files", fd) as Promise<ImportBatchResult>;
   },
   importLegislationAkn: async (file: File, stableId?: string) => {
     const fd = new FormData();

@@ -1,5 +1,5 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, CanliiBudget, Hit, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, StaticBundleWebhook, UsCaselawBudget } from "./api";
+import { api, CanliiBudget, Hit, ImportBatchResult, ImportItem, ImportOptions, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, StaticBundleWebhook, UsCaselawBudget } from "./api";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
@@ -3043,35 +3043,268 @@ export function Dashboard({ open: _open, navigate }: { open: (id: string) => voi
 
 export function ImportView({ open }: { open?: (id: string) => void }) {
   const [msg, setMsg] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [docType, setDocType] = useState("commentary");
-  const [linkTo, setLinkTo] = useState("");
   const show = (r: any) => setMsg(typeof r === "string" ? r : JSON.stringify(r));
   return (
     <div>
-      <div className="panel">
-        <p className="muted">Import standalone secondary material here. To attach material to a <i>specific</i> case or
-          law section, open it in Search/Corpus and use its “Augment” panel instead.</p>
-        <h3>Upload a PDF / HTML file</h3>
-        <div className="row">
-          <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-          <select value={docType} onChange={(e) => setDocType(e.target.value)}>
-            {DOC_TYPES.map((t) => <option key={t}>{t}</option>)}
-          </select>
-        </div>
-        <label>Link to (stable_id of a case/law section — optional)</label>
-        <input value={linkTo} onChange={(e) => setLinkTo(e.target.value)} placeholder="ECLI:EU:C:2020:559" />
-        <p><button className="primary" onClick={async () => {
-          if (!file) return setMsg("choose a file");
-          try { show(await api.importFile(file, { doc_type: docType, link_to: linkTo })); } catch (e: any) { show("error: " + e); }
-        }}>Import file</button></p>
-      </div>
+      <StandaloneImportPanel open={open} />
       <LegislationAknPanel open={open} />
       <CaseLawImportPanel />
       <LiiWorklistPanel />
       <ZoteroPanel show={show} />
       <GuidanceRulesPanel />
       {msg && <div className="panel"><pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{msg}</pre></div>}
+    </div>
+  );
+}
+
+// Drop a set of files, label each one, import the lot.
+//
+// The labelling is the point. A document's JURISDICTION in particular is not
+// cosmetic: it decides which citation grammars are trusted inside it (an Irish
+// decision's "the 2018 Act" must not bind to the UK statute of that name; a single-
+// letter reporter series is a citation in US material and page notation elsewhere), so
+// a hand-uploaded document declares it and is thereafter treated exactly as a harvested
+// document of that jurisdiction is. The rest — court, date, citation, tags — is the
+// metadata every facet, filter and export in the app already reads.
+// `tags` is a comma-separated string while it is being typed, and only becomes the
+// array the API wants at submit — a half-typed "seminar, read" is not two tags yet.
+type ImportRow = Omit<ImportItem, "tags"> & {
+  file: File; expanded?: boolean; tags?: string;
+};
+
+const importRowFor = (file: File): ImportRow => ({
+  file,
+  // The filename is the operator's own name for the thing far more often than not;
+  // strip the extension and let them correct it.
+  title: file.name.replace(/\.[a-z0-9]{1,5}$/i, ""),
+  doc_type: "commentary",
+  jurisdiction: "",
+  structure: "auto",
+});
+
+function StandaloneImportPanel({ open }: { open?: (id: string) => void }) {
+  const [opts, setOpts] = useState<ImportOptions | null>(null);
+  const [rows, setRows] = useState<ImportRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<ImportBatchResult | null>(null);
+  const [err, setErr] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { api.importOptions().then(setOpts).catch(() => setOpts(null)); }, []);
+
+  const patch = (i: number, change: Partial<ImportRow>) =>
+    setRows((rs) => rs.map((r, n) => (n === i ? { ...r, ...change } : r)));
+  // "Set for every file" — the reason a drop of twenty is quicker than twenty drops.
+  const patchAll = (change: Partial<ImportRow>) =>
+    setRows((rs) => rs.map((r) => ({ ...r, ...change })));
+
+  const addFiles = (list: FileList | null) => {
+    const picked = Array.from(list ?? []);
+    if (picked.length) setRows((rs) => [...rs, ...picked.map(importRowFor)]);
+    setResult(null); setErr("");
+    if (fileInput.current) fileInput.current.value = "";   // so the same file can be re-picked
+  };
+
+  const jurisdictionLabel = (code?: string) =>
+    opts?.jurisdictions.find((j) => j.code === code)?.label || "";
+  const courtsFor = (code?: string) =>
+    opts?.courts_by_jurisdiction[jurisdictionLabel(code)] || [];
+
+  const go = async () => {
+    if (!rows.length) { setErr("choose one or more files"); return; }
+    setBusy(true); setErr(""); setResult(null);
+    try {
+      setResult(await api.importFiles(
+        rows.map((r) => r.file),
+        rows.map(({ file: _file, expanded: _expanded, tags, ...item }) => ({
+          ...item,
+          tags: (tags ?? "").split(",").map((t) => t.trim()).filter(Boolean),
+        })),
+      ));
+      setRows([]);
+    } catch (e: any) { setErr(String(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="panel">
+      <h3>Import standalone documents</h3>
+      <p className="muted">
+        Material that stands on its own — a judgment or statute no adapter can reach, a
+        regulator’s PDF, an article, a set of seminar readings. Drop several at once and
+        label each below. To attach material to a <i>specific</i> case or law section
+        instead, open it in Search/Corpus and use its “Augment” panel.
+      </p>
+      <div className="row">
+        <input ref={fileInput} type="file" multiple
+          onChange={(e) => addFiles(e.target.files)} />
+        {rows.length > 0 && (
+          <button style={{ flex: "0 0 auto" }} onClick={() => { setRows([]); setResult(null); }}>
+            Clear {rows.length} file{rows.length > 1 ? "s" : ""}
+          </button>
+        )}
+      </div>
+
+      {rows.length > 1 && opts && (
+        <div className="row import-all" style={{ marginTop: 10, alignItems: "center" }}>
+          <span className="muted" style={{ flex: "0 0 auto" }}>Set for every file:</span>
+          <select defaultValue=""
+            onChange={(e) => { patchAll({ doc_type: e.target.value }); e.target.value = ""; }}>
+            <option value="" disabled>type…</option>
+            {opts.doc_types.map((t) => <option key={t} value={t}>{docTypeLabel(t)}</option>)}
+          </select>
+          <select defaultValue=""
+            onChange={(e) => { patchAll({ jurisdiction: e.target.value, court: "" }); e.target.value = ""; }}>
+            <option value="" disabled>jurisdiction…</option>
+            {opts.jurisdictions.map((j) => <option key={j.code} value={j.code}>{j.label}</option>)}
+          </select>
+          <select defaultValue=""
+            onChange={(e) => { patchAll({ structure: e.target.value }); e.target.value = ""; }}>
+            <option value="" disabled>structure…</option>
+            {opts.structures.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div style={{ overflowX: "auto", marginTop: 10 }}>
+          <table className="import-table">
+            <colgroup>
+              <col style={{ width: "9rem" }} /><col style={{ width: "14rem" }} />
+              <col style={{ width: "10.5rem" }} /><col style={{ width: "10rem" }} />
+              <col style={{ width: "10rem" }} /><col style={{ width: "9rem" }} />
+              <col style={{ width: "11rem" }} /><col style={{ width: "5rem" }} />
+            </colgroup>
+            <thead><tr>
+            <th>File</th><th>Name</th><th>Type</th><th>Jurisdiction</th>
+            <th>Court / body</th><th>Date</th><th>Structure</th><th />
+          </tr></thead><tbody>
+            {rows.map((r, i) => (
+              <Fragment key={i}>
+                <tr>
+                  <td className="muted import-file"
+                    title={`${r.file.name} · ${Math.max(1, Math.round(r.file.size / 1024)).toLocaleString()} kB`}>
+                    {r.file.name}
+                  </td>
+                  <td><input value={r.title ?? ""} style={{ minWidth: 180 }}
+                    onChange={(e) => patch(i, { title: e.target.value })} /></td>
+                  <td>
+                    <select value={r.doc_type} onChange={(e) => patch(i, { doc_type: e.target.value })}>
+                      {(opts?.doc_types ?? DOC_TYPES).map((t) =>
+                        <option key={t} value={t}>{docTypeLabel(t)}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <select value={r.jurisdiction ?? ""}
+                      onChange={(e) => patch(i, { jurisdiction: e.target.value, court: "" })}>
+                      <option value="">— unplaced —</option>
+                      {(opts?.jurisdictions ?? []).map((j) =>
+                        <option key={j.code} value={j.code}>{j.label}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    {/* a datalist, not a select: the picker offers the courts the corpus
+                        holds, but a body it has never seen must still be typeable */}
+                    <input list={`courts-${i}`} value={r.court ?? ""} style={{ minWidth: 140 }}
+                      placeholder={r.jurisdiction ? "court / regulator" : ""}
+                      onChange={(e) => patch(i, { court: e.target.value })} />
+                    <datalist id={`courts-${i}`}>
+                      {courtsFor(r.jurisdiction).map((c) =>
+                        <option key={c.court} value={c.court}>{c.label}</option>)}
+                    </datalist>
+                  </td>
+                  <td><input type="date" value={r.decision_date ?? ""} style={{ minWidth: 130 }}
+                    onChange={(e) => patch(i, { decision_date: e.target.value })} /></td>
+                  <td>
+                    <select value={r.structure} onChange={(e) => patch(i, { structure: e.target.value })}
+                      title="How to find this document's own citable units. Best effort — it falls back to pages.">
+                      {(opts?.structures ?? [{ value: "auto", label: "Best effort" }]).map((s) =>
+                        <option key={s.value} value={s.value}>{s.label}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <button title="citation, language, tags, and what this document is about"
+                      onClick={() => patch(i, { expanded: !r.expanded })}>
+                      {r.expanded ? "less" : "more…"}</button>
+                  </td>
+                </tr>
+                {r.expanded && (
+                  <tr className="import-more"><td /><td colSpan={7}>
+                    <div className="row">
+                      <label style={{ flex: "1 1 15rem" }}>Its own citation
+                        <input value={r.citation ?? ""} placeholder="[2024] UKSC 12 · ECLI:EU:C:2020:559"
+                          title="Registered as an alias, so references to this citation elsewhere in the corpus resolve onto this document."
+                          onChange={(e) => patch(i, { citation: e.target.value })} /></label>
+                      <label style={{ flex: "0 1 9rem" }}>Language
+                        <input list="import-languages" value={r.language ?? ""} placeholder="en"
+                          onChange={(e) => patch(i, { language: e.target.value })} /></label>
+                      <label style={{ flex: "1 1 12rem" }}>Tags
+                        <input list="import-tags" value={r.tags ?? ""}
+                          placeholder="comma, separated"
+                          onChange={(e) => patch(i, { tags: e.target.value })} /></label>
+                    </div>
+                    <div className="row">
+                      <label style={{ flex: "2 1 18rem" }}>About (stable_id of a case / law section)
+                        <input value={r.link_to ?? ""} placeholder="ECLI:EU:C:2020:559"
+                          onChange={(e) => patch(i, { link_to: e.target.value })} /></label>
+                      <label style={{ flex: "1 1 10rem" }}>Relationship
+                        <select value={r.relationship ?? ""} disabled={!r.link_to}
+                          onChange={(e) => patch(i, { relationship: e.target.value })}>
+                          <option value="">default for its type</option>
+                          {(opts?.relationships ?? REL_TYPES).map((t) =>
+                            <option key={t} value={t}>{relationLabel(t)}</option>)}
+                        </select></label>
+                    </div>
+                  </td></tr>
+                )}
+              </Fragment>
+            ))}
+          </tbody></table>
+          <datalist id="import-languages">
+            {(opts?.languages ?? []).map((l) => <option key={l} value={l} />)}
+          </datalist>
+          <datalist id="import-tags">
+            {(opts?.tags ?? []).map((t) => <option key={t} value={t} />)}
+          </datalist>
+        </div>
+      )}
+
+      <p style={{ marginTop: 10 }}>
+        <button className="primary" disabled={busy || !rows.length} onClick={go}>
+          {busy ? "importing…" : `Import ${rows.length || ""} ${rows.length === 1 ? "document" : "documents"}`}
+        </button>
+        {rows.length > 0 && <span className="muted" style={{ marginLeft: 10 }}>
+          A jurisdiction is worth setting: it decides which citation grammars are trusted
+          inside the document.
+        </span>}
+      </p>
+      {err && <p className="err">{err}</p>}
+      {result && (
+        <div>
+          <p className={result.failed ? "err" : "ok"}>
+            ✓ imported {result.imported}{result.failed ? ` · ${result.failed} failed` : ""}
+            {result.next && !result.failed ? ` — ${result.next}` : ""}
+          </p>
+          <table><thead><tr>
+            <th>Document</th><th>Held as</th><th>Text</th><th>Units</th>
+          </tr></thead><tbody>
+            {result.documents.map((d) => (
+              <tr key={d.index}>
+                <td>{d.error ? (d.title || d.filename) : (
+                  open && d.stable_id
+                    ? <DocLink id={d.stable_id} onOpen={() => open(d.stable_id!)}>{d.title || d.stable_id}</DocLink>
+                    : (d.title || d.stable_id))}
+                  {d.error && <div className="err">{d.error}</div>}</td>
+                <td className="muted">{d.error ? "—" : `${docTypeLabel(d.doc_type)} · ${d.source}`}</td>
+                <td className="muted">{d.error ? "—"
+                  : d.needs_ocr ? <span className="err">no text layer — needs OCR</span>
+                  : `${(d.chars ?? 0).toLocaleString()} chars`}</td>
+                <td className="muted">{d.error ? "—" : `${d.segments ?? 0} (${d.structure})`}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        </div>
+      )}
     </div>
   );
 }

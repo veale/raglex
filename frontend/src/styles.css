@@ -246,6 +246,30 @@ th {
 }
 tbody tr:hover { background: var(--surface-2); }
 
+/* The standalone-import labelling table. One row per dropped file, so the cells are
+   controls rather than text. Fixed layout over a <colgroup>: a long filename must widen
+   the table (which scrolls sideways in its own container) rather than crush a select
+   down to an unreadable stub, which is what auto layout did. */
+/* `.panel table { table-layout: auto }` further down is more specific than a bare
+   `.import-table`, and silently won — the <colgroup> became a hint and the selects went
+   back to being crushed. Match its specificity. */
+.panel table.import-table { table-layout: fixed; min-width: 78rem; }
+.import-table th { white-space: nowrap; }
+.import-table td { padding: var(--sp-2) var(--sp-3); vertical-align: top; }
+.import-table input, .import-table select { width: 100%; min-width: 0; font-size: .8125rem; }
+.import-table .import-file {
+  /* an ellipsis, never one character per line — the full name is in the tooltip and,
+     already, in the Name field beside it */
+  font-size: .75rem; line-height: 1.35; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; overflow-wrap: normal;
+}
+.import-table tr.import-more, .import-table tr.import-more:hover { background: var(--surface-2); }
+.import-table tr.import-more td { border-bottom: 1px solid var(--text); }
+.import-table tr.import-more label { display: block; font-size: .75rem; color: var(--subtext); }
+/* "Set for every file" — three short pickers on one line, not three full-width rows
+   (a select is as wide as its longest option unless told otherwise) */
+.import-all > select { flex: 0 0 11rem; max-width: 11rem; }
+
 /* --- unified search -------------------------------------------------------- */
 .seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .seg-toggle button { border: none; border-radius: 0; padding: var(--sp-2) var(--sp-5); background: transparent; color: var(--subtext); }
