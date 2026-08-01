@@ -790,15 +790,21 @@ _BARE_PROVISION = re.compile(
 # fourteen times; every one of those was recorded as a bare reference to the directive,
 # because "Annex" was not a cue and "point 29" had nowhere to attach.
 _ANNEX_OR_SCHEDULE_NUM = r"[ivxlc]+(?![a-z])|\d{1,3}[A-Z]?"
+# Horizontal space only, NEVER a line break. A CJEU judgment numbers its paragraphs at
+# the start of a line, so "…by point 29 of that annex.\n\n42 Annex I, point 29 of
+# Directive 2005/29…" offered the word "annex" and the paragraph number "42" to a
+# newline-crossing gap and minted "Annex 42". Losing a genuine annex whose number was
+# split across a line by PDF extraction is the cheaper error by far.
+_H = r"[ \t ]{0,3}"
 _BARE_COMPOUND = re.compile(
     r"\b(?:"
     # reverse order first, so "point 29 of Annex I" is not read as a bare "Annex I"
-    r"(?:points?|paragraphs?|paras?)\.?\s*\(?(?P<rsub>\d{1,3}[a-z]?)\)?\s*"
-    r"(?:of|to|in)\s+(?:the\s+)?(?P<rcue>annexe?|schedule|sched|sch)\.?\s*"
+    rf"(?:points?|paragraphs?|paras?)\.?{_H}\(?(?P<rsub>\d{{1,3}}[a-z]?)\)?{_H}"
+    rf"(?:of|to|in){_H}\s(?:the{_H}\s)?(?P<rcue>annexe?|schedule|sched|sch)\.?{_H}"
     rf"(?P<rnum>{_ANNEX_OR_SCHEDULE_NUM})"
     r"|"
-    rf"(?P<cue>annexe?|schedule|sched|sch)\.?\s*(?P<num>{_ANNEX_OR_SCHEDULE_NUM})"
-    r"(?:\s*,?\s*(?:points?|paragraphs?|paras?)\.?\s*\(?(?P<sub>\d{1,3}[a-z]?)\)?)?"
+    rf"(?P<cue>annexe?|schedule|sched|sch)\.?{_H}(?P<num>{_ANNEX_OR_SCHEDULE_NUM})"
+    rf"(?:{_H},?{_H}(?:points?|paragraphs?|paras?)\.?{_H}\(?(?P<sub>\d{{1,3}}[a-z]?)\)?)?"
     r")(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )

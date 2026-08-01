@@ -1196,14 +1196,34 @@ def test_annex_anchor_keys_fold_roman_numerals():
     """
     from raglex.facade import _anchor_key, _anchor_sql_prefixes
 
-    assert _anchor_key("Annex I") == "annex:i"
-    assert _anchor_key("Annexe II") == "annex:ii"          # the French spelling
+    assert _anchor_key("Annex I") == "annex:1"
+    assert _anchor_key("Annexe II") == "annex:2"           # the French spelling
     # the tail folds to the family, exactly as "Article 28(3)" folds to art:28
-    assert _anchor_key("Annex I, point 29") == "annex:i"
+    assert _anchor_key("Annex I, point 29") == "annex:1"
     # the segment label carries the annex's TITLE and must still meet the bare anchor
     assert _anchor_key(
         "ANNEX I COMMERCIAL PRACTICES WHICH ARE IN ALL CIRCUMSTANCES CONSIDERED UNFAIR"
-    ) == "annex:i"
-    assert _anchor_sql_prefixes("Annex I") == ["annexi"]
+    ) == "annex:1"
+    # Roman and arabic fold together — Wind Tre writes "Annex I, point 29" twelve times
+    # and "Annex 1, point 29" once, for the same provision of the same directive.
+    assert _anchor_key("Annex 1, point 29") == _anchor_key("Annex I, point 29")
+    # ...but the SQL guard must still look for what the corpus actually STORES, which for
+    # an annex is the roman spelling. Guarding on arabic alone would match nothing.
+    assert _anchor_sql_prefixes("Annex I") == ["annex1", "annexi"]
     # a roman numeral must not be read out of a word ("Annex Introduction")
     assert _anchor_key("Annex Introduction") is None
+
+
+def test_annex_cue_does_not_cross_a_line_break():
+    """A CJEU judgment numbers its paragraphs at the start of a line.
+
+    "…by point 29 of that annex.\\n\\n42 Annex I, point 29 of Directive 2005/29…" offered
+    the word "annex" and the paragraph number "42" to a newline-crossing gap, and minted
+    a citation to a non-existent Annex 42.
+    """
+    text = ("Directive 2005/29/EC applies. The practice is covered by those listed in "
+            "Annex I and, particularly, by point 29 of that annex.\n\n"
+            "42 Annex I, point 29 of Directive 2005/29 provides that demands are unfair.")
+    pins = _pins(text)
+    assert ("32005L0029", "Annex 42") not in pins
+    assert ("32005L0029", "Annex I, point 29") in pins

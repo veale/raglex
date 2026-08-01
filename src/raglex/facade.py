@@ -718,6 +718,27 @@ _ANCHOR_TYPES = {
 }
 
 
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100}
+
+
+def _roman_to_int(numeral: str) -> int:
+    total = 0
+    values = [_ROMAN_VALUES[ch] for ch in numeral.lower()]
+    for i, value in enumerate(values):
+        total += -value if any(v > value for v in values[i + 1:]) else value
+    return total
+
+
+def _int_to_roman(value: int) -> str:
+    out = ""
+    for amount, numeral in ((100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"),
+                            (9, "ix"), (5, "v"), (4, "iv"), (1, "i")):
+        while value >= amount:
+            out += numeral
+            value -= amount
+    return out
+
+
 def _anchor_key(text: str | None) -> str | None:
     t = (text or "").strip().lower().lstrip("[(")
     # An annex is numbered in ROMAN — "Annex I", "Annexe II" — which the arabic matcher
@@ -727,7 +748,11 @@ def _anchor_key(text: str | None) -> str | None:
     # "Article 28(3)" keys to art:28, and the exact anchor keeps the point.
     annex = re.match(r"^annexe?\.?\s+([ivxlc]+)(?![a-z0-9])", t)
     if annex:
-        return f"annex:{annex.group(1)}"
+        # Folded to ARABIC, because the two spellings occur for the same annex: Wind Tre
+        # writes "Annex I, point 29" twelve times and "Annex 1, point 29" once, and the
+        # UCPD's own segment label is "ANNEX I". Keying them apart would scatter a
+        # provision's citers across two keys for a typographic difference.
+        return f"annex:{_roman_to_int(annex.group(1))}"
     # The number may be MULTI-LEVEL: a code of practice is cited by "paragraph 3.19",
     # a rule of court by "r 3.1". Stopping at the first dot folded 3.19 and 3.2 onto the
     # same key as 3 — every paragraph of a chapter answering to its chapter number. The
@@ -768,7 +793,15 @@ def _anchor_sql_prefixes(anchor: str | None) -> list[str]:
     number = number.replace(".", "")
     if not number:                       # a bare numeral: no unit to spell
         return [typ.replace(".", "")]
-    return [f"{spelling}{number}" for spelling in _ANCHOR_SPELLINGS.get(typ, (typ,))]
+    numbers = [number]
+    if typ == "annex" and number.isdigit():
+        # The KEY is arabic (see _anchor_key) but the corpus stores what the citing
+        # document wrote, and for an annex that is nearly always roman. Guarding on the
+        # arabic spelling alone would match nothing at all — the silent-zero failure this
+        # whole path exists to avoid — so guard on both.
+        numbers.append(_int_to_roman(int(number)))
+    return [f"{spelling}{n}" for spelling in _ANCHOR_SPELLINGS.get(typ, (typ,))
+            for n in numbers]
 
 
 _SUBDIVISION_RE = re.compile(r"\(([^()]{1,8})\)")
