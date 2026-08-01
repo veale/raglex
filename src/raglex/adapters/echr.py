@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date as _date
 from typing import Iterator
 
 from bs4 import BeautifulSoup
@@ -65,6 +66,83 @@ def _hudoc_query(value_field: str, value: str) -> str:
     q = f'contentsitename:ECHR AND {value_field}:"{value}"'
     return (f"{BASE}/app/query/results?query={quote(q)}"
             f"&select={_SELECT}&sort={quote('kpdate Descending')}&start=0&length=20")
+
+
+# -- the recency feed (§keep-current) ---------------------------------------
+# The Court's own "latest judgments" RSS (``/app/transform/rss?…``) is a *rendering* of
+# this same query endpoint, and a lossy one: it carries a title, an RFC-822 date and an
+# itemid, but no ECLI — which is precisely the identifier this adapter files judgments
+# under. Following the RSS would mean a second HUDOC round trip per case merely to learn
+# its stable_id. So take the query the feed is built from and read it as JSON, where
+# ecli/appno/kpdate/doctypebranch all arrive in the same response.
+_FEED_COLLECTIONS = ("GRANDCHAMBER", "CHAMBER")
+# Press releases and the old Commission series are not judgments of the Court.
+_FEED_EXCLUDE_DOCTYPES = ("PR", "HFCOMOLD", "HECOMOLD")
+_FEED_PAGE = 500
+# HUDOC is Elasticsearch underneath and enforces its default max_result_window: any
+# ``start`` at or past 10,000 answers 200 OK with an EMPTY result set and
+# ``resultcount: 0`` — not an error, just silence. The Chamber + Grand Chamber corpus is
+# 71,067 documents, so a backfill that only pages ``start`` would stop dead at 2018 and
+# report success. :meth:`_feed_pages` therefore re-anchors the query to a date window
+# whenever it approaches the ceiling instead of paging through it.
+_MAX_RESULT_WINDOW = 10000
+
+
+def _feed_query(
+    collections: tuple[str, ...], *, before: str | None = None, extra: str | None = None,
+) -> str:
+    """The Court's recency query: judgments of the Chamber/Grand Chamber, newest first.
+
+    ``before`` bounds the window at the top (``kpdate:[… TO <date>]``), which is how the
+    crawl gets past the 10,000-row ceiling. HUDOC accepts a bracketed range but rejects
+    ``kpdate>=…``, so both ends are always given.
+    """
+    parts = ["contentsitename:ECHR"]
+    if _FEED_EXCLUDE_DOCTYPES:
+        excluded = " OR ".join(f"doctype={d}" for d in _FEED_EXCLUDE_DOCTYPES)
+        parts.append(f"(NOT ({excluded}))")
+    if collections:
+        wanted = " OR ".join(f'(documentcollectionid="{c}")' for c in collections)
+        parts.append(f"({wanted})")
+    if before:
+        parts.append(f"kpdate:[1959-01-01T00:00:00Z TO {before}T00:00:00Z]")
+    if extra:
+        parts.append(f"({extra})")
+    return " AND ".join(parts)
+
+
+def _feed_url(query: str, start: int, length: int) -> str:
+    from urllib.parse import quote
+    return (f"{BASE}/app/query/results?query={quote(query)}"
+            f"&select={_SELECT}&sort={quote('kpdate Descending')}"
+            f"&start={start}&length={length}")
+
+
+def _kpdate(columns: dict) -> str:
+    """The ISO date HUDOC sorts and filters on (``2026-07-23T00:00:00`` → ``2026-07-23``).
+
+    Strictly ``kpdate`` and never ``judgementdate``, even though the latter is the date a
+    lawyer means: kpdate is HUDOC's *publication* date, it is what the feed is ordered by,
+    and a cursor has to be denominated in the same units as the ordering it follows.
+    They genuinely differ — Big Brother Watch was decided 25/05/2021 and its supervision
+    document published 11/12/2024 — so a cursor kept in judgment dates would let a newly
+    published document about an old case slip past unseen. ``decision_date`` on the
+    record still comes from ``judgementdate`` (see :meth:`fetch`).
+    """
+    return str(columns.get("kpdate") or "")[:10]
+
+
+def _case_key(columns: dict) -> str:
+    """What makes two HUDOC rows the SAME case rather than two documents.
+
+    A judgment is published as several documents — the English text, the French text,
+    sometimes a translation — each with its own itemid but ONE ECLI. Grouping on that is
+    what stops the crawl storing a case twice under two ids, and what lets the French
+    rendition serve as the fallback body when the English one will not convert.
+    """
+    return (str(columns.get("ecli") or "").strip()
+            or str(columns.get("appno") or "").split(";")[0].strip()
+            or str(columns.get("itemid") or "").strip())
 
 
 def _rank_judgments(rows: list[dict]) -> list[dict]:
@@ -132,10 +210,16 @@ class ECHRAdapter(BaseAdapter):
     requires_proxy = False
 
     def __init__(self, *, ids: str | tuple[str, ...] | None = None,
+                 collections: str | tuple[str, ...] | None = None,
+                 query: str | None = None,
                  client: RateLimitedClient | None = None) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
         self.ids = tuple(ids) if ids else ()
+        if isinstance(collections, str):
+            collections = tuple(c.strip().upper() for c in collections.split(",") if c.strip())
+        self.collections = tuple(collections) if collections else _FEED_COLLECTIONS
+        self.query = (query or "").strip() or None
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     def _lookup(self, ident: str) -> dict | None:
@@ -170,35 +254,127 @@ class ECHRAdapter(BaseAdapter):
             return []
         return _rank_judgments(rows)
 
+    def _stub(self, ranked: list[dict]) -> Stub | None:
+        """One case's HUDOC documents (best first) → the stub the pipeline fetches."""
+        meta = ranked[0] if ranked else None
+        if not meta or not meta.get("itemid"):
+            return None
+        itemid = meta["itemid"]
+        ecli = (meta.get("ecli") or "").strip()
+        appnos = (meta.get("appno") or "").replace(";", ", ")
+        first_app = (meta.get("appno") or "").split(";")[0]
+        stable_id = ecli or (f"echr/{first_app}" if first_app else f"echr/{itemid}")
+        # keep every non-empty HUDOC field so nothing the source gives is lost
+        meta_kept = {k: v for k, v in meta.items() if v not in (None, "", [])}
+        day = _kpdate(meta)
+        try:
+            hint_date = _date.fromisoformat(day) if day else None
+        except ValueError:
+            hint_date = None
+        return Stub(
+            stable_id=stable_id,
+            title=meta.get("docname"),
+            court="echr",
+            hint_date=hint_date,
+            landing_url=f"{BASE}/?i={itemid}",
+            raw_url=f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}",
+            hints={"itemid": itemid, "appno": appnos, "ecli": ecli,
+                   # the other HUDOC documents for this same case, in preference
+                   # order — the renditions fetch() falls back to (see below)
+                   "alt": [{"itemid": c["itemid"],
+                            "lang": (c.get("languageisocode") or "").upper(),
+                            "docname": c.get("docname")}
+                           for c in ranked[1:] if c.get("itemid")],
+                   "date": meta.get("judgementdate") or meta.get("kpdate"),
+                   "meta": meta_kept},
+        )
+
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        for ident in self.ids:
-            ranked = self._lookup_all(ident)
-            meta = ranked[0] if ranked else None
-            if not meta or not meta.get("itemid"):
-                continue
-            itemid = meta["itemid"]
-            ecli = (meta.get("ecli") or "").strip()
-            appnos = (meta.get("appno") or "").replace(";", ", ")
-            first_app = (meta.get("appno") or "").split(";")[0]
-            stable_id = ecli or (f"echr/{first_app}" if first_app else f"echr/{itemid}")
-            # keep every non-empty HUDOC field so nothing the source gives is lost
-            meta_kept = {k: v for k, v in meta.items() if v not in (None, "", [])}
-            yield Stub(
-                stable_id=stable_id,
-                title=meta.get("docname"),
-                court="echr",
-                landing_url=f"{BASE}/?i={itemid}",
-                raw_url=f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}",
-                hints={"itemid": itemid, "appno": appnos, "ecli": ecli,
-                       # the other HUDOC documents for this same case, in preference
-                       # order — the renditions fetch() falls back to (see below)
-                       "alt": [{"itemid": c["itemid"],
-                                "lang": (c.get("languageisocode") or "").upper(),
-                                "docname": c.get("docname")}
-                               for c in ranked[1:] if c.get("itemid")],
-                       "date": meta.get("judgementdate") or meta.get("kpdate"),
-                       "meta": meta_kept},
-            )
+        """Named ids when given; otherwise the Court's own recency feed.
+
+        Naming ids is a targeted fetch and stays exact. With none, this walks the
+        Chamber/Grand Chamber judgment feed newest-first, which is what lets ``echr`` be
+        watched rather than only queried — see :func:`_feed_query`.
+        """
+        if self.ids:
+            for ident in self.ids:
+                stub = self._stub(self._lookup_all(ident))
+                if stub is not None:
+                    yield stub
+            return
+        yield from self._discover_feed(since, max_pages=max_pages)
+
+    def _feed_pages(self, max_pages: int | None) -> Iterator[list[dict]]:
+        """Pages of the recency query, newest first, around the 10,000-row ceiling.
+
+        When ``start`` approaches the ceiling the query is re-anchored to end at the
+        oldest date already seen and ``start`` resets to zero, so the walk keeps
+        descending instead of running into HUDOC's silent empty page. The re-anchored
+        window re-serves that whole day; the caller's ``seen`` set absorbs the overlap,
+        which is also what stops a day straddling the boundary from being skipped.
+        """
+        pages = 0
+        before: str | None = None
+        start = 0
+        oldest: str | None = None
+        while max_pages is None or pages < max_pages:
+            query = _feed_query(self.collections, before=before, extra=self.query)
+            try:
+                resp = self._client.get(_feed_url(query, start, _FEED_PAGE))
+                rows = json.loads(resp.content).get("results") or []
+            except FetchError:
+                raise
+            except (ValueError, KeyError, TypeError):
+                return
+            pages += 1
+            if not rows:
+                return
+            columns = [r["columns"] for r in rows if r.get("columns")]
+            yield columns
+            page_oldest = min((_kpdate(c) for c in columns if _kpdate(c)), default=None)
+            if page_oldest and (oldest is None or page_oldest < oldest):
+                oldest = page_oldest
+            start += _FEED_PAGE
+            if start + _FEED_PAGE > _MAX_RESULT_WINDOW:
+                if not oldest or oldest == before:
+                    return  # one day alone fills the window; no way to descend further
+                before, start = oldest, 0
+
+    def _discover_feed(
+        self, since: str | None, *, max_pages: int | None = None,
+    ) -> Iterator[Stub]:
+        cursor = (since or "")[:10]
+        seen: set[str] = set()
+        # Renditions of one judgment share a kpdate and therefore arrive together, but a
+        # page boundary can split them. Hold each day's rows until the day changes, so a
+        # case is grouped from ALL its documents rather than from whichever rendition the
+        # page happened to end on.
+        day: str | None = None
+        pending: dict[str, list[dict]] = {}
+
+        def flush() -> Iterator[Stub]:
+            for key, group in pending.items():
+                if key in seen:
+                    continue
+                seen.add(key)
+                stub = self._stub(_rank_judgments([{"columns": c} for c in group]))
+                if stub is not None:
+                    yield stub
+            pending.clear()
+
+        for columns in self._feed_pages(max_pages):
+            for c in columns:
+                this_day = _kpdate(c)
+                if this_day != day:
+                    yield from flush()
+                    day = this_day
+                # Newest-first, so the first item at or before the cursor means every
+                # remaining item is older still: stop rather than walk the archive.
+                if cursor and this_day and this_day < cursor:
+                    yield from flush()
+                    return
+                pending.setdefault(_case_key(c), []).append(c)
+        yield from flush()
 
     def _body(self, itemid: str) -> bytes | None:
         """One HUDOC rendition's HTML, or None if it converts to nothing. HUDOC answers
@@ -246,10 +422,18 @@ class ECHRAdapter(BaseAdapter):
             raise FetchError(f"empty HUDOC conversion for {stub.stable_id} "
                              f"({1 + len(stub.hints.get('alt') or [])} rendition(s) tried)",
                              transient=True)
+        # HUDOC dates come in two shapes: ``judgementdate`` as "25/05/2021 00:00:00" and
+        # ``kpdate`` as ISO. Accept both — reading only the slashed form left every
+        # judgment whose judgementdate is absent (HUDOC leaves it empty on some
+        # renditions) with no decision_date at all, and an undated judgment drops out of
+        # every date filter, every "newest" sort and the retained-EU-law cutoffs.
         date_raw = (stub.hints.get("date") or "")[:10]
         try:
-            from datetime import date as _date
-            dec_date = _date.fromisoformat("-".join(reversed(date_raw.split("/")))) if "/" in date_raw else None
+            dec_date = (
+                _date.fromisoformat("-".join(reversed(date_raw.split("/"))))
+                if "/" in date_raw else
+                (_date.fromisoformat(date_raw) if date_raw else None)
+            )
         except ValueError:
             dec_date = None
         ecli = stub.hints.get("ecli") or (stub.stable_id if stub.stable_id.startswith("ECLI:") else None)

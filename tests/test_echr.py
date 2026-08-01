@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from raglex.adapters.echr import ECHRAdapter, appno_from_ecli, parse_body_html
 from raglex.citations import extract_citations
@@ -140,3 +141,98 @@ def test_all_renditions_empty_is_still_transient():
         assert exc.transient and "2 rendition(s)" in str(exc)
     else:
         raise AssertionError("expected a transient FetchError")
+
+
+class _FakeFeed:
+    """A HUDOC feed of ``pages`` rows, honouring start/length and the 10,000 ceiling.
+
+    Modelled on the real service: past ``start=10000`` it answers 200 OK with an EMPTY
+    result set rather than an error, which is what makes an unguarded deep page look like
+    the end of the corpus.
+    """
+
+    CEILING = 10000
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.queries: list[str] = []
+
+    def get(self, url, **kw):
+        from urllib.parse import parse_qs, urlparse
+
+        q = parse_qs(urlparse(url).query)
+        query = q["query"][0]
+        self.queries.append(query)
+        start, length = int(q["start"][0]), int(q["length"][0])
+        rows = self.rows
+        m = re.search(r"kpdate:\[\S+ TO (\d{4}-\d{2}-\d{2})T", query)
+        if m:
+            rows = [r for r in rows if r["columns"]["kpdate"][:10] <= m.group(1)]
+        page = [] if start >= self.CEILING else rows[start:start + length]
+
+        class R:
+            content = json.dumps({"resultcount": len(rows), "results": page}).encode()
+        return R()
+
+
+def _feed_rows(n: int, *, start_day: int = 0):
+    """``n`` cases, two renditions each (ENG + FRE), one case per day, newest first."""
+    import datetime as dt
+
+    rows = []
+    for i in range(n):
+        day = (dt.date(2026, 7, 23) - dt.timedelta(days=start_day + i)).isoformat()
+        ecli = f"ECLI:CE:ECHR:2026:0723JUD{i:07d}13"
+        for lang, name, doctype in (("FRE", f"AFFAIRE {i} c. FRANCE", "CHAMBER"),
+                                    ("ENG", f"CASE OF {i} v. FRANCE", "CHAMBER")):
+            rows.append({"columns": {
+                "itemid": f"001-{i}{lang}", "ecli": ecli, "appno": f"{i}/13",
+                "docname": name, "doctype": doctype, "languageisocode": lang,
+                "kpdate": f"{day}T00:00:00", "judgementdate": None,
+            }})
+    return rows
+
+
+def test_echr_feed_groups_renditions_and_stops_at_the_cursor():
+    """One case, not one row per language — and the crawl breaks at the watermark.
+
+    HUDOC publishes a judgment as several documents (English text, French text,
+    translations) that share ONE ECLI. Yielding them as they arrive would store the same
+    judgment twice under two ids and lose the fallback rendition that :meth:`fetch` needs
+    when the English text will not convert.
+    """
+    feed = _FakeFeed(_feed_rows(6))
+    ad = ECHRAdapter(client=feed)
+
+    stubs = list(ad.discover(None, max_pages=1))
+    assert len(stubs) == 6                                    # 12 rows, 6 cases
+    assert len({s.stable_id for s in stubs}) == 6
+    # the English judgment leads; the French rendition rides along as the fallback body
+    assert stubs[0].title.startswith("CASE OF")
+    assert [a["lang"] for a in stubs[0].hints["alt"]] == ["FRE"]
+    assert stubs[0].hint_date.isoformat() == "2026-07-23"     # the cursor the pipeline stores
+
+    # newest-first, so the first item older than the cursor ends the walk
+    recent = list(ad.discover("2026-07-21", max_pages=1))
+    assert [s.hint_date.isoformat() for s in recent] == [
+        "2026-07-23", "2026-07-22", "2026-07-21"]
+
+
+def test_echr_feed_walks_past_the_10000_row_ceiling():
+    """HUDOC serves an empty page past start=10000 instead of an error.
+
+    The Chamber/Grand Chamber series is ~71,000 documents, so a backfill that only pages
+    ``start`` stops dead partway through and reports success. The crawl must re-anchor
+    the query to a date window and start over.
+    """
+    feed = _FakeFeed(_feed_rows(7000))          # 14,000 rows: past the ceiling
+    ad = ECHRAdapter(client=feed)
+
+    stubs = list(ad.discover(None, max_pages=40))
+    dates = [s.hint_date.isoformat() for s in stubs]
+
+    assert len({s.stable_id for s in stubs}) == len(stubs)     # the re-anchor overlap dedupes
+    assert all(dates[i] >= dates[i + 1] for i in range(len(dates) - 1))
+    # got past where an unguarded ``start`` walk would have stopped
+    assert len(stubs) > _FakeFeed.CEILING // 2
+    assert any("kpdate:[" in q for q in feed.queries)

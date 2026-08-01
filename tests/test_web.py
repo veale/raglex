@@ -110,8 +110,10 @@ def test_keep_current_overview_endpoint(client):
     assert "overlap_default_days" in data
     modes = {s["key"]: s["incremental_mode"] for s in data["sources"]}
     assert modes.get("us-caselaw") == "server"
-    assert modes.get("echr") == "targeted"
+    assert modes.get("au-nsw") == "targeted"
     assert modes.get("uk-caselaw") == "early-stop"
+    # HUDOC's newest-first judgment feed — echr stopped being fetch-by-id-only
+    assert modes.get("echr") == "early-stop"
 
 
 def test_document_endpoint(client):

@@ -658,10 +658,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         ("CJEU case CELEX (62018CJ0511)", "ECLI:EU:C:…"),
     ),
     "echr": SourceInfo(
+        # keyword_search stays False: HUDOC's query language is Lucene-ish and a bare
+        # multi-word keyword injected into it returns an empty result set rather than an
+        # error — a silent nothing. Keywords post-filter; ``query`` is the expert escape.
         "echr", "ECHR case law (HUDOC)", "caselaw", "CoE", False,
-        "ECtHR judgments fetched by ECLI (ECLI:CE:ECHR:…) or application number (58170/13) "
-        "— give either as ids.",
-        (SourceOption("ids", "ECLIs or application numbers", "58170/13, ECLI:CE:ECHR:2021:0525JUD005817013"),),
+        "Walks HUDOC's Chamber/Grand Chamber judgment feed newest-first by default, so a "
+        "watch picks up judgments as the Court publishes them; a backfill walks the whole "
+        "series. Name ids to fetch specific judgments by ECLI (ECLI:CE:ECHR:…) or "
+        "application number (58170/13).",
+        (SourceOption("ids", "ECLIs or application numbers", "58170/13, ECLI:CE:ECHR:2021:0525JUD005817013"),
+         SourceOption("collections", "HUDOC collections to follow",
+                      "GRANDCHAMBER,CHAMBER (default); add COMMITTEE or DECISIONS"),
+         SourceOption("query", "Extra HUDOC query clause", 'e.g. article="8"')),
         ("ECLI:CE:ECHR:…", "application no. 58170/13"),
     ),
     "uk-legislation": SourceInfo(
@@ -1495,8 +1503,10 @@ INCREMENTAL_MODE: dict[str, str] = {
     "uk-cat": "full-walk",
     "ie-dpc": "full-walk",
     "ie-dpc-guidance": "full-walk",
+    # HUDOC's own feed is newest-first by kpdate, so the crawl breaks at the cursor.
+    "echr": "early-stop",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
-    "echr": "targeted", "au-nsw": "targeted",
+    "au-nsw": "targeted",
     # bulk / local-file seeds (no live path)
     "au-caselaw": "bulk", "ca-caselaw": "bulk", "us-caselaw-bulk": "bulk",
     "in-caselaw": "bulk", "fr-dila": "bulk", "fr-dila-legi": "bulk",
