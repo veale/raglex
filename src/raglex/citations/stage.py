@@ -475,7 +475,10 @@ def extract_documents_parallel(
             try:
                 # the worker's protocol is (text, aliases, home_id, home_kind) — the
                 # instrument a bare "Article 50(2)" belongs to travels with the document
-                worker.conn.send((text, aliases, *_home_of(doc)))
+                # Source-scoped shorthands travel with the document, not the run: a
+                # bulk rescan mixes sources in one pool.
+                worker.conn.send((text, aliases_for_document(doc, aliases),
+                                  *_home_of(doc)))
             except (OSError, ValueError):
                 return False        # worker torn down — caller respawns
             worker.item = (sid, doc, text)
@@ -536,8 +539,9 @@ def extract_documents_parallel(
                         pool[pool.index(w)] = w = _PoolWorker()
                         defs: list[dict] = []
                         _hid, _hkind = _home_of(doc)
-                        cites = extract_citations(text, aliases=aliases, defs_out=defs,
-                                                  home_id=_hid, home_kind=_hkind)
+                        cites = extract_citations(
+                            text, aliases=aliases_for_document(doc, aliases),
+                            defs_out=defs, home_id=_hid, home_kind=_hkind)
                         _finish(sid, doc, text, (cites, defs))
                     else:
                         w.item = None
@@ -591,6 +595,32 @@ _UK_REFERRAL_RE = re.compile(
 # the name-based UK-statute grammars gated by the CJEU guard (NOT the explicit
 # legislation.gov.uk URI grammar — an explicit URL is unambiguous, not a heuristic).
 _UK_NAME_HEURISTICS = {"uk_statute_named", "uk_act_section"}
+
+# Shorthands that are unambiguous INSIDE one source and dangerous outside it. In an
+# Investigatory Powers Tribunal judgment "RIPA" and "IPA" mean the two Acts the Tribunal
+# exists to apply, every single time they appear; in the wider corpus "IPA" is an
+# insolvency practitioners' association, an independent police authority, and a beer.
+# Scoping the expansion to the source is what lets the certainty be used without
+# spending it somewhere it isn't true.
+# The year-suffixed forms are listed too: a judgment that writes "RIPA 2000" or
+# "IPA 2016" once and the bare acronym thereafter must have both caught, and an alias
+# matches the phrase it is given rather than a prefix of it.
+_SOURCE_ALIASES: dict[str, dict[str, str]] = {
+    "uk-ipt": {
+        "RIPA": "ukpga/2000/23",
+        "RIPA 2000": "ukpga/2000/23",
+        "IPA": "ukpga/2016/25",
+        "IPA 2016": "ukpga/2016/25",
+    },
+}
+
+
+def aliases_for_document(doc, aliases: dict[str, str] | None) -> dict[str, str] | None:
+    """The corpus-wide shorthand rules plus any this document's SOURCE guarantees."""
+    scoped = _SOURCE_ALIASES.get((doc["source"] or "") if doc is not None else "")
+    if not scoped:
+        return aliases
+    return {**(aliases or {}), **scoped}
 
 # UK domestic legislation, by the shape of its identifier. Gating on the TARGET rather
 # than on the grammar that produced it is what makes the guard below complete: a UK act
@@ -808,6 +838,7 @@ def extract_document(
         return 0
     if aliases is None:
         aliases = catalogue.named_alias_map()  # user shorthand rules (propagate)
+    aliases = aliases_for_document(doc, aliases)
     if llm is None:
         guarded = _GUARD.extract(text, aliases, _home_of(doc))
         cites, raw_defs = guarded if guarded is not None else (None, [])

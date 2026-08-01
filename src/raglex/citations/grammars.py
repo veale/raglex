@@ -166,6 +166,12 @@ _UK_ACT_TO_ID = {
     # link the guidance to the exact provision (both directions, via the graph).
     "online safety act 2023": "ukpga/2023/50",
     "online safety act": "ukpga/2023/50",
+    # The surveillance statutes. The full names are unambiguous anywhere; the acronyms
+    # (RIPA, IPA) are not, and are expanded only inside the sources where they always
+    # mean these — see citations.stage._SOURCE_ALIASES.
+    "investigatory powers act 2016": "ukpga/2016/25",
+    "investigatory powers act": "ukpga/2016/25",
+    "regulation of investigatory powers act 2000": "ukpga/2000/23",
 }
 
 # Statutory instruments cited BY NAME. They need their own map, and their own grammar,

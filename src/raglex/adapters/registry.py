@@ -44,6 +44,7 @@ from .fr_judilibre import FrJudilibreAdapter
 from .fr_legislation import FrLegislationAdapter
 from .gdprhub import GDPRhubAdapter
 from .uk_ipa_codes import UKIPACodesAdapter
+from .uk_ipt import UKIPTAdapter
 from .de_gii import DeGiiAdapter
 from .de_neuris import DeNeurisAdapter
 from .de_rii import DeRiiAdapter
@@ -178,6 +179,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # fixed one-time import of the nine gov.uk codes; bare section/schedule references
     # are linked to the IPA 2016 (ukpga/2016/25).
     "uk-ipa-codes": UKIPACodesAdapter,
+    # Investigatory Powers Tribunal judgments — one HTML page each, keyed by the
+    # neutral citation printed on an early line. RIPA and IPA are treated as shorthand
+    # for the two Acts throughout, because in this Tribunal they always are.
+    "uk-ipt": UKIPTAdapter,
     # GDPRhub (noyb's DP case-report wiki) — DPA decisions + court judgments as
     # structured infobox reports, harvested from the NewPages Atom feed (the site is
     # Anubis-walled, the feed is open). Stored under jurisdiction (court = dpa-xx), the
@@ -745,6 +750,21 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "dedup, a revised gov.uk page re-ingests via content hash).",
         (),
         ("gov.uk code-of-practice URL",),
+    ),
+    "uk-ipt": SourceInfo(
+        "uk-ipt", "Investigatory Powers Tribunal", "caselaw", "GB", True,
+        "Judgments of the Investigatory Powers Tribunal, published one HTML page each at "
+        "investigatorypowerstribunal.org.uk. Identity is the neutral citation printed on an "
+        "early line ([2025] UKIPTrib 10 -> ukiptrib/2025/10); the body is segmented by the "
+        "numbered paragraph a later judgment pinpoints. A backfill reads the listing page "
+        "(the whole set in one request); a watch posts the site's own date-range filter, so "
+        "an incremental check normally returns nothing. The Strasbourg judgment in Kennedy, "
+        "republished on the site, is skipped -- its infobox carries an application number "
+        "rather than a case number, and the corpus holds ECtHR judgments under their HUDOC "
+        "identity. Within this source RIPA and IPA resolve to the Regulation of "
+        "Investigatory Powers Act 2000 and the Investigatory Powers Act 2016.",
+        (),
+        ("neutral citation ([2025] UKIPTrib 10)", "IPT case number"),
     ),
     "gdprhub": SourceInfo(
         "gdprhub", "GDPRhub (DP decisions & analysis)", "caselaw", "EU", False,
