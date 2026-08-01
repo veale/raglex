@@ -639,3 +639,87 @@ def test_a_subsection_citation_inherits_through_its_provisions_mapping(tmp_path)
     assert srcs == {"case-sub", "case-exact"}
     # "s. 3" must NOT be swept in by a prefix match on "s. 33A".
     assert "case-other" not in srcs
+
+
+def test_uk_transposition_inherits_only_retained_eu_case_law(tmp_path):
+    """A UK provision transposing a directive inherits pre-Brexit CJEU authority only.
+
+    CJEU judgments handed down before IP completion day are retained EU case law and
+    bind UK courts; what Luxembourg decided afterwards does not govern the domestic
+    provision. Presenting the later judgments as inherited authority would be a legal
+    error, not an untidy result — so the cutoff follows the claim automatically.
+    """
+    from datetime import date
+
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        _held(cat, ts, "ukpga/2018/12")
+        _held(cat, ts, "32016L0680")
+        # Two CJEU judgments either side of the cutoff, both properly dated…
+        for sid, when in (("dated-2019", date(2019, 5, 1)), ("dated-2023", date(2023, 5, 1))):
+            cat.upsert_document(Record(
+                source="eu-cellar", stable_id=sid, doc_type=DocType.JUDGMENT,
+                title=sid, decision_date=when, extracted_via=ExtractedVia.STRUCTURED))
+        # …and two dated ONLY by their ECLI year, which is 61% of the EU corpus.
+        for sid, ecli in (("undated-2018", "ECLI:EU:C:2018:551"),
+                          ("undated-2022", "ECLI:EU:C:2022:702")):
+            cat.upsert_document(Record(
+                source="eu-cellar", stable_id=sid, doc_type=DocType.JUDGMENT,
+                title=sid, ecli=ecli, extracted_via=ExtractedVia.STRUCTURED))
+        for src in ("dated-2019", "dated-2023", "undated-2018", "undated-2022"):
+            cat.add_relations(src, [TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string="Article 4", dst_id="32016L0680",
+                dst_anchor="Article 4", extracted_via=ExtractedVia.MANUAL,
+                resolution_status=ResolutionStatus.RESOLVED,
+            )])
+
+    written = f.upsert_provision_mappings(
+        current_id="ukpga/2018/12", previous_id="32016L0680",
+        mapping_type="uk_transposition",
+        mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4"}])
+    assert written["mappings"][0]["mapping_type"] == "uk_transposition"
+    assert written["mappings"][0]["inherit_before"] == "2020-12-31"   # set from the claim
+
+    inherited = f.inherited_provision_mentions(stable_id="ukpga/2018/12")
+    srcs = {r["src_id"] for r in inherited["incoming"]}
+    # Both pre-cutoff judgments come through — including the one dated only by its ECLI.
+    assert srcs == {"dated-2019", "undated-2018"}
+
+    # An ordinary predecessor mapping is not date-limited.
+    f.upsert_provision_mappings(
+        current_id="ukpga/2018/12", previous_id="32016L0680",
+        mapping_type="functional_predecessor",
+        mappings=[{"current_anchor": "s. 36", "previous_anchor": "Article 4"}])
+    everything = f.inherited_provision_mentions(
+        stable_id="ukpga/2018/12", current_anchor="s. 36")
+    assert {r["src_id"] for r in everything["incoming"]} == {
+        "dated-2019", "dated-2023", "undated-2018", "undated-2022"}
+
+
+def test_the_transposition_cutoff_can_be_set_and_cleared(tmp_path):
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        _held(cat, ts, "ukpga/2018/12")
+        _held(cat, ts, "32016L0680")
+
+    explicit = f.upsert_provision_mappings(
+        current_id="ukpga/2018/12", previous_id="32016L0680",
+        mapping_type="uk_transposition",
+        mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4",
+                   "inherit_before": "2016-05-04"}])
+    assert explicit["mappings"][0]["inherit_before"] == "2016-05-04"
+
+    cleared = f.upsert_provision_mappings(
+        current_id="ukpga/2018/12", previous_id="32016L0680",
+        mapping_type="uk_transposition",
+        mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4",
+                   "inherit_before": "never"}])
+    assert cleared["mappings"][0]["inherit_before"] is None
+
+    bad = f.upsert_provision_mappings(
+        current_id="ukpga/2018/12", previous_id="32016L0680",
+        mapping_type="uk_transposition",
+        mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4",
+                   "inherit_before": "31/12/2020"}])
+    assert "error" in bad and "YYYY-MM-DD" in bad["error"]

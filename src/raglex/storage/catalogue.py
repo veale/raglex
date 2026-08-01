@@ -117,6 +117,10 @@ CREATE TABLE IF NOT EXISTS provision_mappings (
     previous_doc_id     TEXT NOT NULL,
     previous_anchor     TEXT NOT NULL,
     mapping_type        TEXT NOT NULL DEFAULT 'functional_predecessor',
+    -- Only inherit citations from documents decided on or before this date. A UK
+    -- transposition of an EU directive inherits retained EU case law (pre-IP completion
+    -- day) and not what Luxembourg decided afterwards.
+    inherit_before      TEXT,
     note                TEXT,
     created_by          TEXT NOT NULL DEFAULT 'manual',
     confidence          REAL,
@@ -600,6 +604,27 @@ def anchor_norm_sql(column: str = "dst_anchor") -> str:
 ANCHOR_NORM_SQL = anchor_norm_sql()
 
 
+def decided_by_sql(alias: str = "d") -> str:
+    """A date to compare a document against, in SQL, ``YYYY-MM-DD``.
+
+    ``decision_date`` first — but 36,550 of the 60,058 EU case-law documents held
+    (61%) have none, so a date filter over CJEU material would silently mis-handle most
+    of it. An ECLI carries its year in the fourth field (``ECLI:EU:C:2020:559``), which
+    is enough for a year-granularity cutoff, and 36,267 of those undated documents have
+    one. A year-only document is treated as **31 December** of that year: for a cutoff
+    that falls on a year boundary — which is what IP completion day is — that is the
+    reading that neither includes a case it shouldn't nor drops one it should.
+    """
+    # ECLI:EU:C:2020:559 — 1-based, the year begins at 11 ("ECLI:" 5 + "EU:" 3 + "C:" 2).
+    ecli_year = f"substr({alias}.ecli, 11, 4)"
+    return (
+        f"CASE WHEN {alias}.decision_date IS NOT NULL THEN substr(CAST({alias}.decision_date AS TEXT), 1, 10) "
+        f"     WHEN {alias}.ecli LIKE 'ECLI:EU:_:____:%' AND {ecli_year} BETWEEN '1950' AND '2099' "
+        f"       THEN {ecli_year} || '-12-31' "
+        "     ELSE NULL END"
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -801,6 +826,10 @@ class Catalogue:
             # recoverable; a manual edge had nowhere to record its reasoning at all, so a
             # wrong one left no trace of what was intended.
             ("relations", "note", "TEXT"),
+            # A provision mapping may only inherit citations from documents decided ON
+            # OR BEFORE this date. Set automatically for a UK transposition (retained EU
+            # case law ends at IP completion day) and overridable per mapping.
+            ("provision_mappings", "inherit_before", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -1324,13 +1353,14 @@ class Catalogue:
                     """
                     INSERT INTO provision_mappings (
                         current_doc_id, current_anchor, previous_doc_id,
-                        previous_anchor, mapping_type, note, created_by,
-                        confidence, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                        previous_anchor, mapping_type, inherit_before, note,
+                        created_by, confidence, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT (
                         current_doc_id, current_anchor, previous_doc_id,
                         previous_anchor, mapping_type
                     ) DO UPDATE SET
+                        inherit_before = excluded.inherit_before,
                         note = excluded.note,
                         created_by = excluded.created_by,
                         confidence = excluded.confidence
@@ -1339,6 +1369,7 @@ class Catalogue:
                         current_doc_id, item["current_anchor"], previous_doc_id,
                         item["previous_anchor"],
                         item.get("mapping_type") or "functional_predecessor",
+                        item.get("inherit_before"),
                         item.get("note"), created_by, item.get("confidence"), now,
                     ),
                 )
@@ -1447,6 +1478,7 @@ class Catalogue:
             f"{anchor_norm_sql('pm.previous_anchor')} || '(%')"
         )
         family_sql = " OR ".join(clauses)
+        decided = decided_by_sql("s")
         params = [*join_params, *mapping_params, max(1, min(int(limit), 5000))]
         return self.conn.execute(
             f"""
@@ -1458,14 +1490,22 @@ class Catalogue:
                    -- what the mapping CLAIMS: an earlier iteration (history) or a
                    -- companion instrument's parallel provision (in force alongside)
                    pm.mapping_type AS mapping_type,
+                   pm.inherit_before AS inherit_before,
                    d.title AS inherited_from_title
             FROM provision_mappings pm
             JOIN relations r
               ON ({family_sql})
              AND {anchor_match}
             LEFT JOIN documents d ON d.stable_id = pm.previous_doc_id
+            JOIN documents s ON s.stable_id = r.src_id
             WHERE pm.current_doc_id IN ({id_qs})
               {anchor_sql}
+              -- A UK transposition inherits RETAINED EU case law only: what Luxembourg
+              -- decided after IP completion day does not govern the domestic provision,
+              -- and presenting it as inherited authority would be a legal error, not an
+              -- untidy result. An undated citer is excluded rather than assumed current.
+              AND (pm.inherit_before IS NULL
+                   OR ({decided} IS NOT NULL AND {decided} <= pm.inherit_before))
               AND r.src_id <> pm.current_doc_id
               AND r.relationship_type IN (
                 'mentions','interprets','applies','considers','follows',

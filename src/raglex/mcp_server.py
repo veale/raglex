@@ -615,6 +615,15 @@ def build_server(config: Config | None = None) -> MCPServer:
         * ``equivalent`` — a parallel provision in a companion instrument, both in force
           (GDPR / EUDPR / LED, drafted as one package). Use this rather than asserting
           descent between instruments that never replaced one another.
+        * ``transposition`` — a NATIONAL provision implementing an EU one. Neither
+          descent nor a companion: the two are in force in different legal orders, and
+          the EU case law interpreting the directive is the point of the link.
+        * ``uk_transposition`` — the same, qualified by the UK cut-off. Only RETAINED EU
+          case law is inherited: CJEU judgments up to IP completion day (2020-12-31)
+          bind UK courts, later ones do not, so the mapping sets ``inherit_before``
+          automatically. Pass ``inherit_before`` per mapping to move it (YYYY-MM-DD) or
+          ``"never"`` to lift it. A citer whose date cannot be established — neither a
+          decision_date nor an ECLI year — is excluded rather than assumed current.
 
         Anchors are resolved against each law's own segments as they are written; any
         that matches no provision comes back in ``unresolved_anchors`` (the mapping is

@@ -44,7 +44,28 @@ PROVISION_MAPPING_TYPES = {
         "the other provision is an earlier iteration this one succeeds",
     "equivalent":
         "a parallel provision in a companion instrument, both in force",
+    # A national provision implementing an EU one. Not descent and not a companion
+    # instrument: the two are in force in different legal orders, and the EU case law
+    # interpreting the directive is what makes the link worth having.
+    "transposition":
+        "this national provision transposes the other (EU) provision into domestic law",
+    # The same relation, qualified by the UK's constitutional cut-off. CJEU judgments
+    # handed down BEFORE IP completion day are retained EU case law and bind UK courts
+    # (subject to the higher courts' power to depart); judgments after it do not. So a
+    # UK transposition inherits its directive's case law only up to that date, and
+    # saying so in the mapping is what stops the reader quietly presenting post-Brexit
+    # Luxembourg authority as though it governed a UK provision.
+    "uk_transposition":
+        "this UK provision transposes the other (EU) provision; only retained EU case "
+        "law (pre-IP completion day) is inherited",
 }
+
+# IP completion day — 31 December 2020, 11pm. Date granularity is enough: the cutoff
+# falls on a year boundary, which is what lets a document dated only by its ECLI year
+# be placed on the right side of it.
+RETAINED_EU_CASELAW_CUTOFF = "2020-12-31"
+# Mapping types that carry an automatic inheritance cutoff unless one is given.
+_DEFAULT_INHERIT_BEFORE = {"uk_transposition": RETAINED_EU_CASELAW_CUTOFF}
 
 EU_DIGITAL_ACQUIS_IDS = (
     # data protection / data economy
@@ -9837,10 +9858,24 @@ class Facade:
                 return {"error": f"unknown mapping_type {item.get('mapping_type')!r} for "
                                  f"{current_anchor}",
                         "known": sorted(PROVISION_MAPPING_TYPES)}
+            # The cutoff follows the CLAIM unless the caller overrides it: asserting a UK
+            # transposition and getting post-Brexit CJEU authority inherited with it
+            # would be the same class of error as a silently coerced relationship.
+            inherit_before = item.get("inherit_before")
+            if inherit_before is None:
+                inherit_before = _DEFAULT_INHERIT_BEFORE.get(item_type)
+            elif str(inherit_before).strip().lower() in ("", "none", "never"):
+                inherit_before = None
+            else:
+                inherit_before = str(inherit_before).strip()[:10]
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", inherit_before):
+                    return {"error": f"inherit_before must be YYYY-MM-DD, got "
+                                     f"{item.get('inherit_before')!r}"}
             clean.append({
                 "current_anchor": current_anchor,
                 "previous_anchor": previous_anchor,
                 "mapping_type": item_type,
+                "inherit_before": inherit_before,
                 "note": str(item.get("note") or "").strip() or None,
                 "confidence": confidence,
             })
