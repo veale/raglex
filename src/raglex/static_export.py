@@ -733,12 +733,17 @@ class StaticLawExporter:
             for relation in relations:
                 by_source.setdefault(relation["src_id"], []).append(relation)
             authority = cat.authority_for(list(by_source))
+            # One round trip for every citer, like authority_for above — not a
+            # single-row query per citer. A heavily-cited Act has thousands of them,
+            # and the export walks every held document, so the N+1 was paid per
+            # edition per run.
+            source_rows = cat.get_documents(list(by_source))
 
             groups: list[dict] = []
             source_items = list(by_source.items())
             total_sources = len(source_items)
             for position, (source_id, source_relations) in enumerate(source_items, 1):
-                row = cat.get_document(source_id)
+                row = source_rows.get(source_id)
                 if row is None:
                     continue
                 meta = _row_meta(row)
