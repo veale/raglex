@@ -1386,10 +1386,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.document_citations_out(id, family=family)
 
     @app.get("/document-body")
-    def document_body(id: str) -> dict:
+    def document_body(id: str, offset: int = 0, limit: int | None = None,
+                      segments_only: bool = False) -> dict:
         # query-param route: stable_ids contain slashes (ukpga/2000/36), so a
         # /documents/{id}/body suffix would be ambiguous.
-        return facade.document_body(id)
+        #
+        # The window is exposed here as well as over MCP: a 816k-character act is as
+        # unreturnable to the reader as it is to an agent, and an unwindowed call on one
+        # comes back as its first page with ``window.next_offset`` to walk the rest.
+        return facade.document_body(id, offset=offset, limit=limit,
+                                    segments_only=segments_only)
 
     # NB: registered BEFORE the /documents/{stable_id:path} catch-all so the
     # trailing /raw wins the route match (slugs themselves contain slashes).

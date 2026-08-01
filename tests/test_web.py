@@ -381,3 +381,24 @@ def test_import_reads_the_citations_it_carries(client):
     pins = {rel.get("dst_anchor") for rel in doc["relations"]}
     assert "Article 53(1)(a)" in pins and "Annex XII" in pins
     assert all(rel["dst_id"] == "32024R1689" for rel in doc["relations"])
+
+
+def test_a_body_too_large_to_return_comes_back_as_its_first_window(client, monkeypatch):
+    """The DPA 2018 assembles to 2.4 MB against a 1 MB tool ceiling, so the unwindowed
+    call could not be answered at all — and the failure named none of the ways through."""
+    from raglex.facade import Facade
+
+    monkeypatch.setattr(Facade, "_BODY_DEFAULT_WINDOW", 20)
+    body = client.get("/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()
+    w = body["window"]
+    assert w["defaulted"] is True and w["has_more"] is True
+    assert w["next_offset"] == 20 and len(body["text"]) == 20
+    assert "segments_only" in w["note"] and "next_offset" in w["note"]
+    # a caller who asks for a window is left alone
+    explicit = client.get("/document-body",
+                          params={"id": "ECLI:EU:C:2020:1", "limit": 10}).json()
+    assert "defaulted" not in explicit["window"]
+    # …and a short document is returned whole, with no window at all
+    monkeypatch.setattr(Facade, "_BODY_DEFAULT_WINDOW", 10_000_000)
+    assert "window" not in client.get(
+        "/document-body", params={"id": "ECLI:EU:C:2020:1"}).json()

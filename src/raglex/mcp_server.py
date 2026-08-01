@@ -332,8 +332,11 @@ def build_server(config: Config | None = None) -> MCPServer:
         are returned separately as ``inherited_recitals`` with original-act provenance;
         they are live projections, not copied consolidation text.
 
-        A long act CANNOT be returned whole — the DPA 2018 is 1,222 segments and exceeds
-        the 1 MB tool ceiling outright. Two ways through:
+        A long act cannot be returned whole — the DPA 2018 is 1,222 segments and assembles
+        to 2.4 MB against a 1 MB tool ceiling — so an unwindowed call on one returns its
+        FIRST WINDOW, flagged ``window.defaulted`` with ``next_offset`` to walk the rest.
+        Never assume a body is complete without checking ``window.has_more``. Two ways to
+        take control:
 
         * ``segments_only=True`` — every label, kind, level and char offset, no text. For
           structural work (picking a provision to pincite, building a correlation table)

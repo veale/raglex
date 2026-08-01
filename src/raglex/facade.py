@@ -2074,6 +2074,12 @@ class Facade:
             ),
         }
 
+    # Characters of text returned when the caller asked for no window and the document is
+    # too large to return whole. Deliberately conservative: the payload carries segments
+    # and inline citations too, and their density varies enormously between a flat
+    # judgment and a heavily-cross-referenced act, so the budget is set for the dense case.
+    _BODY_DEFAULT_WINDOW = 120_000
+
     def document_body(self, stable_id: str, *, offset: int = 0,
                       limit: int | None = None, segments_only: bool = False) -> dict:
         """The document's extracted text + structural segments (§6b) for the reader.
@@ -2178,6 +2184,16 @@ class Facade:
                 # which still wants indenting
                 if not segs and "\n" in text:
                     flat_lines = _spans(text, 0)
+            # A caller who asked for no window and a document too big to return gets the
+            # FIRST PAGE, not a transport error. The Data Protection Act 2018 assembles to
+            # 2.4 MB — text plus 1,222 segments plus every inline citation — against a 1 MB
+            # tool ceiling, so the unwindowed call could not be answered at all, and the
+            # failure came back as a size error that names none of the ways through. The
+            # window it gets is explicit (``has_more``/``next_offset``, and
+            # ``defaulted: True``), so this can never read as the whole act.
+            defaulted = False
+            if text and not offset and limit is None and len(text) > self._BODY_DEFAULT_WINDOW:
+                limit, defaulted = self._BODY_DEFAULT_WINDOW, True
             window = None
             if text and (offset or limit):
                 # A character window, with segments/citations narrowed to what OVERLAPS
@@ -2188,6 +2204,13 @@ class Facade:
                 window = {"offset": start, "limit": end - start,
                           "text_chars": len(text), "has_more": end < len(text),
                           "next_offset": end if end < len(text) else None}
+                if defaulted:
+                    window["defaulted"] = True
+                    window["note"] = (
+                        f"{len(text):,} characters is too large to return whole, so this "
+                        "is the first window. Walk it with next_offset, or call "
+                        "segments_only=True for the structure alone, or "
+                        "get_provision(label=…) for one provision.")
                 segs = [s for s in segs
                         if s["char_end"] > start and s["char_start"] < end]
                 citations = [c for c in citations

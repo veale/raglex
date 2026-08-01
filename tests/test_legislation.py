@@ -549,3 +549,42 @@ def test_eu_legislation_default_enumeration_includes_whole_treaties():
     assert "work_has_resource-type" in q
     assert '^1[0-9]{4}[A-Z]{1,2}$' in q
     assert "TREATY" in EULegislationAdapter().types
+
+
+# -- EUR-Lex HTML: an annex is its own provision, not the tail of the last article --
+def test_eurlex_html_gives_an_annex_its_own_segment():
+    """Directive 2000/31's "ANNEX — DEROGATIONS FROM ARTICLE 3" was swallowed into
+    Article 24's segment, so it could not be anchored, quoted or cited at all — and the
+    footnote markers that precede it ((28), (29)) were read as its sub-provisions."""
+    from raglex.formats import parse
+
+    html = b"""<html><head><title>EUR-Lex - 32000L0031 - EN</title></head><body>
+    <p class="ti-art">Article 24</p><p>This Directive is addressed to the Member States.</p>
+    <p>(29) OJ L 145, 13.6.1977, p. 1.</p>
+    <p>ANNEX</p><p>DEROGATIONS FROM ARTICLE 3</p>
+    <p>As provided for in Article 3(3), Article 3(1) and (2) do not apply to:</p>
+    </body></html>"""
+    d = parse("eurlex-html", html)
+    kinds = {s.kind for s in d.segments}
+    assert "annex" in kinds
+    annex = next(s for s in d.segments if s.kind == "annex")
+    # the SHOUTED subject line belongs in the label — that is how the annex is cited
+    assert annex.label == "ANNEX DEROGATIONS FROM ARTICLE 3"
+    body = d.text[annex.char_start:annex.char_end]
+    assert body.startswith("As provided for in Article 3(3)")
+    # …and Article 24 keeps only its own text
+    art24 = next(s for s in d.segments if s.label == "Article 24")
+    assert "DEROGATIONS" not in d.text[art24.char_start:art24.char_end]
+
+
+def test_eurlex_html_numbered_annexes_and_plain_articles_still_parse():
+    from raglex.formats import parse
+
+    html = b"""<html><head><title>t</title></head><body>
+    <p class="ti-art">Article 1</p><p>Scope.</p>
+    <p>ANNEX I</p><p>FIRST SCHEDULE OF THINGS</p><p>Item one.</p>
+    <p>ANNEX II</p><p>SECOND SCHEDULE</p><p>Item two.</p>
+    </body></html>"""
+    d = parse("eurlex-html", html)
+    assert [s.label for s in d.segments] == [
+        "Article 1", "ANNEX I FIRST SCHEDULE OF THINGS", "ANNEX II SECOND SCHEDULE"]

@@ -18,6 +18,8 @@ from ..core.segmentation import SEP
 from .base import ParsedDoc, register
 
 _ARTICLE_RE = re.compile(r"^Article\s+\d+", re.IGNORECASE)
+# "ANNEX", "ANNEX I", "ANNEX 1" — its own heading, never part of the last article.
+_ANNEX_RE = re.compile(r"^ANNEXE?\s*(?:[IVXLC]{1,6}|\d{1,2})?\s*$", re.IGNORECASE)
 
 # The <title> of an EUR-Lex page is frequently just "EUR-Lex - 31995L0046 - EN".
 # For older instruments served in the legacy "Avis juridique important" layout the
@@ -115,13 +117,15 @@ def parse_eurlex_html(data: bytes) -> ParsedDoc:
         title = _title_from_body(soup) or title
 
     # Article-structured pass: EUR-Lex uses class names containing 'ti-art'.
-    blocks: list[tuple[str, str]] = []  # (label, text)
+    blocks: list[tuple[str, str, str]] = []  # (label, kind, text)
     current_label: str | None = None
+    current_kind = "article"
     current: list[str] = []
+    want_annex_title = False
 
     def flush():
         if current_label and current:
-            blocks.append((current_label, "\n".join(current).strip()))
+            blocks.append((current_label, current_kind, "\n".join(current).strip()))
 
     paras = soup.find_all(["p", "div"])
     for p in paras:
@@ -130,11 +134,26 @@ def parse_eurlex_html(data: bytes) -> ParsedDoc:
         if not text:
             continue
         is_article = "ti-art" in classes or _ARTICLE_RE.match(text)
-        if is_article and len(text) < 40:  # an "Article N" heading line
+        is_annex = "ti-annexe" in classes or _ANNEX_RE.match(text)
+        if is_annex and len(text) < 40:
+            # Without this every annex was swallowed by the LAST ARTICLE: Directive
+            # 2000/31's "ANNEX — DEROGATIONS FROM ARTICLE 3" ended up inside Article 24's
+            # segment, so it could not be anchored, quoted or cited at all, and the
+            # footnote markers around it ((28), (29)) were read as its sub-provisions.
             flush()
-            current_label = text
-            current = []
+            current_label, current_kind, current = text.strip(), "annex", []
+            want_annex_title = True
+        elif is_article and len(text) < 40:  # an "Article N" heading line
+            flush()
+            current_label, current_kind, current = text, "article", []
+            want_annex_title = False
+        elif want_annex_title and len(text) < 90 and text == text.upper():
+            # An annex heading is two lines — "ANNEX" then its SHOUTED subject. Keep the
+            # subject in the LABEL, so the segment is named the way it is cited.
+            current_label = f"{current_label} {text.strip()}".strip()
+            want_annex_title = False
         elif current_label is not None:
+            want_annex_title = False
             current.append(text)
     flush()
 
@@ -145,13 +164,13 @@ def parse_eurlex_html(data: bytes) -> ParsedDoc:
     parts: list[str] = []
     segments: list[Segment] = []
     cursor = 0
-    for label, text in blocks:
+    for label, kind, text in blocks:
         if not text:
             continue
         if parts:
             cursor += len(SEP)
         segments.append(Segment(label=label, char_start=cursor, char_end=cursor + len(text),
-                                kind="article", level=0))
+                                kind=kind, level=0))
         parts.append(text)
         cursor += len(text)
     return ParsedDoc(text=SEP.join(parts) or None, segments=segments, title=title)
