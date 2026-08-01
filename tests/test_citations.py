@@ -1227,3 +1227,40 @@ def test_annex_cue_does_not_cross_a_line_break():
     pins = _pins(text)
     assert ("32005L0029", "Annex 42") not in pins
     assert ("32005L0029", "Annex I, point 29") in pins
+
+
+def test_annex_guards_reject_the_sentence_end_and_named_host_forms():
+    """The three false positives a sample of the live corpus threw up.
+
+    "Annex" is never abbreviated with a full stop (unlike "Sch." and "para."), so a dot
+    after it always ends a sentence and the number that follows belongs to the NEXT one.
+    And an annex that names its own host — "Annex 9 to the Convention on International
+    Civil Aviation" — is not an annex of whatever instrument happens to have been named
+    last, which is the only thing carry-forward could attach it to.
+    """
+    def annex_pins(text):
+        return {p for _, p in _pins(text) if (p or "").startswith(("Annex", "Sch."))}
+
+    # a clause number after a sentence-final "Annex."
+    assert not annex_pins(
+        "Directive 72/245/EEC applies. It shall be deemed to comply with paragraph 6.9 "
+        "of this Annex. 8.6. The loss of function of receivers during the test.")
+    # a CJEU paragraph number after a sentence-final "annex."
+    assert not annex_pins(
+        "Directive 2005/29/EC applies. In accordance with point 8 of that annex. "
+        "24. The referring court considers that the practice is unfair.")
+    # the annex belongs to a treaty the text names, not to the last EU instrument
+    assert not annex_pins(
+        "Regulation (EU) 2016/679 applies. A transit visa by way of exception from the "
+        "principle laid down in Annex 9 to the Convention on International Civil Aviation.")
+    assert not annex_pins(
+        "Regulation (EU) 2016/679 applies. The Understanding is in Annex 2 to the WTO "
+        "Agreement.")
+    # an instrument referring to its OWN annex
+    assert not annex_pins(
+        "Regulation (EU) 2016/679 applies. The variables are identified in this Annex 1.")
+
+    # ...and none of that costs the real ones
+    assert annex_pins(
+        "Directive 2005/29/EC applies. The practice falls within Annex I, point 29."
+    ) == {"Annex I, point 29"}

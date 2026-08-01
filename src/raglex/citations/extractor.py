@@ -795,19 +795,38 @@ _ANNEX_OR_SCHEDULE_NUM = r"[ivxlc]+(?![a-z])|\d{1,3}[A-Z]?"
 # Directive 2005/29…" offered the word "annex" and the paragraph number "42" to a
 # newline-crossing gap and minted "Annex 42". Losing a genuine annex whose number was
 # split across a line by PDF extraction is the cheaper error by far.
-_H = r"[ \t ]{0,3}"
+_H = r"[ \t\u00a0]{0,3}"
+# "Annex" is NEVER abbreviated with a full stop, unlike "Sch." and "para.". So a dot
+# after it always ends a sentence, and what follows is the next sentence's number rather
+# than the annex's: "…shall be deemed to comply with paragraph 6.9 of this Annex. 8.6.
+# The loss of function…" yielded "Annex 8", and "…point 8 of that annex. 24. The
+# referring court considers…" yielded "Annex 24". Allowing the dot only for the schedule
+# spellings removes that whole family of false positives at once.
+_ANNEX_CUE = r"annexe?"
+_SCHEDULE_CUE = r"(?:schedule|sched|sch)\.?"
+_CUES = rf"(?:{_ANNEX_CUE}|{_SCHEDULE_CUE})"
 _BARE_COMPOUND = re.compile(
     r"\b(?:"
     # reverse order first, so "point 29 of Annex I" is not read as a bare "Annex I"
     rf"(?:points?|paragraphs?|paras?)\.?{_H}\(?(?P<rsub>\d{{1,3}}[a-z]?)\)?{_H}"
-    rf"(?:of|to|in){_H}\s(?:the{_H}\s)?(?P<rcue>annexe?|schedule|sched|sch)\.?{_H}"
+    rf"(?:of|to|in){_H}\s(?:the{_H}\s)?(?P<rcue>{_CUES}){_H}"
     rf"(?P<rnum>{_ANNEX_OR_SCHEDULE_NUM})"
     r"|"
-    rf"(?P<cue>annexe?|schedule|sched|sch)\.?{_H}(?P<num>{_ANNEX_OR_SCHEDULE_NUM})"
+    rf"(?P<cue>{_CUES}){_H}(?P<num>{_ANNEX_OR_SCHEDULE_NUM})"
     rf"(?:{_H},?{_H}(?:points?|paragraphs?|paras?)\.?{_H}\(?(?P<sub>\d{{1,3}}[a-z]?)\)?)?"
     r")(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
+# "this Annex", "that annex", "the present Annex" — an instrument or judgment referring
+# to ITS OWN annex. Carry-forward would attach it to whatever instrument was last NAMED,
+# which is by definition a different one: not a missed edge but a wrong edge avoided.
+_SELF_ANNEX_RE = re.compile(r"(?i)\b(?:this|that|the\s+present|the\s+said|said)\s+$")
+# A reference that names its own host through "to"/"in" rather than the "of" that
+# _EXPLICIT_HOST_RE already catches: "Annex 9 to the Convention on International Civil
+# Aviation", "Annex 2 to the WTO Agreement". That host is not the last-named instrument.
+_ANNEX_HOST_RE = re.compile(
+    r"(?i)^\s*(?:to|in)\s+(?:the\s+)?\[?(?:[A-Z]|convention\b|agreement\b|treaty\b"
+    r"|protocol\b|understanding\b|charter\b)")
 # carry-forward only attaches a bare provision to a *legislation* antecedent — a
 # bare "section 5" never means a paragraph of a cited case.
 _LEG_KINDS = {"act", "regulation", "directive", "decision", "treaty", "eu_instrument", "named"}
@@ -955,6 +974,12 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
             cue_raw = (groups.get("rcue") if reverse else groups.get("cue")) or ""
             number = (groups.get("rnum") if reverse else groups.get("num")) or ""
             sub = (groups.get("rsub") if reverse else groups.get("sub")) or None
+            if cue_raw.lower().startswith("annex"):
+                cue_at = m.start("rcue") if reverse else m.start("cue")
+                if _SELF_ANNEX_RE.search(text[max(0, cue_at - 16):cue_at]):
+                    continue          # "this Annex" — the instrument's own, not the host's
+                if _ANNEX_HOST_RE.match(text[e:e + 48]):
+                    continue          # "Annex 9 to the Convention …" names its own host
             pinpoint = _compound_pinpoint(cue_raw, number, sub)
         else:
             cue_raw = m.group("cue")
