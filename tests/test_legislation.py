@@ -588,3 +588,58 @@ def test_eurlex_html_numbered_annexes_and_plain_articles_still_parse():
     d = parse("eurlex-html", html)
     assert [s.label for s in d.segments] == [
         "Article 1", "ANNEX I FIRST SCHEDULE OF THINGS", "ANNEX II SECOND SCHEDULE"]
+
+
+def test_a_textless_consolidation_never_takes_over_the_read(tmp_path, monkeypatch):
+    """1,965 EU consolidations are metadata stubs — a CELEX row minted from linked data
+    with no body ever fetched. Redirecting a read to one replaced the instrument with
+    nothing: the AI Act showed only the recitals it inherits from its base act, because
+    the expression the reader had been sent to was empty.
+
+    The consolidation choice itself is the catalogue's; this asserts what the facade does
+    with the answer, so it drives that seam directly.
+    """
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record, Segment
+    from raglex.facade import Facade
+    from raglex.storage import Catalogue
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                 embed_model=None)
+    f = Facade(cfg)
+    BASE, STUB, REAL = "32024R1689", "02024R1689-20240712", "02024R1689-20250101"
+    body = "Article 1\nThis Regulation lays down harmonised rules."
+
+    with f._open() as (cat, _rs, ts):
+        base = Record(source="eu-legislation", stable_id=BASE, doc_type=DocType.LEGISLATION,
+                      title="AI Act", text=body, raw_bytes=body.encode(),
+                      segments=[Segment(label="Article 1", char_start=0,
+                                        char_end=len(body), kind="article")],
+                      extracted_via=ExtractedVia.STRUCTURED)
+        base.ensure_payload_hash()
+        cat.upsert_document(base, text_path=str(ts.put(base.payload_hash, body)))
+        # the stub: a row and nothing else
+        cat.upsert_document(Record(
+            source="eu-legislation", stable_id=STUB, doc_type=DocType.LEGISLATION,
+            title=f"Consolidated TEXT: {BASE}", extracted_via=ExtractedVia.STRUCTURED))
+        real_text = body + "\n(as amended)"
+        real = Record(source="eu-legislation", stable_id=REAL, doc_type=DocType.LEGISLATION,
+                      title=f"Consolidated TEXT: {BASE}", text=real_text,
+                      raw_bytes=real_text.encode(), extracted_via=ExtractedVia.STRUCTURED)
+        real.ensure_payload_hash()
+        cat.upsert_document(real, text_path=str(ts.put(real.payload_hash, real_text)))
+        cat.commit()
+
+    # the empty expression cannot stand in for the act …
+    monkeypatch.setattr(Catalogue, "applicable_consolidation",
+                        lambda self, sid: (STUB, "2024-07-12"))
+    assert f.canonical_read_target(BASE) == {
+        "requested_stable_id": BASE, "stable_id": BASE, "as_at": None, "redirected": False}
+
+    # … but one that HAS text still legitimately takes over
+    monkeypatch.setattr(Catalogue, "applicable_consolidation",
+                        lambda self, sid: (REAL, "2025-01-01"))
+    got = f.canonical_read_target(BASE)
+    assert got["stable_id"] == REAL and got["redirected"] is True

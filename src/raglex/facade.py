@@ -1433,6 +1433,22 @@ class Facade:
                 return {"requested_stable_id": stable_id, "stable_id": stable_id,
                         "redirected": False}
             current = cat.applicable_consolidation(stable_id)
+            # A consolidation that holds NO TEXT must never take over the read. 1,965 EU
+            # consolidations are metadata stubs — a CELEX row minted from the linked data
+            # with no body ever fetched — and redirecting to one replaced the instrument
+            # with nothing: opening the AI Act showed only the recitals it inherits from
+            # its base act, because the expression the reader had been sent to was empty.
+            # The dated version stays reachable by asking for it; it just cannot silently
+            # stand in for the act.
+            if current and not (cat.get_document(current[0]) or {})["has_text"]:
+                current = None
+            # A consolidation that holds NO TEXT must never take over the read. 1,965 EU
+            # consolidations are metadata stubs — a CELEX row minted from the linked data
+            # with no body ever fetched — and redirecting to one replaced the instrument
+            # with nothing: opening the AI Act showed only the recitals it inherits from
+            # its base act, because the expression the reader had been sent to was empty.
+            # The dated version stays reachable by asking for it; it just cannot silently
+            # stand in for the act.
         return {
             "requested_stable_id": stable_id,
             "stable_id": current[0] if current else stable_id,
