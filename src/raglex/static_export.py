@@ -1403,14 +1403,11 @@ main { min-width: 0; padding-top: .9rem; }
 }
 .mentions-line .via-line { display: inline; }
 .cite-link {
-  display: inline;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
   color: var(--link);
-  font: inherit;
-  text-align: left;
+  cursor: pointer;
+  /* a long instrument name must break like the prose around it, not sit as one
+     unbreakable box that pushes the commas onto their own lines */
+  overflow-wrap: break-word;
 }
 .cite-link:hover, .cite-link:focus-visible {
   border: 0;
@@ -1703,6 +1700,28 @@ _SCRIPT = r"""
   // How many citers a provision names before it stops naming and starts counting.
   const NAMED_CITERS = 3;
 
+  // The name a citer is given IN THE LINE. A case's OSCOLA citation is already short, but
+  // an instrument's is its full official title — "Regulation (EU) No 604/2013 of the
+  // European Parliament and of the Council of 26 June 2013 establishing the criteria and
+  // mechanisms for determining…", 250 characters. Three of those in one sentence wrap
+  // over a dozen lines and strand the commas at the edges, which is what made the line
+  // look like a broken list instead of prose. Shortened HERE rather than in the payload,
+  // so an already-built edition picks it up on a plain re-render.
+  // the trailing "/EC" is part of the number a pre-2015 directive is cited by
+  // ("Directive 95/46/EC"), so it belongs in the label, not on the cutting-room floor
+  const EU_INSTRUMENT = /\b((?:Council|Commission|European Parliament and(?: of)? the Council)?\s*(?:Implementing|Delegated)?\s*(?:Regulation|Directive|Decision))\s*(\((?:EU|EC|EEC|Euratom)\))?\s*(?:No\.?\s*)?(\d{1,4}\/\d{2,4}(?:\/[A-Z]{2,7})?)/i;
+  const ACT_TITLE = /^(.{3,70}? Act \d{4})\b/;
+  const CITE_MAX = 72;
+  function shortCite(g) {
+    const raw = String(g.cite || g.title || "").replace(/\s+/g, " ").trim();
+    if (raw.length <= CITE_MAX) return raw;
+    const eu = EU_INSTRUMENT.exec(raw);
+    if (eu) return [eu[1], eu[2], eu[3]].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    const act = ACT_TITLE.exec(raw);
+    if (act) return act[1];
+    return raw.slice(0, CITE_MAX - 3).trimEnd() + "…";
+  }
+
   // "Mentioned by FT v DW EU:C:2023:811, Proceedings brought by J.M EU:C:2023:501 and 18
   // more. See all mentions" — the line a reader can actually use, in place of a badge
   // that only ever said how many there were.
@@ -1724,15 +1743,30 @@ _SCRIPT = r"""
     const add = (text) => p.appendChild(document.createTextNode(text));
     // A named citer opens the list AND scrolls to its own row — the name is a way in,
     // not a decoration.
-    const cite = (g, text) => {
-      const a = document.createElement("button");
-      a.type = "button";
-      a.className = "cite-link";
-      a.textContent = text || g.cite;
-      a.title = g.title && g.title !== g.cite ? g.title : "open where it cites this";
-      a.addEventListener("click", () => openMentions(key, label, "all", g.id));
+    //
+    // An ANCHOR, deliberately, not a button. A button is an atomic inline box: browsers
+    // will not break its text across lines whatever its display, so each name that was
+    // longer than the remaining line got pushed onto a line of its own and the commas
+    // between them were stranded at the edges. That is what made a sentence look like a
+    // ragged list. An anchor wraps like the prose it sits in.
+    const link = (cls, text, title, onClick) => {
+      const a = document.createElement("a");
+      a.className = cls;
+      a.textContent = text;
+      a.setAttribute("role", "link");
+      a.tabIndex = 0;
+      if (title) a.title = title;
+      a.addEventListener("click", onClick);
+      a.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); }
+      });
       p.appendChild(a);
+      return a;
     };
+    const cite = (g, text) => link(
+      "cite-link", text || shortCite(g),
+      g.cite || g.title || "",                       // the full name, on hover
+      () => openMentions(key, label, "all", g.id));
 
     if (direct.length) {
       add("Mentioned by ");
@@ -1744,12 +1778,8 @@ _SCRIPT = r"""
       const rest = direct.length - named.length;
       if (rest > 0) add(` and ${number(rest)} more`);
       add(". ");
-      const all = document.createElement("button");
-      all.type = "button";
-      all.className = "cite-link see-all";
-      all.textContent = "See all mentions";
-      all.addEventListener("click", () => openMentions(key, label, "all"));
-      p.appendChild(all);
+      link("cite-link see-all", "See all mentions", "",
+           () => openMentions(key, label, "all"));
     }
 
     // …and then, per predecessor, the ones that only got here through it.
@@ -1758,13 +1788,17 @@ _SCRIPT = r"""
       sentence.className = "via-line";
       sentence.appendChild(document.createTextNode(
         direct.length ? " Also mentioned by " : "Mentioned by "));
-      const b = document.createElement("button");
-      b.type = "button";
+      const b = document.createElement("a");
       b.className = "cite-link";
+      b.setAttribute("role", "link");
+      b.tabIndex = 0;
       b.textContent = `${number(n)} ${n === 1 ? "document" : "documents"} citing a similar provision in ${law.label}`;
       b.title = lawTitle(law.id);
-      b.addEventListener("click", () => openMentions(
-        key, `${label} — via ${law.label}`, law.id));
+      const open = () => openMentions(key, `${label} — via ${law.label}`, law.id);
+      b.addEventListener("click", open);
+      b.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      });
       sentence.appendChild(b);
       sentence.appendChild(document.createTextNode("."));
       p.appendChild(sentence);
