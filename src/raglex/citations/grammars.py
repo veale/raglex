@@ -134,6 +134,10 @@ _NAME_TO_CELEX = {
     "avmsd": "32010L0013",
     "interoperable europe act": "32024R0903",
     "e-commerce directive": "32000L0031", "ecommerce directive": "32000L0031",
+    # Consumer law rather than the digital acquis, but it is cited the same way and its
+    # blacklist (Annex I) is the part the case law is about — "Annex I, point 29 UCPD".
+    # Without the name here that reference resolves to nothing at all.
+    "unfair commercial practices directive": "32005L0029", "ucpd": "32005L0029",
 }
 # Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
 # resolves to the Law Enforcement Directive; the spelled-out names match case-
@@ -145,7 +149,7 @@ _NAME_TO_CELEX = {
 # A bare uppercase "AIA"/"CRA"/"DGA"/"EAA" is likewise left out: those collide with
 # ordinary initialisms in other corpora (a Canadian "CRA" is the Canada Revenue
 # Agency), and the spelled-out names below carry them.
-_EU_ACRONYMS = r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|EMFA|AVMSD|EECC"
+_EU_ACRONYMS = r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|EMFA|AVMSD|EECC|UCPD"
 _EU_FULL_NAMES = "|".join(
     re.escape(k).replace(r"\ ", r"\s+")
     for k in sorted(_NAME_TO_CELEX, key=len, reverse=True) if " " in k)
@@ -592,18 +596,92 @@ register(Grammar(
     lambda m: (m.group(0).upper(), None, _celex_kind(m.group(0).upper())),
 ))
 
-# "Article 17 of Regulation (EU) 2016/679", "Directive 2002/58/EC", with pinpoint.
+# The pinpoint an EU short-name citation carries in FRONT of the instrument. Three things
+# it must reach, all of which were silently lost before — and lost badly, because a prefix
+# the pattern can't parse doesn't merely drop the pinpoint: the match degrades to a bare
+# "AI Act", and the orphaned "Article 53(2)(a)" then falls to the carry-forward pass and is
+# attributed to whichever instrument was named last (the failure this module's own comment
+# warns about, one level down).
+#
+#  * the LETTER-POINT form, which is how EU drafting actually pins — "Article 53(2)(a)",
+#    "Article 3(1)(b) of the DSA", "Article 6(1)(iii)";
+#  * a trailing "point (a)" / "paragraph 2", folded into the same paren form so one
+#    provision has one anchor however it was written;
+#  * ANNEXES — "Annex XII AI Act", "Annex XI, Section 1 AI Act". The annexes are where
+#    these instruments put their substantive obligations, and a code of practice cites
+#    them exactly as it cites an article.
+#
+# (Recitals are NOT here: they have their own grammar below, which handles the ranges and
+# "of the"-forms an article never takes.)
+#
+# Emitted as written — "Annex XII", not "Annex 12" — like every other pinpoint here: the
+# roman numeral is the form the instrument itself uses.
+_EU_ART_NUM = r"\d+[a-z]?(?:\((?:\d{1,3}[a-z]?|[a-z]{1,3})\))*"
+# An annex is pinned to a POINT as often as an article is pinned to a paragraph — the
+# UCPD's blacklist is thirty-one numbered points inside Annex I, and the case law that
+# matters is about "Annex I, point 29", never about Annex I at large. Both orders are
+# ordinary drafting and both mean the same provision, so both fold to one anchor.
+def _annex_point(group: str) -> str:
+    return rf"(?:points?|paragraphs?|paras?)\.?\s*\(?(?P<{group}>\d{{1,3}}[a-z]?)\)?"
+
+
+_EU_PINPOINT = (
+    r"(?:(?:Art(?:icle|\.)?\s*(?P<art>" + _EU_ART_NUM + r")"
+    r"(?:,?\s*(?:point|paragraph|para\.?|subpara(?:graph)?)\s*\(?(?P<pt>\d{1,3}[a-z]?|[a-z]{1,3})\)?)?"
+    # "point 29 of Annex I" — before the plain form, or the reverse order is read as a
+    # bare annex reference and the point is dropped on the floor.
+    + r"|" + _annex_point("ranxpt")
+    + r"\s*(?:of|to|in)\s+(?:the\s+)?Annex\s+(?P<ranx>[IVXLC]{1,6})\b"
+    r"|Annex\s+(?P<anx>[IVXLC]{1,6})\b(?:(?P<anxsec>,?\s*Section\s+\d+)"
+    + r"|,?\s*" + _annex_point("anxpt") + r")?)"
+    # "to" as well as "of": an annex is cited "Annex I TO Directive 2005/29/EC", which
+    # this connector rejected, so the whole reference degraded to the bare instrument.
+    r"\s*,?\s+(?:(?:of|to|in)\s+)?(?:the\s+)?)?"
+)
+
+
+def _eu_pinpoint_of(m: "re.Match[str]") -> str | None:
+    g = m.groupdict()
+    if g.get("art"):
+        # "Article 53(2), point (a)" and "Article 53(2)(a)" are the same provision.
+        point = f"({g['pt']})" if g.get("pt") else ""
+        return f"Article {m.group('art')}{point}"
+    annex = g.get("anx") or g.get("ranx")
+    if annex:
+        section = (g.get("anxsec") or "").strip().lstrip(",").strip()
+        point = g.get("anxpt") or g.get("ranxpt")
+        tail = f", {section}" if section else f", point {point}" if point else ""
+        return f"Annex {annex}{tail}"
+    return None
+
+
+def _eu_prefixed(m: "re.Match[str]") -> bool:
+    """Did this reference carry a pinpoint? (Which is the citation-shaped context the
+    ambiguous acronyms need before they may resolve at all.)"""
+    g = m.groupdict()
+    return bool(g.get("art") or g.get("anx") or g.get("ranx"))
+
+
+
+# "Article 17 of Regulation (EU) 2016/679", "Annex I, point 29 to Directive 2005/29/EC",
+# "Directive 2002/58/EC", with pinpoint.
+#
+# Shares _EU_PINPOINT with the named-instrument grammars rather than carrying its own.
+# The private copy it used to have understood "Article N" and nothing else, so an
+# instrument cited by NUMBER lost every annex, letter-point and trailing-point pinpoint
+# that the same instrument cited by NAME kept — the citation still resolved, which is
+# what made the loss invisible: it just arrived pinned to nothing in particular.
 register(Grammar(
     "eu_instrument_numeric", "regulation",
     re.compile(
-        r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?"
-        r"(?:(?:Council|Commission|European\s+Parliament\s+and\s+(?:of\s+the\s+)?Council)\s+)?(?:(?:Implementing|Delegated)\s+)?(?P<kind>(?:Framework\s+)?(?:Regulation|Directive|Decision))\s*(?:\((?:EU|EC|EEC)\)\s*)?"
+        _EU_PINPOINT
+        + r"(?:(?:Council|Commission|European\s+Parliament\s+and\s+(?:of\s+the\s+)?Council)\s+)?(?:(?:Implementing|Delegated)\s+)?(?P<kind>(?:Framework\s+)?(?:Regulation|Directive|Decision))\s*(?:\((?:EU|EC|EEC)\)\s*)?"
         r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC|JHA|CFSP|PESC|Euratom))?\b",
         re.IGNORECASE,
     ),
     lambda m: (
         _eu_celex(m.group("kind"), m.group("a"), m.group("b")),
-        f"Article {m.group('art')}" if m.group("art") else None,
+        _eu_pinpoint_of(m),
         m.group("kind").lower(),
     ),
 ))
@@ -691,53 +769,6 @@ def instrument_at(text: str) -> tuple[str | None, str | None]:
 _NEEDS_DETERMINER = {"LED", "AVG", "DSGVO", "RGPD", "DSA"}
 _DETERMINER_RE = re.compile(
     r"(?i)\b(?:the|of|de|het|der|die|das|dem|den|des|la|le|les|du|del|el|il)\s+$")
-
-
-# The pinpoint an EU short-name citation carries in FRONT of the instrument. Three things
-# it must reach, all of which were silently lost before — and lost badly, because a prefix
-# the pattern can't parse doesn't merely drop the pinpoint: the match degrades to a bare
-# "AI Act", and the orphaned "Article 53(2)(a)" then falls to the carry-forward pass and is
-# attributed to whichever instrument was named last (the failure this module's own comment
-# warns about, one level down).
-#
-#  * the LETTER-POINT form, which is how EU drafting actually pins — "Article 53(2)(a)",
-#    "Article 3(1)(b) of the DSA", "Article 6(1)(iii)";
-#  * a trailing "point (a)" / "paragraph 2", folded into the same paren form so one
-#    provision has one anchor however it was written;
-#  * ANNEXES — "Annex XII AI Act", "Annex XI, Section 1 AI Act". The annexes are where
-#    these instruments put their substantive obligations, and a code of practice cites
-#    them exactly as it cites an article.
-#
-# (Recitals are NOT here: they have their own grammar below, which handles the ranges and
-# "of the"-forms an article never takes.)
-#
-# Emitted as written — "Annex XII", not "Annex 12" — like every other pinpoint here: the
-# roman numeral is the form the instrument itself uses.
-_EU_ART_NUM = r"\d+[a-z]?(?:\((?:\d{1,3}[a-z]?|[a-z]{1,3})\))*"
-_EU_PINPOINT = (
-    r"(?:(?:Art(?:icle|\.)?\s*(?P<art>" + _EU_ART_NUM + r")"
-    r"(?:,?\s*(?:point|paragraph|para\.?|subpara(?:graph)?)\s*\(?(?P<pt>\d{1,3}[a-z]?|[a-z]{1,3})\)?)?"
-    r"|Annex\s+(?P<anx>[IVXLC]{1,6})(?P<anxsec>,?\s*Section\s+\d+)?)"
-    r"\s*,?\s+(?:of\s+)?(?:the\s+)?)?"
-)
-
-
-def _eu_pinpoint_of(m: "re.Match[str]") -> str | None:
-    g = m.groupdict()
-    if g.get("art"):
-        # "Article 53(2), point (a)" and "Article 53(2)(a)" are the same provision.
-        point = f"({g['pt']})" if g.get("pt") else ""
-        return f"Article {m.group('art')}{point}"
-    if g.get("anx"):
-        section = (g.get("anxsec") or "").strip().lstrip(",").strip()
-        return f"Annex {m.group('anx')}" + (f", {section}" if section else "")
-    return None
-
-
-def _eu_prefixed(m: "re.Match[str]") -> bool:
-    """Did this reference carry a pinpoint? (Which is the citation-shaped context the
-    ambiguous acronyms need before they may resolve at all.)"""
-    return bool(m.groupdict().get("art") or m.groupdict().get("anx"))
 
 
 def _eu_acronym(m: "re.Match[str]") -> Normalised:

@@ -778,6 +778,30 @@ _BARE_PROVISION = re.compile(
     r"(?P<num>\d+[A-Z]?(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
+# The two-level forms, which the single-cue pattern above cannot express and therefore
+# lost: an ANNEX (numbered in roman, so ``num`` never matched it — a bare "Annex I" was
+# invisible to carry-forward entirely) and the point/paragraph WITHIN an annex or
+# schedule. Both orders occur and mean the same provision, so both fold to one anchor:
+#
+#   "Annex I, point 29" / "point 29 of Annex I"           → "Annex I, point 29"
+#   "Schedule 1, paragraph 27" / "paragraph 27 of Sch. 1" → "Sch. 1, para 27"
+#
+# Wind Tre (C-54/17) turns entirely on Annex I, point 29 of the UCPD and says so
+# fourteen times; every one of those was recorded as a bare reference to the directive,
+# because "Annex" was not a cue and "point 29" had nowhere to attach.
+_ANNEX_OR_SCHEDULE_NUM = r"[ivxlc]+(?![a-z])|\d{1,3}[A-Z]?"
+_BARE_COMPOUND = re.compile(
+    r"\b(?:"
+    # reverse order first, so "point 29 of Annex I" is not read as a bare "Annex I"
+    r"(?:points?|paragraphs?|paras?)\.?\s*\(?(?P<rsub>\d{1,3}[a-z]?)\)?\s*"
+    r"(?:of|to|in)\s+(?:the\s+)?(?P<rcue>annexe?|schedule|sched|sch)\.?\s*"
+    rf"(?P<rnum>{_ANNEX_OR_SCHEDULE_NUM})"
+    r"|"
+    rf"(?P<cue>annexe?|schedule|sched|sch)\.?\s*(?P<num>{_ANNEX_OR_SCHEDULE_NUM})"
+    r"(?:\s*,?\s*(?:points?|paragraphs?|paras?)\.?\s*\(?(?P<sub>\d{1,3}[a-z]?)\)?)?"
+    r")(?!\s*:)(?=\W|$)",
+    re.IGNORECASE,
+)
 # carry-forward only attaches a bare provision to a *legislation* antecedent — a
 # bare "section 5" never means a paragraph of a cited case.
 _LEG_KINDS = {"act", "regulation", "directive", "decision", "treaty", "eu_instrument", "named"}
@@ -836,7 +860,20 @@ def _bare_pinpoint(cue: str, num: str) -> str:
         return f"para {num}"
     if c.startswith(("schedule", "sch")):
         return f"Sch. {num}"
+    if c.startswith("annex"):
+        # Roman numerals upper-cased: the instruments write "Annex I", and an anchor is
+        # compared against the segment label the instrument itself carries.
+        return f"Annex {num.upper() if num.isalpha() else num}"
     return f"s. {num}"
+
+
+def _compound_pinpoint(cue: str, num: str, sub: str | None) -> str:
+    """"Annex I" + point 29 → "Annex I, point 29"; "Schedule 1" + 27 → "Sch. 1, para 27"."""
+    base = _bare_pinpoint(cue, re.sub(r"\s+", "", num))
+    if not sub:
+        return base
+    unit = "point" if cue.lower().startswith("annex") else "para"
+    return f"{base}, {unit} {sub}"
 
 
 # A provision that names its OWN host is not bare, even when that host didn't resolve.
@@ -886,13 +923,37 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
     if not antecedents and not home_id:
         return kept
     out = list(kept)
-    for m in _BARE_PROVISION.finditer(text):
+    # Compound forms are scanned FIRST and their spans marked, so the single-cue pattern
+    # cannot come back and record a second, poorer citation for the same words —
+    # "Schedule 1, paragraph 27" must not also yield a bare "Sch. 1".
+    compound: dict[int, "re.Match[str]"] = {}
+    for m in _BARE_COMPOUND.finditer(text):
+        compound[m.start()] = m
+    matches = sorted(
+        [*compound.values(),
+         *(m for m in _BARE_PROVISION.finditer(text)
+           if not any(cs < m.end() and m.start() < ce
+                      for cs, ce in ((c.start(), c.end()) for c in compound.values())))],
+        key=lambda m: m.start(),
+    )
+    for m in matches:
         s, e = m.start(), m.end()
         if any(os < e and s < oe for os, oe in occupied):
             continue  # already part of a literal citation ("s.5 of the FOIA 2000")
         if any(us <= s < ue for us, ue in urls):
             continue  # inside a URL — not a provision reference at all
-        cue = m.group("cue").lower().rstrip(".")
+        groups = m.groupdict()
+        is_compound = "rsub" in groups
+        if is_compound:
+            reverse = bool(groups.get("rcue"))
+            cue_raw = (groups.get("rcue") if reverse else groups.get("cue")) or ""
+            number = (groups.get("rnum") if reverse else groups.get("num")) or ""
+            sub = (groups.get("rsub") if reverse else groups.get("sub")) or None
+            pinpoint = _compound_pinpoint(cue_raw, number, sub)
+        else:
+            cue_raw = m.group("cue")
+            pinpoint = _bare_pinpoint(cue_raw, m.group("num"))
+        cue = cue_raw.lower().rstrip(".")
         # The text names its own host ("of the Road Traffic Act", "of the Code").
         # Whatever that host is, it is not the last-named instrument.
         if _EXPLICIT_HOST_RE.match(text, e) and not re.match(
@@ -914,7 +975,7 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
             if prev and prev[-1].entity_kind in ("case", "opinion"):
                 continue
         prior = [a for a in antecedents if a.char_end <= s
-                 and _cue_allows(m.group("cue"), a.entity_kind, a.candidate_id)]
+                 and _cue_allows(cue_raw, a.entity_kind, a.candidate_id)]
         host_id, host_kind = (prior[-1].candidate_id, prior[-1].entity_kind) if prior \
             else (None, None)
         # Self-reference inside legislation. A cross-reference to another instrument
@@ -923,14 +984,14 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
         # the sentence ends, the instrument is talking about itself again: "Article 8
         # has the effect of…" in the GDPR means the GDPR's Article 8, not the
         # Article 8 of the injunctions directive its recitals last cross-referred to.
-        if home_id and _cue_allows(m.group("cue"), home_kind or "", home_id):
+        if home_id and _cue_allows(cue_raw, home_kind or "", home_id):
             if not prior or _SENTENCE_BREAK_RE.search(text[prior[-1].char_end:s]):
                 host_id, host_kind = home_id, home_kind
         if not host_id:
             continue
         out.append(Citation(
             raw=m.group(0), entity_kind=host_kind, candidate_id=host_id,
-            pinpoint=_bare_pinpoint(m.group("cue"), m.group("num")),
+            pinpoint=pinpoint,
             char_start=s, char_end=e, method="carry_forward", confidence=0.4,
         ))
     return out

@@ -720,6 +720,14 @@ _ANCHOR_TYPES = {
 
 def _anchor_key(text: str | None) -> str | None:
     t = (text or "").strip().lower().lstrip("[(")
+    # An annex is numbered in ROMAN — "Annex I", "Annexe II" — which the arabic matcher
+    # below cannot see at all, so every annex anchor and every annex segment label folded
+    # to no key: the citations existed but could never join the annex they were about.
+    # The tail is dropped, so "Annex I, point 29" keys to the annex family exactly as
+    # "Article 28(3)" keys to art:28, and the exact anchor keeps the point.
+    annex = re.match(r"^annexe?\.?\s+([ivxlc]+)(?![a-z0-9])", t)
+    if annex:
+        return f"annex:{annex.group(1)}"
     # The number may be MULTI-LEVEL: a code of practice is cited by "paragraph 3.19",
     # a rule of court by "r 3.1". Stopping at the first dot folded 3.19 and 3.2 onto the
     # same key as 3 — every paragraph of a chapter answering to its chapter number. The

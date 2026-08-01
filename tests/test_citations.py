@@ -1119,3 +1119,91 @@ def test_echr_oscola_keeps_genuinely_joined_applications():
     doc = {"title": "CASE OF X v Y", "source": "echr", "court": "ECHR",
            "doc_type": "judgment", "stable_id": "x"}
     assert "App Nos 123/45; 678/90" in cite(doc, {"appno": "123/45; 678/90"})["text"]
+
+
+def _pins(text: str) -> set[tuple[str, str | None]]:
+    from raglex.citations import extract_citations
+
+    return {(c.candidate_id, c.pinpoint) for c in extract_citations(text)}
+
+
+def test_annex_points_are_pinpoints_in_both_orders():
+    """An annex is pinned to a POINT as often as an article is to a paragraph.
+
+    Wind Tre (C-54/17) turns entirely on Annex I, point 29 of the UCPD and says so
+    fourteen times, including in the operative ruling — and every one of those was
+    recorded as a bare reference to the directive, because the grammar knew "Article N"
+    and "Recital N" and nothing else. Both orders occur in ordinary drafting and mean the
+    same provision, so both must fold to one anchor or the citations scatter.
+    """
+    assert ("32005L0029", "Annex I, point 29") in _pins(
+        "the practice in Annex I, point 29 to Directive 2005/29 is unfair")
+    assert ("32005L0029", "Annex I, point 29") in _pins(
+        "point 29 of Annex I to the Unfair Commercial Practices Directive")
+    assert ("32005L0029", "Annex I, point 14") in _pins("Annex I, point 14 UCPD")
+    # "to", not only "of": an annex is cited "Annex I TO Directive 2005/29/EC", and that
+    # connector was rejected, so the reference degraded to the bare instrument.
+    assert ("32005L0029", "Annex I") in _pins("Annex I to Directive 2005/29/EC")
+    # unchanged forms
+    assert ("32024R1689", "Annex XI, Section 1") in _pins("Annex XI, Section 1 AI Act")
+    assert ("32016R0679", "Article 17") in _pins("Article 17 of Regulation (EU) 2016/679")
+
+
+def test_instrument_cited_by_number_keeps_the_pinpoints_the_named_form_keeps():
+    """eu_instrument_numeric carried its own "Article N"-only prefix.
+
+    So an instrument cited by NUMBER lost every annex and letter-point pinpoint that the
+    same instrument cited by NAME kept. The citation still resolved, which is what made
+    the loss invisible — it just arrived pinned to nothing in particular.
+    """
+    assert ("32024R1689", "Article 53(2)(a)") in _pins(
+        "Article 53(2)(a) of Regulation (EU) 2024/1689")
+    assert ("32005L0029", "Annex I") in _pins("Annex I to Directive 2005/29/EC")
+
+
+def test_bare_annex_and_schedule_points_carry_forward():
+    """The two-level bare forms, which the single-cue pattern could not express.
+
+    An annex is numbered in ROMAN, so the bare scanner's arabic ``num`` never matched it
+    and "Annex I" was invisible to carry-forward entirely; and a point WITHIN an annex or
+    schedule had nowhere to attach.
+    """
+    eu = ("The dispute concerns Directive 2005/29/EC. The Court holds that the practice "
+          "falls within Annex I, point 29. It follows from point 29 of Annex I that "
+          "inertia selling is unfair. See also Annex II.")
+    assert _pins(eu) >= {
+        ("32005L0029", "Annex I, point 29"), ("32005L0029", "Annex II")}
+
+    uk = ("The claim arises under the Data Protection Act 2018. The judge considered "
+          "paragraph 27 of Schedule 1 and also Schedule 1, paragraph 31. Nothing turns "
+          "on Schedule 2. Section 45 applies.")
+    assert _pins(uk) >= {
+        ("ukpga/2018/12", "Sch. 1, para 27"),
+        ("ukpga/2018/12", "Sch. 1, para 31"),
+        ("ukpga/2018/12", "Sch. 2"),          # the bare form still resolves as before
+        ("ukpga/2018/12", "s. 45"),
+    }
+    # and the compound must not ALSO leave the poorer bare citation behind
+    assert ("ukpga/2018/12", "para 27") not in _pins(uk)
+
+
+def test_annex_anchor_keys_fold_roman_numerals():
+    """Every annex anchor and annex segment label used to fold to no key at all.
+
+    ``_anchor_key`` only understood arabic numbers, so "Annex I" produced nothing — the
+    citations existed but could never join the annex segment they were about, which is
+    why an anchor-scoped query for an annex returned zero however many edges there were.
+    """
+    from raglex.facade import _anchor_key, _anchor_sql_prefixes
+
+    assert _anchor_key("Annex I") == "annex:i"
+    assert _anchor_key("Annexe II") == "annex:ii"          # the French spelling
+    # the tail folds to the family, exactly as "Article 28(3)" folds to art:28
+    assert _anchor_key("Annex I, point 29") == "annex:i"
+    # the segment label carries the annex's TITLE and must still meet the bare anchor
+    assert _anchor_key(
+        "ANNEX I COMMERCIAL PRACTICES WHICH ARE IN ALL CIRCUMSTANCES CONSIDERED UNFAIR"
+    ) == "annex:i"
+    assert _anchor_sql_prefixes("Annex I") == ["annexi"]
+    # a roman numeral must not be read out of a word ("Annex Introduction")
+    assert _anchor_key("Annex Introduction") is None
