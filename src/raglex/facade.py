@@ -4834,6 +4834,11 @@ class Facade:
             ex = extract_documents_parallel(
                 cat, ts, scope, aliases=aliases,
                 stage="re-extracting",
+                # The bulk default (every 200 documents over a 2,000+ scope) leaves the
+                # panel sitting on "1 of 10,773" for several minutes, which reads as a
+                # frozen job — the failure mode this whole pass exists to stop showing.
+                # A rescan is watched, so report often enough to look alive.
+                report_every=25,
                 on_progress=on_progress, cancel_check=cancel_check)
             base = {"queries": per_query, "documents": total,
                     "extractable": len(scope), "re_extracted": ex.processed,
