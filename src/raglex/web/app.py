@@ -514,6 +514,22 @@ def create_app(config: Config | None = None) -> FastAPI:
             queue=bool(p.get("queue")),
         )
 
+    @app.post("/jobs/rescan-matching")
+    def job_rescan_matching_ep(payload: dict = Body(...)) -> dict:
+        """Re-extract every document whose TEXT matches a free-text query.
+
+        The scope a citation fix needs: when a grammar, alias or shorthand changes, the
+        documents to re-read are the ones that MENTION the thing — which is exactly what
+        the edges do not yet record, so the graph cannot find them. Body:
+        ``{query, exact?, limit?}``; several queries joined by ``|||`` are unioned."""
+        query = str((payload or {}).get("query") or "").strip()
+        if not query:
+            return JSONResponse({"error": "query is required"}, status_code=422)
+        return _start_job(
+            "rescan-matching", f"re-extract documents matching {query[:60]}",
+            {"query": query, "exact": bool((payload or {}).get("exact", True)),
+             "limit": int((payload or {}).get("limit") or 20000)})
+
     @app.post("/jobs/rescan")
     def job_rescan_full_ep(payload: dict = Body(default={})) -> dict:
         """Full fresh relink: re-extract EVERY text document with the current grammars, then
