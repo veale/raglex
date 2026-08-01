@@ -2780,8 +2780,15 @@ class Facade:
         """Unified metadata search: filtered, sortable results plus the facet distribution of
         the whole match set (counts per source / doc_type / court and a year histogram) so the
         sidebar can offer refine tick-boxes with live counts. Each result carries its OSCOLA
-        citation and a cited-by count for display and 'most-cited' ranking."""
+        citation and a cited-by count for display and 'most-cited' ranking.
+
+        With no ``sort`` given, a query searches by RELEVANCE and a bare filter browse still
+        goes newest-first. Date was the default for both, which meant a search ranked by
+        when a document was published rather than by how well it matched what was typed.
+        """
         f = {k: v for k, v in filters.items() if k in self._SEARCH_FILTERS and v not in (None, "")}
+        if not sort:
+            sort = "relevance" if str(f.get("query") or "").strip() else "date"
         with self._open() as (cat, _rs, _ts):
             # Citation-format query ("[2011] IESC 26", an ECLI, a report cite) → resolve to
             # the exact document id(s) and match by PK, instead of substring-scanning (the
@@ -2816,7 +2823,7 @@ class Facade:
             raw_total = cat.count_documents(cap=cap, **f)
             total_capped = raw_total > cap
             out = {"items": items, "total": min(raw_total, cap), "total_capped": total_capped,
-                   "limit": limit, "offset": offset, "sort": sort or "date"}
+                   "limit": limit, "offset": offset, "sort": sort}
             if facets:
                 out["facets"] = cat.document_facets(**f)
             return out
@@ -10426,8 +10433,14 @@ class Facade:
                 "source_language": source_language,
             })
             doc = cat.get_document(stable_id)
-            return {"stable_id": stable_id, "updated": ok,
-                    "document": dict(doc) if doc else None}
+        # The document view is cached for 120s and this is the ONE mutation that never
+        # dropped it — so a corrected title was written, the editor re-read the document,
+        # and the pre-edit copy came back. It read exactly like the save had been ignored.
+        # Every sibling correction (untag, tag_many, correct_citation) already did this.
+        if ok:
+            self._invalidate_caches()
+        return {"stable_id": stable_id, "updated": ok,
+                "document": dict(doc) if doc else None}
 
     def correct_citation(self, *, relation_id: int, treatment: str | None = None,
                          dst_id: str | None = None, suppress: bool = False) -> dict:

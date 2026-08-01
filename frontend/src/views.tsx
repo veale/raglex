@@ -611,7 +611,10 @@ type Filters = {
   id_prefix?: string;
 };
 const PAGE = 50;
-const SORTS: [string, string][] = [["date", "Newest"], ["date_asc", "Oldest"], ["title", "Title A–Z"], ["cited", "Most cited"],
+// "Best match" ranks by how well the title matches what was typed; with no query it is
+// the same as Newest (there is nothing to be relevant to).
+const SORTS: [string, string][] = [["relevance", "Best match"], ["date", "Newest"], ["date_asc", "Oldest"],
+  ["title", "Title A–Z"], ["cited", "Most cited"],
   ["authority", "Most influential"], ["authority_recent", "Most influential (recent)"]];
 const GROUPS: [string, string][] = [["none", "No grouping"], ["source", "Source"], ["doc_type", "Type"], ["court", "Court"], ["decade", "Decade"]];
 
@@ -653,7 +656,7 @@ export function SearchView({ open, initialFilter }: { open: (id: string, a?: str
   const [mode, setMode] = useState<"simple" | "advanced">(
     initialFilter && Object.keys(initialFilter).length ? "advanced" : "simple");
   const [filters, setFilters] = useState<Filters>(initialFilter || {});
-  const [sort, setSort] = useState("date");
+  const [sort, setSort] = useState("relevance");
   const [group, setGroup] = useState("none");
   const [page, setPage] = useState(0);
   const [run, setRun] = useState(0);        // bump to (re)run a search

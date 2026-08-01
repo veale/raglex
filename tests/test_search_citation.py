@@ -144,3 +144,76 @@ def test_search_finds_a_case_by_the_name_it_is_known_by_not_titled_with(tmp_path
     assert [d["stable_id"] for d in f.search_corpus(query="Magistrat Wien")["items"]] == [
         "ECLI:EU:C:2025:117"]
     assert f.search_corpus(query="Bradstreet Norway")["items"] == []
+
+
+# -- relevance: how well the title matches, before how recent it is ----------
+def _seed_ranking(facade):
+    """One corpus, four documents whose titles all satisfy the query "code of practice",
+    seeded so that DATE order and MATCH order disagree completely."""
+    from raglex.core.models import RelationshipType, ResolutionStatus, TypedRelation
+
+    with facade._open() as (cat, _rs, _ts):
+        def doc(stable_id, title, when, source="eu-user-import"):
+            cat.upsert_document(Record(
+                source=source, stable_id=stable_id, doc_type=DocType.GUIDANCE,
+                title=title, decision_date=when, extracted_via=ExtractedVia.MANUAL))
+        # newest, but the worst match — a passing phrase inside a longer title
+        doc("au/esafety/1", "Consolidated Industry Codes of Practice for the Online Industry",
+            date(2026, 9, 9))
+        doc("eu/opinion/1", "Commission Opinion on the assessment of the Code of Practice",
+            date(2026, 7, 9))
+        # oldest, but the exact thing someone typing the query is looking for
+        doc("user:guidance:exact", "Code of Practice", date(2025, 1, 1))
+        doc("user:guidance:prefix", "Code of Practice for General-Purpose AI Models",
+            date(2025, 1, 1))
+        cat.commit()
+
+
+def test_relevance_beats_recency_for_a_title_query(tmp_path):
+    """The bug this fixes: a title query was ordered by date, so a worse match published
+    later outranked the document actually named by the query."""
+    facade = Facade(_config(tmp_path))
+    _seed_ranking(facade)
+    ids = [i["stable_id"] for i in
+           facade.search_corpus(query="code of practice", facets=False)["items"]]
+    # exact title first, then the title that starts with it, then the merely-containing
+    assert ids[:2] == ["user:guidance:exact", "user:guidance:prefix"]
+    assert set(ids[2:]) == {"eu/opinion/1", "au/esafety/1"}
+
+
+def test_citation_count_breaks_a_relevance_tie(tmp_path):
+    """Two equally-good title matches are not equally what you meant — the one the corpus
+    leans on wins, and only then the more recent."""
+    facade = Facade(_config(tmp_path))
+    with facade._open() as (cat, _rs, _ts):
+        for n, when in ((1, date(2025, 1, 1)), (2, date(2026, 1, 1))):
+            cat.upsert_document(Record(
+                source="eu-user-import", stable_id=f"code/{n}", doc_type=DocType.GUIDANCE,
+                title="Code of Practice", decision_date=when,
+                extracted_via=ExtractedVia.MANUAL))
+        # the OLDER one is the one everything cites
+        cat.conn.execute(
+            "INSERT INTO citation_counts (candidate_id, occurrences, rebuilt_at) "
+            "VALUES (?, ?, ?)", ("code/1", 42, "2026-01-01T00:00:00"))
+        cat.commit()
+    ids = [i["stable_id"] for i in
+           facade.search_corpus(query="code of practice", facets=False)["items"]]
+    assert ids == ["code/1", "code/2"]
+
+
+def test_a_bare_browse_is_still_newest_first(tmp_path):
+    """Relevance only applies to a query. With nothing typed there is nothing to be
+    relevant to, and the corpus browse must not change."""
+    facade = Facade(_config(tmp_path))
+    _seed_ranking(facade)
+    res = facade.search_corpus(doc_type="guidance", facets=False)
+    assert res["sort"] == "date"
+    assert [i["stable_id"] for i in res["items"]][:2] == ["au/esafety/1", "eu/opinion/1"]
+
+
+def test_an_explicit_sort_still_wins(tmp_path):
+    facade = Facade(_config(tmp_path))
+    _seed_ranking(facade)
+    res = facade.search_corpus(query="code of practice", sort="date", facets=False)
+    assert res["sort"] == "date"
+    assert [i["stable_id"] for i in res["items"]][0] == "au/esafety/1"

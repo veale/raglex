@@ -5607,6 +5607,37 @@ class Catalogue:
             key = key.replace(" DESC NULLS LAST", " DESC").replace(" ASC NULLS LAST", " ASC")
         return key
 
+    # How WELL the title matches, ranked before anything else. A title query is tokenised
+    # — every word must appear somewhere in the title or id, in any order — which is a
+    # good FILTER and no ranking at all: ordered by date alone, "Consolidated Industry
+    # Codes of Practice for the Online Industry" outranked "Code of Practice for
+    # General-Purpose AI Models" for the query "code of practice", because it happened to
+    # be newer. Exact title, then a title starting with the query, then one containing it
+    # as a whole phrase, then the scattered-token match.
+    #
+    # Inside a band the corpus's own judgement breaks the tie: how many documents cite
+    # this one, and only then how recent it is. Two instruments whose titles match a query
+    # equally well are not equally what you meant — the one the corpus leans on is.
+    _RELEVANCE_BANDS = ("CASE WHEN lower(d.title) = ? THEN 0 "
+                        "WHEN lower(d.title) LIKE ? THEN 1 "
+                        "WHEN lower(d.title) LIKE ? THEN 2 ELSE 3 END, "
+                        "cited_by DESC, ")
+
+    def _order_by(self, sort: str | None, query: str | None = None) -> tuple[str, list]:
+        """The ORDER BY clause and the parameters it binds (LIKE patterns are bound, never
+        interpolated — a literal % in the SQL is the pg placeholder trap).
+
+        Like the "cited"/"authority" clauses, the relevance order reads ``cited_by``, so it
+        is only valid for :meth:`search_documents`, which selects it.
+        """
+        q = (query or "").strip().lower()
+        if (sort or "") != "relevance":
+            return self._sort_clause(sort), []
+        if not q:  # nothing to be relevant TO — browsing, not searching
+            return self._sort_clause("date"), []
+        return (self._RELEVANCE_BANDS + self._sort_clause("date"),
+                [q, f"{q}%", f"%{q}%"])
+
     def list_documents(
         self,
         *,
@@ -5692,7 +5723,9 @@ class Catalogue:
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += f" ORDER BY {self._sort_clause(sort)} LIMIT ? OFFSET ?"
+        order, oparams = self._order_by(sort, filters.get("query"))
+        sql += f" ORDER BY {order} LIMIT ? OFFSET ?"
+        params.extend(oparams)      # positional: after the WHERE's, before LIMIT/OFFSET
         params.extend([limit, offset])
         return self.conn.execute(sql, params).fetchall()
 

@@ -351,3 +351,13 @@ def test_single_file_import_still_takes_the_new_metadata(client):
     assert body["source"] == "us-user-import" and body["jurisdiction"] == "us"
     assert sorted(body["tags"]) == ["seminar", "us"]
     assert body["citation"] == "410 U.S. 113"
+
+
+def test_metadata_edit_is_visible_immediately(client):
+    """The document view is cached; a correction that isn't reflected on the next read
+    looks exactly like a save that was ignored (which is how this was found)."""
+    client.get("/documents/ECLI:EU:C:2020:1")           # prime the 120s cache
+    r = client.post("/documents/ECLI:EU:C:2020:1/update",
+                    json={"title": "Corrected Title"})
+    assert r.json()["updated"] is True
+    assert client.get("/documents/ECLI:EU:C:2020:1").json()["document"]["title"] == "Corrected Title"

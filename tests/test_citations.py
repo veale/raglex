@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from raglex.citations import extract_citations, extract_document
 from raglex.core.models import (
     DocType,
@@ -1032,3 +1034,50 @@ def test_every_irish_source_is_gated_not_just_the_case_law_feed(catalogue, tmp_p
     dsts = {e["dst_id"] for e in catalogue.relations_for("ie/dpc/inquiry-x") if e["dst_id"]}
     assert "ukpga/2018/12" not in dsts
     assert "32016R0679" in dsts          # the EU citation is unambiguous and survives
+
+
+# -- EU short-name pinpoints: annexes, letter-points, and the "point (a)" forms -----
+# Found on three EU codes of practice: every "Annex XII AI Act" and every
+# "Article 53(1)(a) AI Act" collapsed to a bare "AI Act" with no pinpoint at all —
+# and an unparsed prefix is worse than a lost pinpoint, because the orphaned
+# "Article 53(1)(a)" then falls to carry-forward and lands on the last instrument named.
+def _pin(text: str):
+    """The pinpoint of the longest citation found in ``text``."""
+    from raglex.citations import extract_citations
+
+    cites = [c for c in extract_citations(text) if c.candidate_id]
+    if not cites:
+        return None, None
+    best = max(cites, key=lambda c: len(c.raw or ""))
+    return best.candidate_id, best.pinpoint
+
+
+@pytest.mark.parametrize("text,celex,pinpoint", [
+    # annexes — where these instruments put their substantive obligations
+    ("Annex XII AI Act", "32024R1689", "Annex XII"),
+    ("Annex IV of the AI Act", "32024R1689", "Annex IV"),
+    ("Annex XI, Section 1 AI Act", "32024R1689", "Annex XI, Section 1"),
+    # the letter-point form EU drafting actually uses
+    ("Article 53(2)(a) AI Act", "32024R1689", "Article 53(2)(a)"),
+    ("Article 3(1)(b) of the DSA", "32022R2065", "Article 3(1)(b)"),
+    ("Article 6(1)(iii) GDPR", "32016R0679", "Article 6(1)(iii)"),
+    # written long, folded to the same anchor — one provision, one anchor
+    ("Article 53(2), point (a) AI Act", "32024R1689", "Article 53(2)(a)"),
+    ("Article 53, paragraph 2 AI Act", "32024R1689", "Article 53(2)"),
+    # what already worked, and must keep working
+    ("Article 53(2) AI Act", "32024R1689", "Article 53(2)"),
+    ("Art. 17 GDPR", "32016R0679", "Article 17"),
+    ("Recital 12 of the AI Act", "32024R1689", "Recital 12"),
+])
+def test_eu_short_name_pinpoint_forms(text, celex, pinpoint):
+    assert _pin(text) == (celex, pinpoint)
+
+
+@pytest.mark.parametrize("text", [
+    "EVIDENCE LED AT TRIAL",          # ALL-CAPS prose, not the Law Enforcement Directive
+    "both the DSA scheme applies",    # Duty Solicitor Advice, not the Digital Services Act
+    "ASU AVG Ltd",                    # a company name, not the Dutch GDPR
+])
+def test_ambiguous_acronym_guards_survive_the_wider_pinpoint(text):
+    """The wider prefix must not weaken the context these acronyms need to resolve."""
+    assert _pin(text) == (None, None)

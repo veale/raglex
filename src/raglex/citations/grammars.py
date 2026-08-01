@@ -693,13 +693,60 @@ _DETERMINER_RE = re.compile(
     r"(?i)\b(?:the|of|de|het|der|die|das|dem|den|des|la|le|les|du|del|el|il)\s+$")
 
 
+# The pinpoint an EU short-name citation carries in FRONT of the instrument. Three things
+# it must reach, all of which were silently lost before — and lost badly, because a prefix
+# the pattern can't parse doesn't merely drop the pinpoint: the match degrades to a bare
+# "AI Act", and the orphaned "Article 53(2)(a)" then falls to the carry-forward pass and is
+# attributed to whichever instrument was named last (the failure this module's own comment
+# warns about, one level down).
+#
+#  * the LETTER-POINT form, which is how EU drafting actually pins — "Article 53(2)(a)",
+#    "Article 3(1)(b) of the DSA", "Article 6(1)(iii)";
+#  * a trailing "point (a)" / "paragraph 2", folded into the same paren form so one
+#    provision has one anchor however it was written;
+#  * ANNEXES — "Annex XII AI Act", "Annex XI, Section 1 AI Act". The annexes are where
+#    these instruments put their substantive obligations, and a code of practice cites
+#    them exactly as it cites an article.
+#
+# (Recitals are NOT here: they have their own grammar below, which handles the ranges and
+# "of the"-forms an article never takes.)
+#
+# Emitted as written — "Annex XII", not "Annex 12" — like every other pinpoint here: the
+# roman numeral is the form the instrument itself uses.
+_EU_ART_NUM = r"\d+[a-z]?(?:\((?:\d{1,3}[a-z]?|[a-z]{1,3})\))*"
+_EU_PINPOINT = (
+    r"(?:(?:Art(?:icle|\.)?\s*(?P<art>" + _EU_ART_NUM + r")"
+    r"(?:,?\s*(?:point|paragraph|para\.?|subpara(?:graph)?)\s*\(?(?P<pt>\d{1,3}[a-z]?|[a-z]{1,3})\)?)?"
+    r"|Annex\s+(?P<anx>[IVXLC]{1,6})(?P<anxsec>,?\s*Section\s+\d+)?)"
+    r"\s*,?\s+(?:of\s+)?(?:the\s+)?)?"
+)
+
+
+def _eu_pinpoint_of(m: "re.Match[str]") -> str | None:
+    g = m.groupdict()
+    if g.get("art"):
+        # "Article 53(2), point (a)" and "Article 53(2)(a)" are the same provision.
+        point = f"({g['pt']})" if g.get("pt") else ""
+        return f"Article {m.group('art')}{point}"
+    if g.get("anx"):
+        section = (g.get("anxsec") or "").strip().lstrip(",").strip()
+        return f"Annex {m.group('anx')}" + (f", {section}" if section else "")
+    return None
+
+
+def _eu_prefixed(m: "re.Match[str]") -> bool:
+    """Did this reference carry a pinpoint? (Which is the citation-shaped context the
+    ambiguous acronyms need before they may resolve at all.)"""
+    return bool(m.groupdict().get("art") or m.groupdict().get("anx"))
+
+
 def _eu_acronym(m: "re.Match[str]") -> Normalised:
     name = m.group("name")
-    if name in _NEEDS_DETERMINER and not m.group("art"):
+    if name in _NEEDS_DETERMINER and not _eu_prefixed(m):
         pre = m.string[max(0, m.start("name") - 12):m.start("name")]
         if not _DETERMINER_RE.search(pre):
             return None, None, DROP
-    if name == "DSA" and not m.group("art"):
+    if name == "DSA" and not _eu_prefixed(m):
         # UK immigration judgments use DSA for the Duty Solicitor Advice scheme:
         # phrases such as "both the DSA scheme" satisfy the determiner rule above
         # but are still plainly not the Digital Services Act.
@@ -708,27 +755,21 @@ def _eu_acronym(m: "re.Match[str]") -> Normalised:
             r"(?i)^\s+(?:scheme|surgery|session|appointment)\b", after,
         ):
             return None, None, DROP
-    return (_name_to_celex(name),
-            f"Article {m.group('art')}" if m.group("art") else None, None)
+    return _name_to_celex(name), _eu_pinpoint_of(m), None
 
 
 register(Grammar(
     "eu_named", "regulation",
     # Case-sensitive so the acronym (GDPR/DMA/DSA/LED) stays uppercase-only, with
-    # the "Article" prefix case-insensitive. The leading \b is load-bearing:
+    # the pinpoint prefix case-insensitive. The leading \b is load-bearing:
     # without it "APPEALED"/"RULED"/"MISLED" match their final LED.
-    re.compile(rf"(?:(?i:art(?:icle|\.)?)\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?i:of\s+(?:the\s+)?)?)?\b(?P<name>{_EU_ACRONYMS})\b"),
+    re.compile(rf"(?i:{_EU_PINPOINT})\b(?P<name>{_EU_ACRONYMS})\b"),
     _eu_acronym,
 ))
 register(Grammar(
     "eu_named_full", "regulation",
-    re.compile(rf"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?(?P<name>{_EU_FULL_NAMES})\b",
-               re.IGNORECASE),
-    lambda m: (
-        _name_to_celex(m.group("name")),
-        f"Article {m.group('art')}" if m.group("art") else None,
-        None,
-    ),
+    re.compile(rf"{_EU_PINPOINT}(?P<name>{_EU_FULL_NAMES})\b", re.IGNORECASE),
+    lambda m: (_name_to_celex(m.group("name")), _eu_pinpoint_of(m), None),
 ))
 
 # ── UK GDPR (the assimilated / "retained" EU GDPR) ───────────────────────────
