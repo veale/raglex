@@ -738,3 +738,48 @@ def test_a_non_uk_transposition_carries_no_cutoff(tmp_path):
         mapping_type="transposition",
         mappings=[{"current_anchor": "s. 71", "previous_anchor": "Article 4"}])
     assert written["mappings"][0]["inherit_before"] is None
+
+
+def test_rescan_matching_reads_the_search_result_it_is_actually_given(tmp_path,
+                                                                     monkeypatch):
+    """A text-scoped rescan must not silently pass over nothing.
+
+    freetext_search returns its rows under `items`; reading `results` gave an empty
+    scope and the job reported success having re-extracted zero documents. An empty
+    scope is now an error, because "matched nothing" and "did the work" are the two
+    outcomes that must never look alike.
+    """
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        _held(cat, ts, "doc-a", text="mentions the Act")
+        _held(cat, ts, "doc-b", text="also mentions the Act")
+
+    seen: list[str] = []
+    monkeypatch.setattr(f, "freetext_search", lambda q, **kw: {
+        "items": [{"stable_id": "doc-a"}, {"stable_id": "doc-b"}], "total": 2})
+    result = f.rescan_matching(query='"the Act"')
+    assert result["documents"] == 2
+    assert result["re_extracted"] == 2
+    assert result["queries"] == {'"the Act"': 2}
+
+    # A query that matches nothing is an error, not a silent success.
+    monkeypatch.setattr(f, "freetext_search", lambda q, **kw: {"items": [], "total": 0})
+    empty = f.rescan_matching(query='"nothing here"')
+    assert "error" in empty and empty["queries"] == {'"nothing here"': 0}
+    assert seen == []
+
+
+def test_rescan_matching_unions_several_queries(tmp_path, monkeypatch):
+    """A document naming three of the Acts is re-extracted once, not three times."""
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        for sid in ("doc-a", "doc-b", "doc-c"):
+            _held(cat, ts, sid, text="text")
+
+    by_query = {'"A"': [{"stable_id": "doc-a"}, {"stable_id": "doc-b"}],
+                '"B"': [{"stable_id": "doc-b"}, {"stable_id": "doc-c"}]}
+    monkeypatch.setattr(f, "freetext_search", lambda q, **kw: {
+        "items": by_query[q], "total": len(by_query[q])})
+    result = f.rescan_matching(query='"A"|||"B"')
+    assert result["documents"] == 3          # the union, not 4
+    assert result["queries"] == {'"A"': 2, '"B"': 2}

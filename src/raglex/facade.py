@@ -4800,14 +4800,25 @@ class Facade:
         ids: dict[str, None] = {}
         per_query: dict[str, int] = {}
         for one in queries:
-            rows = (self.freetext_search(one, exact=exact, limit=limit)
-                    .get("results") or [])
-            per_query[one] = len(rows)
+            # ``items`` is the row list; ``total`` is the match count before the limit.
+            # Reading a key the search does not return is a silent empty scope — the
+            # job reported success over zero documents — so a query that matches
+            # nothing is called out below rather than shrugged at.
+            found = self.freetext_search(one, exact=exact, limit=limit)
+            rows = found.get("items") or []
+            per_query[one] = found.get("total", len(rows))
             for row in rows:
-                sid = row.get("stable_id") or row.get("id")
+                sid = row.get("stable_id")
                 if sid:
                     ids[sid] = None
         total = len(ids)
+        if not total:
+            # Every query matched nothing. Nearly always a mistyped phrase or a
+            # jurisdiction that isn't in the free-text index — never a reason to
+            # report a successful pass over an empty corpus.
+            return {"error": "no documents matched", "queries": per_query,
+                    "hint": "check the phrase and that its jurisdiction is indexed "
+                            "(freetext_scope lists what is)"}
         done = failed = 0
         with self._open() as (cat, _rs, ts):
             for stable_id in ids:
