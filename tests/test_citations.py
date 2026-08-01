@@ -1285,3 +1285,52 @@ def test_extraction_budget_scales_with_document_length():
     # ...but still bounded, so a pathological document dies rather than hanging the pool
     assert _ExtractionGuard.budget_for("x" * 10_000_000_000) <= 900
     assert _ExtractionGuard.budget_for(None) == base
+
+
+def test_party_lookback_stops_at_a_field_label():
+    """Traced from the flagged table: the top entries in the corpus-wide shorthand
+    store were not nouns anyone forgot to blocklist — they were report HEADERS.
+
+    Australian and Canadian case reports are field-labelled documents, and the label
+    sits immediately before the party name::
+
+        Medium Neutral Citation:  Ratewave Pty Limited v BJ Illingby [2017] NSWCA 103
+        Library Sheet - R. v. Paul
+        Cases cited: Foo Ltd v Bar Ltd
+
+    The lookback ran straight through the separator, so the first party read as "Medium
+    Neutral Citation: Ratewave Pty Limited" and its short form as "Medium Neutral" —
+    which the store then carried into 18,692 documents. "Cases cited:", "Library Sheet"
+    and "Citation: R" (4,969 and 4,597 more) arrived by the identical route. No case name
+    has ever contained a colon, so the boundary costs nothing.
+    """
+    from raglex.citations.extractor import _CASE_NAME_BEFORE, _party_short_form
+
+    def parties(text):
+        m = _CASE_NAME_BEFORE.search(text)
+        return (None, None) if not m else (
+            _party_short_form(m.group("p1")), _party_short_form(m.group("p2")))
+
+    # the label is dropped and the REAL party is found instead of being missed
+    assert parties("Medium Neutral Citation:  Ratewave Pty Limited v BJ Illingby, ") == (
+        "Ratewave Pty", "BJ Illingby")
+    assert parties("Cases cited: Foo Ltd v Bar Ltd, ") == ("Foo", "Bar")
+    assert parties("Library Sheet - R. v. Paul, ")[1] == "Paul"
+
+    # ...and ordinary party names are untouched
+    assert parties("Dunsmuir v. New Brunswick, ") == ("Dunsmuir", "New Brunswick")
+    assert parties("See Suncor Energy Inc v Alberta, ") == ("Suncor Energy", "Alberta")
+    assert parties("Mouvement laïque québécois v. Saguenay (City), ")[0] == "Mouvement laïque"
+
+
+def test_a_colon_bearing_name_is_never_a_shorthand():
+    """The read-side half, which retires stored entries without waiting for a purge."""
+    from raglex.citations.extractor import valid_shorthand
+
+    assert valid_shorthand("Cases cited:") is False
+    assert valid_shorthand("CITATION :") is False
+    assert valid_shorthand("Citation: R") is False
+    # real names keep working
+    assert valid_shorthand("Dunsmuir") is True
+    assert valid_shorthand("CPIA") is True
+    assert valid_shorthand("the Vienna Convention") is True

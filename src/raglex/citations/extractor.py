@@ -155,8 +155,22 @@ _CASE_NAME_BEFORE = re.compile(
     # parenthesised public-body qualifier: "Mouvement laïque québécois v. Saguenay
     # (City)". Bound each side at citation-list punctuation rather than pretending
     # every token is capitalised.
-    r"(?P<p1>[A-ZÀ-ÖØ-Þ][^,;\n]{1,100}?)\s+v\.?\s+"
-    r"(?P<p2>[A-ZÀ-ÖØ-Þ][^,;\n]{1,100}?)\s*,?\s*$")
+    #
+    # A COLON or a spaced dash ends the lookback, because Australian and Canadian
+    # reports are field-labelled documents and the label sits immediately before the
+    # party name:
+    #
+    #   "Medium Neutral Citation:  Ratewave Pty Limited v BJ Illingby [2017] NSWCA 103"
+    #   "Library Sheet - R. v. Paul"
+    #   "Cases cited: Foo v Bar"
+    #
+    # Without that boundary the first party reads as "Medium Neutral Citation:
+    # Ratewave Pty Limited", whose short form is "Medium Neutral" — and the corpus-wide
+    # shorthand store then carried that phrase into 18,692 documents. "Cases cited:",
+    # "Library Sheet" and "Citation: R" arrived by the identical route. No case name
+    # has ever contained a colon, so this costs nothing.
+    r"(?P<p1>[A-ZÀ-ÖØ-Þ](?:(?!\s[-–—]\s)[^,;:\n]){1,100}?)\s+v\.?\s+"
+    r"(?P<p2>[A-ZÀ-ÖØ-Þ](?:(?!\s[-–—]\s)[^,;:\n]){1,100}?)\s*,?\s*$")
 _STATUTE_NAME_BEFORE = re.compile(
     r"(?P<name>[A-Z][A-Za-zÀ-ÿ'’()&.\- ]{2,100}?\s+(?:Act|Regulations?))\s*,?\s*$")
 # Parties too generic to be a distinctive short form: a bare "Canada, at para 5"
@@ -263,6 +277,14 @@ def valid_shorthand(name: str | None) -> bool:
     Applied both when a document DEFINES a shorthand and when a stored one is read
     back, so tightening it retires bad entries already in the store without waiting
     for a purge."""
+    # Checked BEFORE the edge-strip below, which would otherwise remove the very
+    # character that identifies the problem: a colon separates a FIELD LABEL from its
+    # value ("Cases cited:", "Citation: R", "Catchwords:"). No authority's name contains
+    # one, so a candidate carrying a colon is part of a report's header that the party
+    # lookback ran through, not a name. This is the read-side half of the boundary fix
+    # in _CASE_NAME_BEFORE: it retires entries already in the store without a purge.
+    if ":" in (name or ""):
+        return False
     n = " ".join((name or "").strip(" '\"“”’.,;:()[]").split())
     if len(n) < 3 or len(n) > 60:
         return False
