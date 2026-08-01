@@ -641,7 +641,7 @@ def test_a_subsection_citation_inherits_through_its_provisions_mapping(tmp_path)
     assert "case-other" not in srcs
 
 
-def test_uk_transposition_inherits_only_retained_eu_case_law(tmp_path):
+def test_a_uk_transposition_inherits_only_retained_eu_case_law(tmp_path):
     """A UK provision transposing a directive inherits pre-Brexit CJEU authority only.
 
     CJEU judgments handed down before IP completion day are retained EU case law and
@@ -676,9 +676,9 @@ def test_uk_transposition_inherits_only_retained_eu_case_law(tmp_path):
 
     written = f.upsert_provision_mappings(
         current_id="ukpga/2018/12", previous_id="32016L0680",
-        mapping_type="uk_transposition",
+        mapping_type="transposition",
         mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4"}])
-    assert written["mappings"][0]["mapping_type"] == "uk_transposition"
+    assert written["mappings"][0]["mapping_type"] == "transposition"
     assert written["mappings"][0]["inherit_before"] == "2020-12-31"   # set from the claim
 
     inherited = f.inherited_provision_mentions(stable_id="ukpga/2018/12")
@@ -705,21 +705,36 @@ def test_the_transposition_cutoff_can_be_set_and_cleared(tmp_path):
 
     explicit = f.upsert_provision_mappings(
         current_id="ukpga/2018/12", previous_id="32016L0680",
-        mapping_type="uk_transposition",
+        mapping_type="transposition",
         mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4",
                    "inherit_before": "2016-05-04"}])
     assert explicit["mappings"][0]["inherit_before"] == "2016-05-04"
 
     cleared = f.upsert_provision_mappings(
         current_id="ukpga/2018/12", previous_id="32016L0680",
-        mapping_type="uk_transposition",
+        mapping_type="transposition",
         mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4",
                    "inherit_before": "never"}])
     assert cleared["mappings"][0]["inherit_before"] is None
 
     bad = f.upsert_provision_mappings(
         current_id="ukpga/2018/12", previous_id="32016L0680",
-        mapping_type="uk_transposition",
+        mapping_type="transposition",
         mappings=[{"current_anchor": "s. 35", "previous_anchor": "Article 4",
                    "inherit_before": "31/12/2020"}])
     assert "error" in bad and "YYYY-MM-DD" in bad["error"]
+
+
+def test_a_non_uk_transposition_carries_no_cutoff(tmp_path):
+    """Only the UK left. An Irish or German transposition inherits its directive's case
+    law in full, so the gate must follow the jurisdiction rather than the word
+    'transposition'."""
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        _held(cat, ts, "ie/act/2018/7")
+        _held(cat, ts, "32016L0680")
+    written = f.upsert_provision_mappings(
+        current_id="ie/act/2018/7", previous_id="32016L0680",
+        mapping_type="transposition",
+        mappings=[{"current_anchor": "s. 71", "previous_anchor": "Article 4"}])
+    assert written["mappings"][0]["inherit_before"] is None

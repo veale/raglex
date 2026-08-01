@@ -170,10 +170,16 @@ class UKIPACodesAdapter(BaseAdapter):
 
     def fetch(self, stub: Stub) -> Record | None:
         from ..extraction import extract_bytes
+        from ..formats import parse as parse_format
 
         page = self._get().fetch(stub.landing_url)
         html = page.html or ""
-        text = extract_bytes(html.encode("utf-8"), ext="html").text or ""
+        # A code of practice is cited by its numbered paragraph and nothing else, so the
+        # govspeak parser (content div, headings, "3.19.") is what makes those citations
+        # land. The generic HTML extractor swallowed the whole GOV.UK page — cookie
+        # banner and all — and produced no segments at all.
+        parsed = parse_format("govuk-govspeak", html.encode("utf-8"))
+        text = parsed.text or extract_bytes(html.encode("utf-8"), ext="html").text or ""
         relations = ipa_provision_relations(text)
         return Record(
             source=self.source,
@@ -187,6 +193,7 @@ class UKIPACodesAdapter(BaseAdapter):
             raw_bytes=html.encode("utf-8"),
             raw_ext="html",
             text=text or None,
+            segments=parsed.segments,
             relations=relations,
             extracted_via=ExtractedVia.STRUCTURED,
             topic_tags=["ipa-code", "home-office", "investigatory-powers-act-2016"],

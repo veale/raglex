@@ -618,12 +618,15 @@ def build_server(config: Config | None = None) -> MCPServer:
         * ``transposition`` — a NATIONAL provision implementing an EU one. Neither
           descent nor a companion: the two are in force in different legal orders, and
           the EU case law interpreting the directive is the point of the link.
-        * ``uk_transposition`` — the same, qualified by the UK cut-off. Only RETAINED EU
-          case law is inherited: CJEU judgments up to IP completion day (2020-12-31)
-          bind UK courts, later ones do not, so the mapping sets ``inherit_before``
-          automatically. Pass ``inherit_before`` per mapping to move it (YYYY-MM-DD) or
-          ``"never"`` to lift it. A citer whose date cannot be established — neither a
-          decision_date nor an ECLI year — is excluded rather than assumed current.
+
+          **It respects exit day by itself.** Where the transposing provision is UK,
+          only RETAINED EU case law is inherited — CJEU judgments up to IP completion
+          day (2020-12-31) bind UK courts, later ones do not — and the cutoff is derived
+          from the jurisdiction, so you never have to remember to ask for it. A citer
+          whose date cannot be established (neither a decision_date nor an ECLI year) is
+          excluded rather than assumed current. Pass ``inherit_before`` per mapping to
+          move the cutoff (YYYY-MM-DD) or ``"never"`` to lift it; a non-UK transposition
+          carries no cutoff at all.
 
         Anchors are resolved against each law's own segments as they are written; any
         that matches no provision comes back in ``unresolved_anchors`` (the mapping is

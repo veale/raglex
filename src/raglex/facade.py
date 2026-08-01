@@ -47,25 +47,32 @@ PROVISION_MAPPING_TYPES = {
     # A national provision implementing an EU one. Not descent and not a companion
     # instrument: the two are in force in different legal orders, and the EU case law
     # interpreting the directive is what makes the link worth having.
+    #
+    # It gates ITSELF. Where the transposing provision is UK, only retained EU case law
+    # is inherited — CJEU judgments up to IP completion day bind UK courts (subject to
+    # the higher courts' power to depart), later ones do not — so the cutoff is derived
+    # from the jurisdiction rather than from the operator remembering a special type
+    # name. Getting that wrong would present post-Brexit Luxembourg authority as
+    # governing a domestic provision: a legal error, not an untidy result.
     "transposition":
-        "this national provision transposes the other (EU) provision into domestic law",
-    # The same relation, qualified by the UK's constitutional cut-off. CJEU judgments
-    # handed down BEFORE IP completion day are retained EU case law and bind UK courts
-    # (subject to the higher courts' power to depart); judgments after it do not. So a
-    # UK transposition inherits its directive's case law only up to that date, and
-    # saying so in the mapping is what stops the reader quietly presenting post-Brexit
-    # Luxembourg authority as though it governed a UK provision.
-    "uk_transposition":
-        "this UK provision transposes the other (EU) provision; only retained EU case "
-        "law (pre-IP completion day) is inherited",
+        "this national provision transposes the other (EU) provision into domestic law; "
+        "a UK transposition inherits retained EU case law only (pre-IP completion day)",
 }
 
 # IP completion day — 31 December 2020, 11pm. Date granularity is enough: the cutoff
 # falls on a year boundary, which is what lets a document dated only by its ECLI year
 # be placed on the right side of it.
 RETAINED_EU_CASELAW_CUTOFF = "2020-12-31"
-# Mapping types that carry an automatic inheritance cutoff unless one is given.
-_DEFAULT_INHERIT_BEFORE = {"uk_transposition": RETAINED_EU_CASELAW_CUTOFF}
+# Jurisdictions whose transpositions carry a cutoff, and what it is. Only the UK has
+# one: no other member state left.
+_TRANSPOSITION_CUTOFF_BY_JURISDICTION = {"United Kingdom": RETAINED_EU_CASELAW_CUTOFF}
+# A UK instrument by its identifier. Checked alongside the jurisdiction bucket because
+# the bucket is derived from the ADAPTER that imported the document — a hand-imported
+# ukpga is no less a UK Act, and the cutoff must not depend on how it arrived.
+_UK_INSTRUMENT_ID_RE = re.compile(
+    r"^(?:ukpga|ukla|ukcm|uksi|ukmo|ukci|asp|ssi|anaw|asc|wsi|nia|nisr|apni|aosp|aep|mnia)/",
+    re.IGNORECASE,
+)
 
 EU_DIGITAL_ACQUIS_IDS = (
     # data protection / data economy
@@ -692,7 +699,11 @@ _ANCHOR_TYPES = {
 
 def _anchor_key(text: str | None) -> str | None:
     t = (text or "").strip().lower().lstrip("[(")
-    m = re.match(r"^([a-z]+)?\.?\s*(\d+[a-z]?)", t)
+    # The number may be MULTI-LEVEL: a code of practice is cited by "paragraph 3.19",
+    # a rule of court by "r 3.1". Stopping at the first dot folded 3.19 and 3.2 onto the
+    # same key as 3 — every paragraph of a chapter answering to its chapter number. The
+    # dot only counts when a digit follows it, so a trailing "s. 7." is unaffected.
+    m = re.match(r"^([a-z]+)?\.?\s*(\d+(?:\.\d+)*[a-z]?)", t)
     if not m or not m.group(2):
         return None
     typ = _ANCHOR_TYPES.get(m.group(1) or "", "")
@@ -721,8 +732,13 @@ def _anchor_sql_prefixes(anchor: str | None) -> list[str]:
     if not key:
         return []
     typ, _, number = key.partition(":")
+    # The database guard compares against a normalisation that removes dots, so the
+    # prefix must too, or "para 3.19" would be looked up as "para3.19" against a stored
+    # "para319" and match nothing. Coarseness is fine here — "para 31.9" normalises the
+    # same way, and the exact matcher behind the guard rejects it.
+    number = number.replace(".", "")
     if not number:                       # a bare numeral: no unit to spell
-        return [typ]
+        return [typ.replace(".", "")]
     return [f"{spelling}{number}" for spelling in _ANCHOR_SPELLINGS.get(typ, (typ,))]
 
 
@@ -6117,8 +6133,15 @@ class Facade:
                 # LawMaker pages whose surrounding site template changes over time.
                 meta = cat.document_meta(stable_id)
                 hinted = str(meta.get("format") or "").strip().lower()
+                # A GOV.UK publication is HTML the sniffer cannot tell from any other
+                # page, but its structure is entirely knowable — so the SOURCE selects
+                # the parser. Without this a reparse would fall back to the generic
+                # extractor and put the cookie banner back.
+                if doc["source"] == "uk-ipa-codes":
+                    hinted = "govuk-govspeak"
                 fmt = hinted if hinted in {
                     "akn", "bwb", "formex-legislation", "lawmaker-html",
+                    "govuk-govspeak",
                 } else _sniff_format(raw)
                 if fmt is None:
                     return {"stable_id": stable_id, "reparsed": False, "reason": "no structural format"}
@@ -9858,34 +9881,47 @@ class Facade:
                 return {"error": f"unknown mapping_type {item.get('mapping_type')!r} for "
                                  f"{current_anchor}",
                         "known": sorted(PROVISION_MAPPING_TYPES)}
-            # The cutoff follows the CLAIM unless the caller overrides it: asserting a UK
-            # transposition and getting post-Brexit CJEU authority inherited with it
-            # would be the same class of error as a silently coerced relationship.
+            # An explicit cutoff wins; otherwise it is derived from the jurisdiction of
+            # the transposing law once we have opened the catalogue (below).
             inherit_before = item.get("inherit_before")
-            if inherit_before is None:
-                inherit_before = _DEFAULT_INHERIT_BEFORE.get(item_type)
-            elif str(inherit_before).strip().lower() in ("", "none", "never"):
-                inherit_before = None
-            else:
-                inherit_before = str(inherit_before).strip()[:10]
-                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", inherit_before):
-                    return {"error": f"inherit_before must be YYYY-MM-DD, got "
-                                     f"{item.get('inherit_before')!r}"}
+            explicit_cutoff = inherit_before is not None
+            if explicit_cutoff:
+                if str(inherit_before).strip().lower() in ("", "none", "never"):
+                    inherit_before = None
+                else:
+                    inherit_before = str(inherit_before).strip()[:10]
+                    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", inherit_before):
+                        return {"error": f"inherit_before must be YYYY-MM-DD, got "
+                                         f"{item.get('inherit_before')!r}"}
             clean.append({
                 "current_anchor": current_anchor,
                 "previous_anchor": previous_anchor,
                 "mapping_type": item_type,
                 "inherit_before": inherit_before,
+                "_explicit_cutoff": explicit_cutoff,
                 "note": str(item.get("note") or "").strip() or None,
                 "confidence": confidence,
             })
         if not clean or len(clean) > 1000:
             return {"error": "supply between 1 and 1000 mappings"}
         with self._open() as (cat, _rs, ts):
-            if cat.get_document(current_id) is None:
+            current_doc = cat.get_document(current_id)
+            if current_doc is None:
                 return {"error": f"current law not held: {current_id}"}
             if cat.get_document(previous_id) is None:
                 return {"error": f"previous law not held: {previous_id}"}
+            # A transposition gates itself on the jurisdiction of the law doing the
+            # transposing: a UK provision inherits retained EU case law only. Derived
+            # here rather than asked of the caller, so the guarantee does not depend on
+            # anyone remembering it.
+            jurisdiction = self._doc_bucket(current_doc["source"], current_doc["court"])
+            derived_cutoff = _TRANSPOSITION_CUTOFF_BY_JURISDICTION.get(jurisdiction)
+            if derived_cutoff is None and _UK_INSTRUMENT_ID_RE.match(current_id):
+                derived_cutoff = RETAINED_EU_CASELAW_CUTOFF
+            for item in clean:
+                if (item.pop("_explicit_cutoff") is False
+                        and item["mapping_type"] == "transposition"):
+                    item["inherit_before"] = derived_cutoff
             # Resolve every anchor against the two documents' own segments BEFORE
             # writing. The whole value of this table is that its anchors point at real
             # provisions; an unresolvable one (a "regulation 6" against an instrument

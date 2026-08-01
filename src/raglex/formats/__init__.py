@@ -15,6 +15,7 @@ from . import (  # noqa: F401  (register on import)
     formex,
     frl_html,
     gii_xml,
+    govuk_govspeak,
     hklm_xml,
     lawmaker_html,
     ldml_de,

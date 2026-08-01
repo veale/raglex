@@ -1228,7 +1228,10 @@ const _ANCHOR_TYPE: Record<string, string> = {
 };
 function anchorKey(text: string): string | null {
   const t = (text || "").trim().toLowerCase().replace(/^[[(]/, "");
-  const m = /^([a-z]+)?\.?\s*(\d+[a-z]?)/.exec(t);
+  // Multi-level numbers are real citation units: "paragraph 3.19" of a code of
+  // practice, "r 3.1" of the rules. Stopping at the first dot folded every paragraph of
+  // a chapter onto its chapter number. Must stay identical to the server's _anchor_key.
+  const m = /^([a-z]+)?\.?\s*(\d+(?:\.\d+)*[a-z]?)/.exec(t);
   if (!m || !m[2]) return null;
   const typ = m[1] ? _ANCHOR_TYPE[m[1]] : "";
   return typ ? `${typ}:${m[2]}` : m[2];

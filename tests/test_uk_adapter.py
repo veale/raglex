@@ -213,3 +213,45 @@ def test_statutory_instrument_regulations_are_citable_units():
     # and it is findable by the pinpoint a judgment would actually use
     from raglex.facade import _anchor_key
     assert _anchor_key("regulation 6") == _anchor_key(reg6.label) == "reg:6"
+
+
+def test_govuk_code_of_practice_segments_by_numbered_paragraph():
+    """A code of practice is cited by paragraph number and nothing else.
+
+    Run through the generic HTML extractor, the whole GOV.UK page came through — cookie
+    banner, navigation, contents, footer — with NO segments at all, so a citation of
+    "paragraph 3.19" had nothing to land on and the reader could not scroll to it. All
+    nine IPA codes were held that way.
+    """
+    from raglex.facade import _anchor_key
+    from raglex.formats import parse
+
+    html = b"""<html><body>
+    <div class="cookie-banner"><p>Cookies on GOV.UK</p></div>
+    <nav><a href="/">Home</a></nav>
+    <div class="govuk-govspeak"><div class="govspeak">
+      <h2 id="introduction">1. Introduction</h2>
+      <p>1.1. This Code relates to functions under Part 5 of the Act.</p>
+      <h3>Necessity and proportionality</h3>
+      <p>3.19. A warrant may be issued only where necessary.</p>
+      <p>Unnumbered prose continuing that paragraph.</p>
+      <script>var x = 1;</script>
+    </div></div>
+    <footer><p>Crown copyright</p></footer></body></html>"""
+
+    parsed = parse("govuk-govspeak", html)
+    assert "Cookies on GOV.UK" not in parsed.text     # page furniture, not the code
+    assert "Crown copyright" not in parsed.text
+    assert "var x" not in parsed.text
+    labels = [s.label for s in parsed.segments]
+    assert labels == ["1. Introduction", "para 1.1",
+                      "Necessity and proportionality", "para 3.19"]
+
+    # The unnumbered continuation belongs to the paragraph it continues.
+    para = next(s for s in parsed.segments if s.label == "para 3.19")
+    assert "Unnumbered prose" in parsed.text[para.char_start:para.char_end]
+
+    # And the pinpoint a judgment writes folds onto that segment — 3.19 must not
+    # collapse onto 3, which would make every paragraph of a chapter the same anchor.
+    assert _anchor_key("paragraph 3.19") == _anchor_key("para 3.19") == "para:3.19"
+    assert _anchor_key("para 3.2") != _anchor_key("para 3.19") != _anchor_key("para 3")
