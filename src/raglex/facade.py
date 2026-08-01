@@ -4832,14 +4832,17 @@ class Facade:
                 if on_progress and (done + failed) % 25 == 0:
                     on_progress(stage="re-extracting", done=done + failed, total=total,
                                 item=f"{done + failed:,} of {total:,} documents")
-            if on_progress:
-                on_progress(stage="resolving", done=total, total=total,
-                            item="linking the new candidates")
-            resolved = Resolver(cat).run()
+            # The BATCHED resolver, not the one-shot: it is the same set-based SQL in
+            # bounded relation-id ranges, but it reports a cursor and honours cancel.
+            # The one-shot version is silent for as long as it takes, which is exactly
+            # what made a finished rescan look frozen in its final phase.
+            resolved = Resolver(cat).run_batched(
+                on_progress=on_progress, cancel_check=cancel_check)
         self._invalidate_caches()
         return {"queries": per_query, "documents": total,
                 "re_extracted": done, "failed": failed,
-                "resolved": getattr(resolved, "resolved", None)}
+                "resolved": getattr(resolved, "resolved", None),
+                "still_pending": getattr(resolved, "still_pending", None)}
 
     def rebuild_citation_counts(self, *, on_progress=None) -> dict:
         """Refresh the snowball's frequency roll-up + the Explore-homepage roll-ups it shares a
