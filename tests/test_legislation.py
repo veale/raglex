@@ -692,3 +692,76 @@ def test_a_ceilinged_body_window_starts_at_the_articles_not_the_recitals(tmp_pat
     assert f.document_body("32024R1689", offset=0, limit=200)["text"].startswith("Recital 1")
     # no ceiling declared → the whole document, unwindowed
     assert "window" not in f.document_body("32024R1689")
+
+
+def test_reparse_reaches_the_eurlex_html_fallback_corpus(tmp_path):
+    """The whole-source sweep kept its OWN list of trusted format hints, and eurlex-html
+    was missing from it — so 22,445 EU acts (every one with no Formex rendition) were
+    skipped by the very sweep meant to deliver a parser fix to them. An EUR-Lex page is
+    HTML the byte sniffer cannot tell from any other, so the hint is the only route."""
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record
+    from raglex.facade import Facade
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                 embed_model=None)
+    f = Facade(cfg)
+    html = (b"<html><head><title>EUR-Lex - 32000L0031 - EN</title></head><body>"
+            b'<p class="ti-art">Article 24</p><p>Addressed to the Member States.</p>'
+            b"<p>ANNEX</p><p>DEROGATIONS FROM ARTICLE 3</p><p>As provided for...</p>"
+            b"</body></html>")
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_file = raw_dir / "ecd.html"
+    raw_file.write_bytes(html)
+
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source="eu-legislation", stable_id="32000L0031",
+                     doc_type=DocType.LEGISLATION, title="e-Commerce Directive",
+                     text="stale text with no annex", raw_bytes=html, raw_ext="html",
+                     extracted_via=ExtractedVia.STRUCTURED,
+                     extra={"format": "eurlex-html"})
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec, raw_path=str(raw_file),
+                            text_path=str(ts.put(rec.payload_hash, rec.text)))
+        cat.commit()
+
+    out = f.reparse_source(source="eu-legislation")
+    assert out["reparsed"] == 1 and out["skipped"] == 0 and out["failed"] == 0
+
+    with f._open() as (cat, _rs, ts):
+        ph = cat.get_document("32000L0031")["payload_hash"]
+        segs = ts.get_segments(ph)
+    # …and the annex the sweep exists to deliver is now its own provision
+    assert any(s.kind == "annex" for s in segs), [s.label for s in segs]
+
+
+def test_a_reparse_failure_says_which_document_and_why(tmp_path):
+    """"44 failed" out of 61,340 with no id and no reason is a number you cannot act on."""
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record
+    from raglex.facade import Facade
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                 embed_model=None)
+    f = Facade(cfg)
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source="eu-legislation", stable_id="32000L0031",
+                     doc_type=DocType.LEGISLATION, title="x", text="t",
+                     raw_bytes=b"<html></html>", raw_ext="html",
+                     extracted_via=ExtractedVia.STRUCTURED,
+                     extra={"format": "eurlex-html"})
+        rec.ensure_payload_hash()
+        # a raw_path that is not there: the read raises, the sweep must survive and say so
+        cat.upsert_document(rec, raw_path=str(tmp_path / "gone.html"),
+                            text_path=str(ts.put(rec.payload_hash, "t")))
+        cat.commit()
+
+    out = f.reparse_source(source="eu-legislation")
+    assert out["failed"] == 1
+    assert out["failures"][0]["stable_id"] == "32000L0031"
+    assert "FileNotFoundError" in out["failures"][0]["error"]

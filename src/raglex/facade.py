@@ -6615,7 +6615,15 @@ class Facade:
         # "akoma-ntoso" is the UK/IE/DE-AKN registry name (uk_legislation stows it); without it
         # a UK reparse fell through to _sniff_format on all 103k acts — still correct (it detects
         # akomaNtoso), just wasteful.
-        hints = {"akn", "akoma-ntoso", "bwb", "formex-legislation", "rii-xml", "dila-xml"}
+        # "eurlex-html" is the EUR-Lex HTML fallback — every EU act with no Formex
+        # rendition, 22,445 of them. It was missing here (though present in the
+        # single-document reparse), and an EUR-Lex page is HTML the byte sniffer cannot
+        # tell from any other, so those documents fell to _sniff_format → None → "skip".
+        # A whole-source reparse silently declined to touch a third of the source: in one
+        # 12,000-document sample, 5,178 were skipped for exactly this reason, and the
+        # parser fix the sweep existed to deliver never reached any of them.
+        hints = {"akn", "akoma-ntoso", "bwb", "formex-legislation", "rii-xml", "dila-xml",
+                 "eurlex-html"}
 
         with self._open() as (cat, _rs, ts):
             # KEYSET pagination, not one fetchall: a source with millions of rows would
@@ -6629,6 +6637,11 @@ class Facade:
                 "AND payload_hash IS NOT NULL AND stable_id > ?",
                 (source, after_stable_id or "")).fetchone()["n"]
             ok = skip = fail = 0
+
+            # What went wrong, and where. A bad file must never stop the sweep — but
+            # swallowing the exception entirely made "44 failed" out of 61,340 a number
+            # with no way to act on it: no id, no reason, nowhere to look.
+            failures: list[dict] = []
 
             def _work(r: dict) -> str:
                 try:
@@ -6645,7 +6658,12 @@ class Facade:
                     ts.put(r["payload_hash"], pd.text)
                     ts.put_segments(r["payload_hash"], pd.segments)
                     return "ok"
-                except Exception:  # noqa: BLE001 — a bad file must never stop the sweep
+                except Exception as exc:  # noqa: BLE001 — reported, never raised
+                    log.warning("[reparse] %s (%s): %s: %s", r["stable_id"],
+                                r.get("raw_path"), exc.__class__.__name__, exc)
+                    if len(failures) < 200:      # bounded: a systemic fault would flood
+                        failures.append({"stable_id": r["stable_id"],
+                                         "error": f"{exc.__class__.__name__}: {exc}"[:200]})
                     return "fail"
 
             done = 0
@@ -6684,7 +6702,9 @@ class Facade:
                               item=cursor, _checkpoint={"phase": "reparse", "source": source,
                                                         "after_stable_id": cursor})
         return {"source": source, "total": total, "reparsed": ok, "skipped": skip,
-                "failed": fail, "offsets_reanchored": reanchored}
+                "failed": fail, "offsets_reanchored": reanchored,
+                # the ids and reasons, so a failure count is something to act on
+                **({"failures": failures[:50]} if failures else {})}
 
     def _reanchor_chunk(self, cat, ts, id_to_hash: dict) -> tuple[int, int, int]:
         """Re-anchor the citation offsets of a batch of documents to their current text.
