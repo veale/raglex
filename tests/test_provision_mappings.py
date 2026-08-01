@@ -769,6 +769,39 @@ def test_rescan_matching_reads_the_search_result_it_is_actually_given(tmp_path,
     assert seen == []
 
 
+def test_rescan_matching_reports_a_cancel_instead_of_looking_finished(tmp_path,
+                                                                     monkeypatch):
+    """A cancelled rescan must never read as a completed one.
+
+    The resolve stage reports its own done/total into the same progress row, so a run
+    stopped at document 52 of 10,767 displayed as 10,767/10,767 — indistinguishable
+    from success, and duly misread as "the rescan finished". A cancel now short-circuits
+    before the resolver and says so in both the result and the last progress event.
+    """
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        for sid in ("doc-a", "doc-b", "doc-c"):
+            _held(cat, ts, sid, text="mentions the Act")
+
+    monkeypatch.setattr(f, "freetext_search", lambda q, **kw: {
+        "items": [{"stable_id": "doc-a"}, {"stable_id": "doc-b"}, {"stable_id": "doc-c"}],
+        "total": 3})
+    events: list[dict] = []
+    calls = {"n": 0}
+
+    def cancel_after_one() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    result = f.rescan_matching(query='"the Act"', cancel_check=cancel_after_one,
+                               on_progress=lambda **kw: events.append(kw))
+    assert result["cancelled"] is True
+    assert result["re_extracted"] < 3          # it did NOT get through the scope
+    assert result["resolved"] == 0             # and never reached the resolver
+    assert events and events[-1]["stage"] == "cancelled"
+    assert events[-1]["done"] == result["re_extracted"]
+
+
 def test_rescan_matching_unions_several_queries(tmp_path, monkeypatch):
     """A document naming three of the Acts is re-extracted once, not three times."""
     f = _facade(tmp_path)

@@ -4791,8 +4791,15 @@ class Facade:
         several queries separated by ``|||`` are unioned — one pass over the union
         rather than one pass per phrase, so a document naming three of the Acts is
         re-extracted once.
+
+        Extraction runs on the same pooled path as every other bulk re-scan. The
+        serial loop this replaced cost ~2.5s/document for three avoidable reasons:
+        it rebuilt the whole named-alias map from the DB *per document*, ran the
+        (CPU-bound, pure-Python) grammar pass on one core, and committed per
+        document. None of those scale with the scope, so a "small" rescan was no
+        faster per document than a corpus-wide one.
         """
-        from .citations import extract_document
+        from .citations import extract_documents_parallel
 
         queries = [q.strip() for q in str(query or "").split("|||") if q.strip()]
         if not queries:
@@ -4819,19 +4826,27 @@ class Facade:
             return {"error": "no documents matched", "queries": per_query,
                     "hint": "check the phrase and that its jurisdiction is indexed "
                             "(freetext_scope lists what is)"}
-        done = failed = 0
         with self._open() as (cat, _rs, ts):
-            for stable_id in ids:
-                if cancel_check and cancel_check():
-                    break
-                try:
-                    extract_document(cat, ts, stable_id)
-                    done += 1
-                except Exception:  # noqa: BLE001 — one bad document must not end the run
-                    failed += 1
-                if on_progress and (done + failed) % 25 == 0:
-                    on_progress(stage="re-extracting", done=done + failed, total=total,
-                                item=f"{done + failed:,} of {total:,} documents")
+            # Confirm held documents that actually have text, once, instead of
+            # discovering per document that there is nothing to extract.
+            scope = cat.held_text_document_ids(list(ids))
+            aliases = cat.named_alias_map()   # hoisted: constant for the whole run
+            ex = extract_documents_parallel(
+                cat, ts, scope, aliases=aliases,
+                stage="re-extracting",
+                on_progress=on_progress, cancel_check=cancel_check)
+            base = {"queries": per_query, "documents": total,
+                    "extractable": len(scope), "re_extracted": ex.processed,
+                    "citations": ex.citations}
+            if ex.cancelled:
+                # A cancel used to be invisible: the resolve stage overwrote the
+                # progress row's done/total, so a run stopped at document 52 of
+                # 10,767 displayed as 10,767/10,767 and read as finished. Stop here
+                # and say so, both in the result and in the progress panel.
+                _progress(on_progress, stage="cancelled", done=ex.processed, total=len(scope),
+                          item=f"cancelled after {ex.processed:,} of {len(scope):,} documents")
+                self._invalidate_caches()
+                return {**base, "cancelled": True, "resolved": 0}
             # The BATCHED resolver, not the one-shot: it is the same set-based SQL in
             # bounded relation-id ranges, but it reports a cursor and honours cancel.
             # The one-shot version is silent for as long as it takes, which is exactly
@@ -4839,8 +4854,7 @@ class Facade:
             resolved = Resolver(cat).run_batched(
                 on_progress=on_progress, cancel_check=cancel_check)
         self._invalidate_caches()
-        return {"queries": per_query, "documents": total,
-                "re_extracted": done, "failed": failed,
+        return {**base,
                 "resolved": getattr(resolved, "resolved", None),
                 "still_pending": getattr(resolved, "still_pending", None)}
 
