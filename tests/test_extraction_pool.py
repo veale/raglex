@@ -177,3 +177,125 @@ def test_pool_size_env_override(monkeypatch):
     monkeypatch.delenv("RAGLEX_EXTRACT_WORKERS")
     assert _pool_size(5) == 5
     assert _pool_size(None) >= 1
+
+
+# A case short name, NOT a statutory initialism: "GDPR" and friends sit in
+# _PROTECTED_SHORTHAND_TARGETS and are skipped on read, so a corpus built on them
+# compares two empty sets and proves nothing about the two-phase path.
+_SHORTHAND_ROW = {"shorthand": "Suncor", "candidate_id": "ewca/civ/2004/1000",
+                  "entity_kind": "case", "is_abbrev": False}
+
+
+def _seed_shorthand_corpus(facade: Facade, n: int) -> list[str]:
+    """``n`` documents citing one case in full AND using a stored short name for it.
+
+    The shorthand only links if the corpus-wide store is consulted, and the store is
+    gated on the document already citing that candidate — hence both in every document.
+    A case short name links only with a pincite, which is why the uses carry one.
+    """
+    ids = []
+    for i in range(n):
+        r = facade.import_bytes(
+            data=(f"<p>Judgment {i}. Applying [2004] EWCA Civ 1000, the position is "
+                  f"settled. Suncor, at para 30, is directly in point, and Suncor at "
+                  f"paras 41-42 confirms it.</p>").encode(),
+            filename=f"s{i}.html", doc_type="judgment", title=f"S{i} v T")
+        ids.append(r["stable_id"])
+    return ids
+
+
+def test_pool_applies_stored_shorthands_exactly_as_the_serial_stage(tmp_path):
+    """The two-phase pool protocol must not change what gets linked.
+
+    The corpus-wide shorthand scan is the most expensive step in the pass, so the pool
+    hands it back to the worker that still holds the text (phase two) instead of paying
+    for it on the parent's single core. That is a pure performance move: the edges must
+    be identical to the serial stage's, shorthand uses included.
+    """
+    from raglex.citations.stage import extract_document, reset_shorthand_cache
+
+    def _run(pooled: bool) -> dict[str, set]:
+        facade = Facade(_config(tmp_path / ("pool" if pooled else "serial")))
+        ids = _seed_shorthand_corpus(facade, 40)
+        with facade._open() as (cat, _rs, ts):
+            cat.add_learned_shorthands([dict(_SHORTHAND_ROW)])
+            reset_shorthand_cache()     # the store changed under a long-lived process
+            for sid in ids:
+                cat.conn.execute(
+                    "UPDATE documents SET last_extracted_at = NULL "
+                    "WHERE stable_id = ?", (sid,))
+            cat.commit()
+            if pooled:
+                stats = extract_documents_parallel(cat, ts, ids, workers=2)
+                assert stats.processed == 40 and not stats.cancelled
+            else:
+                for sid in ids:
+                    extract_document(cat, ts, sid)
+                cat.commit()
+            return {sid: {(r["candidate_id"], r["dst_anchor"])
+                          for r in cat.relations_for(sid)} for sid in ids}
+
+    serial, pooled = _run(False), _run(True)
+    assert set(serial) and len(serial) == len(pooled) == 40
+    # same edges per document, and the shorthand pass really did fire
+    for (s_sid, s_edges), (p_sid, p_edges) in zip(sorted(serial.items()),
+                                                  sorted(pooled.items())):
+        assert s_edges == p_edges, f"{s_sid} vs {p_sid}"
+    # and it is not two empty sets agreeing: the stored short name really linked
+    with Facade(_config(tmp_path / "pool"))._open() as (cat, _rs, _ts):
+        assert sum(1 for sid in pooled
+                   for r in cat.citations_for(sid)
+                   if r["method"] == "shorthand_global") > 0
+
+
+def test_shorthand_scan_falls_back_to_the_parent_when_the_worker_is_gone(tmp_path,
+                                                                            monkeypatch):
+    """If the hand-back to the worker fails, the parent does the scan itself.
+
+    Phase two is an optimisation, never a correctness dependency: a torn-down worker
+    must cost throughput, not edges. Here every attach send fails, so the whole run
+    takes the in-parent path — and must still produce exactly the serial edges.
+    """
+    import raglex.citations.stage as stage
+
+    def _edges(pooled: bool, break_attach: bool) -> dict:
+        facade = Facade(_config(tmp_path / f"{pooled}-{break_attach}"))
+        ids = _seed_shorthand_corpus(facade, 40)
+        with facade._open() as (cat, _rs, ts):
+            cat.add_learned_shorthands([dict(_SHORTHAND_ROW)])
+            stage.reset_shorthand_cache()
+            for sid in ids:
+                cat.conn.execute(
+                    "UPDATE documents SET last_extracted_at = NULL "
+                    "WHERE stable_id = ?", (sid,))
+            cat.commit()
+            if break_attach:
+                real_init = stage._PoolWorker.__init__
+
+                def _init(self):
+                    real_init(self)
+                    real_send = self.conn.send
+
+                    def _send(msg):
+                        if isinstance(msg, tuple) and msg and msg[0] == stage._OP_ATTACH:
+                            raise OSError("worker gone")
+                        return real_send(msg)
+
+                    self.conn.send = _send      # type: ignore[method-assign]
+
+                monkeypatch.setattr(stage._PoolWorker, "__init__", _init)
+            if pooled:
+                stats = extract_documents_parallel(cat, ts, ids, workers=2)
+                assert stats.processed == 40 and not stats.cancelled
+            else:
+                for sid in ids:
+                    stage.extract_document(cat, ts, sid)
+                cat.commit()
+            return {sid: {(r["candidate_id"], r["dst_anchor"])
+                          for r in cat.relations_for(sid)} for sid in ids}
+
+    serial = _edges(False, False)
+    fallback = _edges(True, True)
+    assert len(serial) == len(fallback) == 40
+    for s, f in zip(sorted(serial.values(), key=str), sorted(fallback.values(), key=str)):
+        assert s == f

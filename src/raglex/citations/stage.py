@@ -213,9 +213,17 @@ def _is_us_source(doc) -> bool:
 # is reused across documents (spawn + grammar import are paid once per life).
 
 
+# Worker opcodes. Both messages are ``(op, payload)``, so a shape mismatch is a
+# KeyError-ish failure inside the try below rather than a torn-down worker.
+_OP_EXTRACT = "extract"
+_OP_ATTACH = "attach"
+
+
 def _extract_worker(conn) -> None:  # pragma: no cover — exercised via the guard
+    from raglex.citations.extractor import attach_stored_shorthands as _attach
     from raglex.citations.extractor import extract_citations as _extract
 
+    held_text = ""    # the document this worker last extracted, kept for _OP_ATTACH
     while True:
         try:
             item = conn.recv()
@@ -230,7 +238,19 @@ def _extract_worker(conn) -> None:  # pragma: no cover — exercised via the gua
             # fallback that hid a protocol mismatch for a day: no parallelism, a spawn
             # burnt per document, and the runaway-regex budget (which only the worker
             # has) no longer covering the pass.
-            text, aliases, home_id, home_kind = item
+            op, payload = item
+            if op == _OP_ATTACH:
+                # Phase two of the same document: apply the corpus-wide shorthands the
+                # parent selected. The text is already here, so only the (small) cite
+                # list and the applicable shorthand rows cross the pipe. This is the
+                # single most expensive thing in the whole pass and it is pure CPU on
+                # text, so it belongs on a worker core, not on the parent's.
+                cites, stored, exclude = payload
+                conn.send(("ok", _attach(held_text, cites, stored,
+                                         exclude=frozenset(exclude))))
+                continue
+            text, aliases, home_id, home_kind = payload
+            held_text = text
             defs: list[dict] = []
             cites = _extract(text, aliases=aliases, defs_out=defs,
                              home_id=home_id, home_kind=home_kind)
@@ -263,7 +283,7 @@ class _ExtractionGuard:
         with self._lock:
             try:
                 self._ensure()
-                self._conn.send((text, aliases, home[0], home[1]))
+                self._conn.send((_OP_EXTRACT, (text, aliases, home[0], home[1])))
             except Exception:  # spawn unavailable / worker torn down mid-send
                 self._kill()
                 return self._inproc(text, aliases, home)
@@ -342,9 +362,15 @@ def _pool_size(workers: int | None) -> int:
 
 
 class _PoolWorker:
-    """One guarded worker: spawn process + pipe + the doc currently in flight."""
+    """One guarded worker: spawn process + pipe + the doc currently in flight.
 
-    __slots__ = ("proc", "conn", "item", "deadline")
+    A document occupies its worker for two phases — ``extract`` (the grammar pass) and
+    optionally ``attach`` (the corpus-wide shorthand scan over the same text). ``phase``
+    says which reply to expect; ``pending`` carries what the parent needs to fall back
+    in-process if the worker dies mid-attach.
+    """
+
+    __slots__ = ("proc", "conn", "item", "deadline", "phase", "pending")
 
     def __init__(self) -> None:
         ctx = multiprocessing.get_context("spawn")
@@ -354,6 +380,8 @@ class _PoolWorker:
         child.close()
         self.item = None        # (stable_id, doc_row, text) while busy
         self.deadline = 0.0
+        self.phase = _OP_EXTRACT
+        self.pending = None     # (cites, stored, exclude, defs) while attaching
 
     def kill(self) -> None:
         try:
@@ -473,15 +501,18 @@ def extract_documents_parallel(
                 _count_done(sid, 0)
                 continue
             try:
-                # the worker's protocol is (text, aliases, home_id, home_kind) — the
-                # instrument a bare "Article 50(2)" belongs to travels with the document
-                # Source-scoped shorthands travel with the document, not the run: a
-                # bulk rescan mixes sources in one pool.
-                worker.conn.send((text, aliases_for_document(doc, aliases, text),
-                                  *_home_of(doc)))
+                # the worker's protocol is (op, (text, aliases, home_id, home_kind)) —
+                # the instrument a bare "Article 50(2)" belongs to travels with the
+                # document. Source-scoped shorthands travel with the document, not the
+                # run: a bulk rescan mixes sources in one pool.
+                worker.conn.send((_OP_EXTRACT,
+                                  (text, aliases_for_document(doc, aliases, text),
+                                   *_home_of(doc))))
             except (OSError, ValueError):
                 return False        # worker torn down — caller respawns
             worker.item = (sid, doc, text)
+            worker.phase = _OP_EXTRACT
+            worker.pending = None
             worker.deadline = _time.monotonic() + budget
             return True
         return False
@@ -501,7 +532,20 @@ def extract_documents_parallel(
             committed = True
         _emit(done, sid, with_checkpoint=committed)
 
+    def _write(sid: str, doc, text: str, cites) -> None:
+        """The parent's remaining half: guards already applied, now persist."""
+        try:
+            n = _finish_writes(catalogue, doc, text, cites,
+                               stable_id=sid, run_id=run_id, commit=False)
+        except Exception:  # noqa: BLE001
+            log.exception("[cite-extract] %s failed in finish", sid)
+            n = 0
+        if post_fn is not None:
+            post_fn(sid)
+        _count_done(sid, n)
+
     def _finish(sid: str, doc, text: str, payload) -> None:
+        """Whole-document finish in the parent — the crash/serial fallback path."""
         cites, raw_defs = payload
         try:
             n = _finish_document(catalogue, doc, text, cites, raw_defs,
@@ -512,6 +556,56 @@ def extract_documents_parallel(
         if post_fn is not None:
             post_fn(sid)
         _count_done(sid, n)
+
+    def _after_extract(w: _PoolWorker, sid: str, doc, text: str, payload) -> None:
+        """Grammar pass came back. Apply the parent-side guards, then hand the
+        shorthand scan BACK to this worker rather than doing it here.
+
+        That hand-back is the point of the two-phase protocol. The scan is the single
+        most expensive step in the pass (~93% of the parent's serial half), it is pure
+        CPU over text the worker still holds, and it is *pipelined* — the parent posts
+        the request and returns to the wait loop, so this document's shorthand scan
+        overlaps every other worker's grammar pass and the parent's own writes. A
+        blocking round-trip here would move the cost without removing it.
+        """
+        cites, raw_defs = payload
+        try:
+            cites = _guard_cites(catalogue, doc, cites, stable_id=sid)
+            plan = _shorthand_plan(catalogue, cites, raw_defs)
+        except Exception:  # noqa: BLE001
+            log.exception("[cite-extract] %s failed in guards", sid)
+            _count_done(sid, 0)
+            return
+        if plan is None:
+            _write(sid, doc, text, cites)
+            return
+        stored, exclude, defs = plan
+        if stored:
+            try:
+                w.conn.send((_OP_ATTACH, (cites, stored, list(exclude))))
+            except (OSError, ValueError):
+                pass            # worker gone — fall through and do it in the parent
+            else:
+                w.item = (sid, doc, text)
+                w.phase = _OP_ATTACH
+                # the guarded cites ride along so a worker death mid-scan costs only
+                # the scan, not the grammar pass that produced them
+                w.pending = (cites, stored, exclude, defs)
+                w.deadline = _time.monotonic() + budget
+                return
+            from .extractor import attach_stored_shorthands
+            cites = attach_stored_shorthands(text, cites, stored, exclude=exclude)
+            cites = _gate_domestic_statute_names(doc, cites)
+        _learn_fresh_shorthands(catalogue, defs, sid)
+        _write(sid, doc, text, cites)
+
+    def _after_attach(w: _PoolWorker, sid: str, doc, text: str, cites) -> None:
+        """Shorthand scan came back: re-gate (the store is corpus-wide and will happily
+        bind a UK act into an Irish judgment), learn this document's own, then write."""
+        _cites, _stored, _exclude, defs = w.pending or ([], (), frozenset(), [])
+        cites = _gate_domestic_statute_names(doc, cites)
+        _learn_fresh_shorthands(catalogue, defs, sid)
+        _write(sid, doc, text, cites)
 
     try:
         for w in pool:
@@ -528,6 +622,7 @@ def extract_documents_parallel(
             for w in busy:
                 if w.conn in ready:
                     sid, doc, text = w.item
+                    phase = w.phase
                     try:
                         status, payload = w.conn.recv()
                     except (EOFError, OSError):
@@ -535,27 +630,46 @@ def extract_documents_parallel(
                         # this one in the parent, like the single guard does, and
                         # replace the worker
                         log.warning("[cite-extract] worker died on %s — in-process", sid)
+                        pending = w.pending
                         w.kill()
                         pool[pool.index(w)] = w = _PoolWorker()
-                        defs: list[dict] = []
-                        _hid, _hkind = _home_of(doc)
-                        cites = extract_citations(
-                            text, aliases=aliases_for_document(doc, aliases, text),
-                            defs_out=defs, home_id=_hid, home_kind=_hkind)
-                        _finish(sid, doc, text, (cites, defs))
+                        if phase == _OP_ATTACH:
+                            # It died on the shorthand scan, so the grammar pass and the
+                            # guards are already done and are carried in ``pending`` —
+                            # redo only the scan here, not the whole document.
+                            from .extractor import attach_stored_shorthands
+                            cites, stored, exclude, defs = pending
+                            try:
+                                cites = attach_stored_shorthands(
+                                    text, cites, stored, exclude=exclude)
+                                cites = _gate_domestic_statute_names(doc, cites)
+                            except Exception:  # noqa: BLE001
+                                log.exception("[cite-extract] %s failed in attach", sid)
+                            _learn_fresh_shorthands(catalogue, defs, sid)
+                            _write(sid, doc, text, cites)
+                        else:
+                            defs: list[dict] = []
+                            _hid, _hkind = _home_of(doc)
+                            cites = extract_citations(
+                                text, aliases=aliases_for_document(doc, aliases, text),
+                                defs_out=defs, home_id=_hid, home_kind=_hkind)
+                            _finish(sid, doc, text, (cites, defs))
                     else:
                         w.item = None
+                        w.phase = _OP_EXTRACT
                         if status == "err":
                             log.warning("[cite-extract] %s: %s", sid, payload)
                             _count_done(sid, 0)
+                        elif phase == _OP_ATTACH:
+                            _after_attach(w, sid, doc, text, payload)
                         else:
-                            _finish(sid, doc, text, payload)
+                            _after_extract(w, sid, doc, text, payload)
                 elif w.deadline <= now:
                     # runaway document: kill this worker only, stamp the doc so
                     # staleness-scoped reruns converge (the guard's exact semantics)
                     sid = w.item[0]
-                    log.warning("[cite-extract] %s: grammar pass exceeded %.0fs budget "
-                                "— skipped", sid, budget)
+                    log.warning("[cite-extract] %s: %s pass exceeded %.0fs budget "
+                                "— skipped", sid, w.phase, budget)
                     w.kill()
                     pool[pool.index(w)] = w = _PoolWorker()
                     catalogue.mark_extracted(sid, run_id=run_id, commit=False)
@@ -917,6 +1031,30 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     half stays serial by design. ``commit=False`` lets a bulk caller batch many
     documents into one transaction (the run is restartable off the
     ``last_extracted_at`` stamp, so per-document durability buys nothing there)."""
+    cites = _guard_cites(catalogue, doc, cites, stable_id=stable_id)
+    plan = _shorthand_plan(catalogue, cites, raw_defs)
+    if plan is not None:
+        from .extractor import attach_stored_shorthands
+
+        stored, exclude, defs = plan
+        if stored:
+            # an in-document definition always beats a stored one, so exclude the names
+            # this document defines for itself (already linked by the extractor's pass)
+            cites = attach_stored_shorthands(text, cites, stored, exclude=exclude)
+            # Re-gate: the store is corpus-wide, so it will happily bind a UK act into
+            # an Irish judgment under a name both jurisdictions use.
+            cites = _gate_domestic_statute_names(doc, cites)
+        _learn_fresh_shorthands(catalogue, defs, stable_id)
+    return _finish_writes(catalogue, doc, text, cites, stable_id=stable_id,
+                          run_id=run_id, commit=commit)
+
+
+def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str) -> list:
+    """Every jurisdiction/precision guard that runs BEFORE the shorthand store.
+
+    Pure list work plus two narrow catalogue lookups, so it is cheap enough to stay in
+    the parent on the parallel path — unlike the shorthand scan that follows it.
+    """
     if not _allows_us_reporters(doc):
         cites = [c for c in cites if not c.method.startswith("us_reporter")]
     elif not _is_us_source(doc):
@@ -1006,37 +1144,48 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
             de_known[c.candidate_id] = known
         if known:
             filtered.append(c)
-    cites = filtered
+    return filtered
 
-    # Corpus-wide shorthands: apply the ones learned elsewhere whose parent this
-    # document already cites, then harvest the ones IT defines for the next document.
-    # Both are no-ops for a document that cites nothing resolvable.
-    if _shorthands_enabled() and any(c.candidate_id for c in cites):
-        from .extractor import attach_stored_shorthands
 
-        # The definitions come from the extractor, but the jurisdiction guards above ran
-        # AFTER it and may have stripped a candidate (a UK statute name inside a CJEU
-        # judgment). Keep only definitions whose target survived, or the store would
-        # learn precisely the links those guards exist to prevent.
-        live = {c.candidate_id for c in cites if c.candidate_id}
-        defs = [d for d in raw_defs if d["candidate_id"] in live]
-        stored = _stored_shorthands_for(catalogue, cites)
-        if stored:
-            # an in-document definition always beats a stored one, so exclude the names
-            # this document defines for itself (already linked by the extractor's pass)
-            cites = attach_stored_shorthands(
-                text, cites, stored, exclude={d["shorthand"] for d in defs})
-            # Re-gate: the store is corpus-wide, so it will happily bind a UK act into
-            # an Irish judgment under a name both jurisdictions use.
-            cites = _gate_domestic_statute_names(doc, cites)
-        fresh = _SHORTHANDS.unseen(defs)
-        if fresh:
-            try:
-                catalogue.add_learned_shorthands(fresh, doc_id=stable_id)
-                _SHORTHANDS.note_stored(fresh)
-            except Exception as exc:  # noqa: BLE001 — learning is best-effort
-                log.debug("[cite-extract] %s: shorthand store write failed: %s", stable_id, exc)
+def _shorthand_plan(catalogue: Catalogue, cites: list, raw_defs: list):
+    """``(stored, exclude, defs)`` for the corpus-wide shorthand pass, or None.
 
+    Split out of :func:`_finish_document` so the parallel path can compute it in the
+    parent (it needs the catalogue-backed store, but only does cached dict lookups)
+    and then hand the *expensive* half — the full-text scan in
+    ``attach_stored_shorthands`` — back to the worker that still holds the text.
+    """
+    if not (_shorthands_enabled() and any(c.candidate_id for c in cites)):
+        return None
+    # The definitions come from the extractor, but the jurisdiction guards ran AFTER it
+    # and may have stripped a candidate (a UK statute name inside a CJEU judgment). Keep
+    # only definitions whose target survived, or the store would learn precisely the
+    # links those guards exist to prevent.
+    live = {c.candidate_id for c in cites if c.candidate_id}
+    defs = [d for d in raw_defs if d["candidate_id"] in live]
+    stored = _stored_shorthands_for(catalogue, cites)
+    return stored, {d["shorthand"] for d in defs}, defs
+
+
+def _learn_fresh_shorthands(catalogue: Catalogue, defs: list, stable_id: str) -> None:
+    """Harvest the shorthands this document defines, for the next one to use."""
+    fresh = _SHORTHANDS.unseen(defs)
+    if not fresh:
+        return
+    try:
+        catalogue.add_learned_shorthands(fresh, doc_id=stable_id)
+        _SHORTHANDS.note_stored(fresh)
+    except Exception as exc:  # noqa: BLE001 — learning is best-effort
+        log.debug("[cite-extract] %s: shorthand store write failed: %s", stable_id, exc)
+
+
+def _finish_writes(catalogue: Catalogue, doc, text: str, cites, *, stable_id: str,
+                   run_id: str | None = None, commit: bool = True) -> int:
+    """The DB half: metadata, suppression veto, idempotent clears, citations + edges.
+
+    Needs the one shared connection, so it stays in the parent on the parallel path.
+    Measured at a few milliseconds a document — it is not the bottleneck it looks like.
+    """
     # The bench and counsel are printed on a judgment's first page and nowhere in its
     # metadata, so lift them while we already have the text in hand (the reader shows them
     # under the title). Only for cases, only when not already known, and never a guess —
