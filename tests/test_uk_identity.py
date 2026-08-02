@@ -181,3 +181,47 @@ def test_qb_and_kb_are_only_folded_when_they_are_the_same_case(catalogue, tmp_pa
     out = uk_identity.unify_synonym_slugs(catalogue, dry_run=True)
     assert out["duplicate_nodes"] == 1
     assert out["samples"][0]["kept"] == "ewhc/qb/2021/500"
+
+
+# -- the date the interface uses ----------------------------------------------------
+def test_a_judgment_dates_itself_when_the_metadata_does_not(catalogue, tmp_path):
+    """68,495 held common-law judgments carry no decision_date, and 68,158 of them carry
+    the year in their own identifier. Without a fallback they sort as undated — bottom
+    of every newest-first browse, absent from every year range — although the citation
+    says plainly what year they are."""
+    from raglex.storage.catalogue import effective_date
+
+    assert effective_date("2015-06-01", None, "ewca/civ/2015/1") == \
+        ("2015-06-01", "decision_date")
+    assert effective_date(None, None, "ewca/civ/1975/5") == ("1975-12-31", "identifier")
+    assert effective_date(None, "ECLI:EU:C:2020:559", "62019CJ0311") == \
+        ("2020-12-31", "ecli")
+    # the judgment date WINS where the two disagree: a December judgment is often
+    # numbered in the following year, and there the metadata is the right answer
+    assert effective_date("2014-12-19", None, "ewca/civ/2015/3")[0] == "2014-12-19"
+    # nothing to go on stays nothing — no year is invented from a docket number
+    assert effective_date(None, None, "edpb/binding-decision-1-2026")[0] is None
+    assert effective_date(None, None, "ukut/aac/12345")[0] is None
+
+
+def test_the_fallback_date_reaches_sorting_filtering_and_the_citation(catalogue, tmp_path):
+    ts = TextStore(tmp_path / "text")
+    _case(catalogue, "ewca/civ/1975/5", "Rose v Plenty", ts=ts)      # no decision_date
+    catalogue.conn.execute(
+        "UPDATE documents SET decision_date = NULL, effective_date = NULL, "
+        "date_provenance = NULL WHERE stable_id = 'ewca/civ/1975/5'")
+    catalogue.conn.commit()
+
+    out = catalogue.backfill_effective_dates(dry_run=True)
+    assert out["would_update"] >= 1 and out["updated"] == 0
+    catalogue.backfill_effective_dates(dry_run=False)
+    row = catalogue.get_document("ewca/civ/1975/5")
+    assert row["effective_date"] == "1975-12-31"
+    assert row["date_provenance"] == "identifier"
+
+    # a year filter finds it, and a date sort places it by its real year
+    found = catalogue.search_documents(year_from="1970", year_to="1980", limit=10)
+    assert "ewca/civ/1975/5" in {r["stable_id"] for r in found}
+    # …and its OSCOLA citation carries the year rather than none
+    from raglex.citations.oscola import cite
+    assert "1975" in (cite(row, {}) or {}).get("text", "")

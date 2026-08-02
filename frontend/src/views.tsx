@@ -452,6 +452,25 @@ function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, 
   );
 }
 
+// The date to SHOW for a document. A judgment date where the source gave one; otherwise
+// the year its own identifier carries (ewca/civ/1975/5 is a 1975 judgment) — which is
+// how 68,158 held common-law judgments have a date at all. An inferred date is never
+// dressed up as a judgment date: it shows the year alone, with a marker.
+function docDate(d: any): { text: string; inferred: boolean } | null {
+  if (!d) return null;
+  if (d.decision_date) return { text: String(d.decision_date).slice(0, 10), inferred: false };
+  if (d.effective_date) return { text: String(d.effective_date).slice(0, 4), inferred: true };
+  return null;
+}
+
+function DocDate({ d, prefix = " · " }: { d: any; prefix?: string }) {
+  const dd = docDate(d);
+  if (!dd) return null;
+  return <span title={dd.inferred ? "no judgment date on the record — the year comes from the citation" : undefined}>
+    {prefix}{dd.text}{dd.inferred && <span className="muted"> (from the citation)</span>}</span>;
+}
+
+
 // The inline "Mentioned by A, B, C and n more. See all mentions." line under a paragraph.
 //
 // Direct citers lead. Documents that cited a MAPPED provision of another instrument
@@ -1045,7 +1064,7 @@ function ResultsList({ items, group, open }: { items: any[]; group: string; open
     if (group === "source") return d.source || "—";
     if (group === "doc_type") return d.doc_type || "—";
     if (group === "court") return d.court || "—";
-    if (group === "decade") { const y = (d.decision_date || "").slice(0, 4); return y ? y.slice(0, 3) + "0s" : "undated"; }
+    if (group === "decade") { const y = (d.decision_date || d.effective_date || "").slice(0, 4); return y ? y.slice(0, 3) + "0s" : "undated"; }
     return "";
   };
   const row = (d: any) => (
@@ -1054,7 +1073,7 @@ function ResultsList({ items, group, open }: { items: any[]; group: string; open
       <div className="result-meta muted">
         <span className="tag">{docTypeLabel(d.doc_type)}</span>
         {d.court && <span> · {d.court}</span>}
-        {d.decision_date && <span> · {String(d.decision_date).slice(0, 10)}</span>}
+        <DocDate d={d} />
         {d.cited_by > 0 && <span> · cited by {d.cited_by.toLocaleString()}</span>}
         <AuthorityBadge pct={d.authority_percentile} />
         {d.source && <span> · {d.source}</span>}
@@ -1114,7 +1133,7 @@ function SemanticHit({ h, open }: { h: Hit; open: (id: string, a?: string) => vo
           <Oscola c={h.oscola} fallback={h.title || h.ecli || h.doc_id} /></DocLink>{" "}
         <span className="muted">
           {h.court ? h.court : h.source}
-          {h.decision_date ? ` · ${String(h.decision_date).slice(0, 10)}` : ""}
+          <DocDate d={h} />
           {h.structural_unit ? ` · ${h.structural_unit}` : ""}
         </span>
         <WhyChips s={h.signals} />
@@ -1425,7 +1444,7 @@ function DocPeek({ id, anchor, raw, onCite, openFull }:
         <div className="muted" style={{ fontSize: 12 }}>
           {/* name the court and its jurisdiction — never the raw slug ("ewca") */}
           {provenance([doc?.court_label || d?.court, doc?.jurisdiction])}
-          {d?.decision_date ? " · " + String(d.decision_date).slice(0, 10) : ""}
+          <DocDate d={d} />
           {doc?.cited_by_count ? ` · cited by ${doc.cited_by_count}` : ""}{anchor ? ` · ${anchor}` : ""}</div>
         <button style={{ marginTop: 4 }} onClick={() => openFull(id, anchor)}>open full ↗</button>
       </div>
@@ -1576,7 +1595,7 @@ function FetchPrompt({ refId, raw, onDone }: { refId: string; raw?: string; onDo
                 <tr key={h.stable_id}>
                   <td><Oscola c={h.oscola} fallback={h.title || h.stable_id} /></td>
                   <td className="muted" style={{ whiteSpace: "nowrap" }}>
-                    {h.decision_date ? String(h.decision_date).slice(0, 4) : ""}</td>
+                    {String(h.decision_date || h.effective_date || "").slice(0, 4)}</td>
                   <td style={{ whiteSpace: "nowrap" }}>
                     <button className="mini" disabled={busy}
                       title="Point this citation at that document — every other citation of it resolves too"
@@ -2340,7 +2359,7 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
         <div className="doc-provenance muted">
           <FlagIcon jurisdiction={doc.jurisdiction} opacity={0.85} />{" "}
           {provenance([doc.court_label || d.court, doc.jurisdiction])}
-          {d.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
+          <DocDate d={d} />
           {d.landing_url && (
             <> · <a href={d.landing_url} target="_blank" rel="noopener noreferrer"
                     title={`open at ${doc.link_label}`}>{doc.link_label} ↗</a></>
@@ -6737,7 +6756,7 @@ export function CommandPalette({ open }: { open: (id: string, a?: string) => voi
             <div key={"d" + i} className={`palette-opt${hi === oi ? " hi" : ""}`}
               onMouseEnter={() => setHi(oi)} onMouseDown={(e) => { e.preventDefault(); pick(options[oi]); }}>
               <Oscola c={d.oscola} fallback={d.title || d.stable_id} />
-              <span className="muted"> · {d.doc_type}{d.court ? " · " + d.court : ""}{d.decision_date ? " · " + String(d.decision_date).slice(0, 4) : ""}</span>
+              <span className="muted"> · {d.doc_type}{d.court ? " · " + d.court : ""}{String(d.decision_date || d.effective_date || "") ? " · " + String(d.decision_date || d.effective_date).slice(0, 4) : ""}</span>
             </div>
           );
         })}
@@ -6799,7 +6818,7 @@ export function CiteHoverLayer() {
           <div className="muted" style={{ fontSize: 12 }}>
             {card.d.court_label || d?.court || card.d.source_label || d?.source}
             {card.d.jurisdiction ? ` · ${card.d.jurisdiction}` : ""}
-            {d?.decision_date ? ` · ${String(d.decision_date).slice(0, 10)}` : ""}
+            <DocDate d={d} />
             {d?.doc_type ? ` · ${d.doc_type}` : ""}
           </div>
           <div className="muted" style={{ fontSize: 12 }}>

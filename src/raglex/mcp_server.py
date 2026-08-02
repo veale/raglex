@@ -816,6 +816,13 @@ def build_server(config: Config | None = None) -> MCPServer:
             from_type=from_type, dry_run=dry_run)
 
     @admin
+    def backfill_effective_dates(dry_run: bool = True) -> dict:
+        """Fill the date the interface sorts and filters on, for rows written before the
+        column existed: decision_date where the source gave one, else the year carried by
+        the ECLI or by the identifier itself (ewca/civ/1975/5 is a 1975 judgment)."""
+        return facade.backfill_effective_dates(dry_run=dry_run)
+
+    @admin
     def uk_identity(step: str = "audit", dry_run: bool = True) -> dict:
         """The UK chamber/division identity repairs. ``step``:
 

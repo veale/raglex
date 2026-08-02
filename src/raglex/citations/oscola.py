@@ -63,11 +63,17 @@ def _get(doc: Mapping, key: str) -> Any:
 
 
 def _year(doc: Mapping) -> str | None:
-    d = _get(doc, "decision_date")
-    if d:
-        m = re.search(r"(\d{4})", str(d))
-        if m:
-            return m.group(1)
+    """The year for the citation — the judgment date, else the corpus's effective date.
+
+    A citation without a year is barely a citation, and 68,158 held common-law judgments
+    have no decision_date while their own identifier says plainly what year they are
+    (``ewca/civ/1975/5``). The effective date is that ladder, resolved once on write."""
+    for key in ("decision_date", "effective_date"):
+        d = _get(doc, key)
+        if d:
+            m = re.search(r"(\d{4})", str(d))
+            if m:
+                return m.group(1)
     return None
 
 

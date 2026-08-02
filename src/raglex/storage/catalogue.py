@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS documents (
     title            TEXT,
     court            TEXT,
     decision_date    TEXT,
+    -- what the interface sorts/filters on: decision_date, else the year the
+    -- ECLI or the identifier carries (see effective_date()).
+    effective_date   TEXT,
+    date_provenance  TEXT,
     language         TEXT,
     source_language  TEXT,
     version          INTEGER NOT NULL DEFAULT 1,
@@ -578,6 +582,10 @@ _POST_MIGRATE_INDEXES = (
     # no-ops (IF NOT EXISTS) instead of taking a write-blocking lock at startup.
     "CREATE INDEX IF NOT EXISTS documents_date_id_idx ON documents "
     "(decision_date DESC, stable_id)",
+    # the same index over the FALLBACK date, which is what the corpus browser and
+    # every date sort actually order by now (see effective_date)
+    "CREATE INDEX IF NOT EXISTS documents_effective_date_idx ON documents "
+    "(effective_date DESC, stable_id)",
     # The Unresolved page's with_citing lookup filters pending edges by
     # COALESCE(candidate_id, raw_citation_string) IN (…visible refs…) — an expression the
     # plain candidate_id index can't serve, so it seq-scanned ~1.8M pending rows per page
@@ -647,6 +655,13 @@ def decided_by_sql(alias: str = "d") -> str:
     one. A year-only document is treated as **31 December** of that year: for a cutoff
     that falls on a year boundary — which is what IP completion day is — that is the
     reading that neither includes a case it shouldn't nor drops one it should.
+
+    Common law is the same problem in another dress: 68,495 held judgments carry no
+    decision_date, and 68,158 of them (99.5%) carry the year in their own identifier —
+    ``ewca/civ/1975/5`` is a 1975 judgment whatever the metadata failed to say. See
+    :func:`effective_date`, which is this ladder in Python; the stored column it fills
+    is what the interface sorts and filters on, because a CASE expression cannot use the
+    (decision_date, stable_id) index and a 5M-row browse cannot afford a full sort.
     """
     # ECLI:EU:C:2020:559 — 1-based, the year begins at 11 ("ECLI:" 5 + "EU:" 3 + "C:" 2).
     ecli_year = f"substr({alias}.ecli, 11, 4)"
@@ -654,8 +669,46 @@ def decided_by_sql(alias: str = "d") -> str:
         f"CASE WHEN {alias}.decision_date IS NOT NULL THEN substr(CAST({alias}.decision_date AS TEXT), 1, 10) "
         f"     WHEN {alias}.ecli LIKE 'ECLI:EU:_:____:%' AND {ecli_year} BETWEEN '1950' AND '2099' "
         f"       THEN {ecli_year} || '-12-31' "
+        f"     WHEN {alias}.effective_date IS NOT NULL THEN {alias}.effective_date "
         "     ELSE NULL END"
     )
+
+
+# A four-digit year sitting in an identifier: ``ewca/civ/1975/5``, ``uksc/2024/12``,
+# ``nswca/2017/103``. Bounded so a docket number cannot pass for a year.
+_ID_YEAR_RE = re.compile(r"/((?:1[6-9]|20)\d{2})/")
+_ECLI_YEAR_RE = re.compile(r"^ECLI:[A-Z]{2}:[A-Z0-9]+:((?:1[89]|20)\d{2}):", re.I)
+
+
+def effective_date(decision_date, ecli: str | None,
+                   stable_id: str | None) -> tuple[str | None, str]:
+    """``(YYYY-MM-DD, provenance)`` — the date the interface should USE for a document.
+
+    The ladder, and why it is in this order:
+
+    1. ``decision_date`` — the judgment date, when the source gave one. It stays first
+       even though the identifier usually agrees, because where they disagree (1,759 of
+       433,607 dated common-law judgments, 0.4%) it is the metadata that is right: a
+       judgment given in December is often numbered in the following year.
+    2. the ECLI's year field — the existing EU rung.
+    3. **the year in the identifier itself** — a neutral citation is a year plus a
+       number, so ``ewca/civ/1975/5`` dates itself. This is what makes 68,158 otherwise
+       undated common-law judgments sortable, filterable and citable.
+
+    A year-only estimate becomes 31 December, matching :func:`decided_by_sql`: within
+    the year the ordering is arbitrary anyway, and at a year boundary this is the
+    reading that neither admits a case it shouldn't nor drops one it should. The
+    provenance travels with it so the reader can say "1975 (from the citation)" rather
+    than presenting an inference as a judgment date."""
+    if decision_date:
+        return str(decision_date)[:10], "decision_date"
+    m = _ECLI_YEAR_RE.match(ecli or "")
+    if m:
+        return f"{m.group(1)}-12-31", "ecli"
+    m = _ID_YEAR_RE.search(f"/{(stable_id or '').strip('/')}/")
+    if m:
+        return f"{m.group(1)}-12-31", "identifier"
+    return None, "none"
 
 
 def _now() -> str:
@@ -820,6 +873,12 @@ class Catalogue:
         rare genuine ALTER so it can never hang startup for a backup's duration."""
         for table, col, decl in (
             ("documents", "meta_json", "TEXT"),
+            # The date the INTERFACE uses: the judgment date where the source gave
+            # one, else the year carried by the ECLI or by the identifier itself.
+            # Stored rather than computed because every sort, filter and facet
+            # reads it, and a CASE expression cannot use the date index.
+            ("documents", "effective_date", "TEXT"),
+            ("documents", "date_provenance", "TEXT"),
             ("relations", "candidate_id", "TEXT"),
             ("relations", "raw_fold", "TEXT"),
             # when this document's citations were last (re-)extracted — the durable
@@ -1203,15 +1262,18 @@ class Catalogue:
                 """
             INSERT INTO documents (
                 stable_id, ecli, source, doc_type, title, court, decision_date,
+                effective_date, date_provenance,
                 language, source_language, version, is_latest, landing_url,
                 raw_path, text_path, payload_hash, has_text, search_excluded,
                 extracted_via, added_by,
                 topic_tags, topic_score, upstream_status, fetched_at, meta_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(stable_id) DO UPDATE SET
                 ecli=excluded.ecli, source=excluded.source, doc_type=excluded.doc_type,
                 title=excluded.title, court=excluded.court,
-                decision_date=excluded.decision_date, language=excluded.language,
+                decision_date=excluded.decision_date,
+                effective_date=excluded.effective_date,
+                date_provenance=excluded.date_provenance, language=excluded.language,
                 source_language=excluded.source_language, version=excluded.version,
                 landing_url=excluded.landing_url, raw_path=excluded.raw_path,
                 text_path=excluded.text_path, payload_hash=excluded.payload_hash,
@@ -1228,6 +1290,9 @@ class Catalogue:
                 record.title,
                 self._COURT_CANON.get((record.court or "").lower(), record.court),
                 _isodate(record.decision_date),
+                # the interface's date, derived once on write rather than per query
+                *effective_date(_isodate(record.decision_date), record.ecli,
+                                record.stable_id),
                 record.language,
                 record.source_language,
                 version,
@@ -4742,6 +4807,44 @@ class Catalogue:
             "GROUP BY d.source, d.court, d.doc_type").fetchall()
         return [dict(r) for r in rows]
 
+    def backfill_effective_dates(self, *, dry_run: bool = True, batch: int = 20000,
+                                 on_progress=None) -> dict:
+        """Fill ``effective_date`` for rows written before the column existed.
+
+        Every sort, filter and facet reads it, so until this runs the corpus behaves as
+        though 68,158 common-law judgments have no date at all — they sink to the bottom
+        of a newest-first browse and vanish from any year range. Keyset-paged over the
+        primary key; re-runnable, and it never overwrites a row that already agrees."""
+        seen = filled = 0
+        by_provenance: dict[str, int] = {}
+        after = ""
+        while True:
+            page = self.conn.execute(
+                "SELECT stable_id, ecli, decision_date, effective_date "
+                "FROM documents WHERE stable_id > ? ORDER BY stable_id LIMIT ?",
+                (after, batch)).fetchall()
+            if not page:
+                break
+            after = page[-1]["stable_id"]
+            writes = []
+            for r in page:
+                seen += 1
+                date, why = effective_date(r["decision_date"], r["ecli"], r["stable_id"])
+                by_provenance[why] = by_provenance.get(why, 0) + 1
+                if date != r["effective_date"]:
+                    writes.append((date, why, r["stable_id"]))
+            filled += len(writes)
+            if writes and not dry_run:
+                self.conn.executemany(
+                    "UPDATE documents SET effective_date = ?, date_provenance = ? "
+                    "WHERE stable_id = ?", writes)
+                self.conn.commit()
+            if on_progress:
+                on_progress(seen, filled)
+        return {"scanned": seen, "updated": 0 if dry_run else filled,
+                "would_update": filled if dry_run else 0,
+                "by_provenance": by_provenance, "dry_run": dry_run}
+
     def documents_meta(self, ids: list[str]) -> list[dict]:
         """Facet-bearing metadata for a set of documents, in one round trip.
 
@@ -4757,6 +4860,7 @@ class Catalogue:
             chunk = ids[i:i + 900]
             rows = self.conn.execute(
                 "SELECT d.stable_id, d.source, d.court, d.doc_type, d.decision_date,"
+                "       d.effective_date, d.date_provenance,"
                 "       d.title, COALESCE(a.pagerank, 0) AS pagerank,"
                 # cited_by on the resolved graph, falling back to the string roll-up
                 # for documents outside the authority table
@@ -5892,10 +5996,13 @@ class Catalogue:
             else:
                 clauses.extend(tok_clauses)
                 params.extend(tok_params)
+        # Year filters read the EFFECTIVE date: a 1975 Court of Appeal judgment whose
+        # metadata carries no decision_date is still a 1975 judgment, and excluding it
+        # from "cases before 1980" is the kind of silent omission a reader cannot see.
         if year_from:
-            clauses.append("substr(d.decision_date, 1, 4) >= ?"); params.append(str(year_from))
+            clauses.append("substr(d.effective_date, 1, 4) >= ?"); params.append(str(year_from))
         if year_to:
-            clauses.append("substr(d.decision_date, 1, 4) <= ?"); params.append(str(year_to))
+            clauses.append("substr(d.effective_date, 1, 4) <= ?"); params.append(str(year_to))
         if cites:
             sub = ("EXISTS (SELECT 1 FROM relations r WHERE r.src_id = d.stable_id "
                    "AND (r.dst_id = ? OR r.candidate_id = ?)")
@@ -5914,13 +6021,17 @@ class Catalogue:
     # sort key → ORDER BY. "cited" ranks by the citation-frequency roll-up (a LEFT JOIN,
     # added by search_documents); the rest sort the documents table directly.
     _SORT_SQL = {
-        "date": "d.decision_date DESC NULLS LAST, d.stable_id",
-        "date_asc": "d.decision_date ASC NULLS LAST, d.stable_id",
+        # effective_date, not decision_date: the 68,158 undated common-law judgments
+        # otherwise sank to the bottom of every date sort as though undated, which for a
+        # newest-first browse means they simply never appear. Indexed to match
+        # (documents_effective_date_idx), so the browse still serves LIMIT from the index.
+        "date": "d.effective_date DESC NULLS LAST, d.stable_id",
+        "date_asc": "d.effective_date ASC NULLS LAST, d.stable_id",
         "title": "lower(d.title), d.stable_id",
-        "cited": "cited_by DESC, d.decision_date DESC",
+        "cited": "cited_by DESC, d.effective_date DESC",
         # network authority (PageRank roll-up); raw = landmark, decayed = currently live
-        "authority": "authority DESC, cited_by DESC, d.decision_date DESC",
-        "authority_recent": "authority_decayed DESC, cited_by DESC, d.decision_date DESC",
+        "authority": "authority DESC, cited_by DESC, d.effective_date DESC",
+        "authority_recent": "authority_decayed DESC, cited_by DESC, d.effective_date DESC",
     }
 
     def _sort_clause(self, sort: str | None) -> str:
@@ -6005,7 +6116,7 @@ class Catalogue:
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY d.decision_date DESC, d.stable_id LIMIT ? OFFSET ?"
+        sql += " ORDER BY d.effective_date DESC, d.stable_id LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         return self.conn.execute(sql, params).fetchall()
 
@@ -6125,7 +6236,7 @@ class Catalogue:
 
         out: dict = {}
         col = {"source": "d.source", "doc_type": "d.doc_type", "court": "d.court",
-               "year": "substr(d.decision_date, 1, 4)"}
+               "year": "substr(d.effective_date, 1, 4)"}
         if self.backend == "postgres":
             # ONE pass over the filtered set instead of one per dimension: with a free-text
             # filter (an unindexable LIKE scan) each pass costs seconds, so 4 passes made

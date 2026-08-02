@@ -1836,7 +1836,7 @@ class Facade:
             src_oscola = _oscola_cite(src, _row_meta(src)) if src else None
             incoming.append({**r, "src_title": src["title"] if src else None,
                              "src_court": src["court"] if src else None,
-                             "src_date": src["decision_date"] if src else None,
+                             "src_date": (src["decision_date"] or src["effective_date"]) if src else None,
                              "src_authority": r.get("src_pagerank") or 0.0,
                              # jurisdiction × kind, so the cited-by list can be
                              # sliced the way a lawyer actually reads it
@@ -2454,7 +2454,11 @@ class Facade:
                 groups.append({
                     "src_id": sid,
                     "src_oscola": _oscola_cite(sdoc, _row_meta(sdoc)),
-                    "src_court": sdoc["court"], "src_date": sdoc["decision_date"],
+                    "src_court": sdoc["court"],
+                    # decision_date where the source gave one, else the year the
+                    # identifier carries — otherwise a newest-first sort buries every
+                    # undated judgment at the bottom regardless of its year
+                    "src_date": sdoc["decision_date"] or sdoc["effective_date"],
                     # name the citing court and its jurisdiction, as the explorer does
                     "src_court_label": self.court_label(sdoc["court"], sdoc["source"]) if sdoc["court"] else None,
                     "src_jurisdiction": self._doc_bucket(sdoc["source"], sdoc["court"]),
@@ -10683,6 +10687,15 @@ class Facade:
         return result
 
     # -- UK division/chamber identity (see ops/uk_identity.py) -----------------
+    def backfill_effective_dates(self, *, dry_run: bool = True) -> dict:
+        """Fill the interface's date column for rows written before it existed."""
+        with self._open() as (cat, _rs, _ts):
+            with cat._maintenance_timeout():
+                out = cat.backfill_effective_dates(dry_run=dry_run)
+        if not dry_run:
+            self._invalidate_caches()
+        return out
+
     def uk_identity_audit(self) -> dict:
         """How many chamber-less UK aliases name more than one judgment."""
         from .ops import uk_identity
@@ -12368,7 +12381,7 @@ class Facade:
                 {"id": m["stable_id"], "s": m.get("source"), "c": m.get("court"),
                  "t": m.get("doc_type"),
                  "j": self._doc_bucket(m.get("source") or "", m.get("court")),
-                 "y": (m.get("decision_date") or "")[:4] or None,
+                 "y": (m.get("decision_date") or m.get("effective_date") or "")[:4] or None,
                  # how many documents cite it, and PageRank — so the whole result set
                  # can be re-sorted in the browser rather than re-queried
                  "n": m.get("cited_by") or 0, "p": m.get("pagerank") or 0}
@@ -12401,7 +12414,7 @@ class Facade:
                 court[key] += 1
                 court_labels.setdefault(
                     key, self.court_label(m["court"], source) or m["court"])
-            d = (m.get("decision_date") or "")[:4]
+            d = (m.get("decision_date") or m.get("effective_date") or "")[:4]
             if len(d) == 4 and d.isdigit():
                 years[d] += 1
             else:
