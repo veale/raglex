@@ -125,7 +125,14 @@ CREATE TABLE IF NOT EXISTS provision_mappings (
     created_by          TEXT NOT NULL DEFAULT 'manual',
     confidence          REAL,
     created_at          TEXT NOT NULL,
-    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor, mapping_type)
+    -- IDENTITY IS THE PAIR OF PROVISIONS, NOT THE CLAIM ABOUT THEM.
+    -- mapping_type was part of this key, which made it immutable in practice:
+    -- re-sending a mapping with a corrected type inserted a SECOND row beside
+    -- the wrong one instead of fixing it, so hundreds of AI Act links written as
+    -- 'functional_predecessor' could not be moved to 'equivalent' without
+    -- deleting each by id first. One correspondence between two provisions, one
+    -- row, whose type is an ordinary editable attribute.
+    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor)
 );
 CREATE INDEX IF NOT EXISTS provision_mappings_current_idx
     ON provision_mappings (current_doc_id, current_anchor);
@@ -253,20 +260,40 @@ CREATE INDEX IF NOT EXISTS citation_aliases_dst_idx ON citation_aliases (dst_id)
 -- "FCA" must only link inside a document that already cites the Federal Courts Act by
 -- some other means. The gates live in citations/stage.py; this is just the store.
 --
--- No occurrence counter: a per-document UPDATE of a hot row (every judgment defines
--- "GDPR") would serialise the parallel rescan workers against each other on a single
--- tuple. Rows are written once, ever (INSERT … ON CONFLICT DO NOTHING), so the write
--- path stays contention-free.
+-- ``doc_count`` is how many DISTINCT documents have independently established the pair,
+-- and a shorthand only travels corpus-wide once it reaches SHORTHAND_MIN_DOCS. The
+-- store originally recorded only ``first_doc`` and inserted ON CONFLICT DO NOTHING, so
+-- it could not count at all — and could not, therefore, tell a name several drafters
+-- agree on ("the CPIA") from one document's private misreading ("the BSB" for the Human
+-- Rights Act).
+--
+-- Counting WITHOUT reintroducing the hot-row write the original design (rightly)
+-- refused: the count is derived from ``learned_shorthand_docs`` below rather than
+-- incremented, so re-extracting a document cannot inflate it, and once a pair is over
+-- the threshold nothing is written for it again — which is precisely the hot case
+-- ("GDPR" is settled after three documents and never updated by the other 700k).
 CREATE TABLE IF NOT EXISTS learned_shorthands (
     shorthand    TEXT NOT NULL,
     candidate_id TEXT NOT NULL,
     entity_kind  TEXT,
     is_abbrev    INTEGER NOT NULL DEFAULT 0,
     first_doc    TEXT,
+    doc_count    INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL,
     PRIMARY KEY (shorthand, candidate_id)
 );
 CREATE INDEX IF NOT EXISTS learned_shorthands_cand_idx ON learned_shorthands (candidate_id);
+
+-- WHICH documents established a pair — the evidence behind doc_count, and the reason
+-- the count is idempotent under re-extraction. Bounded, not a full log: rows stop being
+-- written once the pair is over the threshold, so this holds a handful of ids per pair
+-- rather than one per (document, definition) in the corpus.
+CREATE TABLE IF NOT EXISTS learned_shorthand_docs (
+    shorthand    TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    doc_id       TEXT NOT NULL,
+    PRIMARY KEY (shorthand, candidate_id, doc_id)
+);
 
 -- Version history (§1 principle 4): a document is a *series of versions*; the
 -- catalogue points at "latest" (the documents row) but retains all. When upstream
@@ -568,6 +595,12 @@ _POST_MIGRATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS relations_lineage_pending_candidate_idx "
     "ON relations (candidate_id) WHERE resolution_status = 'pending' AND dst_id IS NULL "
     "AND relationship_type IN ('consolidates', 'point_in_time_of')",
+    # Search resolves a typed abbreviation against the shorthand store on every
+    # keystroke (documents_by_shorthand). The primary key is (shorthand, candidate_id)
+    # and cannot serve lower(shorthand), so without this each autocomplete keystroke
+    # seq-scanned the million-row store — the shape that has starved the pool twice.
+    "CREATE INDEX IF NOT EXISTS learned_shorthands_lower_idx "
+    "ON learned_shorthands (lower(shorthand))",
 )
 
 # Postgres-only trigram indexes for substring search (§7): the corpus search matches a
@@ -814,6 +847,11 @@ class Catalogue:
             # insert-only and the next rescan of any document that defines the name
             # would simply learn it again.
             ("learned_shorthands", "blocked", "INTEGER NOT NULL DEFAULT 0"),
+            # How many DISTINCT documents established this pair — the popularity gate.
+            # Existing rows arrive as 0 and are back-filled from the citations table
+            # (backfill_learned_shorthand_doc_counts); until that runs they are
+            # document-local, which is the safe direction.
+            ("learned_shorthands", "doc_count", "INTEGER NOT NULL DEFAULT 0"),
             # System-reported problems land in the same queue as user feedback and
             # refinement flags (kind='error'), so one review surface covers all three.
             # A systemic failure repeats — 13,862 identical harvest failures in one run —
@@ -846,6 +884,10 @@ class Catalogue:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
             except Exception:  # noqa: BLE001 — a migration mustn't block startup
                 pass
+        try:
+            self._migrate_mapping_identity()
+        except Exception:  # noqa: BLE001 — a migration mustn't block startup
+            pass
         # Check-before-CREATE, same medicine as the ALTER above: Postgres takes the
         # table's SHARE lock BEFORE noticing an index already exists, so at startup
         # these no-ops queued behind any long-running relations UPDATE (a resumed
@@ -891,6 +933,73 @@ class Catalogue:
                         self.conn.execute("SET lock_timeout = 0")
                 except Exception:  # noqa: BLE001 — a migration mustn't block startup
                     pass
+
+    _MAPPING_PAIR_COLS = ("current_doc_id", "current_anchor",
+                          "previous_doc_id", "previous_anchor")
+
+    def _migrate_mapping_identity(self) -> None:
+        """Drop ``mapping_type`` out of the provision-mapping unique key.
+
+        It was part of the key, so the type of an existing mapping could not be changed:
+        re-sending the pair with a corrected type inserted a second, contradictory row
+        beside the first. A build of several hundred AI Act correspondences written as
+        'functional_predecessor' therefore had no way back to 'equivalent' short of
+        deleting every row by id. Identity is the pair of provisions; the type is an
+        attribute of it.
+
+        Where a pair really does have two rows already, the SURVIVOR IS THE LATEST — the
+        later write is the correction, which is the whole reason it was made."""
+        pair = ", ".join(self._MAPPING_PAIR_COLS)
+        keep = (f"SELECT MAX(mapping_id) FROM provision_mappings GROUP BY {pair}")
+        if self.backend == "postgres":
+            stale = [r for r in self.conn.execute(
+                "SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint "
+                "WHERE conrelid = 'provision_mappings'::regclass AND contype = 'u'")
+                if "mapping_type" in (r["def"] or "")]
+            if not stale:
+                return
+            self.conn.execute("SET lock_timeout = '5s'")
+            try:
+                self.conn.execute(
+                    f"DELETE FROM provision_mappings WHERE mapping_id NOT IN ({keep})")
+                for r in stale:
+                    self.conn.execute("ALTER TABLE provision_mappings "
+                                      f'DROP CONSTRAINT "{r["conname"]}"')
+                self.conn.execute(
+                    "ALTER TABLE provision_mappings ADD CONSTRAINT "
+                    f"provision_mappings_pair_key UNIQUE ({pair})")
+            finally:
+                self.conn.execute("SET lock_timeout = 0")
+            self.conn.commit()
+            return
+        # SQLite cannot drop a constraint, so the table is rebuilt from the current DDL.
+        stale = False
+        for idx in self.conn.execute("PRAGMA index_list(provision_mappings)").fetchall():
+            if not idx["unique"]:
+                continue
+            cols = [c["name"] for c in
+                    self.conn.execute(f"PRAGMA index_info({idx['name']})")]
+            stale = stale or "mapping_type" in cols
+        if not stale:
+            return
+        create = re.search(
+            r"CREATE TABLE IF NOT EXISTS provision_mappings \(.*?\n\);", _DDL, re.S)
+        cols = [r["name"] for r in
+                self.conn.execute("PRAGMA table_info(provision_mappings)")]
+        names = ", ".join(cols)
+        self.conn.execute("DROP INDEX IF EXISTS provision_mappings_current_idx")
+        self.conn.execute("DROP INDEX IF EXISTS provision_mappings_previous_idx")
+        self.conn.execute("ALTER TABLE provision_mappings RENAME TO _pm_old")
+        self.conn.executescript(create.group(0))
+        self.conn.execute(
+            f"INSERT INTO provision_mappings ({names}) SELECT {names} FROM _pm_old "
+            f"WHERE mapping_id IN (SELECT MAX(mapping_id) FROM _pm_old GROUP BY {pair})")
+        self.conn.execute("DROP TABLE _pm_old")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS provision_mappings_current_idx "
+                          "ON provision_mappings (current_doc_id, current_anchor)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS provision_mappings_previous_idx "
+                          "ON provision_mappings (previous_doc_id, previous_anchor)")
+        self.conn.commit()
 
     @staticmethod
     def reset_schema_cache() -> None:
@@ -1339,6 +1448,10 @@ class Catalogue:
         These are editorial mappings, not citation aliases and not synthetic citation
         edges. The previous citation remains intact and can be surfaced as inherited
         context without claiming that its author cited the current law.
+
+        Re-sending a pair UPDATES it, ``mapping_type`` included — the correspondence is
+        identified by the two provisions, and the type is a claim ABOUT it that an editor
+        (or an agent that got it wrong the first time) may correct in place.
         """
         now = _now()
         with self._atomic():
@@ -1358,8 +1471,9 @@ class Catalogue:
                     ) VALUES (?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT (
                         current_doc_id, current_anchor, previous_doc_id,
-                        previous_anchor, mapping_type
+                        previous_anchor
                     ) DO UPDATE SET
+                        mapping_type = excluded.mapping_type,
                         inherit_before = excluded.inherit_before,
                         note = excluded.note,
                         created_by = excluded.created_by,
@@ -1374,6 +1488,37 @@ class Catalogue:
                     ),
                 )
         return len(mappings)
+
+    def retype_provision_mappings(
+        self, current_doc_id: str, *, to_type: str,
+        previous_doc_id: str | None = None, from_type: str | None = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Change the CLAIM on existing mappings without rewriting them.
+
+        The correspondences are the expensive part — hundreds of anchor pairs, each
+        resolved against both laws' segments. Getting the type wrong across a whole build
+        (every AI Act link written as 'functional_predecessor' when they are companion
+        provisions) should not mean re-deriving the table; it is one attribute. Returns
+        the number of rows affected, and with ``dry_run`` the number that WOULD be."""
+        where = ["current_doc_id = ?", "mapping_type <> ?"]
+        params: list[object] = [current_doc_id, to_type]
+        if previous_doc_id:
+            where.append("previous_doc_id = ?")
+            params.append(previous_doc_id)
+        if from_type:
+            where.append("mapping_type = ?")
+            params.append(from_type)
+        clause = " AND ".join(where)
+        if dry_run:
+            return self.conn.execute(
+                f"SELECT COUNT(*) AS n FROM provision_mappings WHERE {clause}",
+                params).fetchone()["n"]
+        cur = self.conn.execute(
+            f"UPDATE provision_mappings SET mapping_type = ? WHERE {clause}",
+            [to_type, *params])
+        self.conn.commit()
+        return max(cur.rowcount, 0)
 
     def _mapping_doc_ids(self, current_doc_id: str) -> list[str]:
         """This document plus the base act it is a version of.
@@ -4346,12 +4491,21 @@ class Catalogue:
     # -- feedback (Bugs / Feature requests from the app's feedback box) --------
     def add_feedback(self, *, kind: str, message: str, page: str | None = None,
                      url: str | None = None, metadata: str | None = None) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO feedback (kind, message, page, url, metadata, status, created_at) "
-            "VALUES (?,?,?,?,?,'open',?)",
-            (kind, message, page, url, metadata, _now()))
+        """Record one item and return ITS id — on both backends.
+
+        ``lastrowid`` is SQLite-only, so on Postgres this returned 0 and the caller could
+        not address the row it had just written: an agent filing a report and then
+        resolving it (or referring to it in a reply) had nothing to name. RETURNING costs
+        nothing and closes that."""
+        sql = ("INSERT INTO feedback (kind, message, page, url, metadata, status, "
+               "created_at) VALUES (?,?,?,?,?,'open',?)")
+        params = (kind, message, page, url, metadata, _now())
+        if self.backend == "postgres":
+            row = self.conn.execute(sql + " RETURNING feedback_id", params).fetchone()
+            self.conn.commit()
+            return int(row["feedback_id"]) if row else 0
+        cur = self.conn.execute(sql, params)
         self.conn.commit()
-        # lastrowid is SQLite-only; on Postgres the caller doesn't need the id back
         return int(cur.lastrowid) if getattr(cur, "lastrowid", None) is not None else 0
 
     def record_issue(self, *, fingerprint: str, message: str, page: str | None = None,
@@ -4447,44 +4601,80 @@ class Catalogue:
 
     # -- learned shorthands (corpus-wide, but gated at application time) -------
     def add_learned_shorthands(self, rows: list[dict], *, doc_id: str | None = None,
-                               commit: bool = True) -> int:
+                               commit: bool = True) -> dict:
         """Record shorthand definitions a document established. Each row: shorthand,
         candidate_id, entity_kind, is_abbrev.
 
-        Insert-only (``ON CONFLICT DO NOTHING``): re-extracting a document must not
-        rewrite rows it already wrote, because this runs inside the whole-corpus rescan
-        where ~700k documents share one table. Returns the number of rows written."""
+        The definition itself is insert-only (``ON CONFLICT DO NOTHING``): re-extracting
+        a document must not rewrite rows it already wrote, because this runs inside the
+        whole-corpus rescan where ~700k documents share one table. What re-extraction
+        *may* do is add a DOCUMENT to the pair's evidence — recorded as its own row, so
+        the count is a set size and rescanning the same document a second time changes
+        nothing.
+
+        Returns ``{"written": n, "settled": [(shorthand, candidate_id), …]}``; a settled
+        pair has reached ``SHORTHAND_MIN_DOCS`` and needs no further writes ever, which
+        is what keeps the hot pairs ("GDPR", "HMRC") off the write path entirely."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS
+
         rows = [r for r in rows if r.get("shorthand") and r.get("candidate_id")]
         if not rows:
-            return 0
+            return {"written": 0, "settled": []}
         now = _now()
         written = 0
+        settled: list[tuple[str, str]] = []
         for r in rows:
+            key = (r["shorthand"], r["candidate_id"])
             cur = self.conn.execute(
                 """
                 INSERT INTO learned_shorthands
-                    (shorthand, candidate_id, entity_kind, is_abbrev, first_doc, created_at)
-                VALUES (?,?,?,?,?,?)
+                    (shorthand, candidate_id, entity_kind, is_abbrev, first_doc,
+                     doc_count, created_at)
+                VALUES (?,?,?,?,?,0,?)
                 ON CONFLICT(shorthand, candidate_id) DO NOTHING
                 """,
                 (r["shorthand"], r["candidate_id"], r.get("entity_kind"),
                  1 if r.get("is_abbrev") else 0, doc_id, now),
             )
             written += max(cur.rowcount, 0)
+            if not doc_id:
+                continue
+            fresh = self.conn.execute(
+                "INSERT INTO learned_shorthand_docs (shorthand, candidate_id, doc_id) "
+                "VALUES (?,?,?) ON CONFLICT DO NOTHING", (*key, doc_id))
+            if max(fresh.rowcount, 0) == 0:
+                continue
+            # Derived, never incremented — see the DDL. Two extra statements per pair
+            # per document, but only while the pair is still below the threshold.
+            seen = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM learned_shorthand_docs "
+                "WHERE shorthand = ? AND candidate_id = ?", key).fetchone()["n"]
+            self.conn.execute(
+                "UPDATE learned_shorthands SET doc_count = ? "
+                "WHERE shorthand = ? AND candidate_id = ?", (seen, *key))
+            if seen >= SHORTHAND_MIN_DOCS:
+                settled.append(key)
         if commit:
             self.conn.commit()
-        return written
+        return {"written": written, "settled": settled}
 
     def learned_shorthand_map(self, *, limit: int = 400000) -> dict[str, list[tuple]]:
-        """``{candidate_id: [(shorthand, entity_kind, is_abbrev), …]}`` — the whole store,
-        loaded once and cached by the stage. Keyed by candidate because application is
-        gated on the citing document already citing that candidate, so the caller only
-        ever looks up ids it has in hand."""
+        """``{candidate_id: [(shorthand, entity_kind, is_abbrev), …]}`` — the APPLICABLE
+        store, loaded once and cached by the stage. Keyed by candidate because
+        application is gated on the citing document already citing that candidate, so the
+        caller only ever looks up ids it has in hand.
+
+        Only pairs at or over ``SHORTHAND_MIN_DOCS`` are returned: below that a shorthand
+        is document-local and never travels. That is also what makes the load cheap —
+        the gate takes it from ~1.1M rows to ~15k."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS
+
         out: dict[str, list[tuple]] = {}
         for r in self.conn.execute(
                 "SELECT shorthand, candidate_id, entity_kind, is_abbrev "
-                "FROM learned_shorthands WHERE COALESCE(blocked, 0) = 0 LIMIT ?",
-                (limit,)):
+                "FROM learned_shorthands WHERE COALESCE(blocked, 0) = 0 "
+                "AND COALESCE(doc_count, 0) >= ? LIMIT ?",
+                (SHORTHAND_MIN_DOCS, limit)):
             out.setdefault(r["candidate_id"], []).append(
                 (r["shorthand"], r["entity_kind"], bool(r["is_abbrev"])))
         return out
@@ -4708,15 +4898,110 @@ class Catalogue:
         return self.conn.execute(
             "SELECT COUNT(*) AS n FROM learned_shorthands").fetchone()["n"]
 
+    def backfill_learned_shorthand_doc_counts(
+        self, *, dry_run: bool = True, batch: int = 5000,
+        on_progress=None,
+    ) -> dict:
+        """Populate ``doc_count`` for rows written before the store counted anything.
+
+        The million rows already in the store record only ``first_doc``, so on the day
+        the popularity gate ships every one of them reads as document-local and NOTHING
+        travels — including the abbreviations that should ("the CPIA"). The evidence is
+        in the ``citations`` table, which has always recorded one row per USE with its
+        source document; grouping those by (shorthand, target) recovers exactly the
+        distinct-document count the store failed to keep.
+
+        Not a plain ``GROUP BY raw``: ``raw`` holds the whole matched span, pincite and
+        all ("Suncor, at para 30"), so grouping on it would split one shorthand across
+        dozens of keys and undercount every popular name. ``shorthand_name_from_use``
+        undoes what the use-pattern added; the fold is case-insensitive because that is
+        how a case short-name matches.
+
+        Counting stops at the threshold per pair — this is a gate, not a statistic —
+        which also bounds the memory this holds while streaming."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS, shorthand_name_from_use
+
+        keys: dict[tuple[str, str], tuple[str, str]] = {}
+        for r in self.conn.execute(
+                "SELECT shorthand, candidate_id FROM learned_shorthands"):
+            keys[(r["shorthand"].casefold(), r["candidate_id"])] = (
+                r["shorthand"], r["candidate_id"])
+        docs: dict[tuple[str, str], set[str]] = {}
+        scanned = 0
+        # Keyset-paged over the primary key, never one streaming SELECT: the Postgres
+        # shim buffers a result set client-side, and `citations` is tens of millions of
+        # rows. Paging keeps the resident set to one page and lets the PK index serve
+        # `citation_id > ?` incrementally even though `method` is unindexed.
+        after = 0
+        while True:
+            page = self.conn.execute(
+                "SELECT citation_id, src_id, raw, candidate_id FROM citations "
+                "WHERE citation_id > ? AND method = 'shorthand' "
+                "AND candidate_id IS NOT NULL "
+                "ORDER BY citation_id LIMIT ?", (after, batch)).fetchall()
+            if not page:
+                break
+            after = page[-1]["citation_id"]
+            scanned += len(page)
+            for row in page:
+                name = shorthand_name_from_use(row["raw"])
+                pair = keys.get((name.casefold(), row["candidate_id"]))
+                if not pair:
+                    continue
+                seen = docs.setdefault(pair, set())
+                if len(seen) < SHORTHAND_MIN_DOCS:
+                    seen.add(row["src_id"])
+            if on_progress:
+                on_progress(scanned, len(docs))
+        counted = [(len(v), k[0], k[1]) for k, v in docs.items()]
+        popular = sum(1 for n, _s, _c in counted if n >= SHORTHAND_MIN_DOCS)
+        if not dry_run:
+            for i in range(0, len(counted), batch):
+                self.conn.executemany(
+                    "UPDATE learned_shorthands SET doc_count = ? "
+                    "WHERE shorthand = ? AND candidate_id = ? "
+                    "AND COALESCE(doc_count, 0) < ?",
+                    [(n, s, c, n) for n, s, c in counted[i:i + batch]])
+                self.conn.commit()
+        return {"citations_scanned": scanned, "pairs_counted": len(counted),
+                "pairs_at_threshold": popular, "threshold": SHORTHAND_MIN_DOCS,
+                "updated": 0 if dry_run else len(counted), "dry_run": dry_run}
+
+    def documents_by_shorthand(self, query: str, *, limit: int = 20) -> list[str]:
+        """The authorities a corpus-wide shorthand stands for — "CPIA" → the Criminal
+        Procedure and Investigations Act 1996.
+
+        Search matches titles, and no statute's title is its abbreviation, so the names
+        practitioners actually use were the one way of naming an authority that search
+        could not follow. The store already knows them; the popularity gate is what makes
+        it safe to search on, since only names several documents independently agreed on
+        get this far. Exact (folded) match only — this is a lookup, not a substring
+        search."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS
+
+        q = " ".join(str(query or "").split())
+        if len(q) < 2:
+            return []
+        rows = self.conn.execute(
+            "SELECT candidate_id, doc_count FROM learned_shorthands "
+            "WHERE lower(shorthand) = ? AND COALESCE(blocked, 0) = 0 "
+            "AND COALESCE(doc_count, 0) >= ? ORDER BY doc_count DESC LIMIT ?",
+            (q.casefold(), SHORTHAND_MIN_DOCS, limit)).fetchall()
+        return [r["candidate_id"] for r in rows if r["candidate_id"]]
+
     def browse_learned_shorthands(
         self, *, query: str | None = None, candidate_id: str | None = None,
         state: str = "all", limit: int = 100, offset: int = 0,
     ) -> tuple[list[sqlite3.Row], int]:
         """A page of the store for the admin panel, with the total matching the filter.
 
-        ``state`` is ``all`` | ``active`` | ``blocked`` | ``invalid`` — the last being
-        rows that would no longer be learned today (see ``valid_shorthand``), which is
-        how the accumulated junk is found without knowing what to search for."""
+        ``state`` is ``all`` | ``active`` | ``blocked`` | ``invalid`` | ``local`` —
+        ``invalid`` being rows that would no longer be learned today (see
+        ``valid_shorthand``), which is how the accumulated junk is found without knowing
+        what to search for, and ``local`` those below ``SHORTHAND_MIN_DOCS``: stored, but
+        established by too few documents to travel."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS
+
         where, params = ["1=1"], []
         if query:
             where.append("(lower(shorthand) LIKE ? OR lower(candidate_id) LIKE ?)")
@@ -4727,8 +5012,13 @@ class Catalogue:
             params.append(candidate_id)
         if state == "active":
             where.append("COALESCE(blocked, 0) = 0")
+            where.append("COALESCE(doc_count, 0) >= ?")
+            params.append(SHORTHAND_MIN_DOCS)
         elif state == "blocked":
             where.append("COALESCE(blocked, 0) = 1")
+        elif state == "local":
+            where.append("COALESCE(doc_count, 0) < ?")
+            params.append(SHORTHAND_MIN_DOCS)
         sql_where = " AND ".join(where)
         if state == "invalid":
             # No SQL predicate can express it, so filter in Python over the matching
@@ -4772,30 +5062,49 @@ class Catalogue:
         return max(cur.rowcount, 0)
 
     def purge_invalid_learned_shorthands(self, *, dry_run: bool = True,
-                                         batch: int = 5000) -> dict:
+                                         batch: int = 5000,
+                                         include_local: bool = False) -> dict:
         """Delete every stored shorthand that would not be learned today.
 
         The read path already skips these, so this is housekeeping rather than a fix —
-        but the store had grown to 382,885 rows, most of them unusable, and a smaller
-        store is a faster one (it is loaded whole and cached per rescan)."""
-        from ..citations.extractor import valid_shorthand
+        but the store had grown to 1,114,991 rows, most of them unusable, and a smaller
+        store is a faster one (it is loaded whole and cached per rescan).
+
+        ``include_local`` widens it to rows below ``SHORTHAND_MIN_DOCS`` — ~91% of the
+        store, and the only way to shift the report boilerplate the read-side rules
+        cannot see ("Medium Neutral", "Library Sheet": no colon, and they look like
+        names). It is OFF by default and reported separately in the dry run, because it
+        deletes the evidence as well as the row: a pair below the threshold is still
+        ACCUMULATING documents, and deleting it resets that to whatever
+        ``learned_shorthand_docs`` still holds."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS, valid_shorthand
 
         seen = deleted = 0
         doomed: list[tuple[str, str]] = []
+        local = 0
         for r in self.conn.execute(
-                "SELECT shorthand, candidate_id FROM learned_shorthands"):
+                "SELECT shorthand, candidate_id, COALESCE(doc_count, 0) AS doc_count "
+                "FROM learned_shorthands"):
             seen += 1
-            if not valid_shorthand(r["shorthand"]):
+            unlearnable = not valid_shorthand(r["shorthand"])
+            below = r["doc_count"] < SHORTHAND_MIN_DOCS
+            local += bool(below and not unlearnable)
+            if unlearnable or (below and include_local):
                 doomed.append((r["shorthand"], r["candidate_id"]))
         if not dry_run:
             for i in range(0, len(doomed), batch):
+                chunk = doomed[i:i + batch]
                 self.conn.executemany(
                     "DELETE FROM learned_shorthands "
-                    "WHERE shorthand = ? AND candidate_id = ?", doomed[i:i + batch])
+                    "WHERE shorthand = ? AND candidate_id = ?", chunk)
+                self.conn.executemany(
+                    "DELETE FROM learned_shorthand_docs "
+                    "WHERE shorthand = ? AND candidate_id = ?", chunk)
                 self.conn.commit()
             deleted = len(doomed)
         return {"scanned": seen, "invalid": len(doomed), "deleted": deleted,
-                "dry_run": dry_run}
+                "document_local": local, "threshold": SHORTHAND_MIN_DOCS,
+                "include_local": include_local, "dry_run": dry_run}
 
     def list_named_aliases(self) -> list[sqlite3.Row]:
         """User-defined shorthand → document mappings (e.g. "UK GDPR" → its id). These
@@ -5636,7 +5945,8 @@ class Catalogue:
                         "WHEN lower(d.title) LIKE ? THEN 2 ELSE 3 END, "
                         "cited_by DESC, ")
 
-    def _order_by(self, sort: str | None, query: str | None = None) -> tuple[str, list]:
+    def _order_by(self, sort: str | None, query: str | None = None,
+                  id_boost: list | None = None) -> tuple[str, list]:
         """The ORDER BY clause and the parameters it binds (LIKE patterns are bound, never
         interpolated — a literal % in the SQL is the pg placeholder trap).
 
@@ -5644,12 +5954,21 @@ class Catalogue:
         is only valid for :meth:`search_documents`, which selects it.
         """
         q = (query or "").strip().lower()
+        # An exact-name hit (an abbreviation resolved through the shorthand store) leads
+        # whatever the sort — including a date browse, where it would otherwise be buried
+        # by whatever is newest.
+        boost = list(dict.fromkeys(i for i in (id_boost or []) if i))
+        lead, lparams = "", []
+        if boost:
+            qs = ",".join("?" for _ in boost)
+            lead = f"CASE WHEN d.stable_id IN ({qs}) THEN 0 ELSE 1 END, "
+            lparams = list(boost)
         if (sort or "") != "relevance":
-            return self._sort_clause(sort), []
+            return lead + self._sort_clause(sort), lparams
         if not q:  # nothing to be relevant TO — browsing, not searching
-            return self._sort_clause("date"), []
-        return (self._RELEVANCE_BANDS + self._sort_clause("date"),
-                [q, f"{q}%", f"%{q}%"])
+            return lead + self._sort_clause("date"), lparams
+        return (lead + self._RELEVANCE_BANDS + self._sort_clause("date"),
+                [*lparams, q, f"{q}%", f"%{q}%"])
 
     def list_documents(
         self,
@@ -5713,9 +6032,14 @@ class Catalogue:
         return [r["dst_id"] for r in rows if r["dst_id"]]
 
     def search_documents(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
-                         **filters) -> list[sqlite3.Row]:
+                         id_boost: list | None = None, **filters) -> list[sqlite3.Row]:
         """Like :meth:`list_documents` but sortable (incl. by citation frequency) and each row
-        carries a ``cited_by`` count (occurrences from the roll-up) for display + ranking."""
+        carries a ``cited_by`` count (occurrences from the roll-up) for display + ranking.
+
+        ``id_boost`` are documents the query named EXACTLY by some route the title match
+        cannot see — today, an abbreviation resolved through the learned-shorthand store
+        ("CPIA"). They sort first: a document the query names outranks one that merely
+        contains the letters, however well-cited the latter is."""
         tag = filters.pop("tag", None)
         clauses, fparams = self._doc_filter_clauses(tag=None, **filters)
         # cited_by as a correlated scalar subquery: `candidate_id IN (stable_id, ecli)` is two
@@ -5736,7 +6060,7 @@ class Catalogue:
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        order, oparams = self._order_by(sort, filters.get("query"))
+        order, oparams = self._order_by(sort, filters.get("query"), id_boost=id_boost)
         sql += f" ORDER BY {order} LIMIT ? OFFSET ?"
         params.extend(oparams)      # positional: after the WHERE's, before LIMIT/OFFSET
         params.extend([limit, offset])

@@ -816,3 +816,63 @@ def test_rescan_matching_unions_several_queries(tmp_path, monkeypatch):
     result = f.rescan_matching(query='"A"|||"B"')
     assert result["documents"] == 3          # the union, not 4
     assert result["queries"] == {'"A"': 2, '"B"': 2}
+
+
+def test_a_mappings_type_can_be_corrected_in_place(tmp_path):
+    """mapping_type was part of the unique key, so re-sending a pair with a corrected
+    type inserted a SECOND, contradictory row beside the first. A build of ~240 AI Act
+    correspondences written as 'functional_predecessor' therefore had no route back to
+    'equivalent' short of deleting every row by id.
+
+    A correspondence is identified by the two provisions it connects; what it CLAIMS
+    about them is an attribute of it."""
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, _ts):
+        for sid in ("ai-act", "nlf"):
+            cat.upsert_document(Record(source="user-import", stable_id=sid,
+                                       doc_type=DocType.LEGISLATION, title=sid))
+    sent = [{"current_anchor": "Article 40", "previous_anchor": "Article 17",
+             "note": "harmonised standards"}]
+    f.upsert_provision_mappings(current_id="ai-act", previous_id="nlf", mappings=sent)
+    again = f.upsert_provision_mappings(
+        current_id="ai-act", previous_id="nlf", mapping_type="equivalent",
+        mappings=[{"current_anchor": "Article 40", "previous_anchor": "Article 17"}])
+    assert again["total_for_pair"] == 1, "the pair must not have been duplicated"
+    assert again["mappings"][0]["mapping_type"] == "equivalent"
+
+    # …and the whole build can be relabelled without re-sending the correspondences
+    f.upsert_provision_mappings(
+        current_id="ai-act", previous_id="nlf",
+        mappings=[{"current_anchor": "Article 41", "previous_anchor": "Article 18"}])
+    out = f.retype_provision_mappings(current_id="ai-act", to_type="equivalent",
+                                      from_type="functional_predecessor", dry_run=True)
+    assert out["would_update"] == 1 and out["updated"] == 0
+    assert f.retype_provision_mappings(
+        current_id="ai-act", to_type="equivalent")["updated"] == 1
+    rows = f.provision_mappings(stable_id="ai-act")["mappings"]
+    assert {r["mapping_type"] for r in rows} == {"equivalent"}
+
+
+def test_a_write_names_the_rows_it_did_not_send(tmp_path):
+    """A bulk call whose RESPONSE is lost still ran. The caller saw nothing, re-sent a
+    slightly different list, and the pair silently kept both — diagnosable only by
+    inferring orphans from gaps in the mapping_id sequence. Name them instead."""
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, _ts):
+        for sid in ("ai-act", "nlf"):
+            cat.upsert_document(Record(source="user-import", stable_id=sid,
+                                       doc_type=DocType.LEGISLATION, title=sid))
+    f.upsert_provision_mappings(   # the call whose reply never arrived
+        current_id="ai-act", previous_id="nlf",
+        mappings=[{"current_anchor": "Article 40", "previous_anchor": "Article 17"},
+                  {"current_anchor": "Article 99", "previous_anchor": "Article 44"}])
+    out = f.upsert_provision_mappings(   # the corrected re-send
+        current_id="ai-act", previous_id="nlf",
+        mappings=[{"current_anchor": "Article 40", "previous_anchor": "Article 17"}])
+    assert out["total_for_pair"] == 2 and out["sent"] == 1
+    surplus = out["not_sent_in_this_call"]
+    assert [r["current_anchor"] for r in surplus] == ["Article 99"]
+    assert surplus[0]["mapping_id"] and "did not send" in out["warning"]
+    # and the pair alone can be listed, without paging every mapping on the law
+    only = f.provision_mappings(stable_id="ai-act", previous_id="nlf")
+    assert only["matched"] == 2 and only["total"] == 2

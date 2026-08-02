@@ -784,8 +784,18 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/shorthands/purge-invalid")
     def purge_shorthands_ep(payload: dict = Body(default={})) -> dict:
         """Delete every stored shorthand that would not be learned today. Defaults to a
-        dry run — pass ``{"dry_run": false}`` to actually delete."""
-        return facade.purge_shorthands(dry_run=bool((payload or {}).get("dry_run", True)))
+        dry run — pass ``{"dry_run": false}`` to actually delete. ``include_local`` widens
+        it to the rows below the ≥3-document threshold."""
+        p = payload or {}
+        return facade.purge_shorthands(dry_run=bool(p.get("dry_run", True)),
+                                       include_local=bool(p.get("include_local")))
+
+    @app.post("/shorthands/backfill-counts")
+    def backfill_shorthand_counts_ep(payload: dict = Body(default={})) -> dict:
+        """Recover how many documents established each stored shorthand, from the
+        citations table — what the ≥3-document gate reads. Dry run by default."""
+        return facade.backfill_shorthand_doc_counts(
+            dry_run=bool((payload or {}).get("dry_run", True)))
 
     @app.post("/feedback")
     def submit_feedback_ep(payload: dict = Body(...)) -> dict:
@@ -1949,6 +1959,12 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/provision-mappings")
     def upsert_provision_mappings_ep(payload: dict = Body(...)) -> dict:
         return facade.upsert_provision_mappings(**payload)
+
+    @app.post("/provision-mappings/retype")
+    def retype_provision_mappings_ep(payload: dict = Body(...)) -> dict:
+        """Re-label existing mappings (``to_type``), optionally scoped to one previous
+        law and/or one current ``from_type``. The pairs are untouched."""
+        return facade.retype_provision_mappings(**(payload or {}))
 
     @app.delete("/provision-mappings/{mapping_id}")
     def delete_provision_mapping_ep(mapping_id: int) -> dict:

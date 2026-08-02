@@ -122,3 +122,25 @@ def test_quotes_cannot_inject_tsquery_syntax():
     compiled = q("""o'brien""")
     assert compiled is not None and compiled.count("'") == 2
     assert q("""a' | 'b""") is not None
+
+
+def test_a_citation_number_stays_one_lexeme():
+    """Postgres keeps a NUMBER/NUMBER run whole — measured on the live index::
+
+        to_tsvector('english', 'No 765/2008')              -> '765/2008':2
+        to_tsvector('english', 'Regulation (EU) 2016/679') -> '2016/679':3 'eu':2 …
+
+    Splitting it here compiled to `'765' <-> '2008'`, which cannot match that vector,
+    so every quoted phrase carrying an EU citation number returned NOTHING and looked
+    like an honest absence:
+
+        "…affixed in violation of Article 30 of Regulation (EC) No 765/2008"   0
+        the same phrase, cut before the number                                43
+    """
+    assert q('"Regulation (EC) No 765/2008"') == \
+        "('Regulation' <-> 'EC' <-> 'No' <-> '765/2008')"
+    assert q('"Regulation (EU) 2016/679"') == \
+        "('Regulation' <-> 'EU' <-> '2016/679')"
+    assert q('"1.5 million"') == "('1.5' <-> 'million')"
+    # a sub-provision is still several lexemes, exactly as Postgres reads it
+    assert q('"Article 6(1)(f)"') == "('Article' <-> '6' <-> '1' <-> 'f')"

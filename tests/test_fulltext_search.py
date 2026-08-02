@@ -340,3 +340,28 @@ def test_a_truncated_agent_result_says_the_total_is_a_lower_bound(tmp_path, monk
     monkeypatch.setattr(f, "freetext_hydrate", lambda **k: {"items": []})
     out = f.freetext_for_agent("common words")
     assert "lower bound" in out["note"]
+
+
+def test_an_unmatched_jurisdiction_filter_returns_nothing_not_everything(tmp_path):
+    """``jurisdiction="eu"`` came back half full of UK assimilated instruments, each
+    correctly labelled United Kingdom in its own facets — because the filter had not
+    been applied at all.
+
+    Two faults, one behaviour: the argument was compared against the display name
+    ("European Union"), so the ISO code the tool documents matched no source; and the
+    resulting EMPTY source list is falsy, so the filter was dropped and the search ran
+    over the whole corpus. A filter that selects nothing must return nothing.
+    """
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=str(tmp_path / "c.sqlite"),
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=tmp_path / "s.json",
+                      embed_provider="local-hashing", embed_model=None))
+    out = f.freetext_search("notified bodies", jurisdictions=["Kingdom of Erewhon"])
+    assert out["items"] == [] and out["total"] == 0
+    assert any("no indexed source lies in" in n for n in out["notes"])
+    # …and the ISO code the tool advertises resolves, rather than matching nothing
+    assert f._norm_jurisdiction("eu") == "European Union"
+    assert f._norm_jurisdiction("gb") == "United Kingdom"

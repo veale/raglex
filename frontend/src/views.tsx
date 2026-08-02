@@ -453,26 +453,53 @@ function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, 
 }
 
 // The inline "Mentioned by A, B, C and n more. See all mentions." line under a paragraph.
+//
+// Direct citers lead. Documents that cited a MAPPED provision of another instrument
+// (an earlier iteration, or a parallel provision in a companion instrument — the AI Act
+// against the NLF regulations) follow on their own line, naming the instrument they
+// actually cited: they belong beside the article, but calling them mentions of it would
+// be untrue.
 function MentionedBy({ list, target, anchor }: { list: any[]; target: string; anchor: string }) {
   const { push } = useTray();
-  const top = list.slice(0, 3);
-  const more = list.length - top.length;
+  const direct = list.filter((m: any) => !m.inherited);
+  const inherited = list.filter((m: any) => m.inherited);
+  const top = direct.slice(0, 3);
+  const more = direct.length - top.length;
+  const openDoc = (m: any) => push({ kind: "doc", id: m.src_id, highlightTarget: target,
+    // carry the provision anchor so the reader scrolls to the mention of THIS
+    // section, not merely the first mention of the instrument (a general "the
+    // Privacy Act 1988" reference earlier in the citing document).
+    highlightAnchor: anchor, label: <Oscola c={m.src_oscola} fallback={m.src_id} /> });
   return (
     <div className="mentioned-by">
-      <span className="mb-label">Mentioned by </span>
-      {top.map((m, i) => (
-        <Fragment key={i}>{i > 0 && ", "}
-          <a title="Open this citing document, at the passage that cites this provision"
-            onClick={() => push({ kind: "doc", id: m.src_id, highlightTarget: target,
-              // carry the provision anchor so the reader scrolls to the mention of THIS
-              // section, not merely the first mention of the instrument (a general "the
-              // Privacy Act 1988" reference earlier in the citing document).
-              highlightAnchor: anchor, label: <Oscola c={m.src_oscola} fallback={m.src_id} /> })}>
-            <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
-        </Fragment>
-      ))}
-      {more > 0 && <span> and {more} more</span>}.{" "}
-      <a className="mb-all" onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>See all mentions</a>
+      {direct.length > 0 && <>
+        <span className="mb-label">Mentioned by </span>
+        {top.map((m, i) => (
+          <Fragment key={i}>{i > 0 && ", "}
+            <a title="Open this citing document, at the passage that cites this provision"
+              onClick={() => openDoc(m)}>
+              <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
+          </Fragment>
+        ))}
+        {more > 0 && <span> and {more} more</span>}.{" "}
+        <a className="mb-all" onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>See all mentions</a>
+      </>}
+      {inherited.length > 0 && <div className="mb-inherited">
+        <span className="mb-label">
+          {mappingKind(inherited[0].mapping_type).row === "parallel provision"
+            ? "Parallel provision cited by " : "Earlier iteration cited by "}</span>
+        {inherited.slice(0, 3).map((m: any, i: number) => (
+          <Fragment key={i}>{i > 0 && ", "}
+            <a title={`This document cites ${m.from_title || m.from_id} ${m.from_anchor}, mapped to this provision`}
+              onClick={() => openDoc(m)}>
+              <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
+          </Fragment>
+        ))}
+        {inherited.length > 3 && <span> and {inherited.length - 3} more</span>}
+        <span className="muted"> — via {inherited[0].from_title || inherited[0].from_id}{" "}
+          {inherited[0].from_anchor}{
+            new Set(inherited.map((m: any) => m.from_id)).size > 1 ? " and others" : ""}</span>.
+      </div>}
     </div>
   );
 }
@@ -4935,6 +4962,9 @@ function ShorthandsPanel({ open }: { open: (id: string, a?: string) => void }) {
       <h3 style={{ marginTop: 0 }}>Shorthands <span className="muted">
         — names the corpus has learned stand for an authority</span>
         <span className="tag" style={{ marginLeft: 8 }}>{counts.total ?? "—"} stored</span>
+        {counts.corpus_wide != null && <span className="tag" style={{ marginLeft: 4 }}
+          title={`established in ${counts.threshold ?? 3}+ documents, so they travel to other documents`}>
+          {counts.corpus_wide} corpus-wide</span>}
         {counts.blocked > 0 && <span className="tag" style={{ marginLeft: 4 }}>{counts.blocked} blocked</span>}
       </h3>
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
@@ -4942,7 +4972,8 @@ function ShorthandsPanel({ open }: { open: (id: string, a?: string) => void }) {
           className="sort-select" title="which shorthands to show">
           <option value="invalid">needs review</option>
           <option value="all">all</option>
-          <option value="active">active</option>
+          <option value="active">corpus-wide</option>
+          <option value="local">document-local</option>
           <option value="blocked">blocked</option>
         </select>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="name or target id…"
@@ -4986,6 +5017,10 @@ function ShorthandsPanel({ open }: { open: (id: string, a?: string) => void }) {
                 <b>{r.shorthand}</b>
                 {!r.valid && <span className="tag" style={{ marginLeft: 6 }} title="would not be learned today">unlearnable</span>}
                 {r.blocked && <span className="tag" style={{ marginLeft: 6 }}>blocked</span>}
+                {r.valid && !r.blocked && !r.applies_corpus_wide &&
+                  <span className="tag" style={{ marginLeft: 6 }}
+                    title={`established in ${r.doc_count || 0} document(s) — too few to travel, so it links only where it was defined`}>
+                    document-local</span>}
                 {r.first_doc && <div className="muted" style={{ fontSize: 10 }}>
                   first seen in <DocLink id={r.first_doc} onOpen={() => open(r.first_doc)}>{r.first_doc}</DocLink></div>}
               </td>
@@ -4995,7 +5030,11 @@ function ShorthandsPanel({ open }: { open: (id: string, a?: string) => void }) {
                 {r.target_title && <div className="muted" style={{ fontSize: 10 }}>{r.candidate_id}</div>}
               </td>
               <td className="muted" style={{ fontSize: 12 }}>
-                {r.is_abbrev ? "any mention" : "with a pincite"}
+                {/* a STORED shorthand always needs a pinpoint: applied only where the
+                    document already cites the parent, a bare hit adds nothing but a
+                    second, pincite-less edge to an authority already linked. */}
+                with a pinpoint
+                <div style={{ fontSize: 10 }}>{r.doc_count || 0} doc{r.doc_count === 1 ? "" : "s"}</div>
               </td>
               <td style={{ textAlign: "right" }}>
                 <button className="mini" disabled={busy === key(r)}
@@ -5003,13 +5042,17 @@ function ShorthandsPanel({ open }: { open: (id: string, a?: string) => void }) {
                   onClick={() => act(r, () => api.setShorthand({
                     shorthand: r.shorthand, candidate_id: r.candidate_id, blocked: !r.blocked }))}>
                   {r.blocked ? "↺ unblock" : "⊘ block"}</button>{" "}
+                {/* Both forms require a pinpoint; this chooses WHICH KIND counts.
+                    An instrument's abbreviation is pinpointed by provision
+                    ("s. 3 of the FMIOA", "BPRs, reg 5"); a case short name by
+                    paragraph ("Suncor, at para 30"). */}
                 <button className="mini" disabled={busy === key(r)}
                   title={r.is_abbrev
-                    ? "require a pincite before linking (safer for an ordinary word)"
-                    : "link on any bare mention (right for a real initialism)"}
+                    ? "treat as a CASE short name — links on a paragraph pincite"
+                    : "treat as an INSTRUMENT abbreviation — links on a provision pinpoint"}
                   onClick={() => act(r, () => api.setShorthand({
                     shorthand: r.shorthand, candidate_id: r.candidate_id, is_abbrev: !r.is_abbrev }))}>
-                  {r.is_abbrev ? "needs pincite" : "any mention"}</button>{" "}
+                  {r.is_abbrev ? "provision" : "paragraph"}</button>{" "}
                 <button className="mini" disabled={busy === key(r)} title="delete (may be re-learned on rescan)"
                   onClick={() => act(r, () => api.deleteShorthand(r.shorthand, r.candidate_id))}>✕</button>
               </td>

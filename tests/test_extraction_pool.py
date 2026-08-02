@@ -186,6 +186,16 @@ _SHORTHAND_ROW = {"shorthand": "Suncor", "candidate_id": "ewca/civ/2004/1000",
                   "entity_kind": "case", "is_abbrev": False}
 
 
+def _seed_shorthand_store(cat) -> None:
+    """Put the short name in the store as several documents' agreement — a pair below
+    SHORTHAND_MIN_DOCS is document-local and never travels, so seeding it from one
+    document would leave the corpus-wide pass with nothing to apply."""
+    from raglex.citations.extractor import SHORTHAND_MIN_DOCS
+
+    for i in range(SHORTHAND_MIN_DOCS):
+        cat.add_learned_shorthands([dict(_SHORTHAND_ROW)], doc_id=f"seed/{i}")
+
+
 def _seed_shorthand_corpus(facade: Facade, n: int) -> list[str]:
     """``n`` documents citing one case in full AND using a stored short name for it.
 
@@ -218,7 +228,7 @@ def test_pool_applies_stored_shorthands_exactly_as_the_serial_stage(tmp_path):
         facade = Facade(_config(tmp_path / ("pool" if pooled else "serial")))
         ids = _seed_shorthand_corpus(facade, 40)
         with facade._open() as (cat, _rs, ts):
-            cat.add_learned_shorthands([dict(_SHORTHAND_ROW)])
+            _seed_shorthand_store(cat)
             reset_shorthand_cache()     # the store changed under a long-lived process
             for sid in ids:
                 cat.conn.execute(
@@ -262,7 +272,7 @@ def test_shorthand_scan_falls_back_to_the_parent_when_the_worker_is_gone(tmp_pat
         facade = Facade(_config(tmp_path / f"{pooled}-{break_attach}"))
         ids = _seed_shorthand_corpus(facade, 40)
         with facade._open() as (cat, _rs, ts):
-            cat.add_learned_shorthands([dict(_SHORTHAND_ROW)])
+            _seed_shorthand_store(cat)
             stage.reset_shorthand_cache()
             for sid in ids:
                 cat.conn.execute(

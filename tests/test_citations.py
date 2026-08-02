@@ -1334,3 +1334,99 @@ def test_a_colon_bearing_name_is_never_a_shorthand():
     assert valid_shorthand("Dunsmuir") is True
     assert valid_shorthand("CPIA") is True
     assert valid_shorthand("the Vienna Convention") is True
+
+
+def test_a_judge_and_a_foreign_party_label_are_never_shorthands():
+    """Both found by auditing what the ≥3-document gate actually let through on the live
+    store: "Nicklin J" (60 documents) stood for the judgment he wrote, so every later
+    mention of the judge linked to it; VERZOEKSTER / EISER / Klaagster are the party
+    labels printed in every Dutch judgment's header, learned as names for whichever
+    statute the judgment cites. The generic-role list was English-only."""
+    from raglex.citations.extractor import valid_shorthand
+
+    for junk in ("Nicklin J", "Smith LJ", "Denning MR", "Lord Reed PSC",
+                 "VERZOEKSTER", "EISER", "Klaagster", "Kläger", "requérante",
+                 "de Staat"):
+        assert valid_shorthand(junk) is False, junk
+    for good in ("Vavilov", "Haida Nation", "CJA 1988", "the 1996 Act", "TFEU",
+                 "Federal Courts Act", "MR Smith Ltd"):
+        assert valid_shorthand(good) is True, good
+
+
+def test_truncating_an_office_cannot_manufacture_a_generic_party():
+    """_party_short_form tested the FULL party against the generic list and only then
+    truncated it to its leading words, so the truncation MADE the generic party the list
+    exists to stop::
+
+        "Secretary of State"                          -> blocked (exact match)
+        "Secretary of State for the Home Department"  -> not blocked -> 'Secretary'
+        "Commissioners for Her Majesty's Revenue…"    -> 'Commissioners'
+        "Supreme Court of Canada"                     -> 'Supreme Court'
+
+    Each of those then stood for whichever case the store had filed it under, in every
+    document that cites that case — and every jurisdiction has thousands of them."""
+    from raglex.citations.extractor import _party_short_form
+
+    for party in ("Secretary of State for the Home Department",
+                  "Secretary of State for Work and Pensions",
+                  "Commissioners for Her Majesty's Revenue and Customs",
+                  "Supreme Court of Canada",
+                  "Attorney General for Northern Ireland",
+                  "Director of Public Prosecutions for England"):
+        assert _party_short_form(party) is None, party
+
+    # a one-word generic prefix must NOT take a real name down with it
+    assert _party_short_form("State Street Bank") == "State Street"
+    assert _party_short_form("Crown Holdings Inc") == "Crown Holdings"
+    assert _party_short_form("Dunsmuir") == "Dunsmuir"
+    assert _party_short_form("Suncor Energy Inc") == "Suncor Energy"
+
+
+def test_a_bracketed_short_name_belongs_to_the_nearest_antecedent():
+    """From O'Connor v Bar Standards Board (uksc/2017/78)::
+
+        "…claims damages under the Human Rights Act 1998 against the respondent, the Bar
+         Standards Board ("the BSB"), alleging discrimination…"
+
+    The bracket sits 55 characters after the Act and no intervening word reaches the
+    12-letter guard, so "the BSB" was filed as a shorthand for the Human Rights Act —
+    and rendered 54 links to it in one document. The answer was in the gap: B-S-B are
+    the initials of the body named there, not of the statute.
+
+    The gap is also what keeps the ordinary forms working: an EMPTY one
+    (``Act 1998 ("HRA")``) and an APPOSITIVE name that is part of the citation's own
+    reference (``Case C-131/12 Google Spain SL v AEPD ("Google Spain")``)."""
+    from raglex.citations.extractor import _antecedent_owns_definition as owns
+
+    # a body introduced by prose owns its own abbreviation
+    assert owns(" against the respondent, the Bar Standards Board ",
+                "the BSB", "Human Rights Act 1998")
+    assert owns(". The Government of the United Kingdom ",
+                "the Government", "Article 6 of the Convention")
+    assert owns(" the Information Commissioner ",
+                "The Commissioner", "Freedom of Information Act 2000")
+    # …but a name the CITATION yields is the citation's, wherever the body stands
+    assert not owns(", on which the respondent, the Bar Standards Board, relies ",
+                    "the HRA", "Human Rights Act 1998")
+    # …and the ordinary shapes are untouched
+    assert not owns("", "HRA", "Human Rights Act 1998")
+    assert not owns(" at para 64 ", "Suncor", "2021 FC 138")
+    assert not owns(" Google Spain SL v AEPD [2014] ECR I-317 ",
+                    "Google Spain", "C-131/12")
+    assert not owns(" Tele2 Sverige AB v Post- och telestyrelsen ",
+                    "Tele2", "Cases C-203/15")
+
+
+def test_the_bsb_definition_is_not_learned_end_to_end():
+    """The same case through the real extractor: the Act is still cited, and the
+    document's own later "the BSB" mentions link to nothing."""
+    from raglex.citations import extract_citations
+    from raglex.citations.extractor import shorthand_defs
+
+    text = ("The appellant claims damages under the Human Rights Act 1998 against the "
+            "respondent, the Bar Standards Board (\"the BSB\"), alleging discrimination. "
+            "The BSB submits that the claim is out of time. The BSB relies on delay.")
+    cites = extract_citations(text)
+    assert any(c.candidate_id == "ukpga/1998/42" for c in cites)
+    assert not [d for d in shorthand_defs(text, cites) if "BSB" in d["shorthand"]]
+    assert not [c for c in cites if c.method == "shorthand"]

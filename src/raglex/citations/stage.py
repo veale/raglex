@@ -902,10 +902,13 @@ def _uk_referred_preliminary(catalogue: Catalogue, stable_id: str) -> bool:
 #
 # Both halves run inside the whole-corpus rescan (~700k documents, parallel workers),
 # so neither may add a per-document query or a hot-row write:
-#   - READ  — the whole store is loaded once per process and cached (it is small: a
-#             shorthand per few hundred documents), so application costs zero queries.
-#   - WRITE — insert-only, and pre-filtered against a process-local set of pairs
-#             already known, so a re-extraction of a settled corpus issues no writes.
+#   - READ  — the applicable store is loaded once per process and cached (the ≥3-document
+#             gate keeps it small), so application costs zero queries.
+#   - WRITE — insert-only, and pre-filtered against a process-local set of SETTLED pairs
+#             (already over the threshold, so nothing more can be learned about them).
+#             That is the hot set — "GDPR" settles after three documents and the other
+#             700k never write for it again — while a pair still short of the threshold
+#             does write, because that write is how the third document gets counted.
 _SHORTHAND_TTL_S = 900.0
 
 
@@ -920,7 +923,7 @@ class _ShorthandStore:
         self._loaded = False
         self._by_candidate: dict[str, list[tuple]] = {}
         self._by_name: dict[str, set[str]] = {}
-        self._known: set[tuple[str, str]] = set()
+        self._settled: set[tuple[str, str]] = set()
 
     def load(self, catalogue: Catalogue) -> tuple[dict, dict]:
         import time
@@ -940,31 +943,30 @@ class _ShorthandStore:
                 for name, _kind, _abbrev in rows:
                     by_name.setdefault(name, set()).add(cid)
             self._by_candidate, self._by_name = by_cand, by_name
-            self._known |= {(n, c) for c, rows in by_cand.items() for n, _k, _a in rows}
+            self._settled |= {(n, c) for c, rows in by_cand.items() for n, _k, _a in rows}
             self._loaded_at = time.monotonic()
             self._loaded = True
             return by_cand, by_name
 
     def unseen(self, defs: list[dict]) -> list[dict]:
-        """The definitions this process has not already stored — the filter that keeps a
-        steady-state rescan from issuing one INSERT per document per shorthand."""
+        """The definitions still worth writing — those whose pair has NOT yet reached the
+        popularity threshold. A settled pair can learn nothing from another document, so
+        skipping it is what keeps a steady-state rescan off the write path for exactly
+        the names every document defines."""
         with self._lock:
             return [d for d in defs
-                    if (d["shorthand"], d["candidate_id"]) not in self._known]
+                    if (d["shorthand"], d["candidate_id"]) not in self._settled]
 
-    def note_stored(self, defs: list[dict]) -> None:
-        """Record freshly written pairs AND fold them into the live map, so a shorthand
-        learned early in a rescan is usable by the very next document rather than waiting
-        out the reload TTL."""
+    def note_settled(self, pairs: list[tuple[str, str]]) -> None:
+        """Record pairs that have just reached the threshold — stop writing for them.
+
+        Deliberately NOT folded into the live map: a pair becomes applicable at the next
+        reload (≤15 minutes), not the instant it crosses. Applying it immediately would
+        mean the rest of a rescan sees a different rule set than a re-run of the same
+        documents would, and the whole point of the threshold is that the corpus, not one
+        run's ordering, decides."""
         with self._lock:
-            for d in defs:
-                key = (d["shorthand"], d["candidate_id"])
-                if key in self._known:
-                    continue
-                self._known.add(key)
-                self._by_candidate.setdefault(d["candidate_id"], []).append(
-                    (d["shorthand"], d.get("entity_kind"), bool(d.get("is_abbrev"))))
-                self._by_name.setdefault(d["shorthand"], set()).add(d["candidate_id"])
+            self._settled |= set(pairs)
 
 
 _SHORTHANDS = _ShorthandStore()
@@ -1193,8 +1195,8 @@ def _learn_fresh_shorthands(catalogue: Catalogue, defs: list, stable_id: str) ->
     if not fresh:
         return
     try:
-        catalogue.add_learned_shorthands(fresh, doc_id=stable_id)
-        _SHORTHANDS.note_stored(fresh)
+        result = catalogue.add_learned_shorthands(fresh, doc_id=stable_id)
+        _SHORTHANDS.note_settled(result.get("settled") or [])
     except Exception as exc:  # noqa: BLE001 — learning is best-effort
         log.debug("[cite-extract] %s: shorthand store write failed: %s", stable_id, exc)
 

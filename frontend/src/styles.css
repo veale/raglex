@@ -551,6 +551,10 @@ tbody tr:hover { background: var(--surface-2); }
 .reader .mentioned-by a { cursor: pointer; }
 .reader .mentioned-by a i { font-style: italic; }
 .reader .mentioned-by .mb-all { color: var(--accent); font-weight: 500; white-space: nowrap; }
+/* citers of a MAPPED provision in another instrument — beside the article, but set
+   apart from it: they cited the companion/earlier instrument, not this one. */
+.reader .mentioned-by .mb-inherited { margin-top: 2px; padding-left: var(--sp-2);
+  border-left: 2px solid color-mix(in srgb, var(--faint) 45%, transparent); }
 /* a paragraph highlighted in a tray because it cites the origin document */
 .reader .seg-hi { background: color-mix(in srgb, var(--hi) 16%, transparent);
   box-shadow: -3px 0 0 var(--hi); padding-left: var(--sp-3); margin-left: calc(-1 * var(--sp-3)); }

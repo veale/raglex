@@ -376,7 +376,14 @@ CREATE TABLE IF NOT EXISTS provision_mappings (
     created_by          TEXT NOT NULL DEFAULT 'manual',
     confidence          REAL,
     created_at          TEXT NOT NULL,
-    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor, mapping_type)
+    -- IDENTITY IS THE PAIR OF PROVISIONS, NOT THE CLAIM ABOUT THEM.
+    -- mapping_type was part of this key, which made it immutable in practice:
+    -- re-sending a mapping with a corrected type inserted a SECOND row beside
+    -- the wrong one instead of fixing it, so hundreds of AI Act links written as
+    -- 'functional_predecessor' could not be moved to 'equivalent' without
+    -- deleting each by id first. One correspondence between two provisions, one
+    -- row, whose type is an ordinary editable attribute.
+    UNIQUE (current_doc_id, current_anchor, previous_doc_id, previous_anchor)
 );
 CREATE INDEX IF NOT EXISTS provision_mappings_current_idx
     ON provision_mappings (current_doc_id, current_anchor);
@@ -502,10 +509,20 @@ CREATE TABLE IF NOT EXISTS learned_shorthands (
     entity_kind  TEXT,
     is_abbrev    INTEGER NOT NULL DEFAULT 0,
     first_doc    TEXT,
+    doc_count    INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL,
     PRIMARY KEY (shorthand, candidate_id)
 );
 CREATE INDEX IF NOT EXISTS learned_shorthands_cand_idx ON learned_shorthands (candidate_id);
+
+-- The documents behind doc_count (see the SQLite DDL): evidence, bounded — nothing is
+-- written for a pair already over SHORTHAND_MIN_DOCS.
+CREATE TABLE IF NOT EXISTS learned_shorthand_docs (
+    shorthand    TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    doc_id       TEXT NOT NULL,
+    PRIMARY KEY (shorthand, candidate_id, doc_id)
+);
 
 CREATE TABLE IF NOT EXISTS citations (
     citation_id   BIGSERIAL PRIMARY KEY,

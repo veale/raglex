@@ -124,13 +124,41 @@ class ParsedQuery:
 
 
 # -- lexing / parsing ---------------------------------------------------------
-_WORD_CHARS = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
+# A NUMBER/NUMBER (or decimal) run is ONE lexeme to Postgres — measured, not assumed:
+#
+#     to_tsvector('english', 'No 765/2008')             -> '765/2008':2
+#     to_tsvector('english', 'Regulation (EU) 2016/679') -> '2016/679':3 'eu':2 'regul':1
+#     to_tsvector('english', '1.5 million')             -> '1.5':1 'million':2
+#
+# Splitting it here into '765' and '2008' compiled the phrase to `'765' <-> '2008'`,
+# which cannot match a tsvector holding the single lexeme '765/2008'. So every quoted
+# phrase carrying an EU citation number — the commonest identifier in this corpus —
+# silently returned nothing:
+#
+#     "the CE marking has been affixed in violation of Article 30 of
+#      Regulation (EC) No 765/2008"                                  0 hits
+#     …the same phrase cut before the number                        43 hits
+#
+# The two tokenisers have to agree, and Postgres's is the one that built the index.
+_WORD_CHARS = re.compile(
+    r"""
+      \d+(?:[./]\d+)+                    # 765/2008, 2016/679, 1.5 — one lexeme
+    | [^\W_]+(?:['’][^\W_]+)*
+    """,
+    re.UNICODE | re.VERBOSE,
+)
 
 
 def _words_of(text: str) -> list[str]:
     """The indexable words of a phrase. Punctuation is dropped here because Postgres
     drops it too ("section 3(2)" → 'section','3','2'); the *literal* check later is
-    what puts the punctuation back."""
+    what puts the punctuation back.
+
+    Except where Postgres KEEPS it (see ``_WORD_CHARS``): a slash or decimal point
+    between digits binds them into one lexeme, and a phrase that disagrees about that
+    matches nothing at all. Hyphenated numbers ("2020-12-31" → '2020' '-12' '-31')
+    still disagree; they have not been seen to matter and the fix there is not a
+    character class but the sign the parser keeps."""
     return _WORD_CHARS.findall(text)
 
 

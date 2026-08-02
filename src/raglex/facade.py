@@ -175,6 +175,7 @@ def _progress(cb, **fields) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+from .citations.extractor import SHORTHAND_MIN_DOCS as _SHORTHAND_MIN_DOCS
 from .citations.extractor import valid_shorthand as _valid_shorthand
 from .citations.oscola import cite as _oscola_cite
 from .config import Config
@@ -2607,8 +2608,39 @@ class Facade:
                     }
                 elif r.get("version_inherited"):
                     seen[r["src_id"]]["version_inherited"] = True
+            # …plus the citers of a MAPPED provision in another instrument, against the
+            # provision they were mapped to. The bottom-of-page panel already listed
+            # them, behind a dropdown; the article you are reading is where they answer
+            # a question. Marked ``inherited`` with the instrument they actually cite,
+            # so the rail can say so — they are not citations of this Article and the
+            # reader never implies they are. Deliberately confined to this roll-up: the
+            # ``groups``/``total`` half of this reply is the citation record, and
+            # citing_documents() reads it.
+            if offset == 0:
+                inherited_srcs: dict[str, object] = {}
+                for row in cat.inherited_mentions_for(stable_id, limit=1200):
+                    lab = row["inherited_current_anchor"]
+                    seen = by_anchor.setdefault(lab, {})
+                    if not lab or row["src_id"] in seen:
+                        continue
+                    sid = row["src_id"]
+                    if sid not in inherited_srcs:
+                        inherited_srcs[sid] = cat.get_document(sid)
+                    sdoc = inherited_srcs[sid]
+                    seen[sid] = {
+                        "src_id": sid,
+                        "src_oscola": (_oscola_cite(sdoc, _row_meta(sdoc))
+                                       if sdoc else None),
+                        "authority": _authority(sid, sdoc),
+                        "version_inherited": False,
+                        "inherited": True,
+                        "mapping_type": row["mapping_type"],
+                        "from_id": row["inherited_from_id"],
+                        "from_anchor": row["inherited_from_anchor"],
+                        "from_title": row["inherited_from_title"],
+                    }
             by_anchor = {lab: sorted(v.values(), key=lambda x: -x["authority"])
-                         for lab, v in by_anchor.items()}
+                         for lab, v in by_anchor.items() if v}
             end = (offset + limit) if limit else total_groups
             return {"target": stable_id, "anchor": anchor,
                     "version_inheritance": (
@@ -2922,6 +2954,7 @@ class Facade:
         f = {k: v for k, v in filters.items() if k in self._SEARCH_FILTERS and v not in (None, "")}
         if not sort:
             sort = "relevance" if str(f.get("query") or "").strip() else "date"
+        boost: list[str] = []
         with self._open() as (cat, _rs, _ts):
             # Citation-format query ("[2011] IESC 26", an ECLI, a report cite) → resolve to
             # the exact document id(s) and match by PK, instead of substring-scanning (the
@@ -2938,9 +2971,18 @@ class Facade:
                     # those documents into the title match, so the "also cited as" line is
                     # searchable, not just displayable.
                     alias_ids = cat.documents_by_alias_text(f["query"])
-                    if alias_ids:
-                        f["id_or"] = alias_ids
-            rows = cat.search_documents(sort=sort, limit=limit, offset=offset, **f)
+                    # An ABBREVIATION is the third way an authority gets named, and the
+                    # one search could not follow: no statute is titled "CPIA". The
+                    # corpus-wide shorthand store holds exactly those names — gated on
+                    # several documents having independently agreed on each — so a typed
+                    # abbreviation resolves to what practitioners mean by it, ranked
+                    # ahead of the documents that merely contain the letters.
+                    short_ids = cat.documents_by_shorthand(f["query"])
+                    if alias_ids or short_ids:
+                        f["id_or"] = list(dict.fromkeys([*short_ids, *alias_ids]))
+                    boost = short_ids
+            rows = cat.search_documents(sort=sort, limit=limit, offset=offset,
+                                        id_boost=boost, **f)
             items = []
             for r in rows:
                 d = dict(r)
@@ -10262,11 +10304,37 @@ class Facade:
             return None
         return any(_anchor_key(segment.label or "") == wanted for segment in segments)
 
+    @staticmethod
+    def _anchor_heading(cat, textstore, stable_id: str, anchor: str | None) -> str | None:
+        """The FULL LABEL of the segment ``anchor`` names — "Article 52 Transparency
+        obligations…", not just "yes, it exists".
+
+        Existence is not identity. A mapping to "Article 52" resolves happily against any
+        instrument that has one, so a caller who assumed the wrong numbering wrote a
+        silently wrong correspondence and had no way to see it short of a separate
+        get_provision probe per anchor. Echoing the heading back turns that into a read."""
+        if not anchor:
+            return None
+        row = cat.get_document(stable_id)
+        if row is None or not row["payload_hash"]:
+            return None
+        try:
+            segments = textstore.get_segments(row["payload_hash"])
+        except OSError:
+            return None
+        wanted = _anchor_key(anchor)
+        if not wanted:
+            return None
+        for segment in segments or []:
+            if _anchor_key(segment.label or "") == wanted:
+                return " ".join((segment.label or "").split())[:160]
+        return None
+
     def upsert_provision_mappings(
         self, *, current_id: str, previous_id: str, mappings: list[dict],
         created_by: str = "manual", replace: bool = False,
         mapping_type: str = "functional_predecessor", dry_run: bool = False,
-        return_all: bool = False,
+        return_all: bool = False, quiet: bool = False,
     ) -> dict:
         """Bulk-create article/section correspondences between two laws.
 
@@ -10288,6 +10356,10 @@ class Facade:
         sizes above ~55 rows have been seen to exceed the four-minute tool ceiling; the
         write is atomic under that timeout (nothing is stored), so the safe recovery is
         simply to re-send in smaller batches.
+
+        ``quiet`` returns ids and anchors only — writing 32 mappings otherwise echoes
+        back considerably more text than was sent, most of it the ~280-character title of
+        the previous law repeated on every row.
         """
         created_by = (created_by or "manual").strip().lower()
         if created_by not in {"manual", "llm", "structured"}:
@@ -10364,12 +10436,23 @@ class Facade:
             checked = []
             unresolved = []
             for item in clean:
+                # The HEADING each anchor landed on, not merely whether it landed.
+                # Existence is not identity: "Article 52" exists in most instruments,
+                # so a caller working from the wrong numbering wrote a wrong mapping
+                # that resolved perfectly. With the headings echoed back, a dry run
+                # reads as a correlation table you can check.
+                current_head = self._anchor_heading(
+                    cat, ts, current_id, item["current_anchor"])
+                previous_head = self._anchor_heading(
+                    cat, ts, previous_id, item["previous_anchor"])
                 current_ok = self._anchor_resolves(
                     cat, ts, current_id, item["current_anchor"])
                 previous_ok = self._anchor_resolves(
                     cat, ts, previous_id, item["previous_anchor"])
                 checked.append({**item, "current_anchor_resolved": current_ok,
-                                "previous_anchor_resolved": previous_ok})
+                                "previous_anchor_resolved": previous_ok,
+                                "current_heading": current_head,
+                                "previous_heading": previous_head})
                 if current_ok is False or previous_ok is False:
                     unresolved.append({
                         "current_anchor": item["current_anchor"],
@@ -10380,7 +10463,10 @@ class Facade:
             if dry_run:
                 return {"current_id": current_id, "previous_id": previous_id,
                         "dry_run": True, "written": 0, "would_write": len(clean),
-                        "replace": bool(replace), "mappings": checked,
+                        "replace": bool(replace),
+                        "mappings": [
+                            {k: v for k, v in m.items() if k != "note"} if quiet else m
+                            for m in checked],
                         "unresolved_anchors": unresolved}
             written = cat.upsert_provision_mappings(
                 current_id, previous_id, clean, created_by=created_by,
@@ -10400,22 +10486,60 @@ class Facade:
                     str(r["previous_anchor"] or "").strip().lower()) in anchors
             ]
         self._invalidate_caches()
+        if quiet:
+            # ids + anchors, nothing repeated. The caller sent the notes; it does not
+            # need them read back, and the previous law's title is one fact, not one
+            # fact per row.
+            rows = [{"mapping_id": r["mapping_id"],
+                     "current_anchor": r["current_anchor"],
+                     "previous_anchor": r["previous_anchor"],
+                     "mapping_type": r["mapping_type"]} for r in rows]
         result = {"current_id": current_id, "previous_id": previous_id,
                   "written": written, "mappings": rows,
                   # The pair's full size, so a caller can see the running total without
                   # being handed it row by row on every batch.
                   "total_for_pair": len(for_pair),
+                  "sent": len(clean),
                   "returned": "all" if return_all else "written"}
+        # ROWS THIS PAIR HOLDS THAT THIS CALL DID NOT SEND. A tool call whose response is
+        # lost (the four-minute ceiling) still ran: the write landed, the caller saw
+        # nothing, retried with a slightly different list, and the pair silently kept
+        # both. That was only diagnosable by inferring orphans from gaps in the
+        # mapping_id sequence. Name them instead — with their ids, so they can be
+        # deleted or corrected in one step.
+        surplus = [r for r in for_pair
+                   if (str(r["current_anchor"] or "").strip().lower(),
+                       str(r["previous_anchor"] or "").strip().lower()) not in anchors]
+        if surplus:
+            result["not_sent_in_this_call"] = [
+                {"mapping_id": r["mapping_id"], "current_anchor": r["current_anchor"],
+                 "previous_anchor": r["previous_anchor"],
+                 "mapping_type": r["mapping_type"], "created_at": r["created_at"]}
+                for r in surplus[:200]]
+        warnings = [
+            f"{len(surplus)} mapping(s) exist for this pair that this call did not "
+            "send — an earlier batch, or a call whose response was lost. Check "
+            "not_sent_in_this_call and delete_provision_mapping any that are wrong."
+        ] if surplus else []
         if unresolved:
             # Reported, not refused: a mapping can legitimately name a provision of a
             # document held only as a metadata stub. The caller must be able to SEE it.
             result["unresolved_anchors"] = unresolved
-            result["warning"] = (
+            warnings.append(
                 f"{len(unresolved)} of {len(clean)} mappings name an anchor that does "
                 "not match any segment of the document it belongs to")
+        if warnings:
+            result["warning"] = " ".join(warnings)
         return result
 
-    def provision_mappings(self, *, stable_id: str) -> dict:
+    def provision_mappings(self, *, stable_id: str, previous_id: str | None = None,
+                           limit: int | None = None, offset: int = 0) -> dict:
+        """Every mapping written against this law, or — with ``previous_id`` — just the
+        ones to that other law.
+
+        The pair filter is what makes a batch auditable. Without it the only way to see
+        what a write actually left behind was to list all 441 mappings across the law and
+        infer the surplus from gaps in the id sequence."""
         with self._open() as (cat, _rs, _ts):
             rows = [dict(r) for r in cat.provision_mappings(stable_id)]
             inherited = [dict(r) for r in cat.inherited_mentions_for(
@@ -10426,20 +10550,88 @@ class Facade:
         for row in rows:
             row["mentioned_by_count"] = len(
                 counts.get(int(row["mapping_id"]), set()))
-        return {"stable_id": stable_id, "mappings": rows,
+        total = len(rows)
+        if previous_id:
+            rows = [r for r in rows if r["previous_doc_id"] == previous_id]
+        matched = len(rows)
+        if limit is not None:
+            rows = rows[offset:offset + max(1, int(limit))]
+        return {"stable_id": stable_id, "previous_id": previous_id,
+                "mappings": rows, "total": total, "matched": matched,
+                "offset": offset,
                 "inherited_documents": len({r["src_id"] for r in inherited})}
+
+    #: how many inherited citers are assembled before filtering/sorting. The filters
+    #: and the count have to describe the whole set, not a prefix of it.
+    _INHERITED_POOL = 3000
 
     def inherited_provision_mentions(
         self, *, stable_id: str, current_anchor: str | None = None,
-        limit: int = 600,
+        limit: int = 600, offset: int = 0, sort: str = "pagerank",
+        kind: str | None = None, jurisdiction: str | None = None,
     ) -> dict:
+        """Documents that cited a MAPPED provision of another instrument, projected onto
+        this one — with the same browse surface as :meth:`citing_documents`.
+
+        It had none, and that largely defeated it: rows came back in relation_id order
+        with ``src_authority`` 0.0 on every one, so the first page of AI Act Article 40
+        was UK assimilated copies making routine cross-references, while the CJEU
+        harmonised-standards line (James Elliott, Anstar, Germany v Commission) sat
+        somewhere in the tail with no way to reach it but paging. The data was right; the
+        order was arbitrary.
+        """
         with self._open() as (cat, _rs, _ts):
             rows = [dict(r) for r in cat.inherited_mentions_for(
-                stable_id, current_anchor=current_anchor, limit=limit)]
-            incoming = self._assemble_cited_by(cat, rows, cap=limit)
+                stable_id, current_anchor=current_anchor, limit=self._INHERITED_POOL)]
+            incoming = self._assemble_cited_by(cat, rows, cap=self._INHERITED_POOL)
+            # PageRank for the citers — the ranking signal ``_assemble_cited_by`` cannot
+            # supply here, because these edge rows come from the mapping join rather than
+            # from the cited-by query that carries src_pagerank.
+            ids: list[str] = []
+            for row in incoming:
+                ids.append(row["src_id"])
+            pr = cat.authority_for(ids)
+            for row in incoming:
+                row["src_authority"] = float(
+                    (pr.get(row["src_id"]) or {}).get("pagerank", 0.0) or 0.0)
+        from collections import Counter
+
+        facets = {
+            "kind": dict(Counter(
+                r.get("src_kind") for r in incoming if r.get("src_kind"))),
+            "jurisdiction": dict(Counter(
+                r.get("src_jurisdiction") for r in incoming
+                if r.get("src_jurisdiction"))),
+        }
+        want_j = self._norm_jurisdiction(jurisdiction)
+        if kind:
+            wanted = {k.strip().casefold() for k in str(kind).split(",") if k.strip()}
+            incoming = [r for r in incoming
+                        if (r.get("src_kind") or "").casefold() in wanted]
+        if want_j:
+            incoming = [r for r in incoming if r.get("src_jurisdiction") == want_j]
+
+        def _year(row) -> int:
+            d = str(row.get("src_date") or "")[:4]
+            return int(d) if d.isdigit() else 0
+
+        tie = lambda r: (-(r.get("src_cited_by") or 0), r["src_id"])  # noqa: E731
+        keys = {
+            "pagerank": lambda r: (-(r.get("src_authority") or 0.0), *tie(r)),
+            "cited": tie,
+            "newest": lambda r: (-_year(r), *tie(r)),
+            "oldest": lambda r: (_year(r) or 9999, *tie(r)),
+        }
+        sort = sort if sort in keys else "pagerank"
+        incoming.sort(key=keys[sort])
+        total = len(incoming)
+        page = incoming[offset:offset + max(1, int(limit))]
         return {"stable_id": stable_id, "current_anchor": current_anchor,
-                "documents": len({r["src_id"] for r in rows}),
-                "incoming": incoming}
+                "documents": total, "total": total,
+                "offset": offset, "limit": limit, "sort": sort,
+                "sorts": ["pagerank", "cited", "newest", "oldest"],
+                "kind": kind, "jurisdiction": want_j or jurisdiction,
+                "facets": facets, "incoming": page}
 
     def relationship_types(self) -> dict:
         """The closed vocabulary ``link`` accepts, so it can be read rather than probed.
@@ -10495,6 +10687,38 @@ class Facade:
             deleted = cat.delete_provision_mapping(mapping_id)
         self._invalidate_caches()
         return {"mapping_id": mapping_id, "deleted": deleted}
+
+    def retype_provision_mappings(
+        self, *, current_id: str, to_type: str, previous_id: str | None = None,
+        from_type: str | None = None, dry_run: bool = False,
+    ) -> dict:
+        """Re-label existing provision mappings in place: what they CLAIM, not what they
+        connect.
+
+        The correspondences are the work — every anchor pair resolved against both laws.
+        A build that got the type wrong throughout (companion provisions written as
+        'functional_predecessor') needs one relabelling, not a re-derivation of the
+        table. Scope it with ``previous_id`` (one pair of laws) and/or ``from_type``.
+        """
+        to_type = str(to_type or "").strip().lower()
+        if to_type not in PROVISION_MAPPING_TYPES:
+            return {"error": f"unknown mapping_type {to_type!r}",
+                    "known": sorted(PROVISION_MAPPING_TYPES)}
+        if from_type:
+            from_type = str(from_type).strip().lower()
+            if from_type not in PROVISION_MAPPING_TYPES:
+                return {"error": f"unknown mapping_type {from_type!r}",
+                        "known": sorted(PROVISION_MAPPING_TYPES)}
+        with self._open() as (cat, _rs, _ts):
+            n = cat.retype_provision_mappings(
+                current_id, to_type=to_type, previous_doc_id=previous_id,
+                from_type=from_type, dry_run=dry_run)
+        if not dry_run:
+            self._invalidate_caches()
+        return {"current_id": current_id, "previous_id": previous_id,
+                "from_type": from_type, "to_type": to_type,
+                "updated": 0 if dry_run else n, "would_update": n if dry_run else None,
+                "dry_run": bool(dry_run)}
 
     def tag(self, *, doc_id: str, tag: str) -> dict:
         with self._open() as (cat, _rs, _ts):
@@ -12016,11 +12240,33 @@ class Facade:
         # reporting query, run here on every keystroke-speed search. The search only
         # needs the list of selected sources, which is a setting.
         allowed = sources or self._freetext_selected() or None
+        notes: list[str] = []
         if jurisdictions:
-            # narrowing THIS search, not the index — the front page's flags
-            want = {j.casefold() for j in jurisdictions}
+            # narrowing THIS search, not the index — the front page's flags.
+            #
+            # Through the SAME resolver the rest of the citing/facet machinery uses.
+            # This compared the raw argument against the display name, so the ISO code
+            # the tool documents ("eu") matched no source at all — and an EMPTY source
+            # list is falsy, so the filter was then dropped and the search silently ran
+            # over the whole corpus. jurisdiction="eu" came back half full of UK
+            # assimilated instruments, correctly labelled United Kingdom in their own
+            # facets: the filter had not been applied, not misapplied.
             pool = allowed or self._all_sources()
-            allowed = [s for s in pool if self._jurisdiction_of(s).casefold() in want]
+            available = {self._jurisdiction_of(s) for s in pool}
+            want = {self._norm_jurisdiction(j) for j in jurisdictions} - {None}
+            unknown = sorted(str(w) for w in want if w not in available)
+            allowed = [s for s in pool if self._jurisdiction_of(s) in want]
+            if unknown:
+                notes.append(
+                    f"no indexed source lies in {', '.join(unknown)} — "
+                    "call jurisdictions() for the names this filter accepts")
+            if not allowed:
+                # No sources left: the honest answer is nothing, not everything. This
+                # is the branch that used to widen.
+                return {"items": [], "total": 0, "verified": 0, "candidates": 0,
+                        "truncated": False, "took_ms": 0, "exact": exact,
+                        "tsquery": None, "scope": [], "facets": {}, "network": {},
+                        "matched": [], "notes": notes or ["nothing in scope"]}
         filters: dict = {"source": allowed} if allowed else {}
         if doc_type:
             filters["doc_type"] = doc_type
@@ -12072,7 +12318,7 @@ class Facade:
         return {
             "items": items, "total": res.total, "verified": res.verified,
             "candidates": res.candidates, "truncated": res.truncated,
-            "notes": res.notes, "took_ms": res.took_ms, "exact": exact,
+            "notes": [*notes, *res.notes], "took_ms": res.took_ms, "exact": exact,
             "tsquery": res.tsquery, "scope": allowed,
             "facets": facets, "network": network,
             # Compact metadata for EVERY match, not just the page. The client narrows
@@ -12416,9 +12662,16 @@ class Facade:
                 r["is_abbrev"] = bool(r.get("is_abbrev"))
                 r["target_title"] = titles.get(r["candidate_id"])
                 r["valid"] = _valid_shorthand(r["shorthand"])
+                r["doc_count"] = int(r.get("doc_count") or 0)
+                # what the reviewer needs to know at a glance: does this one travel?
+                r["applies_corpus_wide"] = (
+                    r["valid"] and not r["blocked"]
+                    and r["doc_count"] >= _SHORTHAND_MIN_DOCS)
             counts = {
                 "total": cat.count_learned_shorthands(),
                 "blocked": cat.browse_learned_shorthands(state="blocked", limit=1)[1],
+                "corpus_wide": cat.browse_learned_shorthands(state="active", limit=1)[1],
+                "threshold": _SHORTHAND_MIN_DOCS,
             }
             return {"rows": out, "total": total, "counts": counts}
 
@@ -12446,9 +12699,25 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             return {"deleted": cat.delete_learned_shorthand(shorthand, candidate_id)}
 
-    def purge_shorthands(self, *, dry_run: bool = True) -> dict:
+    def purge_shorthands(self, *, dry_run: bool = True,
+                         include_local: bool = False) -> dict:
+        """Delete stored shorthands that would not be learned today; with
+        ``include_local``, also those below the ≥3-document threshold (the bulk of the
+        store, including the report boilerplate that reads as a plausible name)."""
         with self._open() as (cat, _rs, _ts):
-            return cat.purge_invalid_learned_shorthands(dry_run=dry_run)
+            return cat.purge_invalid_learned_shorthands(
+                dry_run=dry_run, include_local=include_local)
+
+    def backfill_shorthand_doc_counts(self, *, dry_run: bool = True,
+                                      on_progress=None) -> dict:
+        """Recover ``doc_count`` for the store's existing rows from the citations table.
+
+        Until this runs, every row written before the store counted anything reads as
+        document-local and nothing travels — including the abbreviations that should."""
+        with self._open() as (cat, _rs, _ts):
+            with cat._maintenance_timeout():
+                return cat.backfill_learned_shorthand_doc_counts(
+                    dry_run=dry_run, on_progress=on_progress)
 
     # -- feedback (Bugs / Feature requests from the app's feedback box) --------
     def submit_feedback(self, *, kind: str, message: str, page: str | None = None,

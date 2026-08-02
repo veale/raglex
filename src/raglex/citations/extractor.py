@@ -183,6 +183,15 @@ _GENERIC_PARTY = {
     "the commonwealth", "director of public prosecutions", "dpp", "attorney general",
     "the attorney general", "minister", "the minister", "secretary of state",
     "the secretary of state", "commissioner", "the commissioner", "government",
+    # The TRUNCATION half of the same problem (see _is_generic_party): the reduced
+    # form of a specific office is a generic one. "Commissioners for Her Majesty's
+    # Revenue and Customs" reduces to "Commissioners", "Supreme Court of Canada" to
+    # "Supreme Court" — names that stand for a hundred different parties apiece.
+    "secretary", "the secretary", "secretaries", "commissioners",
+    "the commissioners", "supreme court", "the supreme court", "high court",
+    "the high court", "federal court", "the federal court", "court of appeal",
+    "chief constable", "the chief constable", "home office", "the home office",
+    "home department", "the home department", "home secretary", "the home secretary",
 }
 _STOP_WORDS = {"and", "others", "ors", "anor", "another", "et", "al", "no", "inc",
                "ltd", "llc", "plc", "co", "corp", "the", "of", "for"}
@@ -194,13 +203,36 @@ _LEADING_SIGNAL = {"see", "in", "cf", "cf.", "also", "accord", "compare", "citin
                    "held", "decision", "judgment", "the"}
 
 
+def _is_generic_party(name: str | None) -> bool:
+    """Whether ``name`` IS, or merely EXTENDS, a party too generic to name an authority.
+
+    The prefix half is the fix for an ordering bug: ``_party_short_form`` tested the FULL
+    party string against ``_GENERIC_PARTY`` and only then truncated it to its leading
+    words, so the truncation manufactured exactly the generic party the set exists to
+    stop —
+
+        "Secretary of State"                          -> blocked (exact match)
+        "Secretary of State for the Home Department"  -> not blocked -> 'Secretary'
+
+    Only MULTI-WORD generic prefixes count. A one-word prefix would take real names down
+    with it ("State Street Bank", "Crown Holdings"), and a one-word party is already
+    caught by the whole-string test."""
+    words = [w for w in re.split(r"\s+", (name or "").casefold().strip(" ,.")) if w]
+    if not words:
+        return False
+    if " ".join(words) in _GENERIC_PARTY:
+        return True
+    return any(" ".join(words[:k]) in _GENERIC_PARTY
+               for k in range(2, len(words)))
+
+
 def _party_short_form(party: str | None) -> str | None:
     """The distinctive short form of a party name — "Dunsmuir v. New Brunswick" is
     referred to as "Dunsmuir" — or None for a generic government/Crown party (whose
     surname would mislink a bare later mention)."""
     p = " ".join((party or "").split()).strip(" ,.")
     p = re.sub(r"\s*\([^)]*\)\s*$", "", p).strip()
-    if not p or p.lower() in _GENERIC_PARTY:
+    if not p or _is_generic_party(p):
         return None
     words = [w for w in re.split(r"\s+", p) if w]
     # drop leading citation-signal words the lookback swept in ("See", "In", "held")
@@ -216,7 +248,7 @@ def _party_short_form(party: str | None) -> str | None:
         if len(lead) >= 2:
             break
     short = " ".join(lead).strip(" ,.")
-    if len(short) < 3 or short.lower() in _GENERIC_PARTY:
+    if len(short) < 3 or _is_generic_party(short):
         return None
     # must contain a real alphabetic surname, not just initials/numbers
     return short if re.search(r"[A-Za-z]{3,}", short) else None
@@ -256,7 +288,29 @@ _GENERIC_SHORTHAND = {
     "ground", "grounds", "issue", "issues", "evidence", "witness", "parties",
     "party", "the parties", "person in question", "the person in question",
     "information", "the information", "policy", "the policy", "the state",
+    # The same role nouns in the corpus's other languages. The list was English-only,
+    # so the Dutch party labels printed in a rechtspraak.nl header — VERZOEKSTER,
+    # VERZOEKER, EISER, Klaagster — were learned as names for the statute the judgment
+    # cites and passed every popularity threshold, because every judgment prints them.
+    "verzoeker", "verzoekster", "verzoekers", "eiser", "eiseres", "eisers",
+    "gedaagde", "gedaagden", "klager", "klaagster", "verweerder", "verweerster",
+    "appellant", "appellante", "belanghebbende", "betrokkene", "de staat",
+    "de minister", "de rechtbank", "het hof", "de inspecteur", "de raad",
+    "kläger", "klägerin", "beklagte", "beklagter", "antragsteller",
+    "antragstellerin", "antragsgegner", "antragsgegnerin", "beschwerdeführer",
+    "beschwerdeführerin", "das gericht", "die kammer",
+    "requérant", "requérante", "demandeur", "demanderesse", "défendeur",
+    "défenderesse", "intimé", "intimée", "appelant", "appelante", "le tribunal",
+    "la cour", "le ministre", "recurrente", "demandante", "demandado",
+    "ricorrente", "resistente",
 }
+# A JUDGE is not an authority. "Nicklin J" was learned as a name for the judgment he
+# wrote, so any later "Nicklin J" — in a document citing that judgment for any reason —
+# rendered as a link to it. The judicial suffixes are unambiguous and appear nowhere in
+# an instrument's or a party's name.
+_JUDICIAL_TITLE = re.compile(
+    r"(?i)^(?:the\s+)?[A-ZÀ-Þ][\w'’\-]+(?:\s+[A-ZÀ-Þ][\w'’\-]+)?\s+"
+    r"(?:JJ?A?|LJJ?|CJ|MR|P|PSC|JSC|JA|B|VC)\.?$")
 # 3. A well-formed name doesn't START or END on a function word. "Code in",
 #    "Code by", "Code. As", "ets of our " and "may make" all came from a lookback
 #    that swept up sentence fragments; requiring both ends to be substantive
@@ -294,6 +348,8 @@ def valid_shorthand(name: str | None) -> bool:
         return False
     if _PROVISION_NAME_RE.match(n):
         return False
+    if _JUDICIAL_TITLE.match(n):
+        return False
     low = n.casefold()
     if low in _GENERIC_SHORTHAND or low.removeprefix("the ") in _GENERIC_SHORTHAND:
         return False
@@ -310,6 +366,132 @@ def valid_shorthand(name: str | None) -> bool:
         return False
     # a name has to carry at least one capitalised or all-caps token of its own
     return any(w[:1].isupper() or w.isupper() for w in n.split() if w)
+
+
+# --- who does a bracketed short name actually define? -------------------------
+# ``_SHORTHAND_DEF`` looks for a bracketed name in the 90 characters AFTER a citation,
+# and attributes it to that citation. In O'Connor v Bar Standards Board (uksc/2017/78):
+#
+#   "...claims damages under the Human Rights Act 1998 against the respondent, the Bar
+#    Standards Board ("the BSB"), alleging discrimination..."
+#
+# the bracket sits 55 characters after the Act, no intervening word reaches the 12-letter
+# guard, and "the BSB" was filed as a shorthand for the Human Rights Act — which the
+# corpus-wide store then applied 54 times in one document. The answer was in the gap:
+# "the Bar Standards Board" immediately precedes the bracket and B-S-B are its initials.
+# The rule attributed the definition to the nearest CITATION while ignoring the nearest
+# ANTECEDENT. "the Government" (respondent State, beside a Convention citation), "The
+# Commissioner" (Information Commissioner, beside FOIA) and "the Home" (Home Office,
+# beside the Mental Health Act) all arrived by this same route.
+_CAP_WORD = re.compile(r"[A-Z][A-Za-z0-9'’\-]+")
+# lower-case words that continue a body's name rather than ending it
+_NAME_CONNECTIVE = {"of", "for", "and", "the", "de", "der", "van", "und", "et"}
+# What tells an APPOSITIVE phrase (part of the citation's own reference — "Case
+# C-131/12 Google Spain SL v AEPD") from a NEW ANTECEDENT ("…against the respondent,
+# the Bar Standards Board"): citation apparatus carries no prose words and no sentence
+# break, so either standing between the citation and the phrase means a new subject.
+_SEPARATES = re.compile(r"[.;]|(?<![A-Za-z])[a-z]{3,}")
+_INITIAL_SKIP = {"of", "for", "and", "the", "a", "an", "in", "on", "to", "de", "der",
+                 "van", "und", "et", "la", "le"}
+
+
+def _capitalised_phrases(gap: str) -> list[tuple[str, int]]:
+    """Every run of two or more capitalised words in ``gap``, with its offset — the
+    NAMED BODIES ("the Bar Standards Board", "Digital Rights Ireland") standing between a
+    citation and a bracketed short name. Lower-case connectives ("of", "and") continue a
+    run; any other lower-case word ends it."""
+    out: list[tuple[str, int]] = []
+    run: list[str] = []
+    start = 0
+    for m in re.finditer(r"\S+", gap):
+        word = m.group(0).strip("()[]{}\"“”'’,;:.")
+        if _CAP_WORD.fullmatch(word):
+            if not run:
+                start = m.start()
+            run.append(word)
+            continue
+        if run and word.casefold() in _NAME_CONNECTIVE:
+            continue                     # "Secretary of State" is still one name
+        if len(run) >= 2:
+            out.append((" ".join(run), start))
+        run = []
+    if len(run) >= 2:
+        out.append((" ".join(run), start))
+    return out
+
+
+def _initials(phrase: str) -> set[str]:
+    """The initialisms a phrase could be abbreviated to — with and without its function
+    words, since drafting produces both ("FOIA" from Freedom of Information Act, "HRA"
+    from Human Rights Act 1998)."""
+    words = [w.strip("()[]{}\"“”'’,;:.") for w in phrase.split()]
+    words = [w for w in words if w and w[:1].isalpha()]
+    full = "".join(w[0] for w in words).upper()
+    lean = "".join(w[0] for w in words if w.casefold() not in _INITIAL_SKIP).upper()
+    return {i for i in (full, lean) if len(i) >= 2}
+
+
+def _derives_from(name: str, phrase: str) -> bool:
+    """Whether ``name`` is plainly derived from ``phrase`` — its initials ("BSB" ← Bar
+    Standards Board) or a leading part of it ("Digital Rights" ← Digital Rights
+    Ireland). This is what settles WHICH of two candidates a short name defines."""
+    n = re.sub(r"(?i)^the\s+", "", (name or "").strip()).strip()
+    if not n or not phrase:
+        return False
+    core = re.sub(r"[^A-Za-z0-9]", "", n).upper()
+    if " " not in n and core in _initials(phrase):
+        return True
+    words = [w for w in (w.casefold().strip(".,'’") for w in n.split()) if len(w) >= 3]
+    haystack = [w.casefold().strip("()[]{}\"“”'’,;:.") for w in phrase.split()]
+    return bool(words) and all(w in haystack for w in words)
+
+
+def _antecedent_owns_definition(gap: str, name: str, cited_raw: str) -> bool:
+    """Whether the bracketed ``name`` defines a NAMED BODY standing in ``gap`` rather
+    than the citation the gap follows — in which case there is no id to file it under
+    ("the Bar Standards Board" is not an authority) and the definition is dropped.
+
+    Kept deliberately narrow, because the ordinary form has an EMPTY gap and must be
+    untouched (``Human Rights Act 1998 ("HRA")``), and an appositive name is part of the
+    citation itself (``Case C-131/12 Google Spain SL v AEPD ("Google Spain")``). Two
+    things decide it:
+
+    * DERIVABILITY — a name derived from the citation's own words ("HRA" ← Human Rights
+      Act, "FOIA" ← Freedom of Information Act) belongs to the citation whatever else
+      stands in the gap. Where the definition is dropped, derivability usually confirms
+      the other reading ("BSB" ← Bar Standards Board).
+    * SEPARATION — see ``_SEPARATES``. Prose or a sentence break before the phrase means
+      a new subject has been introduced and the bracket is its abbreviation.
+    """
+    phrases = _capitalised_phrases(gap)
+    if not phrases:
+        return False
+    if _derives_from(name, cited_raw):
+        return False                     # the short name is the authority's own
+    return any(_SEPARATES.search(gap[:at]) for _phrase, at in phrases)
+
+
+# --- how many documents must agree before a shorthand goes corpus-wide --------
+# The store's application gate — the citing document must already cite the parent — is
+# correct and not enough: for a ubiquitous authority nearly every document satisfies it,
+# so it stops filtering. 92,353 documents cite the Convention, and every one of them
+# uses the word "Government". What is coincidental there is not the target but the
+# NAME: nobody in the citing document ever defined it.
+#
+# So a shorthand travels only once several documents have independently established it.
+# Measured over the 177,068 distinct (shorthand → target) pairs the corpus had ever
+# established in-document:
+#
+#     >=1   177,068   100%       >=5    6,828   3.9%
+#     >=3    15,444   8.7%       >=10   2,523   1.4%
+#
+# and against the known-bad set, >=3 kills "the BSB" -> Human Rights Act (1 document),
+# "the UK" -> GDPR (1), "The Commissioner" -> FOIA (1), "the Home" -> Mental Health Act
+# (1) while keeping "the CPIA" -> Criminal Procedure and Investigations Act (8). It does
+# NOT kill "the Government" -> Convention (128 documents, the same misfire repeated by
+# one source) — that is what the antecedent rule above is for. Below the threshold a
+# definition still applies in the document that made it; it just doesn't travel.
+SHORTHAND_MIN_DOCS = 3
 
 
 def _is_abbrev(name: str) -> bool:
@@ -371,7 +553,11 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
         if m and not re.search(r"[A-Za-z]{12,}", window[:m.start()]):
             name = (m.group("q") or m.group("cue") or m.group("br")
                     or m.group("hf") or "").strip(" '\"“”’")
-            if len(name) >= 3:
+            # …but only if the citation is what the bracket names. A body standing
+            # between the two owns its own abbreviation (see
+            # _antecedent_owns_definition), and there is no id to file that under.
+            if len(name) >= 3 and not _antecedent_owns_definition(
+                    window[:m.start()], name, c.raw):
                 _register(name, c, abbrev=is_statute or _is_abbrev(name))
         # Formal chapter citations are commonly introduced by the short title:
         # "Citizenship Act, R.S.C. 1985, c. C-29". Learn that title for later
@@ -404,16 +590,23 @@ def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[
 
 
 @lru_cache(maxsize=8192)
-def _shorthand_use_re(name: str, abbrev: bool) -> "re.Pattern[str]":
+def _shorthand_use_re(name: str, abbrev: bool, bare: bool = True) -> "re.Pattern[str]":
     """The compiled use-pattern for one shorthand, memoised across documents.
 
     The same few hundred shorthands recur on every document of a bulk run, but the
     pattern is rebuilt as a fresh string each call, so ``re``'s own 512-entry cache
     thrashes and pays a full parse+compile per use — measured at ~17% of the parent's
     serial half on a heavily-cited judgment, which is the ceiling on the whole
-    extraction pool. Keyed on exactly what the pattern depends on: the name and
-    whether it links bare.
-    """
+    extraction pool. Keyed on exactly what the pattern depends on: the name, whether it
+    links bare, and whether a bare mention is allowed at all.
+
+    ``bare=False`` is the STORED (corpus-wide) case: a pinpoint is then required even
+    from an abbreviation. A bare mention there adds nothing — the store only applies at
+    all where the document already cites the parent, so the document already links to
+    that authority and the extra edge is a duplicate carrying no pincite. It is also
+    where the damage was: "the Government", "The Commissioner", "the UK" each fired
+    dozens of times against an authority the document did cite, on a word that merely
+    occurred."""
     esc = re.escape(name)
     # case / opinion short-name uses always carry a pincite ("Suncor at para 30",
     # "Judgment in Digital Rights, paragraph 57"); an abbreviation links on a
@@ -435,12 +628,15 @@ def _shorthand_use_re(name: str, abbrev: bool) -> "re.Pattern[str]":
             rf"(?P<postprov>(?:(?i:sections?|ss?\.?|regulations?|regs?\.?)"
             rf"\s*{post_list}|(?i:Sched(?:ule)?\.?)\s*[IVXLC\d]+))"
         )
-        # a bare mention, optionally preceded by "the" — but not when it's being
-        # (re)defined in brackets, which the def pass already owns
-        pat += (rf"|(?<![\[(\"“'])(?:(?P<prov>(?:(?i:sections?|ss?\.?|"
-                rf"regulations?|regs?\.?)\s*"
-                rf"\d+[A-Za-z]?(?:\s*\([^)]*\))*"
-                rf"|Sched(?:ule)?\.?\s*[IVXLC\d]+))\s+(?:of|to)\s+(?:the\s+)?)?"
+        # a provision OF the named instrument ("s. 3 of the FMIOA") and — unless the
+        # caller demands a pinpoint — a bare mention, optionally preceded by "the",
+        # but not when it's being (re)defined in brackets, which the def pass owns
+        prov_group = (rf"(?P<prov>(?:(?i:sections?|ss?\.?|"
+                      rf"regulations?|regs?\.?)\s*"
+                      rf"\d+[A-Za-z]?(?:\s*\([^)]*\))*"
+                      rf"|Sched(?:ule)?\.?\s*[IVXLC\d]+))\s+(?:of|to)\s+(?:the\s+)?")
+        optional = "?" if bare else ""
+        pat += (rf"|(?<![\[(\"“'])(?:{prov_group}){optional}"
                 rf"\b{esc}\b(?![\"”'\])])")
     year_act = bool(re.fullmatch(r"the\s+(?:18|19|20)\d{2}\s+Act", name, re.I))
     return re.compile(pat, re.IGNORECASE if (not abbrev or year_act) else 0)
@@ -450,11 +646,13 @@ def _link_shorthand_uses(
     text: str, name: str, *, entity_kind: str | None, candidate_id: str | None,
     abbrev: bool, out: list[Citation], occupied: list[tuple[int, int]],
     after: int = -1, method: str = "shorthand", confidence: float = 0.7,
+    bare: bool = True,
 ) -> None:
     """Append a citation for every later USE of ``name`` in ``text``, skipping spans an
     existing citation already covers. ``after`` is the definition's position — only uses
-    beyond it count — and is -1 for a *stored* shorthand, which has no definition here."""
-    use_re = _shorthand_use_re(name, abbrev)
+    beyond it count — and is -1 for a *stored* shorthand, which has no definition here.
+    ``bare=False`` requires every use to carry a pinpoint (see ``_shorthand_use_re``)."""
+    use_re = _shorthand_use_re(name, abbrev, bare)
     for m in use_re.finditer(text):
         s, e = m.start(), m.end()
         if s <= after:   # only USES after the definition count
@@ -482,6 +680,25 @@ def _link_shorthand_uses(
             char_start=s, char_end=e, method=method, confidence=confidence,
         ))
         occupied.append((s, e))
+
+
+def shorthand_name_from_use(raw: str) -> str:
+    """The NAME behind a recorded shorthand use — "Suncor, at para 30" → "Suncor".
+
+    ``citations.raw`` stores the whole matched span, pincite and all, so the stored
+    edges cannot be grouped by shorthand without undoing what ``_shorthand_use_re``
+    added. That grouping is how ``doc_count`` is backfilled for the million rows the
+    store accumulated before it counted anything (see
+    ``Catalogue.backfill_learned_shorthand_doc_counts``)."""
+    s = " ".join((raw or "").split())
+    s = re.sub(r"(?i)^judgment\s+in\s+", "", s)
+    s = re.sub(r"(?i)^(?:sections?|ss?\.?|regulations?|regs?\.?|sched(?:ule)?\.?)\s*"
+               r"\S+?(?:\s*\([^)]*\))*\s+(?:of|to)\s+(?:the\s+)?", "", s)
+    s = re.sub(r"(?i),?\s+at\s+paras?\.?\s*\[?\d.*$", "", s)
+    s = re.sub(r"(?i),?\s*(?:paragraphs?|paras?\.?)\s*\[?\d.*$", "", s)
+    s = re.sub(r"(?i),?\s*(?:sections?|ss?\.?|regulations?|regs?\.?)\s*\d.*$", "", s)
+    s = re.sub(r"(?i),?\s*sched(?:ule)?\.?\s*[IVXLC\d].*$", "", s)
+    return s.strip(" ,.")
 
 
 def _attach_shorthands(text: str, kept: list[Citation],
@@ -578,9 +795,12 @@ def attach_stored_shorthands(
     judgment that happens to use the letters. ``exclude`` holds the names the document
     defines for ITSELF — an in-document definition always wins over a stored one.
 
-    ``stored`` rows are ``(shorthand, candidate_id, entity_kind, is_abbrev)``. A case
-    short-name still requires a pincite; only a statute-hosted initialism links bare, and
-    even then not if it is a common legal initialism (CA/SC/DPP…) or ≤2 characters."""
+    ``stored`` rows are ``(shorthand, candidate_id, entity_kind, is_abbrev)``. EVERY use
+    must carry a pinpoint — a paragraph ("Suncor, at para 30") or a provision ("s. 3 of
+    the FMIOA", "BPRs, reg 5"). A bare mention is not a weaker version of that, it is
+    worth nothing: the store only applies where the document already cites the parent, so
+    a bare hit adds a second, pincite-less edge to an authority already linked. That is
+    all the "the Government" × 43 and "The Commissioner" × 117 misfires ever produced."""
     if not stored:
         return kept
     out = list(kept)
@@ -621,7 +841,7 @@ def attach_stored_shorthands(
             continue
         core = name.replace(".", "").replace(" ", "")
         if abbrev and (len(core) <= 2 or core.lower() in _COMMON_INITIALISMS):
-            abbrev = False   # demand a pincite rather than trusting a bare mention
+            abbrev = False   # a common initialism keeps only the paragraph-pincite form
         # A learned single ordinary word (``kann``, ``Geltendmachung``) is not an
         # abbreviation even if a noisy bracketed definition once labelled it as one.
         # Keep multi-word formal statute titles and genuine FMIOA/GDPR-style tokens.
@@ -629,7 +849,7 @@ def attach_stored_shorthands(
             abbrev = False
         _link_shorthand_uses(
             text, name, entity_kind=entity_kind, candidate_id=candidate_id,
-            abbrev=abbrev, out=out, occupied=occupied,
+            abbrev=abbrev, out=out, occupied=occupied, bare=False,
             method="shorthand_global", confidence=0.6)
     strong = [c for c in out if c.method == "shorthand_global"]
     return [

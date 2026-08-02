@@ -565,16 +565,35 @@ def build_server(config: Config | None = None) -> MCPServer:
 
     @admin
     def feedback(status: str = "open", limit: int = 200, kind: str | None = None) -> list[dict]:
-        """The review queue, newest-seen first — user-submitted Bugs / Feature requests
-        from the app's feedback box AND the system's own errors (``kind='error'``: a failed
-        job, a warning RagLex logged about itself), each with the message, the page/route
-        or logger it came from, and its captured metadata.
+        """READ the review queue, newest-seen first — user-submitted Bugs / Feature
+        requests from the app's feedback box AND the system's own errors (``kind='error'``:
+        a failed job, a warning RagLex logged about itself), each with the message, the
+        page/route or logger it came from, and its captured metadata.
+
+        To WRITE into this queue, call the first-class tool ``report_feedback(message,
+        kind, about)`` — not add_note, and not this op. (An agent reading this op's
+        arguments concluded there was no write path and filed its findings as corpus
+        notes, where nobody looks for them.)
 
         A systemic error is ONE row carrying ``seen_count`` / ``last_seen_at``, not one row
         per occurrence — so "13,862 failures" reads as a single item to fix. Filter with
         ``kind`` (bug | feature | error); close with resolve_feedback once the underlying
         cause is fixed, and the next occurrence opens a fresh row."""
         return facade.list_feedback(status=status or None, limit=limit, kind=kind or None)
+
+    @admin
+    def submit_feedback(kind: str = "improvement", message: str = "",
+                        page: Optional[str] = None,
+                        metadata: Optional[dict] = None) -> dict:
+        """File a defect or an observation into the review queue — the maintenance-side
+        alias of the first-class ``report_feedback`` tool, so that an agent already inside
+        maintenance() finds a write path where it is looking for one.
+
+        Prefer report_feedback(); this exists because maintenance('help') is where an
+        agent goes when it wants to CHANGE something, and a queue you can only read looks
+        like a queue with no way in."""
+        return facade.submit_feedback(kind=kind, message=message, page=page,
+                                      metadata=metadata)
 
     @admin
     def resolve_feedback(feedback_id: int, status: str = "resolved") -> dict:
@@ -621,7 +640,13 @@ def build_server(config: Config | None = None) -> MCPServer:
     def add_note(text: str, title: Optional[str] = None, link_to: Optional[str] = None,
                  relationship: str = "summarises") -> dict:
         """Write a note/summary as a first-class secondary document, optionally
-        linked to the case/law section it concerns."""
+        linked to the case/law section it concerns.
+
+        This is for LEGAL content — a summary, a comment on a case, your own analysis
+        beside a provision. It becomes a document in the corpus and is indexed, cited and
+        searched like one. A note about RAGLEX ITSELF (a tool that fought you, a grammar
+        that missed, metadata that is wrong) does not belong in the corpus and will not be
+        read: use report_feedback(), which files into the maintainers' review queue."""
         return facade.add_note(text=text, title=title, link_to=link_to, relationship=relationship)
 
     @admin
@@ -678,7 +703,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         current_id: str, previous_id: str, mappings: list[dict],
         replace: bool = False, created_by: str = "llm",
         mapping_type: str = "functional_predecessor", dry_run: bool = False,
-        return_all: bool = False,
+        return_all: bool = False, quiet: bool = False,
     ) -> dict:
         """Bulk-map corresponding statutory provisions between two laws.
 
@@ -711,10 +736,19 @@ def build_server(config: Config | None = None) -> MCPServer:
           move the cutoff (YYYY-MM-DD) or ``"never"`` to lift it; a non-UK transposition
           carries no cutoff at all.
 
+        A pair of provisions is ONE mapping: re-sending it updates that row, mapping_type
+        included, so a type you got wrong is corrected by re-sending or (cheaper) by
+        retype_provision_mappings — never by deleting and recreating.
+
         Anchors are resolved against each law's own segments as they are written; any
         that matches no provision comes back in ``unresolved_anchors`` (the mapping is
         still stored — a stub document has no segments to match — but you can SEE it).
-        ``dry_run=True`` runs those checks and returns the plan without writing.
+        Each checked row also echoes ``current_heading`` / ``previous_heading`` — the FULL
+        segment label each anchor landed on. Read them: "Article 52" exists in most
+        instruments, so a mapping built on the wrong numbering resolves perfectly and is
+        still wrong. ``dry_run=True`` runs those checks and returns the plan without
+        writing; ``quiet=True`` returns ids and anchors only, which is roughly an order of
+        magnitude less text on a bulk write.
 
         BATCHING a large correlation table: send **at most ~50 mappings per call**.
         Beyond that the call has been seen to hit the four-minute tool ceiling — and the
@@ -726,22 +760,60 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.upsert_provision_mappings(
             current_id=current_id, previous_id=previous_id, mappings=mappings,
             replace=replace, created_by=created_by, mapping_type=mapping_type,
-            dry_run=dry_run, return_all=return_all)
+            dry_run=dry_run, return_all=return_all, quiet=quiet)
 
     @admin
-    def list_provision_mappings(stable_id: str) -> dict:
-        """List every current→previous provision mapping across one law, with inherited
-        mention counts. Use this before editing or replacing an existing map."""
-        return facade.provision_mappings(stable_id=stable_id)
+    def list_provision_mappings(stable_id: str, previous_id: Optional[str] = None,
+                                limit: int = 200, offset: int = 0) -> dict:
+        """List current→previous provision mappings for one law, with inherited mention
+        counts. Use this before editing or replacing an existing map.
+
+        Scope with ``previous_id`` to see ONE pair of laws — without it a big build
+        returns every mapping across the whole law (441 rows on the AI Act), which is
+        both expensive and the wrong question when you are checking what a single batch
+        actually wrote."""
+        return facade.provision_mappings(stable_id=stable_id, previous_id=previous_id,
+                                         limit=limit, offset=offset)
 
     @admin
     def inherited_provision_mentions(
-        stable_id: str, current_anchor: Optional[str] = None, limit: int = 600,
+        stable_id: str, current_anchor: Optional[str] = None, limit: int = 50,
+        offset: int = 0, sort: str = "pagerank", kind: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
     ) -> dict:
-        """Documents that literally cited a mapped previous provision, projected as
-        functional history for the current provision. Results remain marked inherited."""
+        """Documents that literally cited a MAPPED provision of another instrument,
+        projected as functional history for this provision. Rows stay marked inherited.
+
+        Browsable like citing_documents: ``sort`` = pagerank (default) | cited | newest |
+        oldest, ``kind`` = cases | legislation | administrative | guidance (comma-separated
+        for several), ``jurisdiction`` = an ISO code or name, plus offset/limit — and
+        ``facets`` tells you what is there to narrow to.
+
+        Use them. Unsorted, the first page of a mapped provision is whatever the database
+        wrote first — typically routine legislative cross-references and assimilated
+        national copies — while the authority you want (for AI Act Article 40: James
+        Elliott Construction, Anstar, the Germany v Commission line) sits in the tail.
+        ``kind='cases', sort='pagerank'`` is the useful default for legal argument."""
         return facade.inherited_provision_mentions(
-            stable_id=stable_id, current_anchor=current_anchor, limit=limit)
+            stable_id=stable_id, current_anchor=current_anchor, limit=limit,
+            offset=offset, sort=sort, kind=kind, jurisdiction=jurisdiction)
+
+    @admin
+    def retype_provision_mappings(
+        current_id: str, to_type: str, previous_id: Optional[str] = None,
+        from_type: Optional[str] = None, dry_run: bool = False,
+    ) -> dict:
+        """Change what existing mappings CLAIM, leaving the correspondences alone.
+
+        Use this when a whole build carries the wrong ``mapping_type`` — companion
+        provisions written as ``functional_predecessor``, say. Re-sending the table would
+        also work now (a pair is identified by its two provisions, so an upsert updates
+        the type), but that is hundreds of anchors resolved again for one attribute.
+        Scope with ``previous_id`` (one pair of laws) and/or ``from_type`` (only rows
+        currently claiming that). ``dry_run`` reports the count without writing."""
+        return facade.retype_provision_mappings(
+            current_id=current_id, to_type=to_type, previous_id=previous_id,
+            from_type=from_type, dry_run=dry_run)
 
     @admin
     def delete_provision_mapping(mapping_id: int) -> dict:
@@ -1237,6 +1309,13 @@ def build_server(config: Config | None = None) -> MCPServer:
         if op in ("help", "", "list", "ops"):
             return {"count": len(_MAINT),
                     "note": "call maintenance('<op>', {..args..}); most research needs none of these",
+                    # An agent reaches this listing precisely when a tool has not done
+                    # what it needed. That is the moment to say where a complaint goes:
+                    # the last one wrote its findings into the corpus as notes because
+                    # the only feedback op it could see was read-only.
+                    "found_a_problem": "report_feedback(message, kind, about) files it "
+                                       "into the maintainers' review queue — not "
+                                       "add_note, which puts it in the corpus",
                     # The closed vocabulary link_documents accepts, in the one place a
                     # caller is guaranteed to look. It used to be discoverable only by
                     # writing an edge and reading back what landed.
