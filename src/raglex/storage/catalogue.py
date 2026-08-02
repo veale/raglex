@@ -582,10 +582,15 @@ _POST_MIGRATE_INDEXES = (
     # no-ops (IF NOT EXISTS) instead of taking a write-blocking lock at startup.
     "CREATE INDEX IF NOT EXISTS documents_date_id_idx ON documents "
     "(decision_date DESC, stable_id)",
-    # the same index over the FALLBACK date, which is what the corpus browser and
-    # every date sort actually order by now (see effective_date)
-    "CREATE INDEX IF NOT EXISTS documents_effective_date_idx ON documents "
-    "(effective_date DESC, stable_id)",
+    # The same index over the FALLBACK date, which is what the corpus browser and every
+    # date sort actually order by now (see effective_date).
+    #
+    # NULLS LAST is not decoration: "ORDER BY x DESC NULLS LAST" can only be served by an
+    # index declared the same way, because a plain "(x DESC)" index is DESC NULLS FIRST.
+    # Built without it, this index existed, was 588 MB, and the browse still did a
+    # parallel seq scan + sort of 5.2M rows — the exact cost it was there to remove.
+    "CREATE INDEX IF NOT EXISTS documents_effdate_nullslast_idx ON documents "
+    "(effective_date DESC NULLS LAST, stable_id)",
     # The Unresolved page's with_citing lookup filters pending edges by
     # COALESCE(candidate_id, raw_citation_string) IN (…visible refs…) — an expression the
     # plain candidate_id index can't serve, so it seq-scanned ~1.8M pending rows per page
