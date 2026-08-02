@@ -10682,6 +10682,45 @@ class Facade:
             self._invalidate_caches()
         return result
 
+    # -- UK division/chamber identity (see ops/uk_identity.py) -----------------
+    def uk_identity_audit(self) -> dict:
+        """How many chamber-less UK aliases name more than one judgment."""
+        from .ops import uk_identity
+
+        with self._open() as (cat, _rs, _ts):
+            return uk_identity.audit_chamber_aliases(cat)
+
+    def uk_identity_repair(self, *, dry_run: bool = True) -> dict:
+        """Drop the ambiguous chamber-less aliases and demote what followed them."""
+        from .ops import uk_identity
+
+        with self._open() as (cat, _rs, _ts):
+            out = uk_identity.repair_chamber_aliases(cat, dry_run=dry_run)
+        if not dry_run:
+            self._invalidate_caches()
+        return out
+
+    def uk_identity_tiebreak(self, *, dry_run: bool = True, limit: int = 5000) -> dict:
+        """Settle chamber-less references against the name written beside them."""
+        from .ops import uk_identity
+
+        with self._open() as (cat, _rs, ts):
+            out = uk_identity.tiebreak_ambiguous_divisions(
+                cat, ts, dry_run=dry_run, limit=limit)
+        if not dry_run:
+            self._invalidate_caches()
+        return out
+
+    def uk_identity_unify(self, *, dry_run: bool = True) -> dict:
+        """Fold same-court duplicate slugs (ewhc/pat + ewhc/patents) into one node."""
+        from .ops import uk_identity
+
+        with self._open() as (cat, _rs, _ts):
+            out = uk_identity.unify_synonym_slugs(cat, dry_run=dry_run)
+        if not dry_run:
+            self._invalidate_caches()
+        return out
+
     def delete_provision_mapping(self, *, mapping_id: int) -> dict:
         with self._open() as (cat, _rs, _ts):
             deleted = cat.delete_provision_mapping(mapping_id)

@@ -816,6 +816,31 @@ def build_server(config: Config | None = None) -> MCPServer:
             from_type=from_type, dry_run=dry_run)
 
     @admin
+    def uk_identity(step: str = "audit", dry_run: bool = True) -> dict:
+        """The UK chamber/division identity repairs. ``step``:
+
+        * ``audit`` — how many chamber-less aliases (ewhc/2013/3560) name MORE THAN ONE
+          held judgment. UK numbering is not one sequence across divisions, so the alias
+          key silently names whichever was imported last.
+        * ``repair`` — delete those aliases and demote the edges that followed them to
+          pending. A hanging reference is recoverable; a confident link to the wrong case
+          is not.
+        * ``tiebreak`` — settle what the citing text settles, by matching the name beside
+          the citation against the two or three candidates.
+        * ``unify`` — fold same-court duplicate slugs (ewhc/pat + ewhc/patents) into one
+          node, keeping the text and recording the folded id as a rendition.
+
+        Every step is a DRY RUN by default and reports samples; read them first."""
+        fn = {"audit": lambda: facade.uk_identity_audit(),
+              "repair": lambda: facade.uk_identity_repair(dry_run=dry_run),
+              "tiebreak": lambda: facade.uk_identity_tiebreak(dry_run=dry_run),
+              "unify": lambda: facade.uk_identity_unify(dry_run=dry_run)}.get(step)
+        if fn is None:
+            return {"error": f"unknown step {step!r}",
+                    "known": ["audit", "repair", "tiebreak", "unify"]}
+        return fn()
+
+    @admin
     def delete_provision_mapping(mapping_id: int) -> dict:
         """Remove one editorial provision mapping by its mapping_id."""
         return facade.delete_provision_mapping(mapping_id=mapping_id)
