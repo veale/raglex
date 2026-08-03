@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+from raglex.adapters.uk_legislation import UKLegislationAdapter
+from raglex.resolve.matchers import assimilated_leg_path
 from raglex.facade import (
     _anchor_key,
     _anchor_key_variants,
@@ -229,3 +231,50 @@ def test_ordinary_prose_does_not_mint_a_treatment_signal(prose):
 ])
 def test_subsequent_history_cues(passage, signal):
     assert any(c["signal"] == signal for c in _treatment_cues(passage))
+
+
+# --- point-in-time for assimilated EU law -------------------------------------------
+
+@pytest.mark.parametrize("held_as,serves_as", [
+    ("european/regulation/2016/0679", "eur/2016/679"),      # the UK GDPR
+    ("european/directive/2002/0058", "eudr/2002/58"),       # ePrivacy
+    ("european/decision/2010/0087", "eudn/2010/87"),
+    ("eur/2016/0679", "eur/2016/679"),                      # already a type code, padded
+])
+def test_assimilated_id_maps_to_the_path_that_serves_representations(held_as, serves_as):
+    """Two differences, both fatal on their own: the type WORD becomes a type CODE, and
+    the number loses its padding. /european/regulation/2016/0679/2024-01-01/data.akn is
+    a 404; /eur/2016/679/2024-01-01/data.akn is the point-in-time text."""
+    assert assimilated_leg_path(held_as) == serves_as
+
+
+@pytest.mark.parametrize("path", ["ukpga/2018/12", "uksi/2025/996", "", "nonsense"])
+def test_ordinary_uk_ids_are_left_alone(path):
+    """Domestic legislation already serves representations under its own path."""
+    assert assimilated_leg_path(path) is None
+
+
+def test_dated_assimilated_stub_fetches_from_the_serving_path():
+    """The IDENTITY must stay the id the corpus knows, or the dated copy stops pointing
+    at its base; only the URI moves."""
+    adapter = UKLegislationAdapter(ids="european/regulation/2016/0679",
+                                   version_date="2024-01-01")
+    stub = next(iter(adapter.discover(None)))
+    assert stub.stable_id == "european/regulation/2016/0679@2024-01-01"
+    assert stub.raw_url == (
+        "https://www.legislation.gov.uk/eur/2016/679/2024-01-01/data.akn")
+    assert stub.hints["base_id"] == "european/regulation/2016/0679"
+
+
+def test_dated_domestic_stub_is_unchanged():
+    adapter = UKLegislationAdapter(ids="ukpga/2018/12", version_date="2024-01-01")
+    stub = next(iter(adapter.discover(None)))
+    assert stub.raw_url == (
+        "https://www.legislation.gov.uk/ukpga/2018/12/2024-01-01/data.akn")
+
+
+def test_a_date_that_cannot_be_honoured_is_never_silently_ignored():
+    """Returning today's text to a caller who asked for a date is how the wrong law
+    gets quoted with no way of knowing."""
+    assert Facade.point_in_time_target(
+        Facade, "european/regulation/2016/0679", "January 2024")[1]["error"]
