@@ -220,6 +220,27 @@ def test_eu_legislation_adapter_builds_from_formex():
     assert [s.kind for s in rec.segments] == ["recital", "recital", "article", "article"]
 
 
+def test_eu_legislation_falls_back_to_french_and_records_actual_language():
+    french = FORMEX.replace(
+        b"The protection of personal data is a fundamental right.",
+        "Le Parlement européen protège les données personnelles.".encode(),
+    ).replace(
+        b"This Regulation respects fundamental rights.",
+        "Le présent règlement respecte les droits fondamentaux.".encode(),
+    )
+
+    class _LanguageClient:
+        def get(self, _url, **kw):
+            lang = (kw.get("headers") or {}).get("Accept-Language")
+            return _Resp(french if lang == "fra" else b"")
+
+    ad = EULegislationAdapter(celex="32016R0679", client=_LanguageClient())
+    rec = ad.fetch(list(ad.discover(None))[0])
+    assert rec.source_language == "fr" and rec.language == "fr"
+    assert rec.extra["language_fallback"] == "en-to-fr"
+    assert "Le présent règlement" in rec.text
+
+
 BWB = b"""<?xml version="1.0"?>
 <toestand><wetgeving>
   <intitule>Wet van 16 mei 2018 houdende regels</intitule>

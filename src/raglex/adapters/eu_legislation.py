@@ -394,50 +394,57 @@ LIMIT {self.page_size} OFFSET {offset}
         primary = PRIMARY_LAW.get(stub.stable_id.upper())
         aliases = list(primary["aliases"]) if primary else []
         trans = self._transposition_edges(stub.stable_id)
-        # Try Formex; a 404/FetchError (no Formex rendition) is NOT fatal — fall
-        # through to the EUR-Lex HTML below rather than giving up.
-        raw = None
-        try:
-            resp = self._client.get(
-                stub.raw_url,
-                headers={"Accept": "application/zip;mtype=fmx4", "Accept-Language": "eng"},
-            )
-            if getattr(resp, "status_code", 200) < 400:
-                raw = resp.content
-        except FetchError:
-            raw = None
-        parsed = parse("formex-legislation", raw) if raw else None
-        if parsed and parsed.text:
+        # English first, then French. EUR-Lex sometimes serves the only available
+        # French expression even under an EN URL, so inspect the body rather than
+        # trusting the request path's language label.
+        from .eu_cellar import _rendition_language
+
+        fallback = None
+        chosen = None
+        for language in ("en", "fr"):
+            raw = self._fetch_formex(stub.raw_url, language)
+            parsed = parse("formex-legislation", raw) if raw else None
+            raw_ext = "zip"
+            if not parsed or not parsed.text:
+                raw = self._fetch_html(stub.stable_id, language)
+                parsed = parse("eurlex-html", raw) if raw else None
+                raw_ext = "html"
+            if not parsed or not parsed.text:
+                continue
+            detected = _rendition_language(parsed.text)
+            candidate = (raw, raw_ext, parsed, detected or language)
+            if language == "en" and detected == "fr":
+                fallback = candidate
+                continue
+            chosen = candidate
+            break
+        if chosen is None:
+            chosen = fallback
+
+        if chosen:
+            raw, raw_ext, parsed, source_language = chosen
+            is_formex = raw_ext == "zip"
+            # the EUR-Lex HTML <title> is often generic ("EUR-Lex - 12008E267 - EN")
+            # or a stray heading ("ANNEX") — derive a real title from the CELEX then.
+            title = (str(primary["title"]) if primary else
+                     (parsed.title or stub.stable_id) if is_formex else
+                     celex_title(stub.stable_id) if _is_generic_title(parsed.title)
+                     else parsed.title)
             return self._decorate_currency(Record(
                 source=self.source,
                 stable_id=stub.stable_id,  # CELEX — the resolution target (§5b)
                 doc_type=DocType.LEGISLATION,
-                title=str(primary["title"]) if primary else (parsed.title or stub.stable_id),
-                language="en", source_language="en",
+                title=title or stub.stable_id,
+                language=source_language, source_language=source_language,
                 landing_url=stub.landing_url,
-                raw_bytes=raw, raw_ext="zip",
+                raw_bytes=raw, raw_ext=raw_ext,
                 text=parsed.text, segments=parsed.segments, relations=parsed.relations + trans,
                 extracted_via=ExtractedVia.STRUCTURED,
-                extra={"format": "formex-legislation", "celex": stub.stable_id,
-                       "eli": primary.get("eli") if primary else None, "aliases": aliases},
-            ), base_celex=stub.hints.get("consolidation_of"))
-        # No Formex rendition (common for old instruments like Directive 95/46) — fall
-        # back to the EUR-Lex HTML, which exists even when Formex doesn't.
-        html = self._fetch_html(stub.stable_id)
-        hp = parse("eurlex-html", html) if html else None
-        if hp and hp.text:
-            # the EUR-Lex HTML <title> is often generic ("EUR-Lex - 12008E267 - EN")
-            # or a stray heading ("ANNEX") — derive a real title from the CELEX then.
-            title = (str(primary["title"]) if primary else
-                     celex_title(stub.stable_id) if _is_generic_title(hp.title) else hp.title)
-            return self._decorate_currency(Record(
-                source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
-                title=title or stub.stable_id, language="en", source_language="en",
-                landing_url=stub.landing_url, raw_bytes=html, raw_ext="html",
-                text=hp.text, segments=hp.segments, relations=hp.relations + trans,
-                extracted_via=ExtractedVia.STRUCTURED,
-                extra={"format": "eurlex-html", "celex": stub.stable_id,
-                       "eli": primary.get("eli") if primary else None, "aliases": aliases},
+                extra={"format": "formex-legislation" if is_formex else "eurlex-html",
+                       "celex": stub.stable_id,
+                       "eli": primary.get("eli") if primary else None, "aliases": aliases,
+                       **({"language_fallback": "en-to-fr"}
+                          if source_language == "fr" else {})},
             ), base_celex=stub.hints.get("consolidation_of"))
         # Neither Formex nor HTML parsed — register a metadata stub so the (often
         # heavily-cited) instrument is still a real, clickable node and its citations
@@ -483,7 +490,20 @@ LIMIT {self.page_size} OFFSET {offset}
         })
         return record
 
-    def _fetch_html(self, celex: str) -> bytes | None:
+    def _fetch_formex(self, url: str, language: str = "en") -> bytes | None:
+        try:
+            resp = self._client.get(
+                url,
+                headers={"Accept": "application/zip;mtype=fmx4",
+                         "Accept-Language": {"en": "eng", "fr": "fra"}.get(language, language)},
+            )
+            if getattr(resp, "status_code", 200) < 400:
+                return resp.content
+        except FetchError:
+            pass
+        return None
+
+    def _fetch_html(self, celex: str, language: str = "en") -> bytes | None:
         """The rendered HTML for a CELEX (the fallback when no Formex): the EUR-Lex
         display page first, then CELLAR's own ``text/html`` rendition.
 
@@ -494,16 +514,19 @@ LIMIT {self.page_size} OFFSET {offset}
         real body falls through to CELLAR at ``{CELEX_BASE}/{celex}``, which serves
         the same rendition unchallenged and is the only machine-reachable copy for
         the old instruments."""
-        url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:{celex}"
+        lang = language.upper()
+        accept_language = {"en": "eng", "fr": "fra"}.get(language, language)
+        url = f"https://eur-lex.europa.eu/legal-content/{lang}/TXT/HTML/?uri=CELEX:{celex}"
         try:
-            r = self._client.get(url, headers={"Accept-Language": "eng"})
+            r = self._client.get(url, headers={"Accept-Language": accept_language})
             if getattr(r, "status_code", 200) == 200 and len(r.content or b"") > 500:
                 return r.content
         except FetchError:
             pass
         try:
             r = self._client.get(f"{CELEX_BASE}/{celex}",
-                                 headers={"Accept": "text/html", "Accept-Language": "eng"})
+                                 headers={"Accept": "text/html",
+                                          "Accept-Language": accept_language})
         except FetchError:
             return None
         if getattr(r, "status_code", 200) == 200 and (r.content or b"").strip():

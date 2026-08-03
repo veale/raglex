@@ -820,10 +820,14 @@ def _rendition_language(text: str | None) -> str | None:
     french = sum(sample.count(marker) for marker in (
         " arrêt de la cour", " par ces motifs", " dans l’affaire", " dans l'affaire",
         " en vertu de", " la commission européenne", " le royaume", " la république",
+        " le parlement européen", " considérant ce qui suit", " a adopté le présent",
+        " le présent règlement", " la présente directive", " article premier",
     ))
     english = sum(sample.count(marker) for marker in (
         " judgment of the court", " on those grounds", " in case c", " in the present case",
         " the european commission", " the republic", " the kingdom", " hereby",
+        " the european parliament", " whereas:", " has adopted this", " this regulation",
+        " this directive", " article 1",
     ))
     if french >= 2 and french > english:
         return "fr"
