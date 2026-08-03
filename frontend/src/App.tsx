@@ -166,6 +166,31 @@ function AdminView({ open, navigate }:
 // where they left off, including how far down the page they had scrolled.
 type ViewState = { tab: Tab; docId: string | null; graphId: string | null;
                    pinpoint: string | null; scrollY: number };
+type TrailEntry = { label: string; href: string };
+type RaglexHistory = { index: number; view: ViewState; label: string };
+
+function viewFromHash(): ViewState {
+  const h = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
+  const art = h.match(/^article\/(.+?)(?:\/section\/(.+))?$/);
+  if (art) return { tab: "document", docId: art[1], graphId: null,
+                    pinpoint: art[2] || null, scrollY: 0 };
+  const gr = h.match(/^graph\/(.+)$/);
+  if (gr) return { tab: "graph", docId: null, graphId: gr[1], pinpoint: null, scrollY: 0 };
+  const tab = (["explore", "search", "admin", "settings"].includes(h) ? h : "explore") as Tab;
+  return { tab, docId: null, graphId: null, pinpoint: null, scrollY: 0 };
+}
+
+function viewHref(v: ViewState): string {
+  if (v.tab === "document" && v.docId) return docHref(v.docId, v.pinpoint);
+  if (v.tab === "graph" && v.graphId) return graphHref(v.graphId);
+  return `#/${v.tab}`;
+}
+
+function viewLabel(v: ViewState): string {
+  if (v.tab === "document") return `${v.docId || "document"}${v.pinpoint ? ` · ${v.pinpoint}` : ""}`;
+  if (v.tab === "graph") return `graph · ${v.graphId || "document"}`;
+  return v.tab.charAt(0).toUpperCase() + v.tab.slice(1);
+}
 
 export function App() {
   const [tab, setTab] = useState<Tab>("explore");
@@ -173,85 +198,145 @@ export function App() {
   const [graphId, setGraphId] = useState<string | null>(null);
   const [pinpoint, setPinpoint] = useState<string | null>(null);
 
-  // A back stack, because navigation here is tab state rather than real routing:
-  // opening a document from a search result would otherwise strand the reader with
-  // no way back to the list they were working through.
-  const [back, setBack] = useState<ViewState[]>([]);
+  // One history entry per view, with the exact page position stored on that entry.
+  // Browser Back/Forward and the edge chevrons therefore use the same source of truth.
+  const [trail, setTrail] = useState<TrailEntry[]>([]);
+  const [trailIndex, setTrailIndex] = useState(0);
   const [restoreTo, setRestoreTo] = useState<number | null>(null);
-  const pushBack = () => setBack((b) =>
-    [...b.slice(-19), { tab, docId, graphId, pinpoint, scrollY: window.scrollY }]);
-  const goBack = () => {
-    setBack((b) => {
-      const prev = b[b.length - 1];
-      if (!prev) return b;
-      setTab(prev.tab); setDocId(prev.docId);
-      setGraphId(prev.graphId); setPinpoint(prev.pinpoint);
-      setRestoreTo(prev.scrollY);
-      return b.slice(0, -1);
-    });
+  const currentRef = useRef<ViewState>({ tab, docId, graphId, pinpoint, scrollY: 0 });
+  currentRef.current = { tab, docId, graphId, pinpoint, scrollY: window.scrollY };
+  const trailRef = useRef<TrailEntry[]>(trail); trailRef.current = trail;
+  const indexRef = useRef(trailIndex); indexRef.current = trailIndex;
+
+  const adopt = (v: ViewState, restore = v.scrollY) => {
+    setTab(v.tab); setDocId(v.docId); setGraphId(v.graphId); setPinpoint(v.pinpoint);
+    setRestoreTo(restore);
   };
-  // restore scroll only once the restored view has painted
+  const saveCurrentPosition = () => {
+    const state = history.state?.raglex as RaglexHistory | undefined;
+    if (!state) return;
+    const view = { ...currentRef.current, scrollY: window.scrollY };
+    history.replaceState({ ...history.state, raglex: { ...state, view } }, "", location.href);
+  };
+  const visit = (next: ViewState, replace = false) => {
+    saveCurrentPosition();
+    const href = viewHref(next), label = viewLabel(next);
+    if (replace) {
+      const i = indexRef.current;
+      const nextTrail = trailRef.current.map((entry, n) => n === i ? { label, href } : entry);
+      setTrail(nextTrail);
+      history.replaceState({ ...history.state, raglex: { index: i, view: next, label } }, "", href);
+    } else {
+      const i = indexRef.current + 1;
+      const nextTrail = [...trailRef.current.slice(0, i), { label, href }];
+      setTrail(nextTrail); setTrailIndex(i);
+      history.pushState({ raglex: { index: i, view: next, label } }, "", href);
+    }
+    adopt(next, 0);
+  };
+  // Restore after the target view has painted *and*, for async readers, after enough
+  // body has arrived for that Y position to exist. Two animation frames was not enough:
+  // a judgment briefly renders its header, clamps scrollTo(42000) near the top, then the
+  // body arrives and leaves the reader at that arbitrary clamp point. Retry for up to
+  // five seconds, stopping immediately once the exact position is attainable.
   useEffect(() => {
     if (restoreTo === null) return;
     const y = restoreTo;
-    setRestoreTo(null);
-    requestAnimationFrame(() => requestAnimationFrame(() => window.scrollTo(0, y)));
+    let frame = 0, attempts = 0, cancelled = false;
+    const finish = () => { if (!cancelled) setRestoreTo(null); };
+    const tick = () => {
+      if (cancelled) return;
+      window.scrollTo(0, y);
+      if (Math.abs(window.scrollY - y) <= 2 || y === 0 || attempts++ >= 300) {
+        finish();
+        return;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(() => { frame = requestAnimationFrame(tick); });
+    return () => { cancelled = true; cancelAnimationFrame(frame); };
   }, [restoreTo]);
 
   // open a document, optionally deep-linking to a pinpointed section (JADE-style)
   const open = (id: string, anchor?: string, replace = false) => {
     if (!id) return;
-    if (!replace) pushBack();
-    setDocId(id); setPinpoint(anchor || null); setTab("document");
+    visit({ tab: "document", docId: id, graphId: currentRef.current.graphId,
+            pinpoint: anchor || null, scrollY: 0 }, replace);
   };
   const openGraph = (id: string) => {
     if (!id) return;
-    pushBack(); setGraphId(id); setTab("graph");
+    visit({ tab: "graph", docId: currentRef.current.docId,
+            graphId: id, pinpoint: null, scrollY: 0 });
   };
   // jump to Search pre-filtered (Corpus Map "see this list") — nonce forces re-adopt
   const [corpusFilter, setCorpusFilter] = useState<Record<string, string>>({});
   const navigateCorpus = (f: Record<string, string>) => {
-    pushBack();
-    setCorpusFilter({ ...f, _n: String(Date.now()) }); setTab("search");
+    setCorpusFilter({ ...f, _n: String(Date.now()) });
+    visit({ tab: "search", docId: null, graphId: null, pinpoint: null, scrollY: 0 });
   };
   const goSearch = (q?: string) => navigateCorpus(q ? { query: q } : {});
   // A top-level nav click starts a fresh view → land at the TOP of the page. Without this,
   // switching from a scrolled-down Explore into Admin kept the old scrollY and dropped you
   // into the middle of the Admin page. (The back-arrow still restores its saved scroll.)
-  const goTab = (t: Tab) => { setTab(t); window.scrollTo(0, 0); };
+  const goTab = (t: Tab) => {
+    if (currentRef.current.tab === t && ["explore", "search", "admin", "settings"].includes(t)) {
+      window.scrollTo(0, 0);
+      return;
+    }
+    visit({ tab: t, docId: null, graphId: null, pinpoint: null, scrollY: 0 });
+  };
 
   // which browse surfaces have been opened at least once (see the render below)
   const visited = useRef<Set<Tab>>(new Set(["explore"]));
   visited.current.add(tab);
 
-  // Shareable deep links — every view the app can be IN has a URL, so it survives a
-  // reload, a copied link, and above all being opened in a NEW TAB (which is just a fresh
-  // load of that URL): #/article/{id}[/section/{anchor}], #/graph/{id}, #/{tab}.
+  // Initialise the current browser entry, save its scroll continuously, and adopt
+  // Back/Forward entries only after their view has painted. ``manual`` prevents the
+  // browser racing React with its own restoration against a temporarily different DOM.
   useEffect(() => {
-    const apply = () => {
-      const h = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
-      const art = h.match(/^article\/(.+?)(?:\/section\/(.+))?$/);
-      if (art) { setDocId(art[1]); setPinpoint(art[2] || null); setTab("document"); return; }
-      const gr = h.match(/^graph\/(.+)$/);
-      if (gr) { setGraphId(gr[1]); setTab("graph"); return; }
-      if (["explore", "search", "admin", "settings"].includes(h)) setTab(h as Tab);
+    history.scrollRestoration = "manual";
+    const initial = viewFromHash(), label = viewLabel(initial);
+    history.replaceState({ ...history.state,
+      raglex: { index: 0, view: initial, label } satisfies RaglexHistory }, "", viewHref(initial));
+    setTrail([{ label, href: viewHref(initial) }]);
+    adopt(initial, 0);
+
+    let frame = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(saveCurrentPosition);
     };
-    apply();
-    window.addEventListener("hashchange", apply);
-    return () => window.removeEventListener("hashchange", apply);
-  }, []);
-  useEffect(() => {
-    // replaceState, not push: the app keeps its own back stack (which restores scroll
-    // position), and one history entry per view would fight it.
-    const want = tab === "document" && docId ? docHref(docId, pinpoint)
-      : tab === "graph" && graphId ? graphHref(graphId)
-      : (tab === "explore" || tab === "search" || tab === "admin" || tab === "settings")
-        ? `#/${tab}` : null;
-    if (want && location.hash !== want) history.replaceState(null, "", want);
-    else if (!want && location.hash.startsWith("#/")) {
-      history.replaceState(null, "", location.pathname + location.search);
-    }
-  }, [tab, docId, graphId, pinpoint]);
+    const onPop = (event: PopStateEvent) => {
+      const state = event.state?.raglex as RaglexHistory | undefined;
+      const next = state?.view || viewFromHash();
+      if (state) setTrailIndex(state.index);
+      adopt(next, next.scrollY || 0);
+    };
+    // A real <a href="#/…"> without an in-app click handler asks the browser to make
+    // the entry. Adopt it into our trail after hashchange so Back/Forward still has a
+    // destination label and a stored scroll position.
+    const onHash = () => {
+      if (history.state?.raglex) return;
+      const next = viewFromHash(), i = indexRef.current + 1;
+      const entry = { label: viewLabel(next), href: viewHref(next) };
+      setTrail([...trailRef.current.slice(0, i), entry]);
+      setTrailIndex(i);
+      history.replaceState({ ...history.state,
+        raglex: { index: i, view: next, label: entry.label } satisfies RaglexHistory },
+        "", entry.href);
+      adopt(next, 0);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("popstate", onPop);
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("popstate", onPop);
+      window.removeEventListener("hashchange", onHash);
+      history.scrollRestoration = "auto";
+    };
+  }, []); // history wiring is intentionally installed once; refs carry current values
 
   // A reader gets a read-only research interface: no admin/maintain, no settings. These are
   // also enforced server-side (src/raglex/web/auth.py) — hiding them is only affordance.
@@ -269,26 +354,31 @@ export function App() {
   const tabs: [Tab, string][] = isAdmin
     ? [["explore", "Explore"], ["search", "Search"], ["admin", "Admin"], ["settings", "Settings"]]
     : [["explore", "Explore"], ["search", "Search"]];
+  const backDestination = trailIndex > 0 ? trail[trailIndex - 1] : null;
+  const forwardDestination = trailIndex + 1 < trail.length ? trail[trailIndex + 1] : null;
   return (
     <PeekProvider>
     <TrayProvider>
+    {backDestination && <button className="history-edge history-edge-back"
+      onClick={() => { saveCurrentPosition(); history.back(); }}
+      title={`Back to ${backDestination.label}`} aria-label={`Back to ${backDestination.label}`}>‹</button>}
+    {forwardDestination && <button className="history-edge history-edge-forward"
+      onClick={() => { saveCurrentPosition(); history.forward(); }}
+      title={`Forward to ${forwardDestination.label}`} aria-label={`Forward to ${forwardDestination.label}`}>›</button>}
     <div className="app">
       <header>
-        {back.length > 0 && (
-          <button className="back-arrow" onClick={goBack}
-            title={`Back to ${back[back.length - 1].tab === "document" ? "the previous document" : back[back.length - 1].tab}`}
-            aria-label="Back">←</button>
-        )}
-        <h1 onClick={() => setTab("explore")} style={{ cursor: "pointer" }} title="Explore">RagLex</h1>
+        <h1 onClick={() => goTab("explore")} style={{ cursor: "pointer" }} title="Explore">RagLex</h1>
         <ApiStatus />
         <nav>
           {tabs.map(([t, label]) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => goTab(t)}>{label}</button>
           ))}
           {docId && (tab === "document" || tab === "graph") &&
-            <button className={tab === "document" ? "active" : ""} onClick={() => setTab("document")}>Document</button>}
+            <button className={tab === "document" ? "active" : ""}
+              onClick={() => tab !== "document" && open(docId, pinpoint || undefined)}>Document</button>}
           {graphId && (tab === "document" || tab === "graph") &&
-            <button className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>Graph</button>}
+            <button className={tab === "graph" ? "active" : ""}
+              onClick={() => tab !== "graph" && openGraph(graphId)}>Graph</button>}
         </nav>
         <ThemeSwitch />
         <AuthBadge />
