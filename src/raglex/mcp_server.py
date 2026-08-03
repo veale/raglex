@@ -316,8 +316,11 @@ def build_server(config: Config | None = None) -> MCPServer:
 
         IT WORKS ON JUDGMENTS TOO, which is the case-law research question: ``anchor='[110]'``
         (or "110", or "para 110" — the same thing) on Ittihadieh returns the documents that
-        cite THAT PARAGRAPH, because a paragraph is the unit practitioners actually cite. A
-        range pinpoint ("para 70-71") counts for the paragraphs it spans. Then:
+        cite THAT PARAGRAPH, because a paragraph is the unit practitioners actually cite.
+        Matching is by NUMERIC OVERLAP, so a court that pinpointed "[135]-[140]" is returned
+        for ``anchor='[138]'`` and vice versa — 15% of paragraph pinpoints in this corpus
+        span a range, and counting only exact ones makes the total a floor. You can pass a
+        range yourself (``anchor='[135]-[140]'``). Then:
         • ``sort``: pagerank (most authoritative, default) | cited | newest | oldest | passages
         • ``jurisdiction``: an ISO code ("fr", "gb", "eu") or a name — narrow to one place
         • ``kind``: "cases" | "administrative" (DPA/regulator decisions) | "legislation" | "guidance"

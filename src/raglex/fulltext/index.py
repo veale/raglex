@@ -23,7 +23,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from .query import ParsedQuery, Phrase, parse, to_tsquery
+from .query import ParsedQuery, Phrase, parse, satisfied_by, to_tsquery
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,9 @@ class SearchResult:
     notes: list[str] = field(default_factory=list)
     took_ms: int = 0
     tsquery: str | None = None
+    #: set when the database REFUSED the query. Distinct from "no documents match",
+    #: which is what an empty result set would otherwise be taken to mean.
+    error: str | None = None
 
 
 # -- literal verification ------------------------------------------------------
@@ -107,24 +110,23 @@ def find_literal(text: str, phrase: Phrase) -> int | None:
 
 def verify(text: str, parsed: ParsedQuery) -> int | None:
     """Does this document really contain what was quoted? Returns the offset of the
-    first required phrase (for the snippet), or None if the document fails.
+    matching phrase (for the snippet), or None if the document fails.
 
-    Every positive literal must be present and every excluded one absent. Exclusion
-    is applied HERE rather than in the tsquery because a stemmed NOT over-excludes:
-    ``-"duty of care"`` would drop a document containing only "duties of care", which
-    does not contain the string it was asked to exclude, and a document that was
-    never retrieved cannot be recovered."""
-    first: int | None = None
-    for ph in parsed.literals:
-        at = find_literal(text, ph)
-        if at is None:
-            return None
-        if first is None or at < first:
-            first = at
-    for ph in parsed.excluded:
-        if find_literal(text, ph) is not None:
-            return None
-    return first if first is not None else 0
+    READ AS WRITTEN — the check follows the query's own AND/OR/NOT structure. It used
+    to require every quoted phrase in the query at once, whatever branch each sat in,
+    so ``"duty of care" OR "duties of care"`` demanded BOTH: 530 documents where one
+    branch alone has 3,920, a disjunction answering with less than half of itself. The
+    tsquery had it right all along; the verification pass silently re-read it as a
+    conjunction.
+
+    Exclusion is applied HERE rather than in the tsquery because a stemmed NOT
+    over-excludes: ``-"duty of care"`` would drop a document containing only "duties
+    of care", which does not contain the string it was asked to exclude, and a
+    document that was never retrieved cannot be recovered."""
+    ok, at = satisfied_by(parsed, lambda ph: find_literal(text, ph))
+    if not ok:
+        return None
+    return at if at is not None else 0
 
 
 def highlight_spans(fragment: str, parsed: ParsedQuery) -> list[tuple[int, int]]:
@@ -179,9 +181,15 @@ def match_offsets(text: str, parsed: ParsedQuery, *, cap: int = 12) -> list[int]
     by ``cap`` because a term of art can appear a hundred times in one judgment and
     nobody reads a hundred previews."""
     if parsed.literals:
-        # the first required phrase is the one the reader is looking for; the others
-        # are constraints on the document, not the passage they want to see
-        return [m.start() for m in _literal_re(parsed.literals[0]).finditer(text)][:cap]
+        # Every quoted phrase that this document actually contains, not just the first
+        # one written: under an OR the first branch is frequently the one the document
+        # does NOT answer, and anchoring there returned no passages for a document that
+        # plainly matched the other half of the query.
+        offsets: list[int] = []
+        for ph in parsed.literals:
+            offsets.extend(m.start() for m in _literal_re(ph).finditer(text))
+        if offsets:
+            return sorted(dict.fromkeys(offsets))[:cap]
     from .query import And, Near, Not, Or, Term
 
     def first_word(node) -> str | None:
@@ -241,13 +249,23 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
         out.took_ms = int(1000 * (time.perf_counter() - t0))
         return out
 
-    out.total = cat.fts_total(tsq, filters=filters)
+    from ..storage.catalogue import FtsQueryError
+
+    try:
+        out.total = cat.fts_total(tsq, filters=filters)
+        rows = cat.fts_search(tsq, filters=filters, limit=budget)
+    except FtsQueryError as exc:
+        out.error = (f"the search index refused this query: {exc}. "
+                     "Check the operators — quotes must be paired, and NEAR/N takes a "
+                     "term or a group on each side.")
+        out.notes.append(out.error)
+        out.took_ms = int(1000 * (time.perf_counter() - t0))
+        return out
     want = limit + offset
-    rows = cat.fts_search(tsq, filters=filters, limit=budget)
     out.candidates = len(rows)
     out.truncated = len(rows) >= budget
 
-    needs_check = bool(parsed.literals or parsed.excluded)
+    needs_check = parsed.needs_verification
     seen: set[str] = set()
     matched: list[tuple[str, float, int | None]] = []
     # one batched lookup for the whole candidate set, not one query per document

@@ -17,6 +17,9 @@ import pytest
 from raglex.adapters.uk_legislation import UKLegislationAdapter
 from raglex.resolve.matchers import assimilated_leg_path
 from raglex.facade import (
+    _paragraph_anchor_like,
+    _paragraph_span,
+    _paragraph_spans_overlap,
     _anchor_key,
     _anchor_key_variants,
     _anchor_sql_prefixes,
@@ -271,6 +274,54 @@ def test_dated_domestic_stub_is_unchanged():
     stub = next(iter(adapter.discover(None)))
     assert stub.raw_url == (
         "https://www.legislation.gov.uk/ukpga/2018/12/2024-01-01/data.akn")
+
+
+# --- range-spanning paragraph pinpoints ---------------------------------------------
+
+@pytest.mark.parametrize("written,span", [
+    ("para 138", (138, 138)),
+    ("[138]", (138, 138)),
+    ("138", (138, 138)),
+    ("para 135-140", (135, 140)),
+    ("para 80–81", (80, 81)),            # en dash — the corpus writes both
+    ("paras 16 to 18", (16, 18)),
+    ("[135]-[140]", (135, 140)),
+    ("Article 15", None),
+    ("s. 45", None),
+    ("para 3.19", None),                 # a code of practice, not a judgment paragraph
+])
+def test_paragraph_span_parsing(written, span):
+    assert _paragraph_span(written) == span
+
+
+@pytest.mark.parametrize("want,stored,hit", [
+    ("[138]", "para 135-140", True),     # the citer pinpointed a passage, not a line
+    ("[135]", "para 135-140", True),     # inclusive at both ends
+    ("[140]", "para 135-140", True),
+    ("[141]", "para 135-140", False),
+    ("[134]", "para 135-140", False),
+    ("[80]", "para 80–81", True),
+    ("[135]-[140]", "para 138", True),   # and symmetrically
+    ("[135]-[140]", "para 141", False),
+    ("[138]", "para 138", True),
+])
+def test_range_pinpoints_overlap_the_paragraphs_they_span(want, stored, hit):
+    """15% of the corpus's paragraph pinpoints span a range. Matching only exact ones
+    makes a paragraph-level citer count a floor while it reads as a count."""
+    assert _paragraph_spans_overlap(_paragraph_span(want), stored) is hit
+
+
+def test_range_guard_covers_every_dash_the_corpus_uses():
+    """LIKE is literal: a guard built with the ASCII hyphen alone silently drops
+    "para 80–81", and the same document writes both forms."""
+    patterns = _paragraph_anchor_like((81, 81))
+    assert {"para%-%", "para%–%", "para%—%"} <= set(patterns)
+    assert "para81%" in patterns and "81%" in patterns
+
+
+def test_a_wide_range_falls_back_to_one_broad_guard():
+    """A hundred LIKE branches is not a guard."""
+    assert _paragraph_anchor_like((1, 500)) == ["para%"]
 
 
 def test_a_date_that_cannot_be_honoured_is_never_silently_ignored():

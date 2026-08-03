@@ -37,6 +37,7 @@ Grammar (loose, forgiving — this is a search box, not a compiler)::
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # One token of the query language. Order matters: the multi-character operators have
@@ -46,7 +47,8 @@ _TOKEN = re.compile(
       (?P<phrase>"[^"]*"|“[^”]*”)          # a quoted phrase
     | (?P<lparen>\()
     | (?P<rparen>\))
-    | (?P<near>(?:NEAR\s*/\s*|~|/)\d{1,2})  # NEAR/3, ~3, /3
+    | (?P<slop>~\d{1,2})                    # "phrase"~3 — words may be 3 apart
+    | (?P<near>(?:NEAR\s*/\s*|/)\d{1,2})    # NEAR/3, /3 — a proximity OPERATOR
     | (?P<op>\bAND\b|\bOR\b|\bNOT\b|&&|\|\||&|\|)
     | (?P<neg>-(?=\S))                      # leading dash, not a hyphen inside a word
     # A word may CONTAIN a balanced parenthesis — "R(Miller)" and "section 3(2)" are
@@ -110,17 +112,30 @@ Node = Term | Phrase | Near | Not | And | Or
 class ParsedQuery:
     node: Node | None
     #: phrases the reader quoted, in positive position — these are what "literal"
-    #: means, and the caller verifies them against the document's own text
+    #: means, and the caller verifies them against the document's own text.
+    #:
+    #: FLAT, and therefore not the verification rule: it is every quoted phrase in the
+    #: query regardless of the branch it sits in, which is what highlighting and the
+    #: snippet anchor want. Requiring all of them turned `"duty of care" OR "duties of
+    #: care"` into an AND — 530 documents against 3,920 for one branch alone, a
+    #: disjunction returning less than one of its own halves. ``satisfied_by`` walks
+    #: the tree instead.
     literals: list[Phrase] = field(default_factory=list)
     #: phrases quoted behind a NOT — excluded at verification time, never in the
     #: tsquery, because a stemmed negation over-excludes irrecoverably
     excluded: list[Phrase] = field(default_factory=list)
     #: things the reader should be told about their query
     notes: list[str] = field(default_factory=list)
+    #: whether quoted strings mean literal characters (and so need verifying at all)
+    exact: bool = True
 
     @property
     def is_empty(self) -> bool:
         return self.node is None
+
+    @property
+    def needs_verification(self) -> bool:
+        return bool(self.exact and (self.literals or self.excluded))
 
 
 # -- lexing / parsing ---------------------------------------------------------
@@ -207,8 +222,10 @@ class _Parser:
             node = self.unary()
             if node is None:
                 break
-            # a NEAR operator binds the node just parsed to the one after it
-            while (n := self.peek()) and n[0] == "near":
+            # a NEAR operator binds the node just parsed to the one after it. A tilde
+            # reaching here is an operator too ("negligence ~3 damages"): the phrase
+            # rule above has already claimed the one case where it means slop.
+            while (n := self.peek()) and n[0] in ("near", "slop"):
                 dist = int(re.search(r"\d+", self.take()[1]).group())
                 right = self.unary()
                 if right is None:
@@ -246,8 +263,15 @@ class _Parser:
             self.take()
             body = text[1:-1]
             dist = 1
-            # "…"~3 — the words may be up to 3 apart
-            if (nt := self.peek()) and nt[0] == "near":
+            # "…"~3 — the words may be up to 3 apart. ONLY the tilde form: a phrase
+            # followed by NEAR/3 or /3 is the LEFT OPERAND of a proximity operator,
+            # not a phrase with slop. Conflating them cost the query twice over —
+            # `"duty of care" NEAR/5 breach` compiled to
+            # ('duty' <5> 'of' <5> 'care') & 'breach': the phrase lost the adjacency
+            # that made it a phrase, and the proximity the reader asked for decayed
+            # into a plain AND. Same query with the operands the other way round was
+            # right, so the two spellings of one question disagreed.
+            if (nt := self.peek()) and nt[0] == "slop":
                 dist = int(re.search(r"\d+", self.take()[1]).group())
             words = _words_of(body)
             return Phrase(words, dist) if words else None
@@ -380,7 +404,73 @@ def parse(text: str, *, exact: bool = True) -> ParsedQuery:
                 f'“{ph.text}” is made only of words the index does not store '
                 f"(the, of, in …), so it cannot be looked up directly.")
     return ParsedQuery(node=node, literals=positives if exact else [],
-                       excluded=negatives if exact else [], notes=notes)
+                       excluded=negatives if exact else [], notes=notes, exact=exact)
+
+
+def satisfied_by(parsed: ParsedQuery, find: "Callable[[Phrase], int | None]",
+                 ) -> tuple[bool, int | None]:
+    """Does a document satisfy the QUOTED parts of this query, read as written?
+
+    ``find`` locates one phrase's literal text and returns its offset, or None. The
+    answer is (satisfied, offset of the earliest phrase that carried the match) — the
+    offset anchors the snippet on the branch that actually matched, so an OR shows the
+    reader the half of their query the document answers.
+
+    Only quoted phrases are checked. An unquoted term was already required by the
+    tsquery, and re-checking it here as a raw substring would reject the stemming the
+    index exists to provide ("negligent" for ``negligence``); such a node simply
+    passes, which is why this narrows a candidate set and never widens it."""
+    def walk(node: Node | None) -> tuple[bool, int | None]:
+        if node is None:
+            return True, None
+        if isinstance(node, Phrase):
+            if not parsed.exact:
+                # relaxed mode: a quotation asks for the STEMMED phrase, which the
+                # tsquery already matched — "duties of care" is a correct hit for
+                # "duty of care" and must not be re-rejected as a raw substring
+                return True, None
+            at = find(node)
+            return at is not None, at
+        if isinstance(node, Term):
+            return True, None                   # the tsquery already required it
+        if isinstance(node, Not):
+            # Mirrors _compile: only a NEGATED QUOTED phrase is deferred to here; a
+            # negated term is already `!term` in the tsquery, and negating it a second
+            # time would reject every document the index correctly returned.
+            phrases = _quoted_phrases(node.child) if parsed.exact else []
+            if not phrases:
+                return True, None
+            return all(find(p) is None for p in phrases), None
+        if isinstance(node, Near):
+            # Proximity is the tsquery's job — it is a fact about the INDEX, not about
+            # the characters. Both sides must still hold as literals.
+            ok_l, at_l = walk(node.left)
+            ok_r, at_r = walk(node.right)
+            offsets = [a for a in (at_l, at_r) if a is not None]
+            return ok_l and ok_r, min(offsets) if offsets else None
+        if isinstance(node, And):
+            offsets: list[int] = []
+            for child in node.children:
+                ok, at = walk(child)
+                if not ok:
+                    return False, None
+                if at is not None:
+                    offsets.append(at)
+            return True, min(offsets) if offsets else None
+        if isinstance(node, Or):
+            best: int | None = None
+            satisfied = False
+            for child in node.children:
+                ok, at = walk(child)
+                if not ok:
+                    continue
+                satisfied = True
+                if at is not None and (best is None or at < best):
+                    best = at
+            return satisfied, best
+        return True, None
+
+    return walk(parsed.node)
 
 
 def to_tsquery(parsed: ParsedQuery, *, exact: bool = True) -> str | None:

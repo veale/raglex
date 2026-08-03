@@ -962,6 +962,75 @@ def _anchor_key(text: str | None) -> str | None:
     return f"{typ}:{m.group(2)}" if typ else m.group(2)
 
 
+#: A paragraph pinpoint that SPANS a range — "para 135-140", "[135]-[140]", "paras 16
+#: to 18". 369,230 of the corpus's 2,395,763 paragraph pinpoints are written this way
+#: (15%), because a court citing a passage cites the passage, not its first line.
+_PARA_RANGE = re.compile(
+    r"^\s*(?:paras?\.?|paragraphs?)?\s*\[?(\d+)\]?\s*(?:[-–—]+|\bto\b)\s*\[?(\d+)\]?\s*$",
+    re.IGNORECASE)
+_PARA_SINGLE = re.compile(
+    r"^\s*(?:paras?\.?|paragraphs?)?\s*\[?(\d+)\]?[.\]]?\s*$", re.IGNORECASE)
+#: Beyond this a "range" is a parse artefact, not a citation; it names its first
+#: paragraph and nothing else rather than swallowing a whole judgment.
+_PARA_SPAN_MAX = 200
+
+
+def _paragraph_span(anchor: str | None) -> tuple[int, int] | None:
+    """(first, last) paragraph an anchor covers, or None if it is not a paragraph.
+
+    A single paragraph is a span of one, so containment is the only test either side
+    needs. Multi-level numbering ("para 3.19") deliberately returns None — it is a
+    paragraph of a code of practice, not a judgment paragraph, and 3.19 is not a
+    number to compare with < ."""
+    text = (anchor or "").strip()
+    if not text:
+        return None
+    m = _PARA_RANGE.match(text)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo <= hi <= lo + _PARA_SPAN_MAX:
+            return lo, hi
+        return lo, lo
+    m = _PARA_SINGLE.match(text)
+    return (int(m.group(1)), int(m.group(1))) if m else None
+
+
+#: Above this width a range is guarded by "every paragraph pinpoint" rather than by
+#: enumerating each paragraph — the enumeration is the tighter guard, but a hundred
+#: LIKE branches is not.
+_PARA_ENUMERATE_MAX = 40
+
+
+def _paragraph_anchor_like(span: tuple[int, int]) -> list[str]:
+    """Whole LIKE patterns admitting every pinpoint that could overlap ``span``.
+
+    Two shapes have to survive the SQL guard and neither is reachable by a prefix of
+    the request: a RANGE that contains the paragraph asked for ("para 135-140" for
+    [138]), and — when a range is what was asked for — each single paragraph inside
+    it. Coarse on purpose; ``_paragraph_spans_overlap`` is what decides."""
+    lo, hi = span
+    if hi - lo >= _PARA_ENUMERATE_MAX:
+        return ["para%"]
+    # EVERY dash a court uses. LIKE is literal, so a pattern built with the ASCII
+    # hyphen alone silently misses "para 80–81" — and the corpus writes both, in the
+    # same document. That mistake is this whole class of bug in miniature.
+    out = [f"para%{dash}%" for dash in ("-", "–", "—")]
+    for n in range(lo, hi + 1):
+        out += [f"para{n}%", f"{n}%"]       # "para 138" and the bare "[138]" form
+    return out
+
+
+def _paragraph_spans_overlap(want: tuple[int, int], stored: str | None) -> bool:
+    """Does a stored pinpoint touch the paragraphs asked for?
+
+    Overlap, not equality: "who cites [138]" must find the court that wrote
+    "[135]-[140]", and "who cites [135]-[140]" must find the one that wrote "[138]".
+    Without this the paragraph-level citer count is a floor, not a count — and it
+    reads as a count."""
+    span = _paragraph_span(stored)
+    return span is not None and span[0] <= want[1] and want[0] <= span[1]
+
+
 def _anchor_key_variants(key: str | None) -> set[str]:
     """The keys one pinpoint can legitimately be stored under.
 
@@ -2676,13 +2745,21 @@ class Facade:
             # only the bare pinpoint ("Article 17(2)", "s. 13"). Give the catalogue every
             # spelling of the canonical unit+number as a coarse guard; the exact family
             # matcher below remains authoritative.
-            anchor_prefixes = (
-                _anchor_sql_prefixes(anchor) if anchor and not exact else [])
+            # A range pinpoint shares no prefix with the paragraph it covers, so the
+            # prefix guard dropped every one of them before the span test could run —
+            # 15% of the corpus's paragraph pinpoints, silently, making a
+            # paragraph-level citer count a floor that read as a count.
+            want_span = (_paragraph_span(anchor) if anchor and not exact else None)
+            anchor_prefixes = ([] if want_span else
+                               _anchor_sql_prefixes(anchor) if anchor and not exact
+                               else [])
+            anchor_like = _paragraph_anchor_like(want_span) if want_span else []
             rels = [
                 dict(r) for r in cat.relations_to(
                     stable_id,
                     anchor_exact=anchor_exact,
                     anchor_prefixes=anchor_prefixes,
+                    anchor_like=anchor_like,
                 )
                 if r["extracted_via"] != "inferred"
             ]
@@ -2695,6 +2772,7 @@ class Facade:
                 stable_id, limit=20000,
                 anchor_exact=anchor_exact,
                 anchor_prefixes=anchor_prefixes,
+                anchor_like=anchor_like,
             ):
                 projected = dict(row)
                 key = (
@@ -2716,14 +2794,18 @@ class Facade:
                     return re.sub(r"\s+", "", (a or "")).lower()
                 want = _norm(anchor)
                 rels = [r for r in rels if _norm(r["dst_anchor"]) == want]
-            elif anchor and any(k.startswith("para:") for k in
-                                _anchor_key_variants(_anchor_key(anchor))):
+            elif anchor and want_span:
                 # A JUDGMENT PARAGRAPH — the citable unit of case law, and the one the
                 # string matcher below cannot handle. The unit word is optional on both
-                # sides ("[110]" / "para 110"), and a range pinpoint ("para 70-71") does
-                # cite paragraph 70, so this folds to the canonical key instead of
-                # pattern-matching the written form. Multi-level numbering survives the
-                # fold: "para 3.19" keys apart from "para 3".
+                # sides ("[110]" / "para 110"), and a pinpoint may span a RANGE, so the
+                # test is numeric overlap rather than a match on the written form.
+                rels = [r for r in rels
+                        if _paragraph_spans_overlap(want_span, r["dst_anchor"])]
+            elif anchor and any(k.startswith("para:") for k in
+                                _anchor_key_variants(_anchor_key(anchor))):
+                # Multi-level paragraph numbering ("para 3.19" of a code of practice):
+                # not a judgment paragraph, so it folds on the canonical key, which
+                # keeps 3.19 apart from 3.
                 keys = _anchor_key_variants(_anchor_key(anchor))
                 rels = [r for r in rels
                         if _anchor_key_variants(_anchor_key(r["dst_anchor"])) & keys]
@@ -3003,7 +3085,34 @@ class Facade:
                                          f"{len(preparatory_groups)} available."
                                          if preparatory_groups and offset == 0 else None),
                     "sort": sort, "sorts": dict(self.MENTION_SORTS),
+                    # How many of this document's citers could EVER appear under an
+                    # anchor. Without it a provision-level total is read against the
+                    # document-level one as though the difference were courts that
+                    # considered the provision and passed over it.
+                    **(self._pinpoint_coverage(cat, stable_id) if anchor else {}),
                     "by_anchor": by_anchor if offset == 0 else {}}
+
+    def _pinpoint_coverage(self, cat, stable_id: str) -> dict:
+        """How many citing DOCUMENTS pinpoint anything at all, and how many never do.
+
+        Partitioned per citing document, not per edge: a judgment that cites this one
+        four times and pinpoints once is a citer that CAN appear under an anchor. Counting
+        edges instead put such a document in both columns, and the two numbers then
+        summed to more than the citer total — which is exactly the arithmetic a reader
+        uses them for."""
+        row = cat.conn.execute(
+            "SELECT SUM(CASE WHEN has_pin = 1 THEN 1 ELSE 0 END) AS pinned,"
+            "       SUM(CASE WHEN has_pin = 0 THEN 1 ELSE 0 END) AS unpinned FROM ("
+            "  SELECT src_id, MAX(CASE WHEN COALESCE(dst_anchor, '') <> ''"
+            "                          THEN 1 ELSE 0 END) AS has_pin"
+            "  FROM relations WHERE dst_id = ? AND resolution_status = 'resolved'"
+            "    AND relationship_type <> 'cited_by' AND extracted_via <> 'inferred'"
+            "  GROUP BY src_id) t",
+            (stable_id,)).fetchone()
+        if row is None:
+            return {}
+        return {"pinpointed_citers": row["pinned"] or 0,
+                "unpinpointed_citers": row["unpinned"] or 0}
 
     def _resolve_held_id(self, raw: str) -> tuple[str | None, str | None]:
         """Resolve a citation string / stable_id to (held_id, candidate_id). Shared by
@@ -3121,6 +3230,20 @@ class Facade:
             else:
                 nav.append("No documents in the corpus cite this yet.")
         nav.append("Re-sort with sort=" + "|".join(self.MENTION_SORTS))
+        if anchor:
+            # A pinpoint count cannot be read against the document count without this.
+            # Lloyd v Google is cited by 47 documents; 73 of its 84 incoming edges carry
+            # NO pinpoint at all. "1 citer of [138]" against "47 citers" invites the
+            # reading that 46 courts considered the paragraph and declined to engage,
+            # when in fact most never pinpointed anything.
+            pinned = m.get("pinpointed_citers")
+            unpinned = m.get("unpinpointed_citers")
+            if unpinned:
+                nav.append(
+                    f"{unpinned} of this document's citers cite it with NO pinpoint, so "
+                    f"they can never appear under any anchor; {pinned} pinpoint "
+                    "something. A provision-level total is a count of pinpointed "
+                    "citations, not of courts that engaged with the provision.")
         nav.append("Open any row with lookup(citation=<its stable_id>) or get_document(<stable_id>).")
         if disputed:
             nav.append(
@@ -12965,6 +13088,7 @@ class Facade:
                 })
         return {
             "items": items, "total": res.total, "verified": res.verified,
+            **({"error": res.error} if res.error else {}),
             "candidates": res.candidates, "truncated": res.truncated,
             "notes": [*notes, *res.notes], "took_ms": res.took_ms, "exact": exact,
             "tsquery": res.tsquery, "scope": allowed,
@@ -13233,13 +13357,15 @@ class Facade:
             query, exact=exact, limit=limit, sources=sources, doc_type=doc_type,
             court=court, jurisdictions=jurisdictions, year_from=year_from)
         if res.get("error"):
-            # never as an empty result: a rejected filter must not be readable as an
-            # answer about the corpus
+            # never as an empty result: a rejected filter, or a query the index
+            # refused, must not be readable as an answer about the corpus
+            hint = next((n for n in reversed(res.get("notes") or [])
+                         if n != res["error"]), None)
             return {k: v for k, v in {
                 "query": query, "error": res["error"],
                 "did_you_mean": res.get("did_you_mean") or None,
                 "accepts": res.get("accepts"),
-                "hint": res.get("notes", [None])[-1],
+                "hint": hint,
             }.items() if v}
         ids = [it["stable_id"] for it in res.get("items", [])]
         hydrated = {h["stable_id"]: h

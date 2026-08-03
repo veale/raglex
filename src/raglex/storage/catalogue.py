@@ -738,6 +738,12 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+class FtsQueryError(RuntimeError):
+    """Postgres refused the compiled tsquery. Carried up rather than swallowed: an
+    empty result set is a claim about the corpus, and this is a claim about the
+    query."""
+
+
 def _apply_filters(sql: str, params: list, filters: dict | None) -> tuple[str, list]:
     """Append a partition pre-filter (§6b.6) over the documents join: by source
     (jurisdiction), doc_type, topic tag, or minimum year — applied BEFORE both
@@ -1839,6 +1845,7 @@ class Catalogue:
     def version_inherited_mentions_for(
         self, version_id: str, *, limit: int | None = 5000,
         anchor_exact: str | None = None, anchor_prefixes: list[str] | None = None,
+        anchor_like: list[str] | None = None,
     ) -> list:
         """Literal mentions of a consolidation's base act, projected onto the version.
 
@@ -1871,16 +1878,19 @@ class Catalogue:
                 " AND lower(replace(COALESCE(r.dst_anchor, ''), ' ', '')) = ?"
             )
             anchor_params.append(anchor_exact.lower().replace(" ", ""))
-        elif anchor_prefixes:
+        elif anchor_prefixes or anchor_like:
             # This is only a coarse SQL prefilter: ``art6%`` may also retrieve Article 60,
             # which the facade's exact family matcher then rejects.  It nevertheless turns
             # a 350k-edge mega-authority request into a small query. Normalised, and one
             # branch per spelling of the unit, so "s. 13" / "section 13" / "§ 13" all hit.
-            likes = " OR ".join(
-                [f"{ANCHOR_NORM_SQL.replace('dst_anchor', 'r.dst_anchor')} LIKE ?"]
-                * len(anchor_prefixes))
+            # ``anchor_like`` adds whole patterns for the pinpoints no prefix can reach —
+            # a paragraph RANGE ("para 135-140") answering a request for one paragraph.
+            norm = ANCHOR_NORM_SQL.replace("dst_anchor", "r.dst_anchor")
+            likes = " OR ".join([f"{norm} LIKE ?"]
+                                * (len(anchor_prefixes or []) + len(anchor_like or [])))
             anchor_sql = f" AND ({likes})"
-            anchor_params.extend(prefix + "%" for prefix in anchor_prefixes)
+            anchor_params.extend(prefix + "%" for prefix in (anchor_prefixes or []))
+            anchor_params.extend(anchor_like or [])
         return self.conn.execute(
             f"""
             SELECT r.*, ? AS version_inherited_from_id,
@@ -2859,6 +2869,7 @@ class Catalogue:
     def relations_to(
         self, dst_id: str, *, anchor_exact: str | None = None,
         anchor_prefixes: list[str] | None = None,
+        anchor_like: list[str] | None = None,
     ) -> list[sqlite3.Row]:
         """Incoming resolved edges — what cites/treats this document (citing cases,
         commentary). The other half of 1-hop graph expansion (§6c).
@@ -2881,10 +2892,17 @@ class Catalogue:
                 " AND lower(replace(COALESCE(dst_anchor, ''), ' ', '')) = ?"
             )
             params.append(anchor_exact.lower().replace(" ", ""))
-        elif anchor_prefixes:
-            likes = " OR ".join([f"{ANCHOR_NORM_SQL} LIKE ?"] * len(anchor_prefixes))
-            anchor_sql = f" AND ({likes})"
-            params.extend(prefix + "%" for prefix in anchor_prefixes)
+        elif anchor_prefixes or anchor_like:
+            # ``anchor_like`` carries WHOLE patterns rather than prefixes, because a
+            # range pinpoint cannot be reached by one: "para 135-140" answers a request
+            # for paragraph 138 and shares no prefix with it. The guard admits every
+            # range and lets the caller's numeric span test decide — coarse, which is
+            # what a guard is for.
+            clauses = ([f"{ANCHOR_NORM_SQL} LIKE ?"] * len(anchor_prefixes or [])
+                       + [f"{ANCHOR_NORM_SQL} LIKE ?"] * len(anchor_like or []))
+            anchor_sql = f" AND ({' OR '.join(clauses)})"
+            params.extend(prefix + "%" for prefix in (anchor_prefixes or []))
+            params.extend(anchor_like or [])
         return self.conn.execute(
             "SELECT * FROM relations WHERE dst_id = ? AND resolution_status = 'resolved' "
             "AND relationship_type <> 'cited_by'"  # reverse-oriented scaffold
@@ -4981,9 +4999,12 @@ class Catalogue:
         params.append(limit)
         try:
             rows = self.conn.execute(sql, params).fetchall()
-        except Exception:
-            # a malformed tsquery is user input, not a bug — no hits rather than a 500
-            return []
+        except Exception as exc:
+            # A malformed tsquery is user input, not a bug — but "no hits" is the wrong
+            # way to say so. Zero results is an ANSWER ABOUT THE CORPUS, and a reader
+            # given one for a query the database refused concludes the authority does
+            # not exist. Raise; the search layer turns it into a stated error.
+            raise FtsQueryError(str(exc)) from exc
         return [dict(r) for r in rows]
 
     def fts_total(self, tsquery: str, *, filters: dict | None = None) -> int:
@@ -5000,8 +5021,8 @@ class Catalogue:
         sql, params = _apply_filters(sql, params, filters)
         try:
             return self.conn.execute(sql, params).fetchone()["n"]
-        except Exception:
-            return 0
+        except Exception as exc:
+            raise FtsQueryError(str(exc)) from exc
 
     def count_learned_shorthands(self) -> int:
         return self.conn.execute(
