@@ -112,6 +112,20 @@ class _FakeClient:
         return _Resp(self._c)
 
 
+CLML_ACT = b"""<?xml version="1.0"?>
+<Legislation>
+ <Primary>
+  <PrimaryPrelims><Title>Fallback Act 2000</Title></PrimaryPrelims>
+  <Body>
+   <P1group><Title>General duty</Title><P1><Pnumber>1</Pnumber>
+    <P1para><Text>A person must comply with the duty.</Text></P1para>
+   </P1></P1group>
+  </Body>
+ </Primary>
+</Legislation>
+"""
+
+
 def test_uk_legislation_adapter_builds_legislation_record():
     ad = UKLegislationAdapter(ids="ukpga/2000/36", client=_FakeClient(AKN))
     stubs = list(ad.discover(None))
@@ -120,6 +134,30 @@ def test_uk_legislation_adapter_builds_legislation_record():
     assert rec.doc_type == DocType.LEGISLATION
     assert rec.title == "An Act to make provision for Freedom of Information."
     assert len(rec.segments) >= 3 and rec.extra["format"] == "akoma-ntoso"
+
+
+def test_uk_legislation_falls_back_to_clml_when_akn_transport_times_out():
+    calls = []
+
+    class _AknTimeoutClient:
+        def get(self, url, **kw):
+            calls.append(url)
+            if url.endswith("data.akn"):
+                raise FetchError("The read operation timed out", transient=True)
+            assert url.endswith("data.xml")
+            return _Resp(CLML_ACT)
+
+    ad = UKLegislationAdapter(ids="ukpga/2000/8", client=_AknTimeoutClient())
+    rec = ad.fetch(list(ad.discover(None))[0])
+    assert calls == [
+        "https://www.legislation.gov.uk/ukpga/2000/8/data.akn",
+        "https://www.legislation.gov.uk/ukpga/2000/8/data.xml",
+    ]
+    assert rec.stable_id == "ukpga/2000/8"
+    assert rec.doc_type == DocType.LEGISLATION
+    assert rec.extra["format"] == "clml"
+    assert "A person must comply" in rec.text
+    assert any(s.label == "1 General duty" for s in rec.segments)
 
 
 def test_uk_repealed_title_sets_canonical_currency():

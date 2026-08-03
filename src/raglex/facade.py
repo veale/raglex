@@ -10844,6 +10844,22 @@ class Facade:
         language: str | None = None, tags: list[str] | None = None,
         structure: str = "auto",
     ) -> dict:
+        # The general upload form used to ingest a legislation.gov.uk AKN file as
+        # ``user:commentary:*`` and run the plain-text extractor over the XML. Its own
+        # FRBRWork is a stronger identity signal than a stale/default form selection:
+        # promote it to the canonical UK legislation importer automatically. This also
+        # means harvest-all sees the canonical id as held instead of refetching bytes the
+        # user has already supplied.
+        if b"akomaNtoso" in data[:8192]:
+            from .formats.akoma_ntoso import _frbr_work_id
+
+            akn_id = _frbr_work_id(data)
+            if akn_id and _UK_INSTRUMENT_ID_RE.match(akn_id):
+                result = self.import_legislation_akn(
+                    data=data, stable_id=akn_id, filename=filename)
+                if "error" not in result:
+                    result["auto_promoted_from_upload"] = True
+                return result
         with self._open() as (cat, rs, ts):
             res = import_file(
                 cat, rs, ts, data=data, filename=filename,

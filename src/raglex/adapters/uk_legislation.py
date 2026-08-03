@@ -258,13 +258,32 @@ class UKLegislationAdapter(BaseAdapter):
         # raising it as such keeps the item in the worklist instead of writing it off as
         # absent for months. A 404/410 raises a fatal FetchError from the client.
         raw = b""
-        for attempt in range(4):
-            resp = self._client.get(url, headers=headers) if headers else self._client.get(url)
-            raw = resp.content or b""
-            if raw and getattr(resp, "status_code", 200) != 202:
-                break
-            time.sleep(2 * (attempt + 1))
+        try:
+            for attempt in range(4):
+                resp = self._client.get(url, headers=headers) if headers else self._client.get(url)
+                raw = resp.content or b""
+                if raw and getattr(resp, "status_code", 200) != 202:
+                    break
+                time.sleep(2 * (attempt + 1))
+        except FetchError as exc:
+            # Large domestic Acts can make the on-demand AKN renderer time out/504 while
+            # the publisher's canonical CLML representation is already available (FSMA
+            # 2000 is ~21 MB and serves data.xml in under a second). CLML carries the same
+            # operative hierarchy and effects metadata, so use it instead of cooling a
+            # live Act merely because one presentation format is slow to generate.
+            if not exc.transient or is_assim:
+                raise
+            fallback = self._domestic_clml_fallback(stub, url)
+            if fallback is not None:
+                return fallback
+            raise exc
         if not raw:
+            # HTTP 202 is another face of the same AKN-rendering problem. Do not put a
+            # live Act on cooldown if its already-materialised CLML can be read now.
+            if not is_assim:
+                fallback = self._domestic_clml_fallback(stub, url)
+                if fallback is not None:
+                    return fallback
             raise FetchError(
                 f"{self.source}: {url} still generating (HTTP 202) after 4 attempts",
                 transient=True,
@@ -295,21 +314,47 @@ class UKLegislationAdapter(BaseAdapter):
             base_id=stub.hints.get("base_id"),
             version_date=stub.hints.get("version_date"))
 
+    def _domestic_clml_fallback(self, stub: Stub, akn_url: str) -> Record | None:
+        """Read the publisher's other authoritative XML rendition when AKN is slow.
+
+        A failure here must not replace the original transient AKN failure with (for
+        example) a fatal CLML 404: returning ``None`` lets the caller preserve the
+        correct retry classification.
+        """
+        clml_url = akn_url.removesuffix("data.akn") + "data.xml"
+        try:
+            clml = self._client.get(clml_url)
+        except Exception:  # noqa: BLE001 - the original AKN outcome remains authoritative
+            return None
+        if not clml.content:
+            return None
+        try:
+            record = self.record_from_akn(
+                stub.stable_id, clml.content, landing_url=stub.landing_url,
+                base_id=stub.hints.get("base_id"),
+                version_date=stub.hints.get("version_date"),
+                source_format="clml",
+            )
+        except Exception:  # malformed/unsupported CLML: retain the normal retry path
+            return None
+        return record if record.text else None
+
     def record_from_akn(self, stable_id: str, raw: bytes, *,
                         clml_body: bytes | None = None,
                         landing_url: str | None = None,
                         base_id: str | None = None,
-                        version_date: str | None = None) -> Record:
-        """Build a legislation Record from Akoma Ntoso bytes. Shared by the live
-        harvest (``fetch``) and manual uploads, so a hand-supplied AKN file for an
-        instrument legislation.gov.uk won't serve gets exactly the same structural
-        parse, unapplied-effects edges and schedule pinpoints as a harvested one.
+                        version_date: str | None = None,
+                        source_format: str = "akoma-ntoso") -> Record:
+        """Build a legislation Record from an authoritative XML rendition. Shared by
+        live harvest and manual upload, so a hand-supplied AKN file for an instrument
+        legislation.gov.uk won't serve gets the same parse as a harvested one. Domestic
+        CLML is accepted as a fallback when the publisher's AKN renderer times out.
 
         ``clml_body`` (assimilated EU regs): the AKN body is empty, so its CLML
         data.xml is supplied separately — its text+segments replace the AKN's while
         the AKN still drives effects/currency/title (both are namespace-agnostic)."""
-        parsed = parse("akoma-ntoso", raw)
-        extra: dict = {"format": "akoma-ntoso"}
+        parsed = parse(source_format, raw)
+        extra: dict = {"format": source_format}
         if clml_body:
             clml_pd = parse("clml", clml_body)
             if clml_pd.segments:

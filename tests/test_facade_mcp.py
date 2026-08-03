@@ -49,6 +49,33 @@ def test_facade_import_link_tag_and_read(config):
     assert len(incoming) >= 2
 
 
+def test_general_upload_auto_promotes_identified_uk_akn(config):
+    """An official AKN dropped into the ordinary form is primary legislation, even
+    when the form's historical default still says commentary."""
+    akn = b"""<?xml version="1.0"?>
+    <akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+     <act><meta><identification><FRBRWork>
+      <FRBRthis value="https://www.legislation.gov.uk/id/ukpga/2000/8"/>
+      <FRBRname value="2000 c. 8"/>
+     </FRBRWork></identification></meta>
+     <preface><longTitle><p>Financial Services and Markets Act 2000</p></longTitle></preface>
+     <body><section><num>1</num><heading>The regulator</heading>
+      <content><p>The regulator has the following functions.</p></content>
+     </section></body></act>
+    </akomaNtoso>"""
+    f = Facade(config)
+    result = f.import_bytes(
+        data=akn, filename="fsma.akn", doc_type="commentary", title="ukpga/2000/8")
+
+    assert result["stable_id"] == "ukpga/2000/8"
+    assert result["auto_promoted_from_upload"] is True
+    with f._open() as (cat, _rs, _ts):
+        doc = cat.get_document("ukpga/2000/8")
+        assert doc["source"] == "uk-legislation"
+        assert doc["doc_type"] == "legislation"
+        assert cat.get_document("user:commentary:" + doc["payload_hash"][:16]) is None
+
+
 def test_facade_list_documents_for_iteration(config):
     f = Facade(config)
     for i in range(3):
