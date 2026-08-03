@@ -213,6 +213,13 @@ def _segment_at(ts, doc, char_start: int | None) -> str | None:
         segments = ts.get_segments(doc["payload_hash"]) or []
     except OSError:
         return None
+    if len(segments) <= 1 and (not segments or segments[0].kind in {"section", "body"}):
+        try:
+            from .core.segmentation import recover_numbered_segments
+            segments, _recovered = recover_numbered_segments(
+                ts.get(doc["payload_hash"]), segments)
+        except OSError:
+            pass
     for seg in segments:
         if seg.char_start <= char_start < seg.char_end and seg.label:
             return seg.label
@@ -13650,7 +13657,9 @@ class Facade:
                 # times reads differently from one using it once. Segments are read
                 # once per document and shared across its passages.
                 try:
-                    segs = ts.get_segments(doc["payload_hash"]) or []
+                    from .core.segmentation import recover_numbered_segments
+                    segs, _recovered = recover_numbered_segments(
+                        text, ts.get_segments(doc["payload_hash"]) or [])
                 except OSError:
                     segs = []
 
