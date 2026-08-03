@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from raglex.adapters.uk_legislation import UKLegislationAdapter
-from raglex.resolve.matchers import assimilated_leg_path
+from raglex.resolve.matchers import assimilated_canonical_path, assimilated_leg_path
 from raglex.facade import (
     _paragraph_anchor_like,
     _paragraph_span,
@@ -249,6 +249,16 @@ def test_assimilated_id_maps_to_the_path_that_serves_representations(held_as, se
     the number loses its padding. /european/regulation/2016/0679/2024-01-01/data.akn is
     a 404; /eur/2016/679/2024-01-01/data.akn is the point-in-time text."""
     assert assimilated_leg_path(held_as) == serves_as
+
+
+@pytest.mark.parametrize("serves_as,held_as", [
+    ("eur/2016/679", "european/regulation/2016/0679"),
+    ("eudr/2002/58", "european/directive/2002/0058"),
+    ("eudn/2010/87", "european/decision/2010/0087"),
+])
+def test_assimilated_serving_path_maps_back_to_reader_identity(serves_as, held_as):
+    """Effects feeds use the serving path, but graph edges must target the reader ID."""
+    assert assimilated_canonical_path(serves_as) == held_as
 
 
 @pytest.mark.parametrize("path", ["ukpga/2018/12", "uksi/2025/996", "", "nonsense"])

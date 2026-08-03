@@ -8378,12 +8378,17 @@ class Facade:
         adapter = get_adapter("uk-legislation")
         effects = adapter.changes_affecting(base, max_pages=max_pages)
         with self._open() as (cat, _rs, _ts):
+            from .resolve.matchers import assimilated_canonical_path
             # group by affected instrument; track distinct effects + any unapplied ones
             by_affected: dict[str, dict] = {}
             for e in effects:
-                if not e.affected_id or e.affected_id == base:
+                affected_id = e.affected_id
+                canonical = assimilated_canonical_path(affected_id)
+                if canonical and cat.get_document(canonical) is not None:
+                    affected_id = canonical
+                if not affected_id or affected_id == base:
                     continue
-                g = by_affected.setdefault(e.affected_id, {"effects": [], "unapplied": 0})
+                g = by_affected.setdefault(affected_id, {"effects": [], "unapplied": 0})
                 g["effects"].append(e)
                 if not e.applied:
                     g["unapplied"] += 1

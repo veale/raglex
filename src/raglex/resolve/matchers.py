@@ -175,6 +175,22 @@ def assimilated_leg_path(path: str) -> str | None:
     return None
 
 
+def assimilated_canonical_path(path: str) -> str | None:
+    """The public ``european/{kind}/…`` identity for a serving-form assimilated path.
+
+    Changes-to-Legislation emits ``eur/2016/679`` while citations and the reader use
+    ``european/regulation/2016/0679``. They are one instrument; normalise effects onto
+    the reader identity when that node is held.
+    """
+    p = (path or "").lower().strip("/")
+    m = re.fullmatch(r"(eur|eudr|eudn|eudc)/(\d{4})/(\d+)", p)
+    if not m:
+        return None
+    kind = {"eur": "regulation", "eudr": "directive",
+            "eudn": "decision", "eudc": "decision"}[m.group(1)]
+    return f"european/{kind}/{m.group(2)}/{int(m.group(3)):04d}"
+
+
 def match_legislation_regnal(raw: str) -> Candidate | None:
     """A pre-1963 Act cited by regnal year (ukpga/Geo6/9-10/18). Keep the original
     case — legislation.gov.uk's regnal segment ("Geo6") is case-sensitive in the URI."""
