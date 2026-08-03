@@ -242,8 +242,16 @@ class UKLegislationAdapter(BaseAdapter):
         # Assimilated EU law (/european/…) isn't served at /data.akn — it needs AKN
         # content negotiation on the base URL.
         is_assim = stub.stable_id.lower().startswith("european/")
-        url = f"{BASE_URL}/{stub.stable_id}" if is_assim else stub.raw_url
-        headers = {"Accept": "application/akn+xml", "Accept-Language": "en"} if is_assim else None
+        # …EXCEPT for a dated ask, where discover() has already built the URI under the
+        # type-code path that does serve representations (eur/2016/679/2024-01-01/
+        # data.akn). Content-negotiating the id instead produced HTTP 400, because the
+        # id carries the "@date" that belongs in the path.
+        version_date = stub.hints.get("version_date")
+        if is_assim and not version_date:
+            url = f"{BASE_URL}/{stub.stable_id}"
+            headers = {"Accept": "application/akn+xml", "Accept-Language": "en"}
+        else:
+            url, headers = stub.raw_url, None
         # legislation.gov.uk *async-generates* large representations: it answers 202 with
         # an empty body while building them. Retry a few times; if it never materialises,
         # that's a TRANSIENT failure (the item exists, the server is still building it) —
@@ -271,8 +279,12 @@ class UKLegislationAdapter(BaseAdapter):
             from ..formats.akoma_ntoso import _frbr_work_id
             eur_id = _frbr_work_id(raw)
             if eur_id:
+                # the CLML of the SAME expression — an undated body would silently
+                # reintroduce today's text into a dated record
+                clml_url = (f"{BASE_URL}/{eur_id}/{version_date}/data.xml" if version_date
+                            else f"{BASE_URL}/{eur_id}/data.xml")
                 try:
-                    r = self._client.get(f"{BASE_URL}/{eur_id}/data.xml")
+                    r = self._client.get(clml_url)
                     if r.content and b"<P1group" in r.content:
                         clml_body = r.content
                 except Exception:  # noqa: BLE001 — fall back to AKN-only on any CLML hiccup
