@@ -59,6 +59,16 @@ def test_french_eu_articles_keep_pinpoints_before_numeric_instrument():
     } <= got
 
 
+def test_french_cjeu_treaty_article_is_not_carried_to_previous_directive():
+    text = ("Vu l’article 31, paragraphe 1, de la directive (UE) 2019/882 "
+            "et l’article 260, paragraphe 3, TFUE.")
+    cites = extract_citations(text)
+    assert any(c.candidate_id == "12016E" and c.pinpoint == "Article 260(3)"
+               for c in cites)
+    assert not any(c.method == "carry_forward" and c.pinpoint == "Article 260"
+                   for c in cites)
+
+
 def test_french_echr_article_list_is_not_donated_to_later_domestic_code():
     text = ("articles 3 et 8 de la convention européenne de sauvegarde des droits "
             "de l'homme et des libertés fondamentales ainsi que les dispositions "

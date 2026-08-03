@@ -719,14 +719,23 @@ _EU_TREATIES = (
      r"|(?:la\s+)?Charte\s+des\s+droits\s+fondamentaux(?:\s+de\s+l['’]Union\s+europ[ée]enne)?", "12012P"),
 )
 for _i, (_names, _celex) in enumerate(_EU_TREATIES):
+    def _treaty_ref(celex):
+        def normalise(m):
+            pinpoint = f"Article {m.group('art')}"
+            if m.group("fr_para"):
+                pinpoint += f"({m.group('fr_para')})"
+            return celex, pinpoint, "treaty"
+        return normalise
+
     register(Grammar(
         f"eu_treaty_{_celex}", "treaty",
         re.compile(
-            rf"\bArt(?:icle|\.)?s?\.?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+"
+            rf"\bArt(?:icle|\.)?s?\.?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)"
+            rf"(?:\s*,?\s*(?:paragraphe|§)\s*(?P<fr_para>\d+))?\s*,?\s+"
             rf"(?:(?:of|du|de\s+la|des)\s+)?(?:{_names})\b",
             re.IGNORECASE,
         ),
-        (lambda celex: lambda m: (celex, f"Article {m.group('art')}", "treaty"))(_celex),
+        _treaty_ref(_celex),
     ))
 
 # Just the instrument name at the head of a string → its candidate + kind, for the
