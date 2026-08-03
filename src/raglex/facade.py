@@ -312,6 +312,203 @@ def _match_segment(segs, anchor: str) -> int:
     return -1
 
 
+#: A provision number carrying a letter suffix — "Article 12A", "Article 22B",
+#: "Article 8ZA", "s. 164A", "Article 4a". Legislative drafting inserts new provisions
+#: by suffixing the number of the one they follow, precisely so the existing numbering
+#: survives; an ORIGINAL enacted text therefore does not contain them. Finding them in a
+#: served body is direct evidence that the text has been amended, whatever the edges say.
+_INSERTED_UNIT = re.compile(
+    r"^\s*(?:articles?|arts?\.?|sections?|ss?\.?|regulations?|regs?\.?|"
+    r"paragraphs?|paras?\.?)\s*(\d+[A-Za-z]{1,3})\b", re.IGNORECASE)
+
+
+def _inserted_provisions(labels) -> list[str]:
+    """The letter-suffixed provision numbers among a document's segment labels."""
+    found: list[str] = []
+    for label in labels:
+        m = _INSERTED_UNIT.match(label or "")
+        if m:
+            found.append(" ".join((label or "").split())[:40])
+    return sorted(dict.fromkeys(found))
+
+
+#: A party name written immediately before a citation ("… in Valero Energy Ltd v Persons
+#: Unknown [2025] EWHC 134 KB"). The citation's own opening bracket is optional because
+#: the run-up may or may not include it, depending on where the matched span begins.
+_NAME_RUN_UP = re.compile(
+    r"([A-Z][A-Za-z'’()\-.& ]{1,60}?\s+v\.?\s+[A-Z][A-Za-z'’()\-.& ]{1,60}?)"
+    r"\s*[,\[(]?\s*$")
+
+#: Lowercase words that genuinely belong inside a party name, so the lead-in trim below
+#: walks past them instead of cutting the name short at "and others".
+_NAME_CONNECTORS = frozenset({"and", "&", "of", "the", "others", "ors", "anor",
+                              "another", "on", "behalf", "for", "in", "re"})
+
+
+def _trim_party_lead_in(name: str) -> str:
+    """Drop the sentence that introduces a case name, keeping the name.
+
+    The regex above matches leftmost, so it swallows the prose ("In the more recent case
+    of Valero Energy Ltd v …"). Trimming is done by walking BACK from the "v" through
+    capitalised words and the connectors that belong inside a party name — not by
+    shortening until the pattern stops matching, which ate "Valero Energy" and left the
+    reader looking at "Limited and others v Persons Unknown"."""
+    parts = re.split(r"\s+v\.?\s+", name, maxsplit=1)
+    if len(parts) != 2:
+        return name
+    left, right = parts
+    tokens = left.split()
+    i = len(tokens)
+    while i > 0 and (tokens[i - 1][:1].isupper()
+                     or tokens[i - 1].lower() in _NAME_CONNECTORS):
+        i -= 1
+    tokens = tokens[i:] or left.split()
+    while tokens and tokens[0].lower() in _NAME_CONNECTORS:
+        tokens = tokens[1:]
+    return f"{' '.join(tokens)} v {right}".strip() if tokens else name
+
+
+def _cited_name_conflict(target_title: str | None, snippet: dict) -> dict | None:
+    """Does the party name written beside a citation contradict what it resolved to?
+
+    A UK neutral citation is a number, and a number is all a bare-citation match has to
+    go on — so a typo in the citing judgment ("[2025] EWHC 134" for a 2024 case) mints a
+    confident edge to a real but unrelated judgment. The citing court wrote the parties
+    down right next to it; that is corroborating evidence, and it is free here because
+    the snippet already carries the run-up.
+
+    Only ever a FLAG. Deleting the edge on this evidence would lose the genuine citer
+    that names a case some other way; in a citator precision is what matters, and a
+    reader told "the name beside this citation is a different case" can judge it."""
+    from .ops.uk_identity import _words
+
+    title = target_title or ""
+    mark = snippet.get("mark")
+    body = snippet.get("text") or ""
+    if " v " not in f" {title} " or not mark:
+        return None                      # not a case name: nothing to corroborate against
+    run_up = body[:mark[0]].rstrip()
+    m = _NAME_RUN_UP.search(run_up)
+    if not m:
+        return None
+    named = _trim_party_lead_in(m.group(1).strip())
+    name_words, title_words = _words(named), _words(title)
+    # Corroboration is tested against the WHOLE run-up, not just the abutting name.
+    # A joined appeal puts two names before one citation — "Ittihadieh v 5-11 Cheyne
+    # Gardens RTM Company Limited / Deer v University of Oxford [2017] EWCA Civ 121" —
+    # and only the second abuts it, so testing that one alone called a correct edge a
+    # contradiction. String citations behave the same way. Any mention of the target in
+    # the run-up vindicates the edge; only the abutting name is quoted back.
+    #
+    # Both sides must carry a distinctive word, or "R v Secretary of State" against
+    # "Regina v SSHD" reduces to two empty sets and reads as a contradiction.
+    if not name_words or not title_words or (_words(run_up) & title_words):
+        return None
+    return {"named_beside_citation": named, "resolved_to": title,
+            "why": ("the citing document names a different case beside this citation — "
+                    "a bare neutral citation matches on the number alone, so a "
+                    "mis-typed year or division lands on a real but unrelated judgment")}
+
+
+#: VERBATIM phrases a judgment uses when it says how it is treating an authority, with
+#: the direction each points. Deliberately NOT a treatment classifier: no phrase here is
+#: read as a holding, the matched words are quoted back so the reader judges them, and a
+#: cue found in a passage may belong to a different authority named in the same sentence.
+#: What it buys is the thing that otherwise costs opening every citer — knowing which
+#: citing document is the one that declined to follow.
+_TREATMENT_CUE_PATTERNS: tuple[tuple[re.Pattern, str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), signal) for pattern, signal in (
+        (r"\bdeclin\w+ to follow\b", "negative"),
+        (r"\brefus\w+ to follow\b", "negative"),
+        (r"\b(?:wrongly|incorrectly) decided\b", "negative"),
+        (r"\bplainly wrong\b", "negative"),
+        (r"\bper incuriam\b", "negative"),
+        (r"\bno longer good law\b", "negative"),
+        (r"\bnot binding on (?:this|the) (?:court|tribunal)\b", "negative"),
+        (r"\boverrul\w+\b", "negative"),
+        (r"\bdisapprov\w+\b", "negative"),
+        (r"\bdepart\w* from\b", "negative"),
+        (r"\bcannot stand\b", "negative"),
+        (r"\bdoubt(?:ed|s|ful)\b", "doubted"),
+        (r"\bdistinguish\w+\b", "distinguished"),
+        (r"\bbound by\b", "positive"),
+        (r"\bbinding on (?:this|the) (?:court|tribunal)\b", "positive"),
+        (r"\b(?:approv\w+|endors\w+)\b", "positive"),
+        (r"\bcorrectly (?:stated|decided|held)\b", "positive"),
+        # Anchored to a VERB, not the bare word. "following" and "applied" occur
+        # constantly as ordinary prose — "the cases of X following Y", "applied for
+        # permission" — and a cue that fires on those is worse than no cue: it fills the
+        # signals roll-up with a majority verdict nobody checked.
+        (r"\b(?:I|we|the court|the tribunal|his lordship|her ladyship)\s+"
+         r"(?:respectfully\s+)?(?:follow|adopt|appl(?:y|ied))\b", "positive"),
+        (r"\b(?:is|am|are)\s+(?:therefore\s+)?bound to follow\b", "positive"),
+        (r"\bfollowing (?:the (?:decision|reasoning|approach) (?:in|of)|that approach)\b",
+         "positive"),
+        # SUBSEQUENT HISTORY. There is no appellate edge in the graph — no source the
+        # corpus harvests publishes one — but where the appeal IS held, the appellate
+        # judgment says so in the passage where it cites the decision below. That is the
+        # only evidence available for "has this been appealed", and it is better than the
+        # nothing the citator returned before.
+        (r"\bon appeal from\b", "appeal"),
+        (r"\bappeal (?:against|from) (?:the )?(?:decision|judgment|order|ruling)\b",
+         "appeal"),
+        (r"\bpermission to appeal (?:was |had been )?(?:granted|refused)\b", "appeal"),
+        (r"\b(?:revers\w+|set aside)\b", "reversed"),
+        (r"\b(?:affirm\w+|uph(?:eld|olding))\b", "affirmed"),
+    ))
+
+#: The cue signals that speak to what happened to a decision on appeal, rather than to
+#: how a later court treated it as authority. Reported separately because they answer a
+#: different question — "is this still the last word?" against "how was it received?".
+_HISTORY_SIGNALS = frozenset({"appeal", "reversed", "affirmed"})
+
+
+def _treatment_cues(text: str) -> list[dict]:
+    """The treatment cues visible in one citing passage, quoted verbatim."""
+    found: list[dict] = []
+    seen: set[str] = set()
+    for pattern, signal in _TREATMENT_CUE_PATTERNS:
+        m = pattern.search(text or "")
+        if not m:
+            continue
+        phrase = m.group(0)
+        if phrase.lower() in seen:
+            continue
+        seen.add(phrase.lower())
+        found.append({"phrase": phrase, "signal": signal})
+    return found[:4]
+
+
+def _label_help(segs) -> dict:
+    """What a caller who missed needs in order to hit: the document's own labelling
+    convention, not its opening forty labels.
+
+    A long judgment starts with structural headers ("Introduction", "The facts"), so a
+    head-of-document sample answers "what do the labels look like?" with the one part
+    of the document that does not use the paragraph convention — and the convention is
+    exactly what varies between judgments of the same court ("para 27" against "161.").
+    So: name the numbered run explicitly, and spread the sample over the whole thing."""
+    import re as _re
+
+    labels = [(s.label or "").strip() for s in segs]
+    labels = [x for x in labels if x]
+    numbered = [x for x in labels if _re.fullmatch(r"\[?\d+[.\]]?", x)]
+    # evenly spread rather than the first N, so the sample describes the document
+    step = max(1, len(labels) // 40)
+    sample = labels[::step][:40]
+    out: dict = {"labels_sample": sample, "label_count": len(labels)}
+    if numbered:
+        out["paragraph_labels"] = {
+            "convention": numbered[0],
+            "first": numbered[0], "last": numbered[-1], "count": len(numbered),
+        }
+        out["hint"] = (
+            f"this document numbers its paragraphs {numbered[0]!r} … {numbered[-1]!r}. "
+            "A BARE INTEGER resolves against whatever convention a document uses — "
+            "label='161' finds '161.', '[161]' or 'para 161' alike.")
+    return out
+
+
 def _doc_type(value: str | None, default: DocType) -> DocType:
     if not value:
         return default
@@ -765,6 +962,26 @@ def _anchor_key(text: str | None) -> str | None:
     return f"{typ}:{m.group(2)}" if typ else m.group(2)
 
 
+def _anchor_key_variants(key: str | None) -> set[str]:
+    """The keys one pinpoint can legitimately be stored under.
+
+    A judgment paragraph is the citable unit of case law — practitioners cite Ittihadieh
+    at [110], not Ittihadieh — and it gets written both with its unit word and without.
+    The citing document's extracted pinpoint is "para 110" (key ``para:110``) while the
+    reader types "[110]" or "110" (key ``110``, no unit at all), so the two never met and
+    every judgment pinpoint answered "nothing cites that". Folding them is safe in the
+    direction that matters: a bare number carries no unit, so it cannot collide with
+    ``art:110`` or ``s:110``, which keep their own keys."""
+    if not key:
+        return set()
+    typ, sep, num = key.partition(":")
+    if not sep:                       # a bare number — "[110]", "110"
+        return {key, f"para:{key}"}
+    if typ == "para":
+        return {key, num}
+    return {key}
+
+
 # Every way each unit gets written, keyed by the canonical type ``_anchor_key`` folds to.
 # The database guard needs the spellings, not the fold: the corpus stores whichever form
 # the citing document used ("s. 13"), and the caller types whichever they know
@@ -792,9 +1009,19 @@ def _anchor_sql_prefixes(anchor: str | None) -> list[str]:
     # "para319" and match nothing. Coarseness is fine here — "para 31.9" normalises the
     # same way, and the exact matcher behind the guard rejects it.
     number = number.replace(".", "")
-    if not number:                       # a bare numeral: no unit to spell
-        return [typ.replace(".", "")]
+    if not number:
+        # A bare numeral — a judgment paragraph pinpoint ("[110]"). It has no unit to
+        # spell, but the corpus stores what the CITING document wrote, and for a
+        # paragraph that is "para 110". Guarding on the bare number alone matched
+        # nothing, which is why pinpointing a judgment returned an empty citer list.
+        bare = typ.replace(".", "")
+        return [bare, *(f"{sp}{bare}" for sp in _ANCHOR_SPELLINGS.get("para", ()))]
     numbers = [number]
+    if typ == "para":
+        # …and the mirror image: an anchor written "para 110" against an edge stored as
+        # the bare "[110]".
+        return [f"{spelling}{number}" for spelling in _ANCHOR_SPELLINGS.get(typ, (typ,))
+                ] + [number]
     if typ == "annex" and number.isdigit():
         # The KEY is arabic (see _anchor_key) but the corpus stores what the citing
         # document wrote, and for an annex that is nearly always roman. Guarding on the
@@ -1291,6 +1518,17 @@ class Facade:
             doc = cat.get_document(stable_id)
             meta = _row_meta(doc) if doc is not None else {}
             source = (doc["source"] if doc is not None else None)
+            # What the SERVED TEXT says about its own currency. This tool's answer is
+            # otherwise derived entirely from edges, so an instrument with no recorded
+            # amendments reads as unamended even while the body being served carries
+            # inserted provisions — see the conflict check below.
+            seg_labels: list[str] = []
+            if doc is not None and doc["payload_hash"]:
+                try:
+                    seg_labels = [s.label for s in
+                                  (_ts.get_segments(doc["payload_hash"]) or []) if s.label]
+                except OSError:
+                    seg_labels = []
             # A sector-0 identifier hides whether its base came from sector 1, 2,
             # 3 or 4. The adapter resolves and records the actual base from Cellar;
             # only legacy records need the sector-3 string fallback above.
@@ -1416,6 +1654,24 @@ class Facade:
             degraded = True
             unapplied = None
             up_to_date = False
+        # The mirror image of `uncomparable`, and the more dangerous one: the edges
+        # record NO amendment, so every field says "unamended, nothing outstanding",
+        # while the body actually being served carries inserted provisions. The UK GDPR
+        # held via uk-legislation reads exactly like this — degraded=true,
+        # amended_by=[], unapplied_count=0 — over a body containing Articles 12A, 22A-22D
+        # and 45A, all inserted by the Data (Use and Access) Act 2025. A reader asking
+        # this tool "is this current?" was told the one thing it could not know.
+        #
+        # Never a status change: a letter-suffixed number is strong evidence, not a
+        # recorded effect, and the honest output is a contradiction rather than a
+        # guessed amendment list.
+        inserted = _inserted_provisions(seg_labels)
+        conflict = bool(inserted and not amended_by and not corrected_by
+                        and not repealed_by and not is_cons)
+        if conflict:
+            degraded = True
+            unapplied = None            # unknown — not zero
+            up_to_date = False
         return {
             "stable_id": stable_id, "status": merged,
             "status_label": meta_info["label"], "status_icon": meta_info["icon"],
@@ -1443,12 +1699,40 @@ class Facade:
             "latest_applicable_consolidation": latest_applicable,
             "consolidation_versions": consolidation_versions,
             "consolidations_checked_at": meta.get("consolidations_checked_at"),
-            "point_in_time_capable": bool(native.point_in_time_capable),
+            # A property of the SOURCE, not of this stored record. legislation.gov.uk
+            # serves a dated version of everything it publishes, assimilated EU law
+            # included; reading the flag off harvested metadata alone made it false for
+            # every instrument stored before the adapter recorded it — the UK GDPR among
+            # them, which is the most date-sensitive instrument in UK data protection.
+            "point_in_time_capable": bool(native.point_in_time_capable
+                                          or source == "uk-legislation"),
+            "point_in_time_how": (
+                "harvest_legislation_at(stable_id, date='YYYY-MM-DD') fetches the text "
+                "as it stood, stored as {id}@{date}. Read it with lookup() or "
+                "get_provision() on that dated id."
+            ) if source == "uk-legislation" else None,
             "unapplied_count": unapplied, "up_to_date": up_to_date,
             "by_article": by_article, "provisions": provisions,
             "degraded": degraded,
             # Explicit, because `unapplied_count: null` alone doesn't say WHY.
             "amendments_uncomparable": uncomparable,
+            # The served text contradicts the recorded currency. Named, listed and
+            # dated (or explicitly undated) so a reader can see WHICH provisions say so.
+            "text_contradicts_metadata": conflict,
+            "inserted_provisions_in_text": inserted[:20] if inserted else [],
+            "text_conflict_note": (
+                f"The body served for this instrument contains {len(inserted)} "
+                "letter-suffixed provision(s) — " + ", ".join(inserted[:6]) +
+                ("…" if len(inserted) > 6 else "") + " — which drafting only produces "
+                "by INSERTION into an existing text. So this text has been amended, and "
+                "no amending instrument is recorded against it: amended_by is empty "
+                "because nothing was recorded, not because nothing happened. "
+                + ("The text is also undated (as_at is null), so which commencement "
+                   "dates it reflects cannot be determined from the corpus. "
+                   if not (consolidation_date(stable_id) or native.as_at) else "")
+                + "Treat unapplied_count as unknown and verify against the source "
+                  "before relying on any provision's currency."
+            ) if conflict else None,
             "currency_note": (
                 "The held text is the act as enacted. It has been amended and no "
                 "consolidation is held, so there is nothing to compare it against: "
@@ -2167,15 +2451,20 @@ class Facade:
                 text = None
             if segments_only:
                 segments = ts.get_segments(ph)
+                synthesised = False
                 if not segments and text:
                     from .core.segmentation import synthesise_numbered_segments
                     segments = synthesise_numbered_segments(text)
+                    synthesised = bool(segments)
                 return {
                     "stable_id": stable_id,
                     "title": doc["title"],
                     "doc_type": doc["doc_type"],
                     "segments_only": True,
                     "segment_count": len(segments),
+                    "segments_total": len(segments),
+                    "segmentation": ("none" if (text and not segments)
+                                     else "synthesised" if synthesised else "structural"),
                     "text_chars": len(text or ""),
                     "segments": [
                         {"label": s.label, "kind": s.kind, "level": s.level,
@@ -2207,12 +2496,16 @@ class Facade:
             raw_path = doc["raw_path"]
             meta = _row_meta(doc)
             segments = ts.get_segments(ph)
+            synthesised = False
             if not segments and text:
                 # flat-text imports (Canadian A2AJ, BAILII long tail) carry their
                 # paragraph numbers in the prose — synthesise segments so "[15]"
                 # pinpoints land and peeks can scroll (quote-guarded)
                 from .core.segmentation import synthesise_numbered_segments
                 segments = synthesise_numbered_segments(text)
+                synthesised = bool(segments)
+            total_chars = len(text or "")
+            segments_total = len(segments)
             segs = [asdict(s) for s in segments]
             # Legislation only: a section arrives as ONE segment whose body is
             # newline-separated provisions ("(1)…\n(2)…\n(a)…"). Recover the
@@ -2300,9 +2593,33 @@ class Facade:
                              if (c["char_end"] or 0) > start
                              and (c["char_start"] or 0) < end]
                 text = text[start:end]
+            # The truncation signal sits at the TOP level as well as inside ``window``.
+            # A reader scanning the keys of a body response sees ``text`` and reads it;
+            # nesting "this is 68% of the judgment" one level down inside an object
+            # named for the windowing mechanism is how a 213-paragraph judgment gets
+            # quoted as if it ended at paragraph 140. It should not be possible to hold
+            # this response and not know the text is partial.
+            truncated = bool(window and window["has_more"])
             return {
                 "text": text,
+                "truncated": truncated,
+                "text_chars": total_chars,
+                "char_range": ([window["offset"], window["offset"] + window["limit"]]
+                               if window else [0, total_chars]),
+                **({"incomplete": (
+                    f"PARTIAL TEXT — characters {window['offset']:,}–"
+                    f"{window['offset'] + window['limit']:,} of {total_chars:,}. "
+                    f"The rest is at offset={window['next_offset']}.")}
+                   if truncated else {}),
                 "segments": segs,
+                # How much structure this document HAS, against how much of it this
+                # window carries — "three recitals and nothing operative" is otherwise
+                # indistinguishable from "a commencement SI that says little", and the
+                # difference is whether ingestion dropped the operative part.
+                "segment_count": len(segs),
+                "segments_total": segments_total,
+                "segmentation": ("none" if (text and not segments_total)
+                                 else "synthesised" if synthesised else "structural"),
                 "lines": flat_lines,
                 "citations": citations,
                 **({"window": window} if window else {}),
@@ -2399,6 +2716,17 @@ class Facade:
                     return re.sub(r"\s+", "", (a or "")).lower()
                 want = _norm(anchor)
                 rels = [r for r in rels if _norm(r["dst_anchor"]) == want]
+            elif anchor and any(k.startswith("para:") for k in
+                                _anchor_key_variants(_anchor_key(anchor))):
+                # A JUDGMENT PARAGRAPH — the citable unit of case law, and the one the
+                # string matcher below cannot handle. The unit word is optional on both
+                # sides ("[110]" / "para 110"), and a range pinpoint ("para 70-71") does
+                # cite paragraph 70, so this folds to the canonical key instead of
+                # pattern-matching the written form. Multi-level numbering survives the
+                # fold: "para 3.19" keys apart from "para 3".
+                keys = _anchor_key_variants(_anchor_key(anchor))
+                rels = [r for r in rels
+                        if _anchor_key_variants(_anchor_key(r["dst_anchor"])) & keys]
             elif anchor:
                 # A provision heading represents its whole family. "Mentions of
                 # Article 22" includes citations pinned to Article 22(1), 22(2), …;
@@ -2417,10 +2745,14 @@ class Facade:
                     # reader's own anchorKey()): unit type + number alone, which
                     # still keeps Article 17 distinct from Article 170 and from
                     # Recital 17.
-                    key = _anchor_key(anchor)
-                    if key:
-                        matched = [r for r in rels
-                                   if _anchor_key(r["dst_anchor"]) == key]
+                    #
+                    # Compared as VARIANTS, so a judgment paragraph matches whichever
+                    # way each side spelled it ("[110]" against a stored "para 110").
+                    keys = _anchor_key_variants(_anchor_key(anchor))
+                    if keys:
+                        matched = [
+                            r for r in rels
+                            if _anchor_key_variants(_anchor_key(r["dst_anchor"])) & keys]
                 rels = matched
             by_src: dict[str, list] = {}
             for r in rels:
@@ -2570,7 +2902,14 @@ class Facade:
                             aligned_ce = aligned_cs
                         else:
                             aligned_cs, aligned_ce = aligned
-                        a = max(0, aligned_cs - 90)
+                        # The RUN-UP carries the evidence about the citation, not just
+                        # context for it: the party name the citing court wrote beside it
+                        # (checked against what it resolved to) and, in an appellate
+                        # judgment, the "ON APPEAL FROM THE HIGH COURT …" header that
+                        # names the decision below. 90 characters cut both off — the
+                        # Dawson-Damer appeal's own header ran to ~105 before the
+                        # citation — so this is sized to the sentence, not the phrase.
+                        a = max(0, aligned_cs - 170)
                         b = min(len(text), aligned_ce + 200)
                         # offsets of the citation itself within the snippet, so the
                         # tray can mark the words that actually made the connection
@@ -2731,18 +3070,29 @@ class Facade:
                                    snippet_docs=limit if snippets else 0)
         doc = self.get_document(held).get("document", {}) or {}
         rows = []
+        disputed = 0
         for g in m.get("groups", []):
             snip = None
+            conflict = None
+            cues: list[dict] = []
             if snippets and g.get("snippets"):
                 s0 = g["snippets"][0]
                 snip = {"where": s0.get("anchor"), "text": (s0.get("text") or "")[:320]}
-            rows.append({
+                conflict = _cited_name_conflict(doc.get("title"), s0)
+                if conflict:
+                    disputed += 1
+                cues = _treatment_cues(s0.get("text") or "")
+            rows.append({k: v for k, v in {
                 "stable_id": g["src_id"], "cite": g.get("src_oscola"),
                 "court": g.get("src_court_label"), "jurisdiction": g.get("src_jurisdiction"),
                 "kind": g.get("src_kind"), "date": str(g.get("src_date") or "")[:10] or None,
                 "authority": g.get("authority"), "passages": g.get("count"),
                 "cites_provisions": g.get("anchors"), "snippet": snip,
-            })
+                # a row the reader should check before treating it as a citer
+                "name_conflict": conflict,
+                # verbatim cues, NOT a treatment classification — see _treatment_cues
+                "treatment_cues": cues or None,
+            }.items() if v is not None})
         total = m.get("total", 0)
         shown_to = offset + len(rows)
         # concrete, copy-pasteable next steps — the nudge that keeps an agent from getting
@@ -2772,6 +3122,11 @@ class Facade:
                 nav.append("No documents in the corpus cite this yet.")
         nav.append("Re-sort with sort=" + "|".join(self.MENTION_SORTS))
         nav.append("Open any row with lookup(citation=<its stable_id>) or get_document(<stable_id>).")
+        if disputed:
+            nav.append(
+                f"{disputed} row(s) carry `name_conflict`: the citing document writes a "
+                "DIFFERENT case name beside the citation. Read the snippet before "
+                "counting them as citers.")
         return {
             "target": held, "title": doc.get("title"), "oscola": self.get_document(held).get("oscola"),
             "provision": anchor,
@@ -3094,12 +3449,82 @@ class Facade:
                 return out
         return self._cached(f"related:{stable_id}:{limit}", 300, _compute)
 
+    #: How many citing passages the cue scan reads. Bounded on purpose: this is a
+    #: reconnaissance signal over the most authoritative citers, not a survey.
+    _CUE_SCAN_CITERS = 25
+
+    def _treatment_cue_rollup(self, stable_id: str) -> dict:
+        """Which citing documents use language that says how they treated this one.
+
+        Answers "how has this been received?" well enough to decide WHICH citers to
+        read, which is the question a citator is asked and the one it has so far
+        refused — the docstring's honest "treatment classification is not reliable"
+        left the reader opening every citer by hand. The cues are quoted, attributed
+        and never counted as holdings."""
+        try:
+            page = self.citing_documents(stable_id, sort="pagerank",
+                                         limit=self._CUE_SCAN_CITERS, snippets=True)
+        except Exception:  # noqa: BLE001 — a reconnaissance extra must never 500 the citator
+            return {}
+        rows = [r for r in (page.get("results") or []) if r.get("treatment_cues")]
+        if not rows:
+            return {}
+        scanned = len(page.get("results") or [])
+
+        def _row(r: dict, cues: list[dict]) -> dict:
+            return {"stable_id": r["stable_id"], "cite": r.get("cite"),
+                    "court": r.get("court"), "date": r.get("date"), "cues": cues,
+                    "passage": (r.get("snippet") or {}).get("text")}
+
+        treatment: list[dict] = []
+        history: list[dict] = []
+        signals: dict[str, int] = {}
+        for r in rows:
+            hist = [c for c in r["treatment_cues"] if c["signal"] in _HISTORY_SIGNALS]
+            treat = [c for c in r["treatment_cues"] if c["signal"] not in _HISTORY_SIGNALS]
+            for cue in treat:
+                signals[cue["signal"]] = signals.get(cue["signal"], 0) + 1
+            if treat:
+                treatment.append(_row(r, treat))
+            if hist:
+                history.append(_row(r, hist))
+        out: dict = {}
+        if treatment:
+            out["treatment_cues"] = {
+                "scanned": scanned, "of_total": page.get("total", 0),
+                "signals": dict(sorted(signals.items(), key=lambda kv: -kv[1])),
+                "documents": treatment[:8],
+                "caveat": (
+                    "HEURISTIC, NOT A HOLDING. These are verbatim phrases found in the "
+                    "citing passage, matched by pattern — the cue may belong to another "
+                    "authority named in the same sentence, and 'distinguished' says "
+                    "nothing about whether the distinction held. They tell you WHICH "
+                    "citers to read, not how this authority stands. Read the passage."),
+            }
+        if history:
+            out["subsequent_history_cues"] = {
+                "scanned": scanned, "of_total": page.get("total", 0),
+                "documents": history[:8],
+                "caveat": (
+                    "HEURISTIC. The corpus holds NO appellate edge — no harvested source "
+                    "publishes one — so this is language spotted in citing passages "
+                    "('on appeal from', 'reversed', 'permission to appeal refused'). "
+                    "It can only ever find an appeal whose judgment is HELD and cites "
+                    "this one; silence here is NOT evidence that a decision stands. "
+                    "Open the named document to see what it actually did."),
+            }
+        return out
+
     def citator(self, stable_id: str) -> dict:
         """The "how does this authority stand" report an agent or the UI asks for
         first: citation volume + recency, network-authority percentile, the most
         significant citing documents, and (for legislation) version/effects state.
-        Treatment counts are deliberately ABSENT — the classifier isn't reliable
-        enough to present Shepard's-style signals yet (design §6c caveat)."""
+        Treatment CLASSIFICATIONS are deliberately ABSENT — the classifier isn't
+        reliable enough to present Shepard's-style signals yet (design §6c caveat) —
+        but the verbatim cues are not, because without them the only way to learn how
+        an authority was received is to open every citer."""
+        # Before the connection is taken: citing_documents opens its own.
+        cue_rows = self._treatment_cue_rollup(stable_id)
         with self._open() as (cat, _rs, _ts):
             doc = cat.get_document(stable_id)
             if doc is None:
@@ -3125,6 +3550,7 @@ class Facade:
                 } if auth else None,
                 "most_significant_citors": citors,
                 "treatments": None,  # joins when the treatment classifier is trustworthy
+                **cue_rows,
             }
             if doc["doc_type"] == "legislation":
                 out["versions"] = [
@@ -3136,7 +3562,7 @@ class Facade:
     def lookup(self, *, citation: str, pincite: str | None = None, context: int = 1,
                cited_by: bool = True, similar: bool = True, autofetch: bool = True,
                full: bool = False, original: bool = False,
-               outline_kind: str | None = None) -> dict:
+               outline_kind: str | None = None, as_at: str | None = None) -> dict:
         """Resolve a citation (or a stable_id) and return one self-contained answer.
 
         This is the retrieval front door — it folds fetching in as a silent fallback rather
@@ -3210,11 +3636,26 @@ class Facade:
                 hr = {}
             if hr.get("resolved") and hr.get("document"):
                 held_id, fetched = hr["document"], True
+        # 2b. an ID THAT NAMES A DATE ("…@2024-01-01") that we don't hold yet: the same
+        # on-demand contract as any other authority new to the corpus.
+        pit: dict = {}
+        dated_ask = re.fullmatch(r"(.+)@(\d{4}-\d{2}-\d{2})", raw.strip())
+        if held_id is None and dated_ask and autofetch:
+            held_id, pit = self.point_in_time_target(
+                dated_ask.group(1), dated_ask.group(2), autofetch=True)
+            if not pit.get("as_at"):
+                held_id = None                     # fetch failed — fall through to 3b
         # 3a. held → the rich answer
         if held_id:
             requested_held_id = held_id
+            # A DATED ASK pins the read: never redirect it to today's consolidation,
+            # which is the very text the caller said they did not want.
+            if as_at and not pit:
+                held_id, pit = self.point_in_time_target(
+                    held_id, as_at, autofetch=autofetch)
             with self._open() as (cat, _rs, _ts):
-                if not original and not cat.consolidation_base_for(held_id):
+                if (not original and not pit.get("as_at")
+                        and not cat.consolidation_base_for(held_id)):
                     current = cat.applicable_consolidation(held_id)
                     if current:
                         held_id = current[0]
@@ -3224,7 +3665,19 @@ class Facade:
                 full=full, pincite_inferred=pincite_inferred,
                 outline_kind=outline_kind,
             )
-            if held_id != requested_held_id:
+            if pit:
+                answer["point_in_time"] = pit
+                if pit.get("as_at"):
+                    answer["note"] = (
+                        f"Reading the text as it stood on {pit['as_at']}, not today's. "
+                        "Amendments made after that date are NOT in this text.")
+                elif pit.get("unavailable"):
+                    # Loudly: a caller who asked for a date and silently got today's
+                    # text would quote the wrong law with no way of knowing.
+                    answer["note"] = (
+                        f"THIS IS THE CURRENT TEXT, not the text as at "
+                        f"{pit.get('requested')}: {pit['unavailable']}")
+            if held_id != requested_held_id and not pit:
                 answer["requested_stable_id"] = requested_held_id
                 answer["canonical_read_redirected"] = True
                 answer["note"] = (
@@ -3469,16 +3922,42 @@ class Facade:
         for si in SOURCE_INFO.values():
             fetch.setdefault(_REG_NAME.get(si.jurisdiction, si.jurisdiction), []).append(si.key)
         shape = self._shape_ready()
+        # Whether search_text() can SEE each jurisdiction, on the same row as how much of
+        # it is held. Holding 2.9M French documents and indexing none of them are two
+        # different facts, and an agent that read only the first ran a full-text search,
+        # got nothing, and concluded the corpus lacked the material — a cycle a single
+        # field ends. Measured against the INDEX, not the gate setting: an empty gate
+        # means "no explicit narrowing", not "nothing indexed". Cached, because the
+        # aggregate behind it takes ~2s and this is an orientation call.
+        # sync_wait, and "unknown" rather than a placeholder, because a cold cache
+        # answering "indexed: no" for every jurisdiction is not a missing field — it is
+        # the false claim this exists to prevent.
+        coverage = self._cached("fts-jurisdiction-coverage", 600,
+                                self.freetext_index_summary,
+                                placeholder={"jurisdictions": [], "_unknown": True},
+                                sync_wait=4.0)
+        coverage_known = not coverage.get("_unknown")
+        indexed_docs: dict[str, int] = {
+            row["jurisdiction"]: row["documents"]
+            for row in coverage.get("jurisdictions", [])}
         rows = []
         for j in shape.get("jurisdictions", []):
             total = j.get("total", 0)
             if total < 1:
                 continue
+            n_indexed = indexed_docs.get(j["jurisdiction"], 0)
             rows.append({
                 "jurisdiction": j["jurisdiction"],
                 "held": {"cases": j.get("cases", 0), "legislation": j.get("legislation", 0),
                          "guidance": (j.get("guidance", 0) or 0) + (j.get("administrative", 0) or 0)},
                 "total": total,
+                # yes | partial | no — what search_text() will find here. "no" is the one
+                # that matters: held, and invisible to full-text search.
+                "full_text_indexed": ("unknown" if not coverage_known
+                                      else "no" if not n_indexed
+                                      else "yes" if n_indexed >= total * 0.9
+                                      else "partial"),
+                "full_text_documents": n_indexed if coverage_known else None,
                 "fetch_on_demand": sorted(fetch.get(j["jurisdiction"], [])),
             })
         rows.sort(key=lambda r: -r["total"])
@@ -3494,9 +3973,13 @@ class Facade:
         out: dict = {"jurisdictions": head, "total_documents": total_docs,
                      "warming": bool(shape.get("_warming")),
                      "note": "Main jurisdictional coverage, deepest first, with held density "
-                             "(cases / legislation / guidance). fetch_on_demand lists adapters "
-                             "that can pull MORE on demand; lookup() fetches silently where it "
-                             "can. Search is by citation/title (find/lookup), not concept."}
+                             "(cases / legislation / guidance). full_text_indexed says whether "
+                             "search_text() can see a jurisdiction at all — 'no' means held but "
+                             "invisible to full-text search, reachable only by citation/title "
+                             "(search_coverage() has the per-source detail). fetch_on_demand "
+                             "lists adapters that can pull MORE on demand; lookup() fetches "
+                             "silently where it can. Search is by citation/title "
+                             "(find/lookup), not concept."}
         if tail:
             out["other_jurisdictions"] = {
                 "count": len(tail), "documents": sum(r["total"] for r in tail),
@@ -3614,7 +4097,7 @@ class Facade:
                         }
             if idx < 0 and segs:
                 return {"error": "no matching segment", "stable_id": stable_id,
-                        "labels_sample": [s.label for s in segs[:40] if s.label]}
+                        "requested": label, **_label_help(segs)}
             if not segs:
                 lo = max(0, (char_start or 0) - 400)
                 hi = min(len(text), (char_end or len(text)) + 400)
@@ -7352,6 +7835,47 @@ class Facade:
         if stats.outcome not in ("stored", "present") and stats.notes:
             out["error"] = stats.notes[-1]
         return out
+
+    def point_in_time_target(self, base_id: str, date: str, *,
+                             autofetch: bool = True) -> tuple[str, dict]:
+        """The held id for ``base_id`` as it stood on ``date``, fetching it if need be.
+
+        "Which text applied then?" is a question about a date, not about what happens to
+        be harvested — and legislation.gov.uk serves a dated version of everything it
+        publishes. So a specific date is answerable on demand: this returns the dated id
+        if we hold it, fetches it if we can, and otherwise says why not and leaves the
+        caller reading the current text KNOWING that is what it got."""
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date or ""):
+            return base_id, {"error": "as_at must be a date, YYYY-MM-DD"}
+        base = base_id.split("@")[0]
+        dated = f"{base}@{date}"
+        with self._open() as (cat, _rs, _ts):
+            if cat.get_document(dated) is not None:
+                return dated, {"as_at": date, "base_id": base, "fetched": False}
+            doc = cat.get_document(base)
+            source = doc["source"] if doc is not None else None
+        if source != "uk-legislation":
+            return base_id, {
+                "as_at": None, "requested": date, "base_id": base,
+                "unavailable": ("point-in-time text is served by legislation.gov.uk; "
+                                f"this instrument is held from {source!r}. The text "
+                                "returned is the current one."),
+            }
+        if not autofetch:
+            return base_id, {"as_at": None, "requested": date, "base_id": base,
+                             "unavailable": "not held, and autofetch is off"}
+        try:
+            res = self.harvest_legislation_at(stable_id=base, date=date)
+        except Exception as exc:  # noqa: BLE001 — a fetch failure must not lose the answer
+            return base_id, {"as_at": None, "requested": date, "base_id": base,
+                             "unavailable": f"could not fetch: {exc}"}
+        if res.get("present"):
+            return dated, {"as_at": date, "base_id": base, "fetched": True}
+        return base_id, {
+            "as_at": None, "requested": date, "base_id": base,
+            "unavailable": (res.get("error")
+                            or f"legislation.gov.uk served no version at {date}"),
+        }
 
     def harvest_legislation_at(self, *, stable_id: str, date: str) -> dict:
         """Fetch UK legislation as it stood on ``date`` (YYYY-MM-DD) — the point-in-time
@@ -12277,6 +12801,57 @@ class Facade:
             },
         }
 
+    # Every stored doc_type, and the display KINDS the sibling tools take. The
+    # free-text filter accepts both vocabularies because a reader who has just used
+    # search(kind='cases') has no way to know this one wanted 'judgment' — and an
+    # unrecognised value used to become `doc_type IN ('case')`, matching nothing.
+    _FTS_DOC_TYPES = ("judgment", "legislation", "decision", "opinion", "guidance",
+                      "preparatory", "note", "commentary")
+    _FTS_KIND_DOC_TYPES = {
+        "cases": ("judgment", "decision", "opinion"),
+        "case": ("judgment", "decision", "opinion"),
+        "caselaw": ("judgment", "decision", "opinion"),
+        "case-law": ("judgment", "decision", "opinion"),
+        "judgments": ("judgment",),
+        "legislation": ("legislation",),
+        "statute": ("legislation",),
+        "law": ("legislation",),
+        "act": ("legislation",),
+        "guidance": ("guidance",),
+        # not expressible as a doc_type set — an administrative decision is one made
+        # by a regulator, which is a fact about the SOURCE — so it narrows to the
+        # deciding types and says so rather than silently meaning something else
+        "administrative": ("decision", "opinion", "notice"),
+        "preparatory": ("preparatory",),
+        "notes": ("note",),
+        "commentary": ("commentary",),
+    }
+
+    def _resolve_doc_types(self, values: list[str]) -> tuple[list[str], list[str]]:
+        """Map a doc_type filter onto stored doc types, accepting display kinds too.
+
+        Returns (resolved, unrecognised). A value belonging to NEITHER vocabulary is
+        reported rather than passed through: a filter nothing can satisfy returns
+        total=0, and a silent zero in legal research reads as "the corpus holds no
+        such authority" rather than "you passed a bad enum"."""
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for raw in values:
+            v = (raw or "").strip().lower()
+            if not v:
+                continue
+            if v in self._FTS_KIND_DOC_TYPES:
+                resolved.extend(self._FTS_KIND_DOC_TYPES[v])
+            elif v in self._FTS_DOC_TYPES:
+                resolved.append(v)
+            else:
+                unknown.append(raw)
+        # order-preserving dedup: 'cases,judgment' must not repeat the type
+        return list(dict.fromkeys(resolved)), unknown
+
+    def _doc_type_vocabulary(self) -> list[str]:
+        return sorted(set(self._FTS_DOC_TYPES) | set(self._FTS_KIND_DOC_TYPES))
+
     def freetext_search(self, query: str, *, exact: bool = True, limit: int = 25,
                         offset: int = 0, sources: list[str] | None = None,
                         doc_type: list[str] | None = None,
@@ -12285,6 +12860,8 @@ class Facade:
                         year_from: int | None = None,
                         with_network: bool = True) -> dict:
         """Free-text search over the gated scope, with literal quotation support."""
+        import difflib
+
         from .fulltext import index as fts
 
         # NOT freetext_scope(): that computes per-source coverage, which is a GROUP BY
@@ -12321,7 +12898,26 @@ class Facade:
                         "matched": [], "notes": notes or ["nothing in scope"]}
         filters: dict = {"source": allowed} if allowed else {}
         if doc_type:
-            filters["doc_type"] = doc_type
+            wanted, unknown = self._resolve_doc_types(doc_type)
+            if unknown:
+                vocab = self._doc_type_vocabulary()
+                suggestions = {
+                    u: (difflib.get_close_matches(u.lower(), vocab, n=2, cutoff=0.5)
+                        or None)
+                    for u in unknown}
+                # Loudly, not as an empty result set: the filter cannot be satisfied,
+                # and "0 documents say this" is a different claim from "that is not a
+                # document type".
+                return {"items": [], "total": 0, "verified": 0, "candidates": 0,
+                        "truncated": False, "took_ms": 0, "exact": exact,
+                        "tsquery": None, "scope": [], "facets": {}, "network": {},
+                        "matched": [],
+                        "error": ("unknown doc_type: " + ", ".join(unknown)),
+                        "did_you_mean": {k: v for k, v in suggestions.items() if v},
+                        "accepts": vocab,
+                        "notes": [*notes, "no search was run — the doc_type filter "
+                                          "names no document type in this corpus"]}
+            filters["doc_type"] = wanted
         if year_from:
             filters["year_from"] = year_from
         with self._open() as (cat, _rs, ts):
@@ -12552,8 +13148,13 @@ class Facade:
         parsed = parse(query or "", exact=exact)
         items: list[dict] = []
         with self._open() as (cat, _rs, ts):
-            cited = {m["stable_id"]: (m.get("cited_by") or 0)
-                     for m in cat.documents_meta(list(ids[:100]))}
+            # The LIVE count off the resolved graph, which is what lookup() and
+            # citator() report. documents_meta reads doc_authority.in_degree — a
+            # PageRank-layer roll-up refreshed on its own schedule — so between
+            # refreshes one session could see "cited_by 7" in a search row and
+            # "cited_by_count 8" on the same document a call later. Cheap here: this
+            # page is at most 100 ids and it is one grouped aggregate.
+            cited = cat.cited_by_counts(list(ids[:100]))
             for doc_id in ids[:100]:
                 doc = cat.get_document(doc_id)
                 if not doc or not doc["payload_hash"]:
@@ -12631,6 +13232,15 @@ class Facade:
         res = self.freetext_search(
             query, exact=exact, limit=limit, sources=sources, doc_type=doc_type,
             court=court, jurisdictions=jurisdictions, year_from=year_from)
+        if res.get("error"):
+            # never as an empty result: a rejected filter must not be readable as an
+            # answer about the corpus
+            return {k: v for k, v in {
+                "query": query, "error": res["error"],
+                "did_you_mean": res.get("did_you_mean") or None,
+                "accepts": res.get("accepts"),
+                "hint": res.get("notes", [None])[-1],
+            }.items() if v}
         ids = [it["stable_id"] for it in res.get("items", [])]
         hydrated = {h["stable_id"]: h
                     for h in self.freetext_hydrate(ids=ids, query=query,
@@ -12665,8 +13275,10 @@ class Facade:
             "shown": len(items),
             "items": items,
             "facets": {k: v for k, v in {
+                # keyed by the PARAMETER name — a facet a reader cannot feed back into
+                # the filter that produced it is a third vocabulary to guess at
                 "jurisdiction": top(fac.get("jurisdiction")),
-                "type": top(fac.get("doc_type")),
+                "doc_type": top(fac.get("doc_type")),
                 "court": top(fac.get("court")),
                 "decade": _decades(fac.get("years")),
             }.items() if v},

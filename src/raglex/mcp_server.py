@@ -176,7 +176,12 @@ def build_server(config: Config | None = None) -> MCPServer:
         in common, which is often the fastest route to the leading case.
 
         Scope it with jurisdiction / source / doc_type / court / year_from (comma-
-        separated where several). Call search_coverage() for what is indexed: a
+        separated where several). ``doc_type`` takes either a display kind
+        ("cases" | "legislation" | "guidance" | "administrative" | "preparatory") or a
+        stored type ("judgment", "decision", "opinion", "note", "commentary"); anything
+        else is REJECTED with did_you_mean rather than silently matching nothing. The
+        returned ``facets`` are keyed by these same parameter names, so a facet can be
+        fed straight back as a filter. Call search_coverage() for what is indexed: a
         jurisdiction that is not indexed returns nothing, which is not the same as the
         corpus not holding it."""
         split = lambda v: [x for x in (v or "").split(",") if x]  # noqa: E731
@@ -198,8 +203,11 @@ def build_server(config: Config | None = None) -> MCPServer:
     @mcp.tool(annotations=_READ_ONLY)
     def overview() -> dict:
         """The dense, parsimonious balance of holdings — per jurisdiction, how much
-        case-law / legislation / guidance is HELD and what can be FETCHED on demand. Read
-        this first to know what the corpus can be relied on for."""
+        case-law / legislation / guidance is HELD, whether search_text() can see it
+        (``full_text_indexed``: yes | partial | no), and what can be FETCHED on demand.
+        Read this first to know what the corpus can be relied on for: a jurisdiction
+        held in the millions but indexed 'no' answers a full-text search with nothing,
+        and is reachable by citation and title instead."""
         return facade.holdings_overview()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, openWorldHint=False,
@@ -252,7 +260,7 @@ def build_server(config: Config | None = None) -> MCPServer:
     def lookup(citation: str, pincite: Optional[str] = None, context: int = 1,
                full: bool = False, cited_by: bool = True, similar: bool = True,
                autofetch: bool = True, original: bool = False,
-               outline_kind: Optional[str] = None) -> dict:
+               outline_kind: Optional[str] = None, as_at: Optional[str] = None) -> dict:
         """Resolve a CITATION, a statute-by-name, or a stable_id and return one
         self-contained answer. This is the front door — start here.
 
@@ -270,6 +278,13 @@ def build_server(config: Config | None = None) -> MCPServer:
         The reply identifies the base act; pass ``original=true`` to inspect its original
         text instead. Explicit historical/future dated ids are never redirected.
 
+        AS AT A DATE. ``as_at='2024-01-01'`` reads UK legislation as it stood on that day,
+        FETCHING that version on demand if the corpus doesn't hold it — the answer to
+        "which text applied when this request was made", which for the UK GDPR is a
+        different instrument each side of the DUAA commencement dates. It works for
+        assimilated EU law too. If a dated version can't be had you get the current text
+        with ``point_in_time.unavailable`` saying so — never a date silently ignored.
+
         NO PINPOINT → metadata + a short text PREVIEW + the structural outline (so you can
         pick a provision to pincite), plus document-level ``cited_by``. ``full=true`` returns
         the whole (capped) text — prefer a pincite, it is exact and cheap. Also returned: the
@@ -286,7 +301,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         need to harvest by hand."""
         return facade.lookup(citation=citation, pincite=pincite, context=context, full=full,
                              cited_by=cited_by, similar=similar, autofetch=autofetch,
-                             original=original, outline_kind=outline_kind)
+                             original=original, outline_kind=outline_kind, as_at=as_at)
 
     @mcp.tool(annotations=_READ_ONLY)
     def citing_documents(target: str, anchor: Optional[str] = None, sort: str = "pagerank",
@@ -295,9 +310,14 @@ def build_server(config: Config | None = None) -> MCPServer:
         """The browsable list of documents that CITE ``target`` — the results list you page,
         filter and sort, and return to. ``target`` is a citation or a stable_id.
 
-        Pin it to ONE provision with ``anchor`` ("Article 15", "s. 45", "[42]") to get
-        exactly the documents that cite THAT article, not the whole instrument — this is the
-        answer to "which cases cite Article 15 of the GDPR". Then:
+        Pin it to ONE provision with ``anchor`` ("Article 15", "s. 45") to get exactly the
+        documents that cite THAT article, not the whole instrument — this is the answer to
+        "which cases cite Article 15 of the GDPR".
+
+        IT WORKS ON JUDGMENTS TOO, which is the case-law research question: ``anchor='[110]'``
+        (or "110", or "para 110" — the same thing) on Ittihadieh returns the documents that
+        cite THAT PARAGRAPH, because a paragraph is the unit practitioners actually cite. A
+        range pinpoint ("para 70-71") counts for the paragraphs it spans. Then:
         • ``sort``: pagerank (most authoritative, default) | cited | newest | oldest | passages
         • ``jurisdiction``: an ISO code ("fr", "gb", "eu") or a name — narrow to one place
         • ``kind``: "cases" | "administrative" (DPA/regulator decisions) | "legislation" | "guidance"
@@ -382,7 +402,10 @@ def build_server(config: Config | None = None) -> MCPServer:
         A long act cannot be returned whole — the DPA 2018 is 1,222 segments and assembles
         to 2.4 MB against a 1 MB tool ceiling — so an unwindowed call on one returns its
         FIRST WINDOW, flagged ``window.defaulted`` with ``next_offset`` to walk the rest.
-        Never assume a body is complete without checking ``window.has_more``. Two ways to
+        CHECK ``truncated`` BEFORE QUOTING: it is true whenever text is missing from the
+        end, with ``text_chars`` (the whole document), ``char_range`` (what you have) and
+        an ``incomplete`` sentence naming the offset of the rest. A 213-paragraph judgment
+        windowed at paragraph 140 reads like a judgment that ended there. Two ways to
         take control:
 
         * ``segments_only=True`` — every label, kind, level and char offset, no text. For
@@ -390,6 +413,10 @@ def build_server(config: Config | None = None) -> MCPServer:
           this is the whole answer, in one cheap call.
         * ``offset``/``limit`` — a character window, carrying the segments and citations
           that overlap it; ``window.next_offset`` walks the rest.
+
+        ``segments_total`` + ``segmentation`` ("structural" | "synthesised" | "none")
+        say how much structure the document has, so "this instrument says little" is
+        distinguishable from "ingestion dropped the operative part".
         """
         target = facade.canonical_read_target(stable_id, original=original)
         result = facade.document_body(
@@ -410,7 +437,13 @@ def build_server(config: Config | None = None) -> MCPServer:
         either side and the heading breadcrumb. A recital requested from a consolidation
         transparently reads the unchanged recital from its original act and reports that
         provenance. Prefer this over get_document_body when you need to quote a single
-        provision exactly: it's pinpoint-accurate and token-cheap."""
+        provision exactly: it's pinpoint-accurate and token-cheap.
+
+        Judgments do not agree on how they label paragraphs ("para 27" in one, "161." in
+        another, "[42]" in a third), so pass a BARE INTEGER — ``label='161'`` — and it
+        resolves against whatever convention that document uses. A miss returns the
+        document's own convention and a sample spread across it, not its opening
+        headers."""
         target = facade.canonical_read_target(stable_id, original=original)
         result = facade.get_provision(
             target["stable_id"], label=label, char_start=char_start, context=context)
@@ -450,16 +483,35 @@ def build_server(config: Config | None = None) -> MCPServer:
         validity windows + what changed each, where the source pinpoints it. ``degraded`` = the
         "in force" is inferred from absence of recorded changes, not confirmed. Check this
         before relying on an act — an old directive may have been repealed and recast (e.g.
-        Directive 95/46 → GDPR), or its text may predate unapplied amendments."""
+        Directive 95/46 → GDPR), or its text may predate unapplied amendments.
+
+        ``text_contradicts_metadata`` is the one to read first when it is true: the body
+        being served carries letter-suffixed provisions (Article 12A, s. 164A) that only
+        INSERTION produces, so the text HAS been amended while no amending instrument is
+        recorded against it — ``amended_by: []`` there means nothing was recorded, not
+        that nothing happened, and ``unapplied_count`` is null (unknown) rather than 0.
+        ``inserted_provisions_in_text`` names the provisions that prove it. The UK GDPR
+        and the DPA 2018 as held both read this way."""
         return facade.legislative_status(stable_id)
 
     @mcp.tool(annotations=_READ_ONLY)
     def citator(stable_id: str) -> dict:
         """How this authority currently stands: citation volume, how many citing
         documents are recent, its network-authority percentile (PageRank), and the
-        most significant documents citing it. NOTE: treatment classifications
+        most significant documents citing it. NOTE: treatment CLASSIFICATIONS
         (followed/overruled) are deliberately absent — not yet reliable — so do not
-        infer 'still good law' from this alone; read the significant citors."""
+        infer 'still good law' from this alone; read the significant citors.
+
+        ``treatment_cues`` is the shortcut to WHICH ones to read: the verbatim phrases
+        ("declined to follow", "distinguished", "per incuriam", "bound by") found in
+        the passages of the most authoritative citers, quoted and attributed. A
+        heuristic over language, not a holding — the caveat travels with it.
+
+        ``subsequent_history_cues`` answers "has this been appealed?" as far as the
+        corpus can: there is NO appellate edge in the graph, so it reports citing
+        passages that say so in words ("on appeal from", "reversed", "permission to
+        appeal refused"). It finds an appeal only where the appellate judgment is held
+        and cites this one — ABSENCE IS NOT EVIDENCE that a decision stands."""
         return facade.citator(stable_id)
 
     @admin

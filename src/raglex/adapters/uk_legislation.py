@@ -173,12 +173,20 @@ class UKLegislationAdapter(BaseAdapter):
         if self.feed:
             yield from self._discover_feed(since, max_pages=max_pages)
             return
+        from ..resolve.matchers import assimilated_leg_path
+
         for leg_id in self.ids:
             if self.version_date:  # point-in-time copy, keyed distinctly as id@date
+                # The IDENTITY stays the id the corpus knows; only the URI moves.
+                # Assimilated EU law is keyed european/regulation/2016/0679, whose
+                # dated representations 404 — the same instrument serves them under
+                # eur/2016/679. Keying the fetched copy off the requested id keeps
+                # `european/regulation/2016/0679@2024-01-01` pointing at its base.
+                uri_path = assimilated_leg_path(leg_id) or leg_id
                 yield Stub(
                     stable_id=f"{leg_id}@{self.version_date}",
-                    landing_url=f"{BASE_URL}/{leg_id}/{self.version_date}",
-                    raw_url=f"{BASE_URL}/{leg_id}/{self.version_date}/data.akn",
+                    landing_url=f"{BASE_URL}/{uri_path}/{self.version_date}",
+                    raw_url=f"{BASE_URL}/{uri_path}/{self.version_date}/data.akn",
                     hints={"base_id": leg_id, "version_date": self.version_date},
                 )
             else:

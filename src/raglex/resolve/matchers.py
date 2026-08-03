@@ -146,6 +146,35 @@ def assimilated_celex(path: str) -> str | None:
     return None
 
 
+#: ``/european/{kind}/…`` → the type-code path legislation.gov.uk actually serves
+#: representations under. Both name the same instrument, but only the type-code form
+#: has ``/data.akn`` and dated (point-in-time) URIs.
+_ASSIMILATED_TYPE_CODE = {"regulation": "eur", "directive": "eudr", "decision": "eudn"}
+
+
+def assimilated_leg_path(path: str) -> str | None:
+    """The legislation.gov.uk path that serves REPRESENTATIONS of assimilated EU law.
+
+    The corpus keys the UK GDPR ``european/regulation/2016/0679``, which is a real
+    legislation.gov.uk landing page — but ``/european/regulation/2016/0679/data.akn``
+    is a 404, and so is every dated URI under it. The same instrument answers on
+    ``/eur/2016/679``, where ``/2024-01-01/data.akn`` returns the point-in-time text.
+
+    Two differences, both load-bearing: the type word becomes a type CODE, and the
+    number loses its zero padding (``/eur/2016/0679`` is a 404 as well). This is why
+    assimilated law read as "point_in_time_capable: false" — not a gap in the source,
+    a path form the harvester never tried."""
+    p = (path or "").lower().strip("/")
+    m = re.match(r"european/(regulation|directive|decision)/(\d{4})/(\d+)$", p)
+    if m:
+        return f"{_ASSIMILATED_TYPE_CODE[m.group(1)]}/{m.group(2)}/{int(m.group(3))}"
+    # already in the serving form (possibly zero-padded, which the dated URIs reject)
+    m = re.match(r"(eur|eudr|eudn|eudc|eufr)/(\d{4})/(\d+)$", p)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}/{int(m.group(3))}"
+    return None
+
+
 def match_legislation_regnal(raw: str) -> Candidate | None:
     """A pre-1963 Act cited by regnal year (ukpga/Geo6/9-10/18). Keep the original
     case — legislation.gov.uk's regnal segment ("Geo6") is case-sensitive in the URI."""
