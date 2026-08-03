@@ -275,6 +275,14 @@ def test_find_is_citation_first_then_title_and_is_honest_about_semantic():
     assert q["results"] == [] and "nothing_found" in q
 
 
+def test_find_relaxes_descriptive_party_query_without_widening_questions():
+    assert Facade._relaxed_find_query(
+        "Uber Ola driver Article 15 automated decision-making Amsterdam"
+    ) == "Uber OR Ola OR driver OR automated OR decision OR making OR Amsterdam"
+    assert Facade._relaxed_find_query("what are the rules on the right of access") is None
+    assert Facade._relaxed_find_query("Uber AND Ola") is None
+
+
 def test_mentions_facets_describe_the_whole_set_not_the_loaded_page():
     """The reader's mentions tray shows one PAGE of citers but chips that claim to
     summarise all of them. Counting the page's own rows made the chips describe 40

@@ -3451,6 +3451,34 @@ class Facade:
                      "guidance": "guidance", "administrative": "administrative",
                      "decision": "administrative", "dpa": "administrative"}
 
+    # Words which do not make a failed descriptive query distinctive enough to widen
+    # into an OR search.  The relaxed route is for party/place/fact discovery (common in
+    # civil-law records whose titles are only ECLIs or docket numbers), not a pretence at
+    # semantic question answering.
+    _FIND_RELAX_STOP = {
+        "and", "are", "article", "case", "cases", "court", "for", "from", "how",
+        "law", "of", "on", "right", "rights", "rule", "rules", "section", "the",
+        "to", "under", "what", "when", "where", "which", "who", "why", "access",
+    }
+
+    @classmethod
+    def _relaxed_find_query(cls, query: str) -> str | None:
+        """A conservative OR query for descriptive searches whose all-terms pass failed."""
+        # Preserve explicit query-language intent: callers who used operators, quotes or
+        # grouping asked for that shape and should not have it silently widened.
+        if re.search(r'(?i)\b(?:AND|OR|NOT)\b|["“”()|&]', query):
+            return None
+        terms: list[str] = []
+        for word in re.findall(r"[^\W_]+", query, flags=re.UNICODE):
+            folded = word.casefold()
+            if len(folded) < 3 or folded.isdigit() or folded in cls._FIND_RELAX_STOP:
+                continue
+            if folded not in {t.casefold() for t in terms}:
+                terms.append(word)
+        if len(terms) < 2:
+            return None
+        return " OR ".join(terms[:8])
+
     def find(self, query: str, *, k: int = 10, jurisdiction: str | None = None,
              kind: str | None = None, source: str | None = None,
              doc_type: str | None = None, tag: str | None = None,
@@ -3515,6 +3543,16 @@ class Facade:
                 jurisdictions=[jurisdiction] if jurisdiction else None,
                 doc_type=[kind] if kind else None, with_network=False,
             )
+            if not fulltext.get("items"):
+                relaxed = self._relaxed_find_query(q)
+                if relaxed:
+                    fulltext = self.freetext_search(
+                        relaxed, exact=False, limit=k,
+                        jurisdictions=[jurisdiction] if jurisdiction else None,
+                        doc_type=[kind] if kind else None, with_network=False,
+                    )
+                    if fulltext.get("items"):
+                        out["relaxed_query"] = relaxed
             for r in fulltext.get("items", []):
                 results.append({
                     "stable_id": r["stable_id"], "title": r.get("title"),
@@ -3527,7 +3565,11 @@ class Facade:
                 })
             out["total_shown"] = len(results)
             if results:
-                out["search_route"] = "indexed body (title/citation search had no match)"
+                out["search_route"] = (
+                    "relaxed indexed body (ranked any-term match)"
+                    if out.get("relaxed_query") else
+                    "indexed body (title/citation search had no match)"
+                )
         # honest note about what search can and can't do here
         with self._open() as (cat, _rs, _ts):
             semantic_on = cat.has_vector_index(self._provider().dimensions)
