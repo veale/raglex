@@ -1175,6 +1175,20 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str) -> l
             de_known[c.candidate_id] = known
         if known:
             filtered.append(c)
+    # Canonicalise the narrow UKUT AAC/ACC spelling and legacy zero-padding variants
+    # while the catalogue is available.  The set-based resolver intentionally handles
+    # exact identifiers and aliases only; leaving ``ukut/acc/2014/310`` on the edge
+    # would therefore stay pending even though ``ukut/aac/2014/0310`` is held.
+    if catalogue is not None:
+        ukut = list(dict.fromkeys(
+            c.candidate_id for c in filtered
+            if c.candidate_id and re.fullmatch(
+                r"ukut/(?:aac|acc)/\d{4}/\d+", c.candidate_id, re.IGNORECASE)
+        ))
+        canonical = catalogue.find_existing(ukut) if ukut else {}
+        if canonical:
+            filtered = [replace(c, candidate_id=canonical.get(c.candidate_id, c.candidate_id))
+                        for c in filtered]
     return filtered
 
 

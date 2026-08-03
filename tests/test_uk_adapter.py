@@ -255,6 +255,28 @@ def test_nested_styled_level_becomes_a_heading_not_a_paragraph():
     assert text.count("Illicit cash") == 1
 
 
+def test_nested_quotes_keep_lines_and_inline_formatting_inside_judgment_paragraph():
+    from raglex.adapters.uk_caselaw import parse_judgment
+
+    xml = b"""<akomaNtoso><judgment><judgmentBody>
+      <paragraph eId="para_12"><num>12.</num><intro><p>Structure:</p></intro>
+        <subparagraph><content><p><span style="font-weight:bold">Issue 1</span></p></content></subparagraph>
+        <subparagraph><content><p><span style="font-style:italic;text-decoration-line:underline">Issue 2</span></p></content></subparagraph>
+      </paragraph>
+      <paragraph eId="para_93"><num>93.</num><content><p>The Court said:</p>
+        <block><embeddedStructure><paragraph><num>&quot;42.</num><content><p>Quoted law.</p></content></paragraph></embeddedStructure></block>
+      </content></paragraph>
+    </judgmentBody></judgment></akomaNtoso>"""
+    text, _rels, _ncn, segments = parse_judgment(xml)
+    twelve = next(s for s in segments if s.label == "12.")
+    ninety_three = next(s for s in segments if s.label == "93.")
+    assert text[twelve.char_start:twelve.char_end] == "12. Structure:\nIssue 1\nIssue 2"
+    assert text[ninety_three.char_start:ninety_three.char_end] == \
+        '93. The Court said:\n"42. Quoted law.'
+    assert {m["kind"] for m in twelve.formatting} == {"bold", "italic", "underline"}
+    assert not any(s.label == '"42.' for s in segments)
+
+
 def test_govuk_code_of_practice_segments_by_numbered_paragraph():
     """A code of practice is cited by paragraph number and nothing else.
 

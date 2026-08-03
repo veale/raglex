@@ -17,8 +17,11 @@ def test_existing_global_shorthand_guard_does_not_link_bare_litigation_terms():
         ("HMRC", "ukpga/2000/36", "act", True),
         ("LPP", "ukpga/2000/36", "act", True),
         ("Issue 3", "ukpga/2000/36", "act", True),
+        ("Secretary of State", "some/case", "judgment", True),
+        ("Human Rights", "some/act", "act", True),
     ]
-    text = "The SAR left HMRC to address LPP under Issue 3."
+    text = ("The SAR left HMRC to address LPP under Issue 3. A former Secretary of "
+            "State worked on democracy, Human Rights and labour.")
     assert attach_stored_shorthands(text, [], stored) == []
     assert all(not valid_shorthand(name) for name, *_ in stored)
 
@@ -54,3 +57,24 @@ def test_judgment_drops_bare_schedule_carry_forward_but_keeps_literal_citation()
     })
     kept = _guard_cites(None, doc, [inferred, literal], stable_id=doc["stable_id"])
     assert kept == [literal]
+
+
+def test_held_ukut_aac_variant_is_canonicalised_before_set_based_resolution():
+    cite = Citation(
+        raw="[2014] UKUT 310 (ACC)", entity_kind="judgment",
+        candidate_id="ukut/acc/2014/310", pinpoint=None,
+        char_start=0, char_end=22, method="uk_neutral",
+    )
+    doc = defaultdict(lambda: None, {
+        "doc_type": "judgment", "source": "uk-caselaw", "court": "ewhc",
+        "stable_id": "ewhc/kb/2025/134", "meta_json": None,
+    })
+
+    class Catalogue:
+        @staticmethod
+        def find_existing(ids):
+            assert ids == ["ukut/acc/2014/310"]
+            return {ids[0]: "ukut/aac/2014/0310"}
+
+    kept = _guard_cites(Catalogue(), doc, [cite], stable_id=doc["stable_id"])
+    assert kept[0].candidate_id == "ukut/aac/2014/0310"

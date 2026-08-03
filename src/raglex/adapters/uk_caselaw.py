@@ -34,7 +34,7 @@ from ..core.models import (
     Stub,
     TypedRelation,
 )
-from ..core.segmentation import assemble, blocks_by_localname, element_text
+from ..core.segmentation import blocks_by_localname, element_text
 
 BASE_URL = "https://caselaw.nationalarchives.gov.uk"
 
@@ -159,6 +159,103 @@ _BLOCK_TEXT_TAGS = {
     "subparagraph", "level",
 }
 
+_LINE_TEXT_TAGS = {"paragraph", "subparagraph", "level", "block", "embeddedstructure", "wrapup"}
+_FORMAT_STYLES = {
+    "font-weight:bold": "bold",
+    "font-style:italic": "italic",
+    "text-decoration-line:underline": "underline",
+    "text-decoration:underline": "underline",
+}
+
+
+def _rich_mixed_text(
+    elem: ET.Element, excluded: set[int] | None = None,
+) -> tuple[str, list[dict]]:
+    """Mixed XML text with block lines and inline presentation retained.
+
+    LegalDocML uses nested paragraphs/levels both for tables of contents and quoted
+    authorities.  They belong inside the judgment paragraph, but flattening every
+    boundary to a space makes those passages unreadable.  A private sentinel records
+    only structural breaks; pretty-printed XML whitespace remains an ordinary space.
+    """
+    excluded = excluded or set()
+    raw: list[tuple[str, frozenset[str]]] = []
+    line_break = "\ue000"
+
+    def emit(value: str | None, styles: frozenset[str]) -> None:
+        if value:
+            raw.extend((ch, styles) for ch in value)
+
+    def visit(node: ET.Element, inherited: frozenset[str]) -> None:
+        if id(node) in excluded:
+            return
+        style_attr = (node.get("style") or "").lower().replace(" ", "")
+        own = {kind for token, kind in _FORMAT_STYLES.items() if token in style_attr}
+        styles = inherited | frozenset(own)
+        emit(node.text, styles)
+        previous_name = ""
+        for child in node:
+            name = _localname(child.tag).lower()
+            if id(child) in excluded:
+                emit(child.tail, styles)
+                previous_name = name
+                continue
+            if raw and (name in _LINE_TEXT_TAGS or (name == "p" and previous_name == "p")):
+                emit(line_break, frozenset())
+            elif raw and name in _BLOCK_TEXT_TAGS and not raw[-1][0].isspace():
+                emit(" ", frozenset())
+            visit(child, styles)
+            if name in _LINE_TEXT_TAGS:
+                emit(line_break, frozenset())
+            emit(child.tail, styles)
+            previous_name = name
+
+    visit(elem, frozenset())
+
+    chars: list[str] = []
+    char_styles: list[frozenset[str]] = []
+    pending: str | None = None
+    pending_styles = frozenset()
+    for ch, styles in raw:
+        if ch == line_break:
+            pending = "newline"
+            pending_styles = frozenset()
+            continue
+        if ch.isspace():
+            if pending != "newline":
+                pending = "space"
+                pending_styles = styles
+            continue
+        if pending and chars:
+            if pending == "newline":
+                if chars[-1] != "\n":
+                    chars.append("\n")
+                    char_styles.append(frozenset())
+            elif chars[-1] != "\n":
+                chars.append(" ")
+                # Underline/italic/bold naturally includes spaces inside one styled
+                # run, but not indentation between separate XML elements.
+                char_styles.append(pending_styles & styles)
+        pending = None
+        pending_styles = frozenset()
+        chars.append(ch)
+        char_styles.append(styles)
+
+    text = "".join(chars).strip()
+    char_styles = char_styles[:len(text)]
+    spans: list[dict] = []
+    for kind in ("bold", "italic", "underline"):
+        start: int | None = None
+        for i in range(len(text) + 1):
+            active = i < len(text) and kind in char_styles[i]
+            if active and start is None:
+                start = i
+            elif not active and start is not None:
+                spans.append({"kind": kind, "char_start": start, "char_end": i})
+                start = None
+    spans.sort(key=lambda mark: (mark["char_start"], mark["char_end"], mark["kind"]))
+    return text, spans
+
 
 def _normalised_mixed_text(elem: ET.Element, excluded: set[int] | None = None) -> str:
     """XML mixed content without inventing spaces between inline styling runs.
@@ -166,28 +263,8 @@ def _normalised_mixed_text(elem: ET.Element, excluded: set[int] | None = None) -
     Structural children do need a boundary (``<num>I.</num><content>Overview``), while
     inline ``span`` children emphatically do not (``<span>Ő</span><span>sterreich``).
     """
-    excluded = excluded or set()
-    out: list[str] = []
-
-    def visit(node: ET.Element) -> None:
-        if id(node) in excluded:
-            return
-        if node.text:
-            out.append(node.text)
-        for child in node:
-            if id(child) in excluded:
-                if child.tail:
-                    out.append(child.tail)
-                continue
-            if (_localname(child.tag).lower() in _BLOCK_TEXT_TAGS and out
-                    and out[-1] and not out[-1][-1].isspace()):
-                out.append(" ")
-            visit(child)
-            if child.tail:
-                out.append(child.tail)
-
-    visit(elem)
-    return " ".join("".join(out).split())
+    text, _spans = _rich_mixed_text(elem, excluded)
+    return " ".join(text.split())
 
 
 def _compact_text(elem: ET.Element | None) -> str:
@@ -237,15 +314,21 @@ def _is_embedded_heading(elem: ET.Element) -> bool:
     content = _direct_child(elem, "content")
     heading = _compact_text(content)
     host = content if content is not None else elem
-    return bool(heading and len(heading) <= 240 and _fully_styled_heading(host))
+    p = next((e for e in host.iter() if _localname(e.tag) == "p"), None)
+    explicitly_heading = bool(
+        _direct_child(elem, "num") is not None
+        or (p is not None and (p.get("class") or "").lower().startswith("heading"))
+    )
+    return bool(explicitly_heading and heading and len(heading) <= 240
+                and _fully_styled_heading(host))
 
 
-def _text_skipping(elem: ET.Element, excluded: set[int]) -> str:
+def _text_skipping(elem: ET.Element, excluded: set[int]) -> tuple[str, list[dict]]:
     """Compact element text while omitting selected structural descendants."""
-    return _normalised_mixed_text(elem, excluded)
+    return _rich_mixed_text(elem, excluded)
 
 
-def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
+def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str, list[dict]]]:
     """The judgment's own paragraphs and headings, in source order.
 
     Quoted legislation and authorities are themselves marked up with nested
@@ -255,14 +338,15 @@ def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
     ``“40.`` between paragraphs 62 and 90.  Walk the tree instead and stop descending
     once a top-level judgment paragraph has been emitted.
     """
-    blocks: list[tuple[str, str, str]] = []
+    blocks: list[tuple[str, str, str, list[dict]]] = []
 
     def add_paragraph(paragraph: ET.Element, n: int) -> None:
         embedded = [e for e in paragraph.iter() if _is_embedded_heading(e)]
         excluded = {id(e) for e in embedded}
         label_node = _direct_child(paragraph, "num")
         label = _compact_text(label_node) or f"para {n}"
-        main = _text_skipping(paragraph, excluded).strip()
+        main, formatting = _text_skipping(paragraph, excluded)
+        main = main.strip()
 
         # An unnumbered wrapper paragraph carrying a Roman-numeral, wholly styled
         # title is itself a heading (the first "I. Overview" in many FCL files).
@@ -272,11 +356,11 @@ def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
             and len(main) <= 260
             and _fully_styled_heading(paragraph)
         )
-        blocks.append((label, "heading" if roman_heading else "paragraph", main))
+        blocks.append((label, "heading" if roman_heading else "paragraph", main, formatting))
         for heading in embedded:
             h_label = _compact_text(_direct_child(heading, "num"))
-            h_text = _compact_text(heading)
-            blocks.append((h_label or h_text, "heading", h_text))
+            h_text, h_formatting = _rich_mixed_text(heading)
+            blocks.append((h_label or h_text, "heading", h_text, h_formatting))
 
     number = 0
 
@@ -289,14 +373,39 @@ def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
                 add_paragraph(child, number)
                 continue                    # nested quote paragraphs stay in its text
             if name == "heading":
-                text = _compact_text(child)
-                if text:
-                    blocks.append((text, "heading", text))
+                heading_text, formatting = _rich_mixed_text(child)
+                if heading_text:
+                    blocks.append((heading_text, "heading", heading_text, formatting))
                 continue
             walk(child)
 
     walk(body)
     return blocks
+
+
+def _assemble_rich(
+    blocks: list[tuple[str, str, str, list[dict]]],
+) -> tuple[str, list[Segment]]:
+    text_parts: list[str] = []
+    segments: list[Segment] = []
+    cursor = 0
+    for label, kind, value, formatting in blocks:
+        value = value.strip()
+        if not value:
+            continue
+        if text_parts:
+            text_parts.append("\n\n")
+            cursor += 2
+        start = cursor
+        text_parts.append(value)
+        cursor += len(value)
+        absolute = tuple({**mark,
+                          "char_start": start + mark["char_start"],
+                          "char_end": start + mark["char_end"]}
+                         for mark in formatting)
+        segments.append(Segment(label=label, char_start=start, char_end=cursor,
+                                kind=kind, formatting=absolute))
+    return "".join(text_parts), segments
 
 
 def judgment_judges(xml_bytes: bytes) -> list[str]:
@@ -347,10 +456,11 @@ def parse_judgment(
     body = next((e for e in root.iter() if _localname(e.tag) == "judgmentBody"), root)
     blocks = _judgment_blocks(body)
     if not blocks:
-        blocks = blocks_by_localname(body, {"p"}, kind="paragraph", counter_label="para")
+        blocks = [(*block, []) for block in
+                  blocks_by_localname(body, {"p"}, kind="paragraph", counter_label="para")]
     if not blocks:
-        blocks = [("body", "section", element_text(body))]
-    text, segments = assemble(blocks)
+        blocks = [("body", "section", element_text(body), [])]
+    text, segments = _assemble_rich(blocks)
     return text, relations, ncn, segments
 
 

@@ -1190,22 +1190,40 @@ function segId(label: string): string {
 // "Delo … at 131" is a pinpoint into the *cited* case, not this judgment, so it's
 // left as plain text (linking it would be wrong/confusing). Also requires that the
 // number names a real paragraph here (so citation years like "[2023]" never match).
-function renderRun(text: string, key: string, paraSet?: Set<string>, onPara?: (n: string) => void) {
-  if (!onPara || !paraSet || paraSet.size === 0) return text;
+function formattedRun(text: string, start: number, end: number, formatting: any[] = [], key = "fmt") {
+  const marks = formatting.filter((m) => m.char_start < end && m.char_end > start);
+  if (!marks.length) return text.slice(start, end);
+  const cuts = Array.from(new Set([start, end, ...marks.flatMap((m) =>
+    [Math.max(start, m.char_start), Math.min(end, m.char_end)])])).sort((a, b) => a - b);
+  return cuts.slice(0, -1).map((a, i) => {
+    const b = cuts[i + 1];
+    const active = new Set(marks.filter((m) => m.char_start <= a && m.char_end >= b).map((m) => m.kind));
+    let node: any = text.slice(a, b);
+    if (active.has("underline")) node = <u>{node}</u>;
+    if (active.has("italic")) node = <em>{node}</em>;
+    if (active.has("bold")) node = <strong>{node}</strong>;
+    return <Fragment key={`${key}-${a}`}>{node}</Fragment>;
+  });
+}
+
+function renderRun(text: string, key: string, paraSet?: Set<string>, onPara?: (n: string) => void,
+                   start = 0, end = text.length, formatting: any[] = []) {
+  const run = text.slice(start, end);
+  if (!onPara || !paraSet || paraSet.size === 0) return formattedRun(text, start, end, formatting, key);
   const out: any[] = [];
   // [N] (optionally a range/list) immediately followed by above|below
   const re = /\[(\d{1,3})\](?:\s*[-–]\s*\[\d{1,3}\]|\s*,?\s*(?:and|to)\s*\[\d{1,3}\])?\s+(above|below)\b/gi;
   let last = 0, m: RegExpExecArray | null, k = 0;
-  while ((m = re.exec(text))) {
+  while ((m = re.exec(run))) {
     const n = m[1];
     if (!paraSet.has(n)) continue;
-    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m.index > last) out.push(formattedRun(text, start + last, start + m.index, formatting, `${key}-t${k}`));
     out.push(<a key={`${key}-p${k++}`} className="pararef" title={`go to paragraph ${n} (this judgment)`}
-      onClick={() => onPara(n)}>{m[0]}</a>);
+      onClick={() => onPara(n)}>{formattedRun(text, start + m.index, start + re.lastIndex, formatting, `${key}-p`)}</a>);
     last = re.lastIndex;
   }
-  if (last < text.length) out.push(text.slice(last));
-  return out.length ? out : text;
+  if (last < run.length) out.push(formattedRun(text, start + last, end, formatting, `${key}-tail`));
+  return out.length ? out : formattedRun(text, start, end, formatting, key);
 }
 
 // Render a slice of text with its recognised citations wrapped as live links to the
@@ -1213,7 +1231,7 @@ function renderRun(text: string, key: string, paraSet?: Set<string>, onPara?: (n
 // pending → marked as a citation we've parsed but don't yet hold. Paragraph refs jump.
 function renderCited(text: string, segStart: number, segEnd: number, cites: any[],
                      onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void,
-                     idPrefix?: string) {
+                     idPrefix?: string, formatting: any[] = []) {
   const within = cites
     .filter((c) => c.char_start >= segStart && c.char_end <= segEnd)
     .sort((a, b) => a.char_start - b.char_start);
@@ -1221,7 +1239,8 @@ function renderCited(text: string, segStart: number, segEnd: number, cites: any[
   let cursor = segStart;
   within.forEach((c, k) => {
     if (c.char_start < cursor) return; // skip overlaps
-    if (c.char_start > cursor) nodes.push(renderRun(text.slice(cursor, c.char_start), `g${k}`, paraSet, onPara));
+    if (c.char_start > cursor) nodes.push(renderRun(text, `g${k}`, paraSet, onPara,
+      cursor, c.char_start, formatting));
     const label = text.slice(c.char_start, c.char_end);
     const state = c.state || (c.resolved_id ? "resolved" : c.candidate_id ? "pending" : "maybe");
     // heuristic "carried-forward" provision (e.g. a bare "section 5" linked to the
@@ -1241,11 +1260,12 @@ function renderCited(text: string, segStart: number, segEnd: number, cites: any[
       title={state === "resolved" && !guess ? undefined : title}
       href={state === "resolved" && c.resolved_id ? docHref(c.resolved_id, c.pinpoint) : undefined}
       data-doc={state === "resolved" ? c.resolved_id : undefined} data-pin={c.pinpoint || undefined}
-      onClick={(e) => { if (opensNewTab(e)) return; e.preventDefault(); onCite(c); }}>{label}</a>);
+      onClick={(e) => { if (opensNewTab(e)) return; e.preventDefault(); onCite(c); }}>
+        {formattedRun(text, c.char_start, c.char_end, formatting, `cite-${k}`)}</a>);
     cursor = c.char_end;
   });
-  if (cursor < segEnd) nodes.push(renderRun(text.slice(cursor, segEnd), "tail", paraSet, onPara));
-  return nodes.length ? nodes : text.slice(segStart, segEnd);
+  if (cursor < segEnd) nodes.push(renderRun(text, "tail", paraSet, onPara, cursor, segEnd, formatting));
+  return nodes.length ? nodes : formattedRun(text, segStart, segEnd, formatting);
 }
 
 // the set of paragraph numbers in this document (from segment labels like "43.")
@@ -1325,7 +1345,7 @@ function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
       {s.lines.map((ln: any, i: number) => (
         <div className="stat-line" key={i}
           style={ln.depth ? { paddingLeft: `calc(var(--indent-step) * ${ln.depth})` } : undefined}>
-          {renderCited(text, ln.start, ln.end, cites, onCite, paraSet, onPara, idPrefix)}
+          {renderCited(text, ln.start, ln.end, cites, onCite, paraSet, onPara, idPrefix, s.formatting)}
           {/* the sub-provision's mention badge, at the END of its own line (not bunched
               at the section foot) — only where the drafting hierarchy pinpointed the line */}
           {ln.anchor && lineBadge ? lineBadge(ln.anchor) : null}
@@ -1335,14 +1355,14 @@ function segLines(text: string, s: any, cites: any[], onCite: (c: any) => void,
   );
 }
 
-function segBody(text: string, s: { label: string; char_start: number; char_end: number; kind?: string; lines?: any[] },
+function segBody(text: string, s: { label: string; char_start: number; char_end: number; kind?: string; lines?: any[]; formatting?: any[] },
                  cites: any[], onCite: (c: any) => void, paraSet?: Set<string>, onPara?: (n: string) => void,
                  idPrefix?: string, lineBadge?: (anchorPath: string) => any) {
   // A section heading IS its own text ("Legal context"), so printing the label beside the
   // body would print it twice.
   if (s.kind === "heading") {
     return { showLabel: false,
-             body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix) };
+             body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix, s.formatting) };
   }
   // drafted hierarchy (legislation): render provision-by-provision, indented
   if (s.lines && s.lines.length > 1) {
@@ -1351,13 +1371,13 @@ function segBody(text: string, s: { label: string; char_start: number; char_end:
   const num = labelNum(s.label);
   const raw = text.slice(s.char_start, s.char_end);
   const m = num ? new RegExp(`^(\\s*)(${num})([.)\\]]?)(\\s+)`).exec(raw) : null;
-  if (!m) return { showLabel: true, body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix) };
+  if (!m) return { showLabel: true, body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix, s.formatting) };
   const numEnd = s.char_start + m[0].length;
   return {
     showLabel: false,
     body: <>
       <b className="seg-num">{m[2]}{m[3]}</b>{" "}
-      {renderCited(text, numEnd, s.char_end, cites, onCite, paraSet, onPara, idPrefix)}
+      {renderCited(text, numEnd, s.char_end, cites, onCite, paraSet, onPara, idPrefix, s.formatting)}
     </>,
   };
 }

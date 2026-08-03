@@ -309,7 +309,9 @@ _GENERIC_SHORTHAND = {
 # litigation vocabulary, not names of legal authorities.  A noisy inline definition
 # once taught these to the corpus-wide store (``HMRC -> FOIA``, ``SAR -> DPA 1998``,
 # ``LPP -> FOIA``); rejecting them on both write and read retires the historical rows.
-_NON_AUTHORITY_SHORTHAND = {"hmrc", "sar", "lpp", "information rights"}
+_NON_AUTHORITY_SHORTHAND = {
+    "hmrc", "sar", "lpp", "information rights", "secretary of state", "human rights",
+}
 _NUMBERED_ISSUE = re.compile(r"(?i)^(?:the\s+)?issues?\s+\d+[a-z]?(?:\([a-z0-9]+\))?$")
 # A JUDGE is not an authority. "Nicklin J" was learned as a name for the judgment he
 # wrote, so any later "Nicklin J" — in a document citing that judgment for any reason —

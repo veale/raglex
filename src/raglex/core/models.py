@@ -200,6 +200,10 @@ class Segment:
     char_end: int
     kind: str = "paragraph"  # paragraph | section | zone | article | ruling
     level: int = 0
+    # Inline presentation retained from structured source XML.  Offsets are absolute
+    # into the document text, like the segment itself; ``kind`` is bold | italic |
+    # underline.  Plain-text consumers can ignore this re-derivable projection.
+    formatting: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
