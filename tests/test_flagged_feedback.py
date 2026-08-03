@@ -41,6 +41,20 @@ def test_nearby_explicit_article_supplies_host_for_quoted_article_range():
     assert {f"Article {n}" for n in range(15, 23)} | {"Article 34"} <= pins
 
 
+def test_named_uk_gdpr_heading_overrides_earlier_directive_for_bare_articles():
+    text = (
+        "The old regime implemented Directive 95/46/EC.\n\n"
+        "The UK GDPR and the DPA 2018 provisions\n\n"
+        "Article 12 provides information under Articles 13 and 14 and communications "
+        "under Articles 15 to 22 and 34."
+    )
+    target = "european/regulation/2016/0679"
+    cites = extract_citations(text, aliases={"UK GDPR": target})
+    relevant = [c for c in cites if c.char_start >= text.index("Article 12")]
+    assert relevant
+    assert all(c.candidate_id == target for c in relevant)
+
+
 def test_judgment_drops_bare_schedule_carry_forward_but_keeps_literal_citation():
     inferred = Citation(
         raw="Schedule 1", entity_kind="regulation", candidate_id="uk/cpr/part/8",

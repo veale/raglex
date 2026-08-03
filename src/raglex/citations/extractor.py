@@ -929,7 +929,8 @@ def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
         # unbounded document-wide carry-forward.
         if not cand:
             prior = [c for c in kept if c.char_end <= m.start() and c.candidate_id
-                     and c.entity_kind in {"regulation", "directive", "eu_instrument", "treaty"}
+                     and (c.entity_kind in {"regulation", "directive", "eu_instrument", "treaty"}
+                          or _is_eu_candidate(c.candidate_id, c.entity_kind))
                      and m.start() - c.char_end <= 3000]
             if prior:
                 cand, kind = prior[-1].candidate_id, prior[-1].entity_kind
@@ -1109,7 +1110,11 @@ _CELEX_RE = re.compile(r"^[0-9]{5}[A-Z]{1,2}[0-9]{4}$")
 
 
 def _is_eu_candidate(candidate_id: str | None, kind: str) -> bool:
-    return kind in _EU_KINDS or bool(_CELEX_RE.match(candidate_id or ""))
+    return (kind in _EU_KINDS or bool(_CELEX_RE.match(candidate_id or ""))
+            # Assimilated EU instruments use the legislation.gov.uk-derived stable
+            # path but retain EU drafting structure (Articles/Recitals). Named aliases
+            # such as UK GDPR therefore remain valid antecedents for bare Articles.
+            or (candidate_id or "").startswith("european/regulation/"))
 
 
 def _cue_allows(cue: str, kind: str, candidate_id: str | None = None) -> bool:
