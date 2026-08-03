@@ -7051,6 +7051,14 @@ class Facade:
                 from .adapters.eu_cellar import extract_formex
                 text, segments = extract_formex(raw)
                 fmt = "formex-judgment"
+            elif doc["source"] == "uk-caselaw":
+                # Find Case Law stores LegalDocML judgments.  Byte sniffing sees the
+                # Akoma Ntoso envelope and would otherwise send these through the
+                # legislation parser, losing judgment headings and native paragraph
+                # boundaries.  Keep the same source-selected parser used at harvest.
+                from .adapters.uk_caselaw import parse_judgment
+                text, _relations, _ncn, segments = parse_judgment(raw)
+                fmt = "uk-caselaw-judgment"
             else:
                 # Older harvests can pre-date (or omit) a byte signature that the
                 # current sniffer knows about.  The importer records the parser format
