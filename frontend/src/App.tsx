@@ -275,6 +275,22 @@ export function App() {
     visit({ tab: "search", docId: null, graphId: null, pinpoint: null, scrollY: 0 });
   };
   const goSearch = (q?: string) => navigateCorpus(q ? { query: q } : {});
+  // Replace an article's internal stable id in browser-history affordances with the
+  // citation the reader actually displays once its metadata has arrived.
+  const labelCurrentDocument = (citation: string) => {
+    const cite = citation.trim();
+    const current = currentRef.current;
+    if (!cite || current.tab !== "document") return;
+    const label = `${cite}${current.pinpoint ? ` · ${current.pinpoint}` : ""}`;
+    const i = indexRef.current;
+    if (trailRef.current[i]?.label !== label) {
+      const nextTrail = trailRef.current.map((entry, n) => n === i ? { ...entry, label } : entry);
+      setTrail(nextTrail);
+    }
+    const state = history.state?.raglex as RaglexHistory | undefined;
+    if (state && state.label !== label)
+      history.replaceState({ ...history.state, raglex: { ...state, label } }, "", location.href);
+  };
   // A top-level nav click starts a fresh view → land at the TOP of the page. Without this,
   // switching from a scrolled-down Explore into Admin kept the old scrollY and dropped you
   // into the middle of the Admin page. (The back-arrow still restores its saved scroll.)
@@ -399,7 +415,8 @@ export function App() {
       )}
       {tab === "admin" && isAdmin && <AdminView open={open} navigate={navigateCorpus} />}
       {tab === "settings" && isAdmin && <SettingsView />}
-      {tab === "document" && docId && <DocumentView id={docId} open={open} openGraph={openGraph} pinpoint={pinpoint} />}
+      {tab === "document" && docId && <DocumentView id={docId} open={open} openGraph={openGraph}
+        pinpoint={pinpoint} onCitation={labelCurrentDocument} />}
       {tab === "graph" && graphId && <GraphView focusId={graphId} open={open} />}
     </div>
     <PeekPanel open={open} />

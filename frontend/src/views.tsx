@@ -2376,7 +2376,13 @@ function StaticExportMenu({ id }: { id: string }) {
   );
 }
 
-export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; open: (id: string, a?: string, replace?: boolean) => void; openGraph: (id: string) => void; pinpoint?: string | null }) {
+export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
+  id: string;
+  open: (id: string, a?: string, replace?: boolean) => void;
+  openGraph: (id: string) => void;
+  pinpoint?: string | null;
+  onCitation?: (citation: string) => void;
+}) {
   const [displayId, setDisplayId] = useState(id);
   const [showingOriginal, setShowingOriginal] = useState(false);
   useEffect(() => {
@@ -2385,6 +2391,13 @@ export function DocumentView({ id, open, openGraph, pinpoint }: { id: string; op
   }, [id]);
   const [doc, err, reload] = useAsync(() => api.document(displayId), [displayId]);
   const canonicalRead = doc?.canonical_read?.stable_id;
+  const displayedCitation = String(doc?.oscola?.text || doc?.document?.title || "").trim();
+  useEffect(() => {
+    if (displayedCitation) onCitation?.(displayedCitation);
+    // The callback deliberately updates the current history entry; the citation is the
+    // only data dependency and prevents a parent render from relabelling in a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayedCitation]);
   useEffect(() => {
     if (!showingOriginal && canonicalRead && canonicalRead !== id) {
       open(canonicalRead, pinpoint || undefined, true);
