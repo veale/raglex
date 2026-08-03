@@ -38,7 +38,7 @@ from ..core.models import (
     TypedRelation,
 )
 from ..formats import parse
-from .leg_effects import parse_unapplied_effects, summarise_effects
+from .leg_effects import parse_changes_feed, parse_unapplied_effects, summarise_effects
 
 BASE_URL = "https://www.legislation.gov.uk"
 

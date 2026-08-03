@@ -871,7 +871,12 @@ register(Grammar(
 # "Recital 47 of the GDPR" / "recital (26) GDPR" / "Recital 11 of the DMA".
 register(Grammar(
     "recital_eu_named", "regulation",
-    re.compile(_RECITAL + rf"\s+(?:of\s+(?:the\s+)?)?(?P<name>{_EU_ACRONYMS})\b"),
+    re.compile(
+        _RECITAL
+        + rf"\s+(?:of\s+(?:the\s+)?)?"
+          rf"(?:(?:preamble|recitals?)\s+(?:to|of)\s+(?:the\s+)?)?"
+          rf"(?P<name>{_EU_ACRONYMS})\b"
+    ),
     lambda m: (_name_to_celex(m.group("name")), _recital_pin(m.group("rec")), None),
 ))
 register(Grammar(

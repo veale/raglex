@@ -1190,6 +1190,33 @@ _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 # has to make is "are we still talking about the same instrument".
 _SENTENCE_BREAK_RE = re.compile(r"[.;]\s|\n\s*\n")
 
+# A formally named instrument inside a dependency clause is not the subject carried into
+# the next provision.  The GDPR's title ends "repealing Directive 95/46/EC"; treating that
+# Directive as the active antecedent made the operative ruling's "Article 22(1) of that
+# regulation" point to the repealed Directive.  Keep the citation itself, but do not let it
+# govern later bare/anaphoric provisions.
+_DEPENDENCY_ANTECEDENT_RE = re.compile(
+    r"(?i)\b(?:repealing|amending|replacing|recasting|superseding)\s+(?:the\s+)?(?:Council\s+)?$"
+)
+_ANAPHORIC_HOST_RE = re.compile(
+    r"(?i)^\s+of\s+(?:that|this|the\s+said)\s+"
+    r"(?P<kind>regulation|directive|decision|treaty|act)\b"
+)
+
+
+def _carry_antecedent(text: str, cite: Citation) -> bool:
+    before = text[max(0, cite.char_start - 48):cite.char_start]
+    return not _DEPENDENCY_ANTECEDENT_RE.search(before)
+
+
+def _host_kind_matches(kind: str, candidate_id: str | None, named: str) -> bool:
+    named = named.lower()
+    if named == "regulation":
+        return kind == "regulation" and _is_eu_candidate(candidate_id, kind)
+    if named == "act":
+        return kind == "act" or (kind == "regulation" and not _is_eu_candidate(candidate_id, kind))
+    return kind == named
+
 
 def _attach_carry_forward(text: str, kept: list[Citation], *,
                           home_id: str | None = None,
@@ -1212,7 +1239,8 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
     all_sorted = sorted(kept, key=lambda c: c.char_start)
     # legislation antecedents in document order, with their candidate + kind
     antecedents = sorted(
-        (c for c in kept if c.candidate_id and c.entity_kind in _LEG_KINDS),
+        (c for c in kept if c.candidate_id and c.entity_kind in _LEG_KINDS
+         and _carry_antecedent(text, c)),
         key=lambda c: c.char_start,
     )
     if not antecedents and not home_id:
@@ -1284,6 +1312,13 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
                 continue
         prior = [a for a in antecedents if a.char_end <= s
                  and _cue_allows(cue_raw, a.entity_kind, a.candidate_id)]
+        # "Article 15 of that regulation" supplies the instrument TYPE even though it
+        # does not repeat its name.  Prefer the nearest antecedent of that type, rather
+        # than blindly taking a nearer Directive mentioned midway through the sentence.
+        anaphor = _ANAPHORIC_HOST_RE.match(text[e:e + 64])
+        if anaphor:
+            prior = [a for a in prior if _host_kind_matches(
+                a.entity_kind, a.candidate_id, anaphor.group("kind"))]
         host_id, host_kind = (prior[-1].candidate_id, prior[-1].entity_kind) if prior \
             else (None, None)
         # Self-reference inside legislation. A cross-reference to another instrument

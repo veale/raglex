@@ -756,6 +756,18 @@ def _apply_filters(sql: str, params: list, filters: dict | None) -> tuple[str, l
         vals = filters["source"]
         sql += f" AND d.source IN ({','.join('?' * len(vals))})"
         params.extend(vals)
+    if filters.get("source_or_court"):
+        scope = filters["source_or_court"]
+        sources = list(scope.get("sources") or [])
+        courts = list(scope.get("courts") or [])
+        alternatives: list[str] = []
+        if sources:
+            alternatives.append(f"d.source IN ({','.join('?' * len(sources))})")
+            params.extend(sources)
+        if courts:
+            alternatives.append(f"d.court IN ({','.join('?' * len(courts))})")
+            params.extend(courts)
+        sql += " AND (" + " OR ".join(alternatives or ["1 = 0"]) + ")"
     if filters.get("doc_type"):
         vals = filters["doc_type"]
         sql += f" AND d.doc_type IN ({','.join('?' * len(vals))})"
@@ -3093,6 +3105,26 @@ class Catalogue:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def documents_citing_all(self, ids: list[str], *, limit: int = 10000) -> list[str]:
+        """Held source documents with a real resolved citation to EVERY target.
+
+        This is the exact co-citation intersection used for doctrinal conflict mapping;
+        inferred carry-forward edges are excluded because a guessed provision host must
+        not manufacture the claim that a court considered two authorities together.
+        """
+        ids = list(dict.fromkeys(i for i in ids if i))
+        if len(ids) < 2:
+            return []
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT r.src_id FROM relations r JOIN documents d ON d.stable_id = r.src_id "
+            f"WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved' "
+            f"AND r.relationship_type <> 'cited_by' AND r.extracted_via <> 'inferred' "
+            f"GROUP BY r.src_id HAVING COUNT(DISTINCT r.dst_id) = ? LIMIT ?",
+            (*ids, len(ids), limit),
+        ).fetchall()
+        return [r["src_id"] for r in rows]
+
     def coupled_with(self, doc_id: str, *, limit: int = 15,
                      max_target_citers: int = 1500) -> list[dict]:
         """Documents that rely on the same authorities as this one (bibliographic
@@ -5002,9 +5034,9 @@ class Catalogue:
         seconds. This walks the index itself — a twentieth the size — because the
         front page only needs to say what is searchable."""
         rows = self.conn.execute(
-            "SELECT d.source AS source, count(DISTINCT f.doc_id) AS n "
+            "SELECT d.source AS source, d.court AS court, count(DISTINCT f.doc_id) AS n "
             "FROM doc_fts f JOIN documents d ON d.stable_id = f.doc_id "
-            "GROUP BY d.source").fetchall()
+            "GROUP BY d.source, d.court").fetchall()
         return [dict(r) for r in rows]
 
     def embedding_coverage(self) -> list[dict]:

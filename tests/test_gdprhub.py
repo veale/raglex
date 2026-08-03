@@ -77,6 +77,7 @@ COURT_ENTRY = """<entry>
 |ECLI=ECLI:NL:RBNHO:2026:8438&lt;br /&gt;
 |Court_Abbrevation=Rb. Noord-Holland&lt;br /&gt;
 |Court_With_Country=Rb. Noord-Holland (Netherlands)&lt;br /&gt;
+|Party_Name_1=Claimant BV&lt;br /&gt;
 |Original_Source_Name_1=de Rechtspraak&lt;br /&gt;
 |Original_Source_Link_1=https://uitspraken.rechtspraak.nl/x.pdf&lt;br /&gt;
 |Original_Source_Language_1=Dutch&lt;br /&gt;
@@ -207,6 +208,7 @@ def test_court_record_uses_ecli_and_judgment_type():
     assert r.doc_type is DocType.JUDGMENT
     assert r.court == "court-nl"
     assert r.ecli == "ECLI:NL:RBNHO:2026:8438"
+    assert any("claimant" in a.lower() for a in r.extra.get("aliases", []))
 
 
 def test_body_falls_back_to_summary_when_no_translation():

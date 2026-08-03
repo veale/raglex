@@ -468,6 +468,7 @@ def build_record(entry: FeedEntry, source: str) -> Record | None:
     ecli_raw = (p.get("ECLI") or "").strip()
     ecli = ecli_raw if ecli_raw.upper().startswith("ECLI:") else None
     case_number = _clean_case_number(p.get("Case_Number_Name"))
+    parties = [x for x in _numbered(p, "Party_Name")]
 
     source_lang = (p.get("Original_Source_Language__Code_1") or "").lower() or None
     # the body is the machine translation; if absent, the English summary stands in so
@@ -478,6 +479,12 @@ def build_record(entry: FeedEntry, source: str) -> Record | None:
     aliases: list[str] = []
     if case_number and (any(ch.isdigit() for ch in case_number) and len(case_number) > 4):
         aliases.append(case_number.casefold())
+    # Civil-law reports are commonly titled only by court+docket. Party names are the
+    # route a reader actually knows, so make each one (and the combined caption) a
+    # resolution/search alias without changing the faithful displayed title.
+    aliases.extend(parties)
+    if len(parties) > 1:
+        aliases.append(" v ".join(parties))
 
     national_law = [
         {"name": n, "url": u} for n, u in zip(
@@ -498,7 +505,7 @@ def build_record(entry: FeedEntry, source: str) -> Record | None:
         "date_decided": p.get("Date_Decided"),
         "date_published": p.get("Date_Published"),
         "date_started": p.get("Date_Started"),
-        "parties": [x for x in _numbered(p, "Party_Name")] or None,
+        "parties": parties or None,
         "appeal_from": {k: p.get(f"Appeal_From_{k}") for k in
                         ("Body", "Case_Number_Name", "Status", "Link") if p.get(f"Appeal_From_{k}")} or None,
         "appeal_to": {k: p.get(f"Appeal_To_{k}") for k in

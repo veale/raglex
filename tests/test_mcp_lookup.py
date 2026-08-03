@@ -224,12 +224,40 @@ def test_citing_documents_filters_by_iso_jurisdiction_and_sorts():
     assert [x["stable_id"] for x in newest["results"]] == ["decFR", "caseUK"]
     # a browsable, re-callable list with concrete navigation hints
     assert newest["how_to_browse"] and any("sort=" in h for h in newest["how_to_browse"])
+    assert newest["is_floor"] is True and "minimum" in newest["count_note"]
+
+
+def test_gdprhub_court_bucket_uses_the_decision_jurisdiction():
+    f = _facade()
+    assert f._doc_bucket("gdprhub", "court-nl") == "Netherlands"
+    assert f._doc_bucket("gdprhub", "court-de") == "Germany"
 
 
 def test_citing_documents_on_unheld_target_guides_to_lookup():
     f = _facade()
     r = f.citing_documents("[2099] UKSC 1")
     assert r["held"] is False and "lookup" in r["note"]
+
+
+def test_citing_documents_intersects_multiple_authorities():
+    f = _facade()
+    with f._open() as (cat, _rs, ts):
+        for sid in ("authority/A", "authority/B", "citer/both", "citer/one"):
+            rec = Record(source="uk-caselaw", stable_id=sid, doc_type=DocType.JUDGMENT,
+                         title=sid, text="body", raw_bytes=sid.encode(),
+                         extracted_via=ExtractedVia.STRUCTURED)
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        for src, dst in (("citer/both", "authority/A"), ("citer/both", "authority/B"),
+                         ("citer/one", "authority/A")):
+            cat.conn.execute(
+                "INSERT INTO relations (src_id,dst_id,candidate_id,raw_citation_string,"
+                "resolution_status,relationship_type,extracted_via) VALUES (?,?,?,?,?,?,?)",
+                (src, dst, dst, dst, "resolved", "mentions", "regex"))
+        cat.commit()
+    found = f.citing_documents(["authority/A", "authority/B"], mode="intersection")
+    assert found["total"] == 1
+    assert [r["stable_id"] for r in found["results"]] == ["citer/both"]
 
 
 def test_find_is_citation_first_then_title_and_is_honest_about_semantic():
@@ -240,8 +268,8 @@ def test_find_is_citation_first_then_title_and_is_honest_about_semantic():
     # a title query matches on the title, not on meaning
     byt = f.find("General Data Protection")
     assert any(x["stable_id"] == "32016R0679" for x in byt["results"])
-    # honest about what search does: titles/citations, not a concept search
-    assert "not by a legal question" in byt["how_search_works"].lower()
+    # honest about the title-first route and lexical body fallback
+    assert "indexed document body" in byt["how_search_works"].lower()
     # a natural-language legal question finds nothing (no concept search)
     q = f.find("what are the rules on the right of access")
     assert q["results"] == [] and "nothing_found" in q

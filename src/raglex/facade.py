@@ -3222,10 +3222,11 @@ class Facade:
     # small so a page of citers is token-cheap; the agent pages/narrows to see more.
     _CITING_PAGE = 20
 
-    def citing_documents(self, target: str, *, anchor: str | None = None,
+    def citing_documents(self, target: str | list[str], *, anchor: str | None = None,
                          sort: str = "pagerank", jurisdiction: str | None = None,
                          kind: str | None = None, offset: int = 0,
-                         limit: int | None = None, snippets: bool = True) -> dict:
+                         limit: int | None = None, snippets: bool = True,
+                         mode: str = "union") -> dict:
         """The browsable list of who cites ``target`` — optionally pinned to ONE provision
         (``anchor`` = "Article 15", "s. 45", "[42]") so you get exactly the documents that
         cite THAT article, not the whole instrument. Sortable, filterable by jurisdiction
@@ -3233,6 +3234,12 @@ class Facade:
         counts telling you what you can narrow to. Re-callable with the same arguments — this
         IS the results list to come back to; there is no hidden state."""
         limit = limit or self._CITING_PAGE
+        if isinstance(target, (list, tuple)):
+            if mode != "intersection":
+                return {"error": "multiple targets require mode='intersection'"}
+            return self._citing_intersection(
+                list(target), sort=sort, jurisdiction=jurisdiction, kind=kind,
+                offset=offset, limit=limit)
         held, cand = self._resolve_held_id(target)
         if held is None:
             return {"target": target, "held": False,
@@ -3251,6 +3258,60 @@ class Facade:
             result["read_target"] = read_target
             return result
         return self._cached(key, 180, build)
+
+    def _citing_intersection(self, targets: list[str], *, sort: str,
+                             jurisdiction: str | None, kind: str | None,
+                             offset: int, limit: int) -> dict:
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for target in dict.fromkeys(targets):
+            held, _cand = self._resolve_held_id(target)
+            if held:
+                resolved.append(self.canonical_read_target(held)["stable_id"])
+            else:
+                unknown.append(target)
+        resolved = list(dict.fromkeys(resolved))
+        if unknown or len(resolved) < 2:
+            return {"targets": targets, "mode": "intersection", "held_targets": resolved,
+                    "unheld_targets": unknown,
+                    "error": "every target must resolve to a distinct held document"}
+        with self._open() as (cat, _rs, _ts):
+            ids = cat.documents_citing_all(resolved)
+            meta = cat.documents_meta(ids)
+        want_j = self._norm_jurisdiction(jurisdiction)
+        want_kind = self._KIND_ALIASES.get((kind or "").lower()) if kind else None
+        rows: list[dict] = []
+        for d in meta:
+            j = self._doc_bucket(d.get("source", ""), d.get("court"))
+            k = self._doc_kind(d.get("source", ""), d.get("doc_type", ""), d.get("court"))
+            if want_j and j.lower() != want_j.lower():
+                continue
+            if want_kind and k != want_kind:
+                continue
+            rows.append({
+                "stable_id": d["stable_id"], "title": d.get("title"),
+                "court": self.court_label(d.get("court"), d.get("source")) if d.get("court") else None,
+                "jurisdiction": j, "kind": k,
+                "date": str(d.get("decision_date") or d.get("effective_date") or "")[:10] or None,
+                "authority": d.get("pagerank") or 0, "cited_by_count": d.get("cited_by") or 0,
+            })
+        if sort == "newest":
+            rows.sort(key=lambda r: (r.get("date") or "", r["stable_id"]), reverse=True)
+        elif sort == "oldest":
+            rows.sort(key=lambda r: (r.get("date") or "9999", r["stable_id"]))
+        elif sort == "cited":
+            rows.sort(key=lambda r: (r["cited_by_count"], r["authority"]), reverse=True)
+        else:
+            rows.sort(key=lambda r: (r["authority"], r["cited_by_count"]), reverse=True)
+        total = len(rows)
+        page = rows[offset:offset + limit]
+        return {
+            "targets": resolved, "mode": "intersection", "total": total,
+            "offset": offset, "showing": [offset + 1 if page else 0, offset + len(page)],
+            "has_more": offset + len(page) < total, "sort": sort,
+            "jurisdiction": want_j, "kind": want_kind, "results": page,
+            "count_note": "documents with resolved, non-inferred citations to every target",
+        }
 
     def _citing_documents(self, held, anchor, sort, jurisdiction, kind, offset, limit,
                           snippets) -> dict:
@@ -3333,6 +3394,9 @@ class Facade:
         return {
             "target": held, "title": doc.get("title"), "oscola": self.get_document(held).get("oscola"),
             "provision": anchor,
+            "is_floor": bool(anchor),
+            "count_note": ("minimum evidenced count: only resolved citations carrying "
+                           "this provision anchor are included" if anchor else None),
             "sort": sort, "sorts": dict(self.MENTION_SORTS),
             "jurisdiction": m.get("jurisdiction"), "kind": kind,
             "total": total, "offset": offset, "showing": [offset + 1 if rows else 0, shown_to],
@@ -3442,14 +3506,37 @@ class Facade:
                 break
         out["results"] = results
         out["total_shown"] = len(results)
+        # Civil-law sources often title a judgment only by docket/ECLI. If metadata
+        # search has no route in, fall back to the indexed body: GDPRhub's translated
+        # Facts/Holding text is where party names such as Uber and Ola live.
+        if not results and "citation_match" not in out:
+            fulltext = self.freetext_search(
+                q, exact=False, limit=k,
+                jurisdictions=[jurisdiction] if jurisdiction else None,
+                doc_type=[kind] if kind else None, with_network=False,
+            )
+            for r in fulltext.get("items", []):
+                results.append({
+                    "stable_id": r["stable_id"], "title": r.get("title"),
+                    "jurisdiction": r.get("jurisdiction"),
+                    "kind": self._doc_kind(r.get("source", ""), r.get("doc_type", ""),
+                                           r.get("court")),
+                    "court": r.get("court_label"), "date": r.get("decision_date"),
+                    "doc_type": r.get("doc_type"), "source": r.get("source"),
+                    "match": "full_text", "snippet": r.get("snippet"),
+                })
+            out["total_shown"] = len(results)
+            if results:
+                out["search_route"] = "indexed body (title/citation search had no match)"
         # honest note about what search can and can't do here
         with self._open() as (cat, _rs, _ts):
             semantic_on = cat.has_vector_index(self._provider().dimensions)
         out["how_search_works"] = (
-            "Matches CITATIONS and document TITLES/ids only" +
-            ("" if semantic_on else " — semantic/concept search is OFF (embeddings incomplete)") +
-            ". Search by a case/act NAME or a citation, not by a legal question. "
-            "For a provision and who cites it: lookup(citation, pincite=…) then citing_documents().")
+            "Matches CITATIONS and document TITLES/ids first; when those find nothing, "
+            "searches the indexed document body" +
+            ("" if semantic_on else " (lexically — semantic embeddings are incomplete)") +
+            ". For a provision and who cites it: lookup(citation, pincite=…) then "
+            "citing_documents().")
         if not results and "citation_match" not in out:
             out["nothing_found"] = (
                 "No title/citation match. Try fewer/among-title words, a party name, or a "
@@ -4026,6 +4113,23 @@ class Facade:
             text = body.get("text") or ""
             segs = body.get("segments") or []
             inherited_recitals = body.get("inherited_recitals")
+            held_recitals = [s for s in segs
+                             if str(s.get("kind") or "").lower() == "recital"]
+            if inherited_recitals:
+                out["recitals"] = {"status": "held_via_base_act",
+                                   "count": inherited_recitals.get("count")}
+            elif held_recitals:
+                out["recitals"] = {"status": "held", "count": len(held_recitals)}
+            elif held_id.startswith("european/"):
+                out["recitals"] = {
+                    "status": "not_held",
+                    "note": ("This assimilated-EU instrument's operative UK text is held, "
+                             "but its recitals are absent from the source rendition. Absence "
+                             "here is a corpus holding gap, not a statement that the "
+                             "instrument has no recitals."),
+                }
+            elif d.get("doc_type") == "legislation":
+                out["recitals"] = {"status": "not_part_of_instrument"}
             out["segment_count"] = len(segs)
             # A repealed Act's live text is struck out at source, so "held: true" with a
             # healthy segment count is not a promise that anything can be READ. Say so,
@@ -4084,6 +4188,8 @@ class Facade:
                 out["citing"] = {
                     "provision": pincite,
                     "total": cd.get("total", 0),
+                    "is_floor": True,
+                    "count_note": cd.get("count_note"),
                     "facets": cd.get("facets"),
                     "top": cd.get("results", []),
                     "browse": {"tool": "citing_documents",
@@ -4299,8 +4405,19 @@ class Facade:
                             },
                         }
             if idx < 0 and segs:
-                return {"error": "no matching segment", "stable_id": stable_id,
-                        "requested": label, **_label_help(segs)}
+                missing = {"error": "no matching segment", "stable_id": stable_id,
+                           "requested": label, **_label_help(segs)}
+                if label and re.match(r"^\s*recitals?\b", label, re.I):
+                    if stable_id.startswith("european/"):
+                        missing["recitals"] = {
+                            "status": "not_held",
+                            "note": ("The assimilated-EU instrument's recitals are absent "
+                                     "from this source rendition; this is a corpus holding "
+                                     "gap, not a statement that the instrument has none."),
+                        }
+                    elif doc["doc_type"] == "legislation":
+                        missing["recitals"] = {"status": "not_part_of_instrument"}
+                return missing
             if not segs:
                 lo = max(0, (char_start or 0) - 400)
                 hi = min(len(text), (char_end or len(text)) + 400)
@@ -4677,8 +4794,8 @@ class Facade:
 
     def _doc_bucket(self, source: str, court: str | None) -> str:
         c = (court or "").lower()
-        if c.startswith("dpa-"):
-            return self._DPA_COUNTRY.get(c[4:], "European Union")
+        if c.startswith(("dpa-", "court-")):
+            return self._DPA_COUNTRY.get(c.split("-", 1)[1], "European Union")
         return self._jurisdiction_of(source)
 
     def _doc_kind(self, source: str, doc_type: str, court: str | None) -> str:
@@ -12949,8 +13066,8 @@ class Facade:
         for r in rows:
             if not r["n"]:
                 continue
-            by_jur[self._jurisdiction_of(r["source"])] = (
-                by_jur.get(self._jurisdiction_of(r["source"]), 0) + r["n"])
+            jurisdiction = self._doc_bucket(r["source"], r.get("court"))
+            by_jur[jurisdiction] = by_jur.get(jurisdiction, 0) + r["n"]
         out = [{"jurisdiction": j, "documents": n} for j, n in by_jur.items()]
         out.sort(key=lambda x: -x["documents"])
         return {"jurisdictions": out,
@@ -13093,6 +13210,7 @@ class Facade:
         # reporting query, run here on every keystroke-speed search. The search only
         # needs the list of selected sources, which is a setting.
         allowed = sources or self._freetext_selected() or None
+        jurisdiction_scope: dict | None = None
         notes: list[str] = []
         if jurisdictions:
             # narrowing THIS search, not the index — the front page's flags.
@@ -13106,14 +13224,25 @@ class Facade:
             # facets: the filter had not been applied, not misapplied.
             pool = allowed or self._all_sources()
             available = {self._jurisdiction_of(s) for s in pool}
+            # GDPRhub is one multilingual source whose records carry their country in
+            # court-nl/court-de (or dpa-nl), not in the source key. Include those country
+            # buckets in both validation and the SQL scope without admitting GDPRhub
+            # records from every other jurisdiction.
+            if "gdprhub" in pool or any(s.startswith("edpb") for s in pool):
+                available.update(self._DPA_COUNTRY.values())
             want = {self._norm_jurisdiction(j) for j in jurisdictions} - {None}
             unknown = sorted(str(w) for w in want if w not in available)
-            allowed = [s for s in pool if self._jurisdiction_of(s) in want]
+            jurisdiction_sources = [s for s in pool if self._jurisdiction_of(s) in want]
+            country_codes = sorted(c for c, name in self._DPA_COUNTRY.items() if name in want)
+            jurisdiction_courts = [f"{prefix}-{code}"
+                                   for code in country_codes for prefix in ("dpa", "court")]
+            jurisdiction_scope = {"sources": jurisdiction_sources,
+                                  "courts": jurisdiction_courts}
             if unknown:
                 notes.append(
                     f"no indexed source lies in {', '.join(unknown)} — "
                     "call jurisdictions() for the names this filter accepts")
-            if not allowed:
+            if not jurisdiction_sources and not jurisdiction_courts:
                 # No sources left: the honest answer is nothing, not everything. This
                 # is the branch that used to widen.
                 return {"items": [], "total": 0, "verified": 0, "candidates": 0,
@@ -13121,6 +13250,8 @@ class Facade:
                         "tsquery": None, "scope": [], "facets": {}, "network": {},
                         "matched": [], "notes": notes or ["nothing in scope"]}
         filters: dict = {"source": allowed} if allowed else {}
+        if jurisdiction_scope is not None:
+            filters["source_or_court"] = jurisdiction_scope
         if doc_type:
             wanted, unknown = self._resolve_doc_types(doc_type)
             if unknown:

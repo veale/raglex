@@ -304,13 +304,16 @@ def build_server(config: Config | None = None) -> MCPServer:
                              original=original, outline_kind=outline_kind, as_at=as_at)
 
     @mcp.tool(annotations=_READ_ONLY)
-    def citing_documents(target: str, anchor: Optional[str] = None, sort: str = "pagerank",
+    def citing_documents(target: str | list[str], anchor: Optional[str] = None,
+                         mode: str = "union", sort: str = "pagerank",
                          jurisdiction: Optional[str] = None, kind: Optional[str] = None,
                          offset: int = 0, limit: int = 20) -> dict:
         """The browsable list of documents that CITE ``target`` — the results list you page,
         filter and sort, and return to. ``target`` is a citation or a stable_id.
 
-        Pin it to ONE provision with ``anchor`` ("Article 15", "s. 45") to get exactly the
+        Pass two or more targets and ``mode='intersection'`` to find documents that cite
+        every authority together — the co-citation conflict-mapping question. Pin one
+        target to ONE provision with ``anchor`` ("Article 15", "s. 45") to get exactly the
         documents that cite THAT article, not the whole instrument — this is the answer to
         "which cases cite Article 15 of the GDPR".
 
@@ -330,7 +333,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         jurisdiction, kind and date; ``facets`` shows the whole citer set so you know what you
         can narrow to. Stateless — call again with the same args to come back to these
         results, or open any row with lookup(its stable_id)."""
-        return facade.citing_documents(target, anchor=anchor, sort=sort,
+        return facade.citing_documents(target, anchor=anchor, mode=mode, sort=sort,
                                        jurisdiction=jurisdiction, kind=kind,
                                        offset=offset, limit=limit)
 

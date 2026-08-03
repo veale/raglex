@@ -164,6 +164,29 @@ def test_carry_forward_needs_a_legislation_antecedent():
     assert not [c for c in cites if c.method == "carry_forward"]
 
 
+def test_carry_forward_ignores_dependency_clause_and_honours_anaphoric_kind():
+    text = (
+        "Regulation (EU) 2016/679 repealing Directive 95/46/EC must be interpreted "
+        "as meaning that Article 22(1) of that regulation applies. Directive "
+        "2016/943 protects secrets, but the right of access under Article 15 of that "
+        "regulation remains."
+    )
+    carried = {c.pinpoint: c.candidate_id for c in extract_citations(text)
+               if c.method == "carry_forward"}
+    assert carried["Article 22(1)"] == "32016R0679"
+    assert carried["Article 15"] == "32016R0679"
+
+
+def test_recital_named_through_preamble_wording_beats_carry_forward():
+    text = ("Directive 2016/943 protects secrets. Recital 63 of the preamble to the GDPR "
+            "and recital 71 of the recitals of the GDPR qualify that protection.")
+    recitals = [c for c in extract_citations(text) if (c.pinpoint or "").startswith("Recital")]
+    assert {(c.pinpoint, c.candidate_id, c.method) for c in recitals} == {
+        ("Recital 63", "32016R0679", "recital_eu_named"),
+        ("Recital 71", "32016R0679", "recital_eu_named"),
+    }
+
+
 def test_self_citation_in_header_never_becomes_an_edge(catalogue, tmp_path):
     # a judgment's header prints its OWN neutral citation — that must not become
     # an outgoing edge (it used to resolve into a silent self-loop)
