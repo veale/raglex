@@ -44,6 +44,8 @@ SPECIMENS = [
     ("gdprhub", "judgment", "dpa-de"),
     ("uk-judiciary", "guidance", "judiciary"),
     ("eu-cellar", "opinion", "cjeu"),
+    ("eu-berec", "opinion", "BEREC"),         # policy opinion, not case law
+    ("eu-berec", "decision", "BEREC"),        # whole register is guidance/reports
     ("uk-caselaw", "commentary", None),
     # a judgment with NO recorded court: `NULL LIKE 'dpa-%'` is NULL, so a naive
     # `NOT (...)` drops the row and the case vanishes from its own slice

@@ -468,6 +468,14 @@ tbody tr:hover { background: var(--surface-2); }
 .doc-main { flex: 1; min-width: 0; }
 /* in the two-column reader, let the page scroll so the sticky rail title follows along */
 .doc-main .reader { max-height: none; overflow: visible; }
+.language-fallback-box { margin: 0 0 var(--sp-5); padding: var(--sp-4) var(--sp-5);
+  border: 1px solid color-mix(in srgb, var(--note) 45%, var(--line-faint));
+  border-left: 3px solid var(--note); border-radius: 6px;
+  background: color-mix(in srgb, var(--note) 8%, transparent); line-height: 1.45; }
+.language-fallback-actions { display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--sp-2); margin-top: var(--sp-3); }
+.language-fallback-actions .ok { color: var(--success, var(--accent)); font-size: .8125rem; }
+.language-fallback-actions .err, .language-fallback-actions .muted { font-size: .8125rem; }
 .doc-nav { flex: 0 0 210px; position: sticky; top: var(--sp-4); align-self: flex-start;
   max-height: calc(100vh - 32px); overflow-y: auto; font-size: .8125rem;
   border-right: 1px solid var(--line-faint); padding-right: var(--sp-4); }

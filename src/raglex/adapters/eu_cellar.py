@@ -230,7 +230,8 @@ def _eurlex_value(el: ET.Element) -> str | None:
 # instrument (2nd letter); the CDM resource-type, when present, is authoritative.
 #   C* = Court of Justice · T* = General Court · F* = Civil Service Tribunal
 #   *J = judgment · *O = order · *V = Opinion of the Court (e.g. Opinion 1/15,
-#   Canada PNR) · *C / *A = Advocate General opinion/view
+#   Canada PNR) · *C = Advocate General conclusions.  *A and *N are OJ
+#   information notices (respectively the result and the application), not opinions.
 _COURT_BY_SECTOR = {
     "C": "Court of Justice",
     "T": "General Court",
@@ -241,7 +242,8 @@ _DOCTYPE_BY_DESCRIPTOR = {
     "O": DocType.DECISION,  # order
     "V": DocType.OPINION,  # Opinion of the Court
     "C": DocType.OPINION,  # AG opinion (conclusions)
-    "A": DocType.OPINION,  # AG view
+    "A": DocType.NOTE,  # OJ notice of the judgment/order (operative part)
+    "N": DocType.NOTE,  # OJ notice of the application/reference
 }
 # CDM work_has_resource-type prefixes → doc_type (authoritative when available).
 _RESOURCE_TYPE_DOCTYPE = {
@@ -250,6 +252,7 @@ _RESOURCE_TYPE_DOCTYPE = {
     "OPIN_JUR": DocType.OPINION,  # Opinion of the Court
     "OPIN_AG": DocType.OPINION,
     "VIEW": DocType.OPINION,
+    "INFO_JUDICIAL": DocType.NOTE,
 }
 
 
@@ -270,7 +273,7 @@ def classify_celex(celex: str | None, resource_type: str | None = None) -> tuple
     if m:
         court = _COURT_BY_SECTOR.get(m.group(1), court)
         doc_type = _DOCTYPE_BY_DESCRIPTOR.get(m.group(2), DocType.JUDGMENT)
-        if m.group(2) in ("C", "A"):  # AG opinion / view
+        if m.group(2) == "C":  # AG conclusions
             court = "Advocate General"
     if resource_type:
         rt = resource_type.upper()
@@ -811,6 +814,37 @@ def parse_ag_opinion_head(text: str | None) -> dict:
     return {"advocate_general": name, "delivered_on": " ".join(m.group("date").split())}
 
 
+def _rendition_language(text: str | None) -> str | None:
+    """Distinguish the EN and FR CJEU bodies EUR-Lex can return under the same EN URL."""
+    sample = f" {(text or '')[:20000].lower()} "
+    french = sum(sample.count(marker) for marker in (
+        " arrêt de la cour", " par ces motifs", " dans l’affaire", " dans l'affaire",
+        " en vertu de", " la commission européenne", " le royaume", " la république",
+    ))
+    english = sum(sample.count(marker) for marker in (
+        " judgment of the court", " on those grounds", " in case c", " in the present case",
+        " the european commission", " the republic", " the kingdom", " hereby",
+    ))
+    if french >= 2 and french > english:
+        return "fr"
+    if english >= 2 and english > french:
+        return "en"
+    return None
+
+
+def _extract_oj_operative_part(text: str | None) -> str | None:
+    """Return the ruling, not the parties/history apparatus, from an English OJ notice."""
+    if not text:
+        return None
+    marker = re.search(r"(?im)^Operative part of (?:the )?(?:judgment|order)\s*$", text)
+    if not marker:
+        return None
+    out = text[marker.end():].strip()
+    # Footnote/ELI furniture follows the numbered disposition.
+    out = re.split(r"(?im)^ELI:\s|^ISSN\s|^Top\s*$|^\(\s*\n?\s*1\s*\n?\s*\)\s*$", out, maxsplit=1)[0]
+    return out.strip() or None
+
+
 class EUCellarAdapter(BaseAdapter):
     source = "eu-cellar"
     # SPARQL/REST endpoint; no published hard limit, but pace politely (§1.8).
@@ -856,8 +890,9 @@ SELECT DISTINCT ?celex ?ecli ?date ?link ?rtype ?title WHERE {{
   VALUES ?linkProp {{ {link_values} }}
   ?work cdm:resource_legal_id_celex ?celex .
   # Court of Justice / General Court / Civil Service Tribunal, all instruments
-  # (judgments J, orders O, Opinions of the Court V, AG opinions C/A).
-  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVCA]"))
+  # (judgments J, orders O, Opinions of the Court V, AG conclusions C).
+  # A/N are derivative OJ information notices, not separate case-law works.
+  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVC]"))
   ?work ?linkProp ?legWork .
   ?legWork cdm:resource_legal_id_celex ?leg .
   FILTER(STR(?leg) = "{self.legislation_celex}")
@@ -882,7 +917,7 @@ LIMIT {self.per_page}
 PREFIX cdm: <{CDM}>
 SELECT DISTINCT ?celex ?ecli ?date ?rtype ?title WHERE {{
   ?work cdm:resource_legal_id_celex ?celex .
-  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVCA][0-9]{{4}}$"))
+  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVC][0-9]{{4}}$"))
   ?work cdm:work_date_document ?date .
   {date_filter}
   OPTIONAL {{ ?work cdm:case-law_ecli ?ecli }}
@@ -971,7 +1006,7 @@ SELECT DISTINCT ?celex ?ecli ?date ?rtype ?title WHERE {{
   ?target cdm:resource_legal_id_celex ?tc . FILTER(STR(?tc) = "{celex}")
   ?work cdm:work_cites_work ?target .
   ?work cdm:resource_legal_id_celex ?celex .
-  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVCA]"))
+  FILTER(REGEX(STR(?celex), "^6[0-9]{{4}}[CTF][JOVC]"))
   OPTIONAL {{ ?work cdm:case-law_ecli ?ecli }}
   OPTIONAL {{ ?work cdm:work_date_document ?date }}
   OPTIONAL {{ ?work cdm:work_has_resource-type ?rt .
@@ -1044,19 +1079,33 @@ LIMIT {self.per_page}
     def fetch(self, stub: Stub) -> Record | None:
         celex = stub.hints.get("celex") or stub.stable_id
         doc_type, court = classify_celex(celex, stub.hints.get("rtype"))
-        raw = self._fetch_formex(stub.raw_url)
-        if raw is not None:
-            text, segments = extract_formex(raw)
-            raw_ext = "xml"
-        else:
-            # Formex not available (common for pre-2010 cases) — fall back to HTML.
-            html = self._fetch_html(stub.raw_url)
-            if html is not None:
-                text = self._html_to_text(html)
-                segments = []
-                raw, raw_ext = html, "html"
-            else:
-                text, segments, raw_ext = None, [], "txt"
+        raw, raw_ext, text, segments, source_language = self._best_rendition(
+            stub.raw_url, celex
+        )
+
+        # When the full decision is available only in French, EUR-Lex commonly publishes
+        # a short English OJ information notice later.  Keep the full French reasons as
+        # the authoritative body and append only that notice's operative part, visibly
+        # labelled so readers never mistake the summary for a translation of the reasons.
+        oj_meta: dict = {}
+        if source_language == "fr" and doc_type in (DocType.JUDGMENT, DocType.DECISION):
+            oj = self._english_oj_operative_part(celex)
+            if oj:
+                oj_text, oj_celex, oj_url = oj
+                start = len(text or "")
+                heading = "English Official Journal notice — operative part"
+                text = f"{(text or '').rstrip()}\n\n{heading}\n\n{oj_text}".lstrip()
+                segments = list(segments) + [Segment(
+                    label=heading,
+                    char_start=start + (2 if start else 0),
+                    char_end=len(text),
+                    kind="ruling",
+                )]
+                oj_meta = {
+                    "english_oj_notice_celex": oj_celex,
+                    "english_oj_notice_url": oj_url,
+                    "english_oj_operative_part": oj_text,
+                }
         # the CELLAR webservice often gives no title — derive a concise case name from
         # the judgment's own parties + case number ("ZZ v … (C-300/11)").
         formex_title = formex_case_title(raw) if raw is not None and raw_ext == "xml" else None
@@ -1151,8 +1200,8 @@ LIMIT {self.per_page}
             title=title,
             court=court,
             decision_date=stub.hint_date,
-            language="en",
-            source_language="en",
+            language=source_language,
+            source_language=source_language,
             landing_url=stub.landing_url,
             raw_bytes=raw if raw is not None else stub.raw_url.encode(),
             raw_ext=raw_ext,
@@ -1171,6 +1220,8 @@ LIMIT {self.per_page}
                 **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {}),
                 **({"origin_country": origin_country} if origin_country else {}),
                 **({"referring_courts": referring_courts} if referring_courts else {}),
+                **({"language_fallback": "en-to-fr"} if source_language == "fr" else {}),
+                **oj_meta,
             },
         )
 
@@ -1188,26 +1239,27 @@ LIMIT {self.per_page}
             out["advocate_general_source"] = "cellar" if structured else "document"
         return out
 
-    def _fetch_formex(self, url: str) -> bytes | None:
+    def _fetch_formex(self, url: str, language: str = "en") -> bytes | None:
         """Best-effort Formex fetch: a 404/406 (no Formex rendition) is not fatal —
         the case is still catalogued with its SPARQL metadata + edges."""
         try:
             resp = self._client.get(
                 url,
-                headers={"Accept": "application/zip;mtype=fmx4", "Accept-Language": "eng"},
+                headers={"Accept": "application/zip;mtype=fmx4",
+                         "Accept-Language": {"en": "eng", "fr": "fra"}.get(language, language)},
             )
         except FetchError:
             return None
         return unzip_formex(resp.content)
 
-    def _fetch_html(self, url: str) -> bytes | None:
+    def _fetch_html(self, url: str, language: str = "en") -> bytes | None:
         """HTML fallback: fetch the EUR-Lex HTML rendering when no Formex exists.
         Many pre-2010 CJEU cases have no Formex in CELLAR but do have HTML.
         The same CELLAR content-negotiation URL serves HTML with the right Accept header."""
         try:
             resp = self._client.get(
                 url,
-                headers={"Accept": "text/html;q=0.9,*/*;q=0.8", "Accept-Language": "en"},
+                headers={"Accept": "text/html;q=0.9,*/*;q=0.8", "Accept-Language": language},
             )
         except FetchError:
             return None
@@ -1216,6 +1268,64 @@ LIMIT {self.per_page}
         if b"<html" in low or b"<!doctype" in low:
             return content
         return None
+
+    def _fetch_eurlex_html(self, celex: str, language: str) -> bytes | None:
+        """Fetch the public EUR-Lex rendition directly.
+
+        CELLAR's content-negotiation endpoint can return no HTML even while the public
+        EUR-Lex reader has a rendition.  In particular this occurs during the interval
+        in which a newly delivered CJEU judgment exists in one language only.
+        """
+        url = f"https://eur-lex.europa.eu/legal-content/{language.upper()}/TXT/?uri=CELEX:{celex}"
+        try:
+            resp = self._client.get(
+                url,
+                headers={"Accept": "text/html;q=0.9,*/*;q=0.8", "Accept-Language": language},
+            )
+        except FetchError:
+            return None
+        content = resp.content
+        low = content[:1024].lower()
+        return content if b"<html" in low or b"<!doctype" in low else None
+
+    def _rendition(self, url: str, celex: str, language: str):
+        raw = self._fetch_formex(url, language)
+        if raw is not None:
+            text, segments = extract_formex(raw)
+            if text:
+                return raw, "xml", text, segments
+        for html in (self._fetch_html(url, language),
+                     self._fetch_eurlex_html(celex, language)):
+            if html is None:
+                continue
+            text = self._html_to_text(html)
+            if text and "requested document does not exist" not in text.lower():
+                return html, "html", text, []
+        return None
+
+    def _best_rendition(self, url: str, celex: str):
+        """English first; use French when English is absent or is a French passthrough."""
+        english = self._rendition(url, celex, "en")
+        if english and _rendition_language(english[2]) != "fr":
+            return (*english, "en")
+        french = self._rendition(url, celex, "fr")
+        if french:
+            return (*french, "fr")
+        if english:  # retain a useful body even if language detection was uncertain
+            return (*english, _rendition_language(english[2]) or "en")
+        return None, "txt", None, [], "en"
+
+    def _english_oj_operative_part(self, celex: str) -> tuple[str, str, str] | None:
+        """English operative part from the OJ result notice paired with a decision."""
+        m = re.match(r"^(6\d{4}[CTF])[JO](\d{4})$", celex or "", re.I)
+        if not m:
+            return None
+        notice_celex = f"{m.group(1)}A{m.group(2)}".upper()
+        url = f"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{notice_celex}"
+        html = self._fetch_eurlex_html(notice_celex, "en")
+        text = self._html_to_text(html) if html else None
+        operative = _extract_oj_operative_part(text)
+        return (operative, notice_celex, url) if operative else None
 
     @staticmethod
     def _html_to_text(html_bytes: bytes) -> str | None:
@@ -1227,7 +1337,8 @@ LIMIT {self.per_page}
             for junk in soup(["script", "style", "nav", "header", "footer"]):
                 junk.decompose()
             # EUR-Lex judgment HTML puts the text in one of these containers:
-            body = (soup.find(id="document-content")
+            body = (soup.find(id="document1")
+                    or soup.find(id="document-content")
                     or soup.find(class_="EurlexContent")
                     or soup.find(id="mainContent")
                     or soup.body)
@@ -1238,7 +1349,6 @@ LIMIT {self.per_page}
             return _re.sub(r"\n{3,}", "\n\n", text).strip() or None
         except Exception:  # noqa: BLE001 — best-effort
             return None
-
     def case_metadata(self, *, celex: str | None = None, ecli: str | None = None) -> dict:
         """One SPARQL hop returning ``{celex, ecli, title}`` for a CJEU case, keyed by
         either its CELEX or its ECLI — so a single case fetched by case-number is keyed
@@ -1454,19 +1564,26 @@ class CJEUCaseAdapter(BaseAdapter):
         doc_type, court = classify_celex(celex)
         meta = self._cellar.case_metadata(celex=celex)
         ecli, title = meta.get("ecli"), meta.get("title")
-        raw = self._cellar._fetch_formex(stub.raw_url)
-        if raw is not None:
-            text, segments = extract_formex(raw)
-            raw_bytes, raw_ext = raw, "xml"
-        else:
-            # Formex unavailable — try HTML (common for pre-2010 cases in CELLAR).
-            html = self._cellar._fetch_html(stub.raw_url)
-            if html is not None:
-                text = self._cellar._html_to_text(html)
-                segments = []
-                raw_bytes, raw_ext = html, "html"
-            else:
-                text, segments, raw_bytes, raw_ext = None, [], None, "txt"
+        raw_bytes, raw_ext, text, segments, source_language = self._cellar._best_rendition(
+            stub.raw_url, celex
+        )
+        oj_meta: dict = {}
+        if source_language == "fr" and doc_type in (DocType.JUDGMENT, DocType.DECISION):
+            oj = self._cellar._english_oj_operative_part(celex)
+            if oj:
+                oj_text, oj_celex, oj_url = oj
+                start = len(text or "")
+                heading = "English Official Journal notice — operative part"
+                text = f"{(text or '').rstrip()}\n\n{heading}\n\n{oj_text}".lstrip()
+                segments = list(segments) + [Segment(
+                    label=heading, char_start=start + (2 if start else 0),
+                    char_end=len(text), kind="ruling",
+                )]
+                oj_meta = {
+                    "english_oj_notice_celex": oj_celex,
+                    "english_oj_notice_url": oj_url,
+                    "english_oj_operative_part": oj_text,
+                }
         # Return None only when we have literally nothing — no content AND no ECLI
         # to key the record by. If we have any content, store it (metadata-only is
         # already handled by SPARQL in EUCellarAdapter; this path is targeted fetch).
@@ -1476,11 +1593,14 @@ class CJEUCaseAdapter(BaseAdapter):
             source=self.source, stable_id=ecli or celex,
             ecli=ecli, doc_type=doc_type, court=court, title=title,
             landing_url=stub.landing_url,
+            language=source_language, source_language=source_language,
             raw_bytes=raw_bytes if raw_bytes is not None else celex.encode(),
             raw_ext=raw_ext,
             text=text, segments=segments, extracted_via=ExtractedVia.STRUCTURED,
             extra={"celex": celex,
                    **({"celex_aliases": list(self.celex_aliases)} if self.celex_aliases else {}),
                    **({"currency": _eu_currency_meta(celex, meta)} if doc_type == DocType.LEGISLATION else {}),
-                   **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {})},
+                   **("html_fallback" and {"content_format": "html"} if raw_ext == "html" else {}),
+                   **({"language_fallback": "en-to-fr"} if source_language == "fr" else {}),
+                   **oj_meta},
         )

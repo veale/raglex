@@ -85,6 +85,7 @@ READER_WRITE_ALLOW = frozenset({
     "/refinement-flags",     # a reader flags a passage for an admin to action
     "/feedback",             # a reader submits a bug / feature request
     "/unresolved/harvest",   # trigger ONE on-demand fetch+process of a missing authority
+    "/documents/check-english",  # recheck ONE held CELLAR decision's language rendition
 })
 
 # Read (GET) paths a reader must NOT see — secrets, ops control, and the maintain/curation

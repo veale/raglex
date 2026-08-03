@@ -344,6 +344,11 @@ def create_app(config: Config | None = None) -> FastAPI:
     def reparse_ep(stable_id: str) -> dict:
         return facade.reparse_document(stable_id=stable_id)
 
+    @app.post("/documents/check-english")
+    def refresh_eu_rendition_ep(payload: dict = Body(...)) -> dict:
+        """Recheck one CELLAR decision for a newly available English rendition."""
+        return facade.refresh_eu_rendition(stable_id=str(payload.get("stable_id") or ""))
+
     @app.post("/reparse-all")
     def reparse_all_ep(payload: dict = Body(default={})) -> dict:
         return facade.reparse_all(**(payload or {}))

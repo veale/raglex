@@ -557,6 +557,8 @@ def test_document_kinds_place_regulator_decisions_and_reports_where_readers_look
     # law-reform reports go with guidance; EU travaux keep their own category
     assert f._doc_kind("uk-lawcom-reports", "preparatory", None) == "guidance"
     assert f._doc_kind("eu-preparatory", "preparatory", None) == "preparatory"
+    assert f._doc_kind("eu-berec", "opinion", "BEREC") == "guidance"
+    assert f._doc_kind("eu-berec", "decision", "BEREC") == "guidance"
     # real courts and tribunals are untouched
     assert f._doc_kind("uk-ftt-ir", "judgment", "ukftt") == "cases"
     assert f._doc_kind("uk-caselaw", "judgment", "ewca") == "cases"

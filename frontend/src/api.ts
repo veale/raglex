@@ -463,6 +463,10 @@ export const api = {
   deleteWatch: (id: number) => req<any>(`/watches/${id}`, { method: "DELETE" }),
   reparse: (stable_id: string) =>
     req<any>(`/documents/${encodeURIComponent(stable_id)}/reparse`, { method: "POST", body: "{}" }),
+  checkEnglishRendition: (stable_id: string) =>
+    req<any>("/documents/check-english", {
+      method: "POST", body: JSON.stringify({ stable_id }),
+    }),
   resolveReferenceFile: async (ref: string, file: File, fields: Record<string, string>) => {
     const fd = new FormData();
     fd.append("file", file);

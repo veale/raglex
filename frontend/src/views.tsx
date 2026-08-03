@@ -1787,7 +1787,9 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   const rawKind = body?.raw_ext === "pdf" ? "pdf"
     : body?.raw_ext === "html" || body?.raw_ext === "htm" ? "html" : null;
   const [view, setView] = useState<"text" | "orig">("text");
+  const [languageCheck, setLanguageCheck] = useState<"" | "checking" | "english" | "still-french" | "error">("");
   useEffect(() => { setView(body && !body.text && rawKind ? "orig" : "text"); }, [id, !body]);
+  useEffect(() => { setLanguageCheck(""); }, [id]);
   // per-paragraph "mentioned by" roll-up (who cites each paragraph, most-authoritative first).
   // Index it by a canonical anchor key so a citation to "Article 4" matches the segment whose
   // label is "Article 4 Definitions"; keep the real citation anchor for the "see all" filter.
@@ -1845,6 +1847,37 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   const pinned = (label: string) => (incoming || []).filter(
     (r) => r.dst_anchor === label && !CITE_TYPES.has(r.relationship_type));
   const isCase = CASE_DOC_TYPES.has(body.doc_type);
+  const checkForEnglish = async () => {
+    setLanguageCheck("checking");
+    try {
+      const result = await api.checkEnglishRendition(id);
+      if (result.error) throw new Error(result.error);
+      setLanguageCheck(result.english_available ? "english" : "still-french");
+      reloadBody();
+    } catch {
+      setLanguageCheck("error");
+    }
+  };
+  const languageBanner = body.language_fallback === "en-to-fr" && (
+    <div className="language-fallback-box" role="note">
+      <div>
+        <b>Full English text is not currently available.</b>{" "}
+        The complete decision below is the official French rendition.
+        {body.english_oj_notice && " An English Official Journal notice containing the operative ruling is appended at the end."}
+      </div>
+      <div className="language-fallback-actions">
+        {body.english_oj_notice && <button type="button" className="mini" onClick={() =>
+          scrollToSeg(segId(body.english_oj_notice.anchor))}>Skip to the English ruling ↓</button>}
+        <button type="button" className="mini" disabled={languageCheck === "checking"}
+          onClick={checkForEnglish}>
+          {languageCheck === "checking" ? "Checking EUR-Lex…" : "Check again for English"}
+        </button>
+        {languageCheck === "still-french" && <span className="muted">Still French only; this text has been kept.</span>}
+        {languageCheck === "english" && <span className="ok">English is now available; the reader has been refreshed.</span>}
+        {languageCheck === "error" && <span className="err">EUR-Lex could not be checked just now.</span>}
+      </div>
+    </div>
+  );
   const recitalContent = inheritedRecitals?.text && recitalSegs.length > 0 ? (
     <div className="inherited-recitals">
       <div className="leg-version-state">
@@ -1984,7 +2017,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
       <div className="doc-layout">
         <DocNav segs={navSegs} text={navText} oscola={oscola} title={title} landingUrl={landingUrl} id={id} />
         <MobileJumpNav segs={navSegs} />
-        <div className="doc-main" ref={readerRef}>{chips}{pdfBanner}{tabs}{main}</div>
+        <div className="doc-main" ref={readerRef}>{languageBanner}{chips}{pdfBanner}{tabs}{main}</div>
         {view === "text" && body.text && (
           <Minimap containerRef={readerRef} segs={segs || []} cites={cites}
             mentionAnchors={mentionAnchors} textLen={body.text.length} />

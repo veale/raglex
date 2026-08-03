@@ -24,6 +24,9 @@ def test_classify_celex_covers_courts_and_instruments():
     assert classify_celex("62015CV0001") == (DocType.OPINION, "Court of Justice")
     # AG opinion → classified as opinion, attributed to the Advocate General
     assert classify_celex("62020CC0311") == (DocType.OPINION, "Advocate General")
+    # CA/CN are OJ information notices, never Advocate General opinions.
+    assert classify_celex("62024CA0646") == (DocType.NOTE, "Court of Justice")
+    assert classify_celex("62024CN0646", "INFO_JUDICIAL") == (DocType.NOTE, "Court of Justice")
     # CDM resource-type wins when present
     assert classify_celex("62015CV0001", "OPIN_JUR") == (DocType.OPINION, "Court of Justice")
     assert classify_celex("62022TJ0667", "JUDG") == (DocType.JUDGMENT, "General Court")
@@ -188,6 +191,43 @@ def test_ag_opinion_links_to_its_judgment():
     assert rec.doc_type == DocType.OPINION and rec.court == "Advocate General"
     op_edges = [r for r in rec.relations if r.relationship_type == RelationshipType.OPINION_IN]
     assert len(op_edges) == 1 and op_edges[0].dst_id == "62018CJ0311"  # → the judgment
+
+
+def test_oj_result_notice_is_not_linked_as_an_ag_opinion():
+    ad = EUCellarAdapter(legislation_celex="32004R0139", client=FakeClient())
+    stub = Stub(stable_id="62024CA0646",
+                raw_url="https://publications.europa.eu/resource/celex/62024CA0646",
+                hints={"celex": "62024CA0646", "rtype": "INFO_JUDICIAL"})
+    rec = ad.fetch(stub)
+    assert rec.doc_type == DocType.NOTE and rec.court == "Court of Justice"
+    assert not any(r.relationship_type == RelationshipType.OPINION_IN for r in rec.relations)
+
+
+def test_french_fallback_appends_labelled_english_oj_ruling(monkeypatch):
+    ad = EUCellarAdapter(client=FakeClient())
+    french = "ARRÊT DE LA COUR\nDans l’affaire C-646/24, la Commission européenne.\nPar ces motifs."
+    notice = ("Operative part of the judgment\nThe Court:\n1. Declares the failure.\n"
+              "2. Orders payment.\nELI: http://example.test/oj")
+
+    def rendition(_url, _celex, language):
+        if language == "en":
+            return b"<html>French passthrough</html>", "html", french, []
+        return "<html>Texte français</html>".encode(), "html", french, []
+
+    monkeypatch.setattr(ad, "_rendition", rendition)
+    monkeypatch.setattr(ad, "_fetch_eurlex_html", lambda celex, language: notice.encode())
+    monkeypatch.setattr(ad, "_html_to_text", lambda raw: raw.decode())
+
+    stub = Stub(stable_id="ECLI:EU:C:2026:221", hint_date=None,
+                raw_url="https://publications.europa.eu/resource/celex/62024CJ0646",
+                hints={"celex": "62024CJ0646"})
+    monkeypatch.setattr(ad, "_sparql", lambda _query: [])
+    rec = ad.fetch(stub)
+    assert rec.source_language == "fr"
+    assert "English Official Journal notice — operative part" in rec.text
+    assert "The Court:\n1. Declares" in rec.text
+    assert "ELI:" not in rec.extra["english_oj_operative_part"]
+    assert rec.extra["english_oj_notice_celex"] == "62024CA0646"
 
 
 def test_parse_national_judgements_extracts_court_and_url():

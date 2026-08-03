@@ -2057,11 +2057,11 @@ class Facade:
 
     # A CJEU case is published as two documents with the SAME case number, differing only
     # in the CELEX descriptor: the Court's judgment (…CJ…) and the Advocate General's
-    # Opinion (…CC…) or View (…CA…). Reading one, you almost always want to know the other
+    # Opinion (…CC…). Reading one, you almost always want to know the other
     # exists — so pair them deterministically off the CELEX rather than relying on the
     # opinion_in edge, which only 368 of the 8,553 held opinions actually carry (most were
     # pulled by a path that never minted it).
-    _CELEX_CASE_RE = re.compile(r"^(6\d{4})(CJ|CC|CA)(\d+)$", re.IGNORECASE)
+    _CELEX_CASE_RE = re.compile(r"^(6\d{4})(CJ|CC)(\d+)$", re.IGNORECASE)
 
     def _cjeu_companion(self, cat, doc, meta: dict) -> dict | None:
         """``{"role": "ag_opinion"|"judgment", …}`` for the counterpart document, when the
@@ -2071,7 +2071,7 @@ class Facade:
         if not m:
             return None
         year, kind, num = m.groups()
-        wanted = ([("CC", "ag_opinion"), ("CA", "ag_opinion")] if kind == "CJ"
+        wanted = ([("CC", "ag_opinion")] if kind == "CJ"
                   else [("CJ", "judgment")])
         for desc, role in wanted:
             other = cat.find_document_id(f"{year}{desc}{num}")
@@ -2299,6 +2299,68 @@ class Facade:
             path = doc["raw_path"]
             ext = path.rsplit(".", 1)[-1].lower() if "." in path else "bin"
             return {"path": path, "ext": ext, "title": doc["title"], "stable_id": real}
+
+    def refresh_eu_rendition(self, *, stable_id: str) -> dict:
+        """Recheck one held CELLAR decision for a newly published English rendition.
+
+        This is deliberately a one-document operation for the reader's language banner,
+        not a source-wide harvest.  If English is still absent, the held French body and
+        its labelled English OJ operative part remain unchanged.
+        """
+        from .adapters.eu_cellar import CELEX_BASE, EUCellarAdapter
+        from .core.models import Stub
+        from .pipeline import Pipeline
+        from .pipeline.runner import RunStats
+
+        with self._open() as (cat, rs, ts):
+            real = cat.find_document_id(stable_id) or stable_id
+            doc = cat.get_document(real)
+            if doc is None:
+                return {"error": "document not found", "stable_id": stable_id}
+            if doc["source"] != "eu-cellar":
+                return {"error": "language refresh is available only for CELLAR documents",
+                        "stable_id": real}
+            old_meta = _row_meta(doc)
+            celex = str(old_meta.get("celex") or "").upper()
+            if not re.fullmatch(r"6\d{4}[CTF][JOVC]\d{4}", celex):
+                return {"error": "document has no refreshable CJEU CELEX identifier",
+                        "stable_id": real}
+            adapter = EUCellarAdapter(with_citations=True)
+            stub = Stub(
+                stable_id=real,
+                title=doc["title"],
+                court=doc["court"],
+                hint_date=(date.fromisoformat(str(doc["decision_date"])[:10])
+                           if doc["decision_date"] else None),
+                landing_url=(doc["landing_url"]
+                             or f"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:{celex}"),
+                raw_url=f"{CELEX_BASE}/{celex}",
+                hints={"celex": celex},
+            )
+            record = adapter.fetch(stub)
+            if record is None or not record.text:
+                return {"stable_id": real, "refreshed": False,
+                        "source_language": doc["source_language"],
+                        "english_available": doc["source_language"] == "en",
+                        "reason": "no current rendition returned by EUR-Lex"}
+            # Preserve unrelated enrichment/provenance already accumulated on this row;
+            # fresh rendition facts win where they overlap.
+            record.extra = {**old_meta, **(record.extra or {})}
+            stored = Pipeline(cat, rs, textstore=ts)._ingest(
+                record, RunStats(source=adapter.source))
+            if stored:
+                from .citations import extract_document
+                extract_document(cat, ts, real)
+                Resolver(cat).run_for(real, record.ecli)
+            result = {
+                "stable_id": real,
+                "refreshed": stored,
+                "source_language": record.source_language,
+                "english_available": record.source_language == "en",
+                "english_oj_notice": bool(record.extra.get("english_oj_notice_celex")),
+            }
+        self._invalidate_caches()
+        return result
 
     def scan_citations(self, *, text: str, limit: int = 400) -> list[dict]:
         """Grammar-recognise citations in ARBITRARY text and resolve each against the
@@ -2693,6 +2755,17 @@ class Facade:
                 "citations": citations,
                 **({"window": window} if window else {}),
                 "doc_type": doc["doc_type"],
+                "language": doc["language"],
+                "source_language": doc["source_language"],
+                "language_fallback": meta.get("language_fallback"),
+                "english_oj_notice": (
+                    {
+                        "celex": meta.get("english_oj_notice_celex"),
+                        "url": meta.get("english_oj_notice_url"),
+                        "anchor": "English Official Journal notice — operative part",
+                    }
+                    if meta.get("english_oj_notice_celex") else None
+                ),
                 "title": doc["title"],
                 "oscola": _oscola_cite(doc, meta),
                 # the reader offers an "original" pane when the ingested file is stored
@@ -4587,6 +4660,11 @@ class Facade:
     # and belongs with guidance under "Guidance/Reports" rather than in a category a reader
     # would never think to open.
     _TRAVAUX_SOURCES = {"eu-preparatory"}
+    # Whole-register policy/advisory collections whose source vocabulary happens to use
+    # legal-sounding raw types such as ``opinion`` and ``decision``. BEREC opinions and
+    # common positions are regulatory publications, not judgments; source identity must
+    # win over the generic opinion→case-law fallback used for Advocate General opinions.
+    _GUIDANCE_SOURCES = {"eu-berec"}
     # What a regulator DECIDES (as opposed to writes about): the doc types that make a
     # document from an admin body an administrative decision.
     _ADMIN_DOC_TYPES = {"decision", "opinion", "notice"}
@@ -4611,6 +4689,8 @@ class Facade:
             return "guidance"
         if doc_type == "preparatory":
             return "preparatory" if source in self._TRAVAUX_SOURCES else "guidance"
+        if source in self._GUIDANCE_SOURCES:
+            return "guidance"
         # then an administrative body's DECISIONS (a DPA decision, an enforcement
         # notice) — before the case-type check, since those carry doc_type "decision".
         # A data-protection authority's whole output is administrative whatever it is
@@ -4859,6 +4939,7 @@ class Facade:
         admin_courts = sorted(self._ADMIN_COURTS)
         admin_types = sorted(self._ADMIN_DOC_TYPES)
         travaux = sorted(self._TRAVAUX_SOURCES)
+        guidance_sources = sorted(self._GUIDANCE_SOURCES)
         # mirrors _doc_kind's order: a DPA's whole output, then an admin body's
         # DECIDING documents
         # COALESCE is load-bearing: court is nullable, and `NULL LIKE 'dpa-%'` is
@@ -4870,7 +4951,10 @@ class Facade:
         # matches a data-protection authority's whole output regardless of doc type. It
         # only became reachable when a DPA guidance library was first harvested — until
         # then every dpa-* document was a decision.
+        guidance_source_sql = (f"d.source IN ({','.join('?' * len(guidance_sources))})"
+                               if guidance_sources else "1 = 0")
         admin_sql = ("(d.doc_type NOT IN ('guidance', 'preparatory')"
+                     f" AND NOT ({guidance_source_sql})"
                      " AND (COALESCE(lower(d.court), '') LIKE 'dpa-%'"
                      + (f" OR COALESCE(lower(d.court), '') IN "
                         f"({','.join('?' * len(admin_courts))})"
@@ -4879,7 +4963,7 @@ class Facade:
                         f" AND d.doc_type IN ({','.join('?' * len(admin_types))}))"
                         if admin_sources and admin_types else "")
                      + "))")
-        admin_params = list(admin_courts)
+        admin_params = list(guidance_sources) + list(admin_courts)
         if admin_sources and admin_types:
             admin_params += admin_sources + admin_types
 
@@ -4888,8 +4972,8 @@ class Facade:
         if kind == "guidance":
             # doc_type 'guidance', plus 'preparatory' from any source that is NOT a
             # travaux collection — which is where the Law Commission lives
-            sql = "(d.doc_type = 'guidance' OR (d.doc_type = 'preparatory'"
-            params: list = []
+            sql = f"(({guidance_source_sql}) OR d.doc_type = 'guidance' OR (d.doc_type = 'preparatory'"
+            params: list = list(guidance_sources)
             if travaux:
                 sql += f" AND d.source NOT IN ({','.join('?' * len(travaux))})"
                 params += travaux
@@ -4902,14 +4986,16 @@ class Facade:
                     f"({','.join('?' * len(travaux))}))"), list(travaux)
         if kind == "cases":
             types = sorted(self._CASE_TYPES)
-            return (f"(d.doc_type IN ({','.join('?' * len(types))}) AND NOT {admin_sql})",
-                    list(types) + list(admin_params))
+            return (f"(d.doc_type IN ({','.join('?' * len(types))})"
+                    f" AND NOT ({guidance_source_sql}) AND NOT {admin_sql})",
+                    list(types) + list(guidance_sources) + list(admin_params))
         if kind == "legislation":
             return "(d.doc_type = 'legislation')", []
         if kind == "other":
             known = sorted({"guidance", "preparatory", "legislation"} | set(self._CASE_TYPES))
-            return (f"(d.doc_type NOT IN ({','.join('?' * len(known))}) AND NOT {admin_sql})",
-                    list(known) + list(admin_params))
+            return (f"(d.doc_type NOT IN ({','.join('?' * len(known))})"
+                    f" AND NOT ({guidance_source_sql}) AND NOT {admin_sql})",
+                    list(known) + list(guidance_sources) + list(admin_params))
         # an explicit doc_type ("judgment", "notice") rather than a display kind
         return "(d.doc_type = ?)", [kind]
 
