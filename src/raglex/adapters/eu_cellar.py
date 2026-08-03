@@ -187,6 +187,28 @@ def concise_case_title(raw: str) -> str:
     return parties or (f"Case {case_no}" if case_no else raw)
 
 
+def html_case_title(html_bytes: bytes | None) -> str | None:
+    """Concise title from EUR-Lex's hidden, language-neutral display heading."""
+    if not html_bytes:
+        return None
+    try:
+        from bs4 import BeautifulSoup
+        heading = BeautifulSoup(html_bytes, "html.parser").find(id="englishTitle")
+        raw = heading.get_text(" ", strip=True) if heading else ""
+    except Exception:  # noqa: BLE001 — title enrichment must not block the body
+        return None
+    if not raw:
+        return None
+    if "#" in raw:
+        return concise_case_title(raw)
+    # OJ result notices use “Case C-…: Judgment … – Parties (subject matter)”.
+    m = re.match(r"(?i)^Case\s+([CTF][-‑]\d+/\d+)\s*:\s*.+?\s+[–—]\s+(.+?)(?:\s+\(|$)", raw)
+    if m:
+        return clean_case_display_title(
+            f"{m.group(2).strip()} ({m.group(1).replace('‑', '-')})")
+    return concise_case_title(raw)
+
+
 def _parse_eurlex_metadata(xml: bytes) -> dict[str, dict]:
     """``{CELEX: {title, subjects}}`` from an Expert Search response — one entry per
     ``<result>``, keyed by the result's own CELEX/DN."""
@@ -1112,13 +1134,14 @@ LIMIT {self.per_page}
                 }
         # the CELLAR webservice often gives no title — derive a concise case name from
         # the judgment's own parties + case number ("ZZ v … (C-300/11)").
-        formex_title = formex_case_title(raw) if raw is not None and raw_ext == "xml" else None
+        content_title = (formex_case_title(raw) if raw is not None and raw_ext == "xml"
+                         else html_case_title(raw) if raw_ext == "html" else None)
         generic = bool(stub.title and (
             re.fullmatch(r"(?i)ECLI:[A-Z]{2}:.+", stub.title.strip())
             or stub.title.strip() == celex
             or re.fullmatch(r"(?i)(?:Joined\s+)?Cases?\s+[CTF][-‑–]?\d+/\d+", stub.title.strip())
         ))
-        title = formex_title or (None if generic else stub.title)
+        title = content_title or (None if generic else stub.title)
 
         relations: list[TypedRelation] = []
         # 0) a consolidated version (sector-0 CELEX ``0…-YYYYMMDD``) → its authoritative base
@@ -1571,6 +1594,8 @@ class CJEUCaseAdapter(BaseAdapter):
         raw_bytes, raw_ext, text, segments, source_language = self._cellar._best_rendition(
             stub.raw_url, celex
         )
+        if not title and raw_ext == "html":
+            title = html_case_title(raw_bytes)
         oj_meta: dict = {}
         if source_language == "fr" and doc_type in (DocType.JUDGMENT, DocType.DECISION):
             oj = self._cellar._english_oj_operative_part(celex)

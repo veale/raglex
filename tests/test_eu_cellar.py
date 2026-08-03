@@ -70,6 +70,14 @@ def test_unzip_formex_unpacks_zip_and_passes_raw_xml():
     assert unzip_formex(b"not a zip or xml") is None
 
 
+def test_html_case_title_uses_eurlex_hidden_heading():
+    from raglex.adapters.eu_cellar import html_case_title
+
+    html = (b'<html><p id="englishTitle">Judgment of the Court of 19 March 2026.'
+            b'#European Commission v Republic of Bulgaria.#Case C-646/24.</p></html>')
+    assert html_case_title(html) == "European Commission v Republic of Bulgaria"
+
+
 def test_extract_formex_text_prefers_ruling_and_reasoning():
     text = extract_formex_text(FORMEX)
     assert "hereby rules" in text  # JURISDICTION (operative)
