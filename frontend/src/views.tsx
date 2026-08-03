@@ -514,7 +514,9 @@ function MentionedBy({ list, target, anchor }: { list: any[]; target: string; an
               <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
           </Fragment>
         ))}
-        {inherited.length > 3 && <span> and {inherited.length - 3} more</span>}
+        {inherited.length > 3 && <span> and <a title="See every mapped-provision citer"
+          onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>
+          {inherited.length - 3} more</a></span>}
         <span className="muted"> — via {inherited[0].from_title || inherited[0].from_id}{" "}
           {inherited[0].from_anchor}{
             new Set(inherited.map((m: any) => m.from_id)).size > 1 ? " and others" : ""}</span>.

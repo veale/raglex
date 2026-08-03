@@ -83,6 +83,35 @@ def test_lookup_empty_is_handled():
     assert "error" in _facade().lookup(citation="   ")
 
 
+def test_duplicate_ecli_renditions_share_one_citator_identity():
+    """A GDPRhub copy and an official ECLI node are one judgment for cited-by purposes."""
+    f = _facade()
+    with f._open() as (cat, _rs, ts):
+        ecli = "ECLI:DE:BFH:2025:U.140125.IXR25.22.0"
+        for sid, source in (("gdprhub/bfh-ix-r-25-22", "gdprhub"), (ecli, "de-rii")):
+            rec = Record(source=source, stable_id=sid, ecli=ecli,
+                         doc_type=DocType.JUDGMENT, title="BFH IX R 25/22",
+                         text="judgment", raw_bytes=sid.encode(),
+                         extracted_via=ExtractedVia.STRUCTURED)
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        _doc_rec = Record(source="de-rii", stable_id="citer/1", doc_type=DocType.JUDGMENT,
+                          title="Later BFH case", text="cites it", raw_bytes=b"citer",
+                          extracted_via=ExtractedVia.STRUCTURED)
+        _doc_rec.ensure_payload_hash()
+        cat.upsert_document(_doc_rec, text_path=str(ts.put(_doc_rec.payload_hash, _doc_rec.text)))
+        cat.conn.execute(
+            "INSERT INTO relations (src_id,dst_id,candidate_id,raw_citation_string,"
+            "resolution_status,relationship_type,extracted_via) VALUES (?,?,?,?,?,?,?)",
+            ("citer/1", ecli, ecli, ecli, "resolved", "mentions", "regex"))
+        cat.commit()
+
+    summary = f.get_document("gdprhub/bfh-ix-r-25-22")
+    citers = f.citing_documents("gdprhub/bfh-ix-r-25-22")
+    assert summary["cited_by_count"] == citers["total"] == 1
+    assert citers["results"][0]["stable_id"] == "citer/1"
+
+
 # -- overview / jurisdictions ------------------------------------------------
 
 def test_holdings_overview_shape():

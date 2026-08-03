@@ -3346,7 +3346,43 @@ class Catalogue:
                 (alias_dst, alias_dst),
             ).fetchone()
             return row["stable_id"] if row else None
+        # The Administrative Appeals Chamber appears in citations as both ``(AAC)``
+        # and the common typo ``(ACC)``, while older BAILII imports zero-pad the neutral
+        # number (``.../0310``) and FCL does not (``.../310``).  They are the same
+        # identifier.  Keep this fallback deliberately confined to UKUT AAC so it cannot
+        # guess across genuinely independent EWHC/EWCA division number sequences.
+        m = re.fullmatch(r"ukut/(?:aac|acc)/(\d{4})/(\d+)", candidate, re.IGNORECASE)
+        if m:
+            rows = self.conn.execute(
+                "SELECT stable_id FROM documents WHERE stable_id LIKE ? OR stable_id LIKE ?",
+                (f"ukut/aac/{m.group(1)}/%", f"ukut/acc/{m.group(1)}/%"),
+            ).fetchall()
+            wanted = int(m.group(2))
+            hits = [r["stable_id"] for r in rows
+                    if int(r["stable_id"].rsplit("/", 1)[-1]) == wanted]
+            if len(hits) == 1:
+                return hits[0]
         return None
+
+    def document_identity_ids(self, stable_id: str) -> list[str]:
+        """Every node key under which this same identified Work may receive edges.
+
+        Some secondary-source records predate rendition reconciliation and coexist with
+        an official ECLI-keyed record.  Until those nodes are physically unified, the
+        citator must treat their shared ECLI as one identity; otherwise lookup counts
+        inbound edges to the ECLI while ``citing_documents`` on the secondary stable id
+        claims there are none.
+        """
+        doc = self.get_document(stable_id)
+        if doc is None:
+            return [stable_id] if stable_id else []
+        ids = [stable_id]
+        ecli = doc["ecli"]
+        if ecli:
+            ids.append(ecli)
+            ids.extend(r["stable_id"] for r in self.conn.execute(
+                "SELECT stable_id FROM documents WHERE ecli = ?", (ecli,)).fetchall())
+        return list(dict.fromkeys(i for i in ids if i))
 
     def find_existing(self, candidates) -> dict:
         """Batch version of :meth:`find_document_id` — given many candidate ids, return
@@ -3386,6 +3422,14 @@ class Catalogue:
             for c, dst in wanted.items():
                 if dst and dst in present:
                     out[c] = present[dst]
+            # Rare legacy UKUT spelling/padding variants are cheaper to settle one by
+            # one than to complicate the set-based hot path for every jurisdiction.
+            for c in remaining:
+                if c not in out and re.fullmatch(
+                        r"ukut/(?:aac|acc)/\d{4}/\d+", c, re.IGNORECASE):
+                    held = self.find_document_id(c)
+                    if held:
+                        out[c] = held
         return out
 
     def pending_relations(self) -> list[sqlite3.Row]:

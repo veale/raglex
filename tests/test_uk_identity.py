@@ -204,6 +204,16 @@ def test_a_judgment_dates_itself_when_the_metadata_does_not(catalogue, tmp_path)
     assert effective_date(None, None, "ukut/aac/12345")[0] is None
 
 
+def test_ukut_acc_typo_and_zero_padding_reach_the_held_aac_judgment(catalogue, tmp_path):
+    ts = TextStore(tmp_path / "text")
+    _case(catalogue, "ukut/aac/2014/0310", "Farrand v Information Commissioner", ts=ts)
+    assert catalogue.find_document_id("ukut/aac/2014/310") == "ukut/aac/2014/0310"
+    assert catalogue.find_document_id("ukut/acc/2014/310") == "ukut/aac/2014/0310"
+    assert catalogue.find_existing(["ukut/acc/2014/310"]) == {
+        "ukut/acc/2014/310": "ukut/aac/2014/0310"
+    }
+
+
 def test_the_fallback_date_reaches_sorting_filtering_and_the_citation(catalogue, tmp_path):
     ts = TextStore(tmp_path / "text")
     _case(catalogue, "ewca/civ/1975/5", "Rose v Plenty", ts=ts)      # no decision_date

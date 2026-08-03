@@ -814,7 +814,7 @@ register(Grammar(
     "uk_gdpr", "regulation",
     re.compile(
         r"(?:Art(?:icle|\.)?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)\s+(?:of\s+)?(?:the\s+)?)?"
-        r"(?:UK|United\s+Kingdom)\s+GDPR\b",
+        r"(?:UK|United\s+Kingdom)\s+(?:GDPR|(?:General\s+)?Data\s+Protection\s+Regulation)\b",
         re.IGNORECASE,
     ),
     lambda m: (UK_GDPR_ID, f"Article {m.group('art')}" if m.group("art") else None, "regulation"),

@@ -1904,7 +1904,7 @@ class Facade:
             # Python and pinned a pool connection for seconds per page view
             # (a prime suspect in the pool-exhaustion freezes). `inferred` edges
             # (heuristic carry-forwards) are excluded there and counted apart.
-            ids_self = [stable_id] + ([doc["ecli"]] if doc["ecli"] else [])
+            ids_self = cat.document_identity_ids(stable_id)
             direct_edges = [dict(r) for r in cat.top_citing_edges(ids_self, limit=600)]
             version_edges: list[dict] = []
             for row in cat.version_inherited_mentions_for(stable_id, limit=5000):
@@ -2754,15 +2754,22 @@ class Facade:
                                _anchor_sql_prefixes(anchor) if anchor and not exact
                                else [])
             anchor_like = _paragraph_anchor_like(want_span) if want_span else []
-            rels = [
-                dict(r) for r in cat.relations_to(
-                    stable_id,
+            identity_ids = cat.document_identity_ids(stable_id)
+            rels = []
+            seen_relation_ids: set[int] = set()
+            for identity_id in identity_ids:
+                for row in cat.relations_to(
+                    identity_id,
                     anchor_exact=anchor_exact,
                     anchor_prefixes=anchor_prefixes,
                     anchor_like=anchor_like,
-                )
-                if r["extracted_via"] != "inferred"
-            ]
+                ):
+                    if row["extracted_via"] == "inferred":
+                        continue
+                    rid = int(row["relation_id"])
+                    if rid not in seen_relation_ids:
+                        seen_relation_ids.add(rid)
+                        rels.append(dict(row))
             direct_keys = {
                 (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
                 for r in rels

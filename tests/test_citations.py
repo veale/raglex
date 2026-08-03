@@ -619,6 +619,16 @@ def test_uk_gdpr_maps_to_the_assimilated_instrument_not_the_eu_original():
     assert by["recital (26) of the UK GDPR"].pinpoint == "Recital 26"
 
 
+def test_uk_gdpr_full_name_is_one_complete_link():
+    cites = extract_citations(
+        "A request pursuant to Article 15 of the UK General Data Protection Regulation."
+    )
+    assert [(c.raw, c.candidate_id, c.pinpoint) for c in cites] == [(
+        "Article 15 of the UK General Data Protection Regulation",
+        "european/regulation/2016/0679", "Article 15",
+    )]
+
+
 def test_digital_regulation_names_resolve_with_subsection_pinpoints():
     by = {c.candidate_id: c for c in extract_citations(
         "Article 8(2) of the DMA and Article 5 of the DSA and the Law Enforcement Directive.")}

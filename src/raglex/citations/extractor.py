@@ -304,6 +304,13 @@ _GENERIC_SHORTHAND = {
     "la cour", "le ministre", "recurrente", "demandante", "demandado",
     "ricorrente", "resistente",
 }
+
+# Abbreviations for actors, requests, privileges and numbered issues are ordinary
+# litigation vocabulary, not names of legal authorities.  A noisy inline definition
+# once taught these to the corpus-wide store (``HMRC -> FOIA``, ``SAR -> DPA 1998``,
+# ``LPP -> FOIA``); rejecting them on both write and read retires the historical rows.
+_NON_AUTHORITY_SHORTHAND = {"hmrc", "sar", "lpp", "information rights"}
+_NUMBERED_ISSUE = re.compile(r"(?i)^(?:the\s+)?issues?\s+\d+[a-z]?(?:\([a-z0-9]+\))?$")
 # A JUDGE is not an authority. "Nicklin J" was learned as a name for the judgment he
 # wrote, so any later "Nicklin J" — in a document citing that judgment for any reason —
 # rendered as a link to it. The judicial suffixes are unambiguous and appear nowhere in
@@ -351,6 +358,8 @@ def valid_shorthand(name: str | None) -> bool:
     if _JUDICIAL_TITLE.match(n):
         return False
     low = n.casefold()
+    if low.removeprefix("the ") in _NON_AUTHORITY_SHORTHAND or _NUMBERED_ISSUE.match(n):
+        return False
     if low in _GENERIC_SHORTHAND or low.removeprefix("the ") in _GENERIC_SHORTHAND:
         return False
     words = [w.strip(".,'’\"").casefold() for w in n.split()]
@@ -910,6 +919,18 @@ def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
                      and c.entity_kind == "directive"]
             if prior:
                 cand, kind = prior[-1].candidate_id, "directive"
+        # A judgment often introduces the instrument in a section heading before a run
+        # of quoted provisions: ``The UK GDPR ... provisions`` then Articles 4–12,
+        # including ``Articles 15 to 22 and 34``.  The list has no repeated instrument
+        # tail, but the closest explicit instrument mention in that short section makes
+        # its host clear.  3,000 chars covers a handful of judgment paragraphs, not an
+        # unbounded document-wide carry-forward.
+        if not cand:
+            prior = [c for c in kept if c.char_end <= m.start() and c.candidate_id
+                     and c.entity_kind in {"regulation", "directive", "eu_instrument", "treaty"}
+                     and m.start() - c.char_end <= 3000]
+            if prior:
+                cand, kind = prior[-1].candidate_id, prior[-1].entity_kind
         if not cand:
             continue
         article_matches = list(_ARTICLE_IN_LIST.finditer(m.group("list")))
@@ -1227,6 +1248,13 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
             cue_raw = m.group("cue")
             pinpoint = _bare_pinpoint(cue_raw, m.group("num"))
         cue = cue_raw.lower().rstrip(".")
+        # A possessive followed by a tax/academic year is not the abbreviation for
+        # section: ``client's 2011/12 tax return`` previously minted ``s. 2011``.
+        if cue in ("s", "ss") and (
+            text[max(0, s - 1):s] in {"'", "’"}
+            or re.match(r"/\d{2,4}\b", text[e:])
+        ):
+            continue
         # The text names its own host ("of the Road Traffic Act", "of the Code").
         # Whatever that host is, it is not the last-named instrument.
         if _EXPLICIT_HOST_RE.match(text, e) and not re.match(

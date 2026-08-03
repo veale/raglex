@@ -1105,6 +1105,15 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str) -> l
     if doc["doc_type"] in (str(DocType.JUDGMENT), str(DocType.DECISION), str(DocType.OPINION)):
         cites = [c for c in cites
                  if not (c.method == "carry_forward" and c.raw.lower().startswith("para"))]
+        # A bare Schedule/Annex in a judgment very commonly names an evidential bundle,
+        # order or quoted document.  Carrying it onto the last statute creates impossible
+        # pinpoints (CPR Part 8 and the GDPR do not acquire Schedules 1–5 merely because
+        # they were the last law named).  Explicit ``Schedule N to/of <Act>`` citations
+        # are recognised by the literal grammars and are unaffected.
+        cites = [c for c in cites if not (
+            c.method == "carry_forward"
+            and c.raw.lower().lstrip().startswith(("schedule", "sched", "sch.", "annex"))
+        )]
 
     # CJEU precision guard: a UK statute *name* ("<Title> Act <year>", "DPA 1998 s.5")
     # only resolves to UK legislation inside a CJEU judgment that was a UK-referred

@@ -154,8 +154,52 @@ def _direct_child(elem: ET.Element, name: str) -> ET.Element | None:
     return next((child for child in elem if _localname(child.tag) == name), None)
 
 
+_BLOCK_TEXT_TAGS = {
+    "num", "heading", "content", "intro", "wrapup", "p", "paragraph",
+    "subparagraph", "level",
+}
+
+
+def _normalised_mixed_text(elem: ET.Element, excluded: set[int] | None = None) -> str:
+    """XML mixed content without inventing spaces between inline styling runs.
+
+    Structural children do need a boundary (``<num>I.</num><content>Overview``), while
+    inline ``span`` children emphatically do not (``<span>Ő</span><span>sterreich``).
+    """
+    excluded = excluded or set()
+    out: list[str] = []
+
+    def visit(node: ET.Element) -> None:
+        if id(node) in excluded:
+            return
+        if node.text:
+            out.append(node.text)
+        for child in node:
+            if id(child) in excluded:
+                if child.tail:
+                    out.append(child.tail)
+                continue
+            if (_localname(child.tag).lower() in _BLOCK_TEXT_TAGS and out
+                    and out[-1] and not out[-1][-1].isspace()):
+                out.append(" ")
+            visit(child)
+            if child.tail:
+                out.append(child.tail)
+
+    visit(elem)
+    return " ".join("".join(out).split())
+
+
 def _compact_text(elem: ET.Element | None) -> str:
-    return " ".join(_iter_text(elem)) if elem is not None else ""
+    if elem is None:
+        return ""
+    # The mixed-content walk preserves whether adjacent styled runs actually had
+    # whitespace between them. Joining the individually stripped runs with a space corrupted
+    # names and quotation marks in FCL judgments, e.g. ``Ő`` + ``sterreichische``
+    # became ``Ő sterreichische`` and ``(“`` + ``FF`` + ``”)`` became ``(“ FF ”)``.
+    # Collapse only whitespace that exists in the XML; never manufacture it at an
+    # inline element boundary.
+    return _normalised_mixed_text(elem)
 
 
 def _fully_styled_heading(elem: ET.Element) -> bool:
@@ -170,6 +214,8 @@ def _fully_styled_heading(elem: ET.Element) -> bool:
     p = next((e for e in elem.iter() if _localname(e.tag) == "p"), None)
     if p is None:
         return False
+    if (p.get("class") or "").lower().startswith("heading"):
+        return True
     style = (p.get("style") or "").lower()
     styled = ("font-weight:bold", "font-style:italic", "text-decoration-line:underline")
     if any(token in style for token in styled):
@@ -186,7 +232,7 @@ def _fully_styled_heading(elem: ET.Element) -> bool:
 
 
 def _is_embedded_heading(elem: ET.Element) -> bool:
-    if _localname(elem.tag) != "subparagraph":
+    if _localname(elem.tag) not in {"subparagraph", "level"}:
         return False
     content = _direct_child(elem, "content")
     heading = _compact_text(content)
@@ -196,27 +242,22 @@ def _is_embedded_heading(elem: ET.Element) -> bool:
 
 def _text_skipping(elem: ET.Element, excluded: set[int]) -> str:
     """Compact element text while omitting selected structural descendants."""
-    out: list[str] = []
-
-    def visit(node: ET.Element) -> None:
-        if id(node) in excluded:
-            return
-        if node.text and node.text.strip():
-            out.append(node.text.strip())
-        for child in node:
-            visit(child)
-            if child.tail and child.tail.strip():
-                out.append(child.tail.strip())
-
-    visit(elem)
-    return " ".join(out)
+    return _normalised_mixed_text(elem, excluded)
 
 
 def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
-    """LegalDocML paragraphs with embedded end-headings split into distinct blocks."""
+    """The judgment's own paragraphs and headings, in source order.
+
+    Quoted legislation and authorities are themselves marked up with nested
+    ``<paragraph>`` elements.  They are content of the enclosing judgment paragraph,
+    not new citable paragraphs of the judgment.  The old ``body.iter()`` scan flattened
+    both levels, producing duplicate/out-of-order labels such as quoted ``“1.`` and
+    ``“40.`` between paragraphs 62 and 90.  Walk the tree instead and stop descending
+    once a top-level judgment paragraph has been emitted.
+    """
     blocks: list[tuple[str, str, str]] = []
-    numbered = [e for e in body.iter() if _localname(e.tag) == "paragraph"]
-    for n, paragraph in enumerate(numbered, 1):
+
+    def add_paragraph(paragraph: ET.Element, n: int) -> None:
         embedded = [e for e in paragraph.iter() if _is_embedded_heading(e)]
         excluded = {id(e) for e in embedded}
         label_node = _direct_child(paragraph, "num")
@@ -236,6 +277,25 @@ def _judgment_blocks(body: ET.Element) -> list[tuple[str, str, str]]:
             h_label = _compact_text(_direct_child(heading, "num"))
             h_text = _compact_text(heading)
             blocks.append((h_label or h_text, "heading", h_text))
+
+    number = 0
+
+    def walk(elem: ET.Element) -> None:
+        nonlocal number
+        for child in elem:
+            name = _localname(child.tag)
+            if name == "paragraph":
+                number += 1
+                add_paragraph(child, number)
+                continue                    # nested quote paragraphs stay in its text
+            if name == "heading":
+                text = _compact_text(child)
+                if text:
+                    blocks.append((text, "heading", text))
+                continue
+            walk(child)
+
+    walk(body)
     return blocks
 
 

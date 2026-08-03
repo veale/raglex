@@ -215,6 +215,46 @@ def test_statutory_instrument_regulations_are_citable_units():
     assert _anchor_key("regulation 6") == _anchor_key(reg6.label) == "reg:6"
 
 
+def test_judgment_quotes_do_not_become_judgment_paragraphs_and_inline_runs_join():
+    """Nested quoted provisions are content, not the judgment's own paragraph sequence."""
+    from raglex.adapters.uk_caselaw import parse_judgment
+
+    xml = """<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+      <judgment><judgmentBody>
+        <level><heading>THE LAW</heading>
+          <paragraph eId="para_62"><num>62.</num><content>
+            <p>Article 12 provides:</p>
+            <paragraph><num>“1.</num><content><p>The controller shall act.</p></content></paragraph>
+          </content></paragraph>
+          <paragraph eId="para_63"><num>63.</num><content><p>
+            <span>FF v </span><span>Ő</span><span>sterreichische</span>
+            (“<span>FF</span>”).</p></content></paragraph>
+        </level>
+      </judgmentBody></judgment>
+    </akomaNtoso>""".encode()
+
+    text, _rels, _ncn, segments = parse_judgment(xml)
+    assert [s.label for s in segments] == ["THE LAW", "62.", "63."]
+    assert "“1. The controller shall act." in text
+    assert "Ősterreichische" in text and "Ő sterreichische" not in text
+    assert "(“FF”)" in text and "(“ FF ”)" not in text
+
+
+def test_nested_styled_level_becomes_a_heading_not_a_paragraph():
+    from raglex.adapters.uk_caselaw import parse_judgment
+
+    xml = b"""<akomaNtoso><judgment><judgmentBody>
+      <paragraph eId="para_33"><num>33.</num><content><p>Main text.</p>
+        <level><content><p class="Heading3">Illicit cash</p></content></level>
+      </content></paragraph>
+      <paragraph eId="para_34"><num>34.</num><content><p>Next.</p></content></paragraph>
+    </judgmentBody></judgment></akomaNtoso>"""
+    text, _rels, _ncn, segments = parse_judgment(xml)
+    assert [(s.label, s.kind) for s in segments] == [
+        ("33.", "paragraph"), ("Illicit cash", "heading"), ("34.", "paragraph")]
+    assert text.count("Illicit cash") == 1
+
+
 def test_govuk_code_of_practice_segments_by_numbered_paragraph():
     """A code of practice is cited by paragraph number and nothing else.
 
