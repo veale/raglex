@@ -131,6 +131,24 @@ def test_unreachable_reference_gets_the_short_cooldown_only(monkeypatch):
         assert cat.enrichment_misses("harvest-retry", max_age_days=1)
 
 
+def test_transient_drain_progress_says_retry_not_terminal_error(monkeypatch):
+    from raglex.jobs import fmt_progress
+
+    f = _facade()
+    _hanging_ref(f)
+    events: list[dict] = []
+
+    def fake_fetch(self, cat, rs, ts, *, ref, candidate):
+        return {"candidate": candidate, "outcome": "transient", "stored": 0,
+                "error": "transport timeout"}
+
+    monkeypatch.setattr(Facade, "_fetch_reference", fake_fetch)
+    f.harvest_all_references(limit=10, on_progress=lambda **p: events.append(p))
+    event = next(p for p in events if p.get("outcome") == "transient")
+    line = fmt_progress(event)
+    assert "↻" in line and "eligible again" in line and "✗" not in line
+
+
 def test_rate_limiting_stops_the_batch_without_recording_a_miss(monkeypatch):
     f = _facade()
     _doc(f, "case-1", "Article 17 of Regulation (EU) 2016/679 and Article 5 of Directive 95/46/EC")

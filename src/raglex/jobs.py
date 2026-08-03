@@ -262,7 +262,12 @@ def fmt_progress(p: dict) -> str:
     if p.get("item"):
         parts.append("— " + str(p["item"]))
     if "ok" in p:
-        parts.append("✓" if p["ok"] else "✗")
+        marker = {
+            "transient": "↻",       # exhausted retries now; remains eligible later
+            "rate_limited": "⏸",    # source queue paused, not an item failure
+            "absent": "∅",          # upstream positively says no such item
+        }.get(p.get("outcome"), "✓" if p["ok"] else "✗")
+        parts.append(marker)
     if p.get("msg"):
         parts.append(str(p["msg"]))
     return "  ".join(parts).strip()

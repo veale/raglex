@@ -8073,9 +8073,17 @@ class Facade:
                                 absent.append(r["candidate"])
                             elif outcome != "no_adapter":
                                 transient.append(r["candidate"])
+                        error = res.get("error")
+                        if not ok and outcome == "transient":
+                            error = (f"temporary; eligible again after the "
+                                     f"{retry_ttl_days * 24:g}h retry cooldown"
+                                     + (f" — {error}" if error else ""))
+                        elif not ok and outcome == "rate_limited":
+                            error = ("source paused; remaining items stay queued"
+                                     + (f" — {error}" if error else ""))
                         _progress(on_progress, stage="harvesting", done=done_ctr["n"], total=total,
                                   item=res.get("candidate") or r["ref"], ok=ok,
-                                  msg=res.get("error") if not ok else None)
+                                  outcome=outcome, msg=error if not ok else None)
                     if outcome == "rate_limited":
                         # This source is throttling — stop draining IT (its remaining refs
                         # would all "fail" for reasons that say nothing about them), but let
