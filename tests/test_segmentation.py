@@ -5,6 +5,27 @@ structural re-import."""
 from __future__ import annotations
 
 from raglex.core.segmentation import synthesise_numbered_segments as syn
+from raglex.core.segmentation import recover_numbered_segments
+from raglex.core.models import Segment
+
+
+def test_generic_whole_body_segment_is_recovered_as_numbered_paragraphs():
+    text = ("1. First paragraph\n\n2. Second paragraph\n\n3. Third paragraph\n\n"
+            "4. Fourth paragraph\n\n5. Fifth paragraph")
+    stored = [Segment(label="section", kind="section", char_start=0,
+                      char_end=len(text))]
+    recovered, synthesised = recover_numbered_segments(text, stored)
+    assert synthesised is True
+    assert [s.label for s in recovered] == ["1.", "2.", "3.", "4.", "5."]
+
+
+def test_richer_native_segmentation_is_never_replaced():
+    text = ("1. First paragraph\n\n2. Second paragraph\n\n3. Third paragraph\n\n"
+            "4. Fourth paragraph\n\n5. Fifth paragraph")
+    stored = [Segment(label="native", kind="paragraph", char_start=0,
+                      char_end=len(text))]
+    recovered, synthesised = recover_numbered_segments(text, stored)
+    assert recovered == stored and synthesised is False
 
 
 def _labels(text):

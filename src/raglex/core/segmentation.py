@@ -311,3 +311,27 @@ def synthesise_numbered_segments(text: str, *, min_paras: int = 3) -> list[Segme
         segs.append(Segment(label=label_fmt.format(n), kind="paragraph", level=1,
                             char_start=start, char_end=end))
     return _split_author_labels(text, segs)
+
+
+def recover_numbered_segments(
+    text: str, stored: list[Segment] | tuple[Segment, ...] | None,
+) -> tuple[list[Segment], bool]:
+    """Replace a generic whole-body segment with visible numbered paragraphs.
+
+    Some Find Case Law renditions wrap a conventionally numbered judgment in one
+    unrecognised element.  The parser then stores one ``section`` spanning the whole
+    body: technically structure, but useless for paragraph pincites.  Treat only that
+    degenerate wrapper like absent segmentation and preserve every richer native index.
+    """
+    existing = list(stored or [])
+    degenerate = (
+        len(existing) <= 1
+        and (not existing or existing[0].kind in {"section", "body"})
+        and (not existing or existing[0].char_start == 0)
+    )
+    if not degenerate:
+        return existing, False
+    derived = synthesise_numbered_segments(text)
+    if len(derived) <= len(existing):
+        return existing, False
+    return derived, True

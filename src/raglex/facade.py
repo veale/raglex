@@ -2581,12 +2581,9 @@ class Facade:
             except OSError:
                 text = None
             if segments_only:
-                segments = ts.get_segments(ph)
-                synthesised = False
-                if not segments and text:
-                    from .core.segmentation import synthesise_numbered_segments
-                    segments = synthesise_numbered_segments(text)
-                    synthesised = bool(segments)
+                from .core.segmentation import recover_numbered_segments
+                segments, synthesised = recover_numbered_segments(
+                    text or "", ts.get_segments(ph))
                 return {
                     "stable_id": stable_id,
                     "title": doc["title"],
@@ -2626,15 +2623,9 @@ class Facade:
                 })
             raw_path = doc["raw_path"]
             meta = _row_meta(doc)
-            segments = ts.get_segments(ph)
-            synthesised = False
-            if not segments and text:
-                # flat-text imports (Canadian A2AJ, BAILII long tail) carry their
-                # paragraph numbers in the prose — synthesise segments so "[15]"
-                # pinpoints land and peeks can scroll (quote-guarded)
-                from .core.segmentation import synthesise_numbered_segments
-                segments = synthesise_numbered_segments(text)
-                synthesised = bool(segments)
+            from .core.segmentation import recover_numbered_segments
+            segments, synthesised = recover_numbered_segments(
+                text or "", ts.get_segments(ph))
             total_chars = len(text or "")
             segments_total = len(segments)
             segs = [asdict(s) for s in segments]
@@ -4378,10 +4369,9 @@ class Facade:
                 text = ts.get(doc["payload_hash"])
             except OSError:
                 return {"error": "text unavailable", "stable_id": stable_id}
-            segs = ts.get_segments(doc["payload_hash"])
-            if not segs:
-                from .core.segmentation import synthesise_numbered_segments
-                segs = synthesise_numbered_segments(text)
+            from .core.segmentation import recover_numbered_segments
+            segs, _synthesised = recover_numbered_segments(
+                text, ts.get_segments(doc["payload_hash"]))
             idx = -1
             if label:
                 idx = _match_segment(segs, label)
@@ -6994,7 +6984,7 @@ class Facade:
         guard has to reject. Throwing that away to gain a byline would be a bad trade,
         so the byline split is applied to the stored segments; only a document with no
         segmentation at all is derived from scratch."""
-        from .core.segmentation import _split_author_labels, synthesise_numbered_segments
+        from .core.segmentation import _split_author_labels, recover_numbered_segments
 
         st = {"scanned": 0, "improved": 0, "derived": 0, "headings_added": 0,
               "unchanged": 0, "unreadable": 0}
@@ -7022,10 +7012,8 @@ class Facade:
                     st["unreadable"] += 1
                     continue
                 old = list(ts.get_segments(ph) or [])
-                if old:
-                    fresh, derived = _split_author_labels(text, old), False
-                else:
-                    fresh, derived = synthesise_numbered_segments(text), True
+                recovered, derived = recover_numbered_segments(text, old)
+                fresh = recovered if derived else _split_author_labels(text, old)
                 if not fresh or len(fresh) == len(old):
                     st["unchanged"] += 1
                     continue
@@ -13240,6 +13228,87 @@ class Facade:
     def _doc_type_vocabulary(self) -> list[str]:
         return sorted(set(self._FTS_DOC_TYPES) | set(self._FTS_KIND_DOC_TYPES))
 
+    def search_within_document(self, stable_id: str, query: str, *, limit: int = 20,
+                               offset: int = 0) -> dict:
+        """Literal search over the complete served body, bypassing the FTS index.
+
+        This is deliberately grep-like rather than a second query language: pass one
+        phrase or term, optionally quoted.  It is the authoritative escape hatch when
+        a corpus-level index is incomplete or a researcher already knows the document.
+        """
+        from .core.segmentation import recover_numbered_segments
+        from .fulltext.index import _literal_re, highlight_spans, snippet
+        from .fulltext.query import Phrase, parse
+
+        written = (query or "").strip()
+        if ((written.startswith('"') and written.endswith('"'))
+                or (written.startswith("“") and written.endswith("”"))):
+            written = written[1:-1].strip()
+        if not written:
+            return {"stable_id": stable_id, "error": "empty query"}
+        if re.search(r"(?i)\b(?:AND|OR|NOT|NEAR\s*/\s*\d+)\b|[()|&]", written):
+            return {"stable_id": stable_id,
+                    "error": "search_within_document is literal; pass one phrase or term"}
+        words = re.findall(r"\d+(?:[./]\d+)+|[^\W_]+(?:['’][^\W_]+)*",
+                           written, flags=re.UNICODE)
+        if not words:
+            return {"stable_id": stable_id, "error": "query contains no searchable words"}
+        matcher = _literal_re(Phrase(words))
+        with self._open() as (cat, _rs, ts):
+            doc = cat.get_document(stable_id)
+            if not doc or not doc["payload_hash"]:
+                return {"stable_id": stable_id, "error": "not found or no text"}
+            try:
+                text = ts.get(doc["payload_hash"])
+            except OSError:
+                return {"stable_id": stable_id, "error": "text unavailable"}
+            segs, synthesised = recover_numbered_segments(
+                text, ts.get_segments(doc["payload_hash"]))
+            offsets = [m.start() for m in matcher.finditer(text)]
+            page = offsets[max(0, offset):max(0, offset) + max(1, min(limit, 100))]
+
+            def anchor_at(at: int) -> str | None:
+                return next((s.label for s in segs
+                             if s.char_start <= at < s.char_end and s.label), None)
+
+            parsed = parse(f'"{written}"', exact=True)
+            fts_rows = cat.conn.execute(
+                "SELECT count(*) AS parts, min(char_start) AS first_char, "
+                "max(char_end) AS last_char, max(words) AS max_part_words "
+                "FROM doc_fts WHERE doc_id = ?", (stable_id,)).fetchone()
+            last = int(fts_rows["last_char"] or 0)
+            safe = int(fts_rows["max_part_words"] or 0) <= cat.FTS_PART_WORDS
+            complete = bool(fts_rows["parts"] and last >= len(text) and safe)
+            return {
+                "stable_id": stable_id,
+                "title": doc["title"],
+                "query": written,
+                "matched": bool(offsets),
+                "total": len(offsets),
+                "offset": max(0, offset),
+                "matches": [{
+                    "char_start": at,
+                    "anchor": anchor_at(at),
+                    "snippet": (frag := snippet(text, at)),
+                    "highlights": [list(span) for span in highlight_spans(frag, parsed)],
+                } for at in page],
+                "text_chars": len(text),
+                "segmentation": ("synthesised" if synthesised
+                                 else "structural" if segs else "none"),
+                "segments_total": len(segs),
+                "index_coverage": {
+                    "indexed_chars": min(last, len(text)),
+                    "text_chars": len(text),
+                    "parts": int(fts_rows["parts"] or 0),
+                    "max_part_words": int(fts_rows["max_part_words"] or 0),
+                    "complete": complete,
+                    "note": ("whole text is safely position-indexed" if complete else
+                             "the stored index is incomplete or has a legacy oversized part; "
+                             "these direct-body matches remain authoritative"),
+                },
+                "search_route": "complete served body (index bypassed)",
+            }
+
     def freetext_search(self, query: str, *, exact: bool = True, limit: int = 25,
                         offset: int = 0, sources: list[str] | None = None,
                         doc_type: list[str] | None = None,
@@ -13323,6 +13392,14 @@ class Facade:
         if year_from:
             filters["year_from"] = year_from
         with self._open() as (cat, _rs, ts):
+            positional_risk = cat.fts_positional_risk_count()
+            if positional_risk:
+                notes.append(
+                    f"{positional_risk:,} indexed documents still have legacy oversized "
+                    "parts while the positional-index repair runs; phrase/proximity misses "
+                    "in those documents are not conclusive. Use search_within_document() "
+                    "for a known authority."
+                )
             res = fts.search(cat, ts, query, filters=filters, exact=exact,
                              limit=limit, offset=offset)
             # Facets over the WHOLE result set, never the page. One metadata read
@@ -13713,6 +13790,37 @@ class Facade:
         with self._open() as (cat, _rs, ts):
             return fts.build(cat, ts, sources=targets, reindex=reindex, limit=limit,
                              on_progress=on_progress, cancel_check=cancel_check)
+
+    def repair_freetext_positions(self, *, limit: int = 1_000_000,
+                                  on_progress=None, cancel_check=None) -> dict:
+        """Repartition only legacy FTS rows that exceed PostgreSQL's position budget."""
+        st = {"risky": 0, "reindexed": 0, "parts": 0, "unreadable": 0}
+        with self._open() as (cat, _rs, ts):
+            rows = cat.conn.execute(
+                "SELECT d.stable_id, d.payload_hash FROM documents d "
+                "WHERE EXISTS (SELECT 1 FROM doc_fts f WHERE f.doc_id = d.stable_id "
+                "AND f.words > ?) ORDER BY d.stable_id LIMIT ?",
+                (cat.FTS_PART_WORDS, limit),
+            ).fetchall()
+            st["risky"] = len(rows)
+            for n, row in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                if on_progress and (n == 1 or n % 200 == 0):
+                    _progress(on_progress, stage="repairing full-text phrase positions",
+                              done=n, total=len(rows), item=row["stable_id"])
+                try:
+                    text = ts.get(row["payload_hash"])
+                except (OSError, TypeError):
+                    st["unreadable"] += 1
+                    continue
+                st["parts"] += cat.put_doc_fts(row["stable_id"], text, commit=False)
+                st["reindexed"] += 1
+                if st["reindexed"] % 200 == 0:
+                    cat.conn.commit()
+            cat.conn.commit()
+            st["remaining"] = cat.fts_positional_risk_count()
+        return st
 
     # -- learned shorthands (the corpus-wide store, curated by hand) -----------
     def browse_shorthands(self, *, query: str | None = None,

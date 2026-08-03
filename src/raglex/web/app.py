@@ -698,6 +698,13 @@ def create_app(config: Config | None = None) -> FastAPI:
             court=split(court) or None, jurisdictions=split(jurisdiction) or None,
             year_from=year_from)
 
+    @app.get("/documents/{stable_id:path}/search")
+    def search_within_document_ep(stable_id: str, q: str, limit: int = 20,
+                                  offset: int = 0) -> dict:
+        """Literal search over one complete served body, independent of FTS coverage."""
+        return facade.search_within_document(
+            stable_id, q, limit=min(max(limit, 1), 100), offset=max(offset, 0))
+
     @app.get("/system/text-storage")
     def text_storage_ep() -> dict:
         """Where each source's text physically lives when the store is split across a
@@ -756,6 +763,15 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: v for k, v in (payload or {}).items()
                   if k in ("sources", "reindex", "limit")}
         return _start_job("build-fts", "build free-text index", params)
+
+    @app.post("/jobs/repair-fts-positions")
+    def job_repair_fts_positions_ep(payload: dict = Body(default={})) -> dict:
+        """Repartition only legacy FTS parts that exceed PostgreSQL's position limit."""
+        params = {k: v for k, v in (payload or {}).items() if k == "limit"}
+        return _start_job(
+            "repair-fts-positions", "repair full-text phrase positions", params,
+            queue=bool((payload or {}).get("queue")),
+        )
 
     # -- learned shorthands ---------------------------------------------------
     @app.get("/shorthands")

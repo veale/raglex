@@ -68,6 +68,20 @@ def test_lookup_pincite_returns_a_passage_not_the_body():
     assert "passage" in r and "text_preview" not in r
 
 
+def test_search_within_document_bypasses_index_and_recovers_paragraph_anchor():
+    f = _facade()
+    body = ("1. First paragraph.\n\n2. Middle paragraph.\n\n"
+            "3. The data must not be denuded of its proper context.\n\n"
+            "4. Fourth paragraph.\n\n5. Fifth paragraph.")
+    _doc(f, "ewhc/kb/2025/134", body, "Ashley v HMRC")
+    r = f.search_within_document(
+        "ewhc/kb/2025/134", '"denuded of its proper context"')
+    assert r["matched"] is True and r["total"] == 1
+    assert r["matches"][0]["anchor"] == "3."
+    assert r["search_route"] == "complete served body (index bypassed)"
+    assert r["index_coverage"]["complete"] is False
+
+
 # -- lookup: not held --------------------------------------------------------
 
 def test_lookup_unheld_returns_external_links():

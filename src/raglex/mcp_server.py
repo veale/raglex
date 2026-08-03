@@ -192,6 +192,19 @@ def build_server(config: Config | None = None) -> MCPServer:
             year_from=year_from, passages=max(0, min(passages, 10)))
 
     @mcp.tool(annotations=_READ_ONLY)
+    def search_within_document(stable_id: str, query: str, limit: int = 20,
+                               offset: int = 0) -> dict:
+        """Search one known document's COMPLETE served body directly, bypassing FTS.
+
+        Pass one literal phrase or term, optionally quoted. Returns every matching
+        passage on the requested page with its character offset and paragraph anchor,
+        plus explicit index coverage. Use this when a corpus-wide zero result is not
+        conclusive or when you already know the authority to inspect.
+        """
+        return facade.search_within_document(
+            stable_id, query, limit=min(max(limit, 1), 100), offset=max(offset, 0))
+
+    @mcp.tool(annotations=_READ_ONLY)
     def search_coverage() -> dict:
         """Which jurisdictions search_text() actually covers, and how many documents.
 

@@ -34,7 +34,7 @@ from ..core.models import (
     Stub,
     TypedRelation,
 )
-from ..core.segmentation import blocks_by_localname, element_text
+from ..core.segmentation import blocks_by_localname, element_text, recover_numbered_segments
 
 BASE_URL = "https://caselaw.nationalarchives.gov.uk"
 
@@ -461,6 +461,7 @@ def parse_judgment(
     if not blocks:
         blocks = [("body", "section", element_text(body), [])]
     text, segments = _assemble_rich(blocks)
+    segments, _recovered = recover_numbered_segments(text, segments)
     return text, relations, ncn, segments
 
 

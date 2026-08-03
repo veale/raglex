@@ -13,6 +13,17 @@ from raglex.fulltext.index import (
     find_literal, highlight_spans, snippet, verify,
 )
 from raglex.fulltext.query import Phrase, parse
+from raglex.storage.catalogue import _fts_parts
+
+
+def test_fts_parts_stay_below_postgres_position_budget_even_when_text_is_short():
+    # 25k tiny words fit beneath the old character cap but exceed PostgreSQL's
+    # 16,383 stored positions, making phrases near a judgment's end unfindable.
+    text = "word " * 25_000
+    parts = _fts_parts(text, 400_000, word_cap=10_000)
+    assert len(parts) == 3
+    assert all(len(text[start:end].split()) <= 10_000 for start, end in parts)
+    assert parts[0][0] == 0 and parts[-1][1] == len(text)
 
 
 # -- literal verification ------------------------------------------------------

@@ -781,19 +781,29 @@ def _apply_filters(sql: str, params: list, filters: dict | None) -> tuple[str, l
     return sql, params
 
 
-def _fts_parts(text: str, cap: int) -> list[tuple[int, int]]:
-    """Split a document into indexable spans at most ``cap`` characters long, cutting
-    on a blank line where one is near the boundary so a phrase is only ever broken
-    when a single paragraph is itself over-long."""
+def _fts_parts(text: str, cap: int, *, word_cap: int = 10_000) -> list[tuple[int, int]]:
+    """Split text below PostgreSQL's character *and positional-word* ceilings.
+
+    A tsvector retains at most 16,383 word positions.  A 160k-character judgment can
+    therefore fit comfortably below the 1 MB vector limit while every phrase position
+    near its conclusion collapses onto 16,383.  Keep generous headroom for punctuation
+    that PostgreSQL tokenises into more lexemes than Python's whitespace count.
+    """
     n = len(text or "")
-    if n <= cap:
-        return [(0, n)]
+    if not n:
+        return [(0, 0)]
     spans: list[tuple[int, int]] = []
     start = 0
     while start < n:
         end = min(start + cap, n)
+        words = 0
+        for match in re.compile(r"\S+").finditer(text, start, end):
+            words += 1
+            if words > word_cap:
+                end = match.start()
+                break
         if end < n:
-            window = text.rfind("\n\n", start + cap // 2, end)
+            window = text.rfind("\n\n", start + (end - start) // 2, end)
             if window > start:
                 end = window + 2
         spans.append((start, end))
@@ -4847,7 +4857,8 @@ class Catalogue:
     # A tsvector is capped at 1 MB. This corpus reaches it: uk-cma averages 1.13M
     # characters a document and uk-lawcom-reports 468k, so a single-row-per-document
     # design would silently fail on exactly the documents most worth searching.
-    FTS_PART_CHARS = 400_000
+    FTS_PART_CHARS = 120_000
+    FTS_PART_WORDS = 10_000
 
     def put_doc_fts(self, doc_id: str, text: str, *, commit: bool = True) -> int:
         """(Re)index one document. Returns the number of parts written.
@@ -4860,7 +4871,7 @@ class Catalogue:
         # real example). Replace one code point with one code point so stored offsets
         # remain aligned with the source text while the rest of the document indexes.
         text = text.replace("\x00", "\ufffd")
-        parts = _fts_parts(text, self.FTS_PART_CHARS)
+        parts = _fts_parts(text, self.FTS_PART_CHARS, word_cap=self.FTS_PART_WORDS)
         now = _now()
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
         for i, (start, end) in enumerate(parts):
@@ -4892,6 +4903,13 @@ class Catalogue:
             sql += " WHERE d.source = ?"
             params.append(source)
         return {r["doc_id"] for r in self.conn.execute(sql, params)}
+
+    def fts_positional_risk_count(self) -> int:
+        """Documents still carrying a legacy part beyond the safe position budget."""
+        return int(self.conn.execute(
+            "SELECT count(DISTINCT doc_id) AS n FROM doc_fts WHERE words > ?",
+            (self.FTS_PART_WORDS,),
+        ).fetchone()["n"])
 
     def fts_coverage(self) -> list[dict]:
         """Per-source: how many documents have text, and how many are indexed. This is
