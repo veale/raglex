@@ -186,6 +186,42 @@ def test_anachronistic_eu_citation_probe_and_repair(catalogue):
     assert run_probes(catalogue, only=["anachronistic_eu_citation"])[0].count == 0
 
 
+def test_anachronism_repair_reaches_undated_judgments_but_never_legislation(catalogue):
+    """Two halves of one predicate, and the second is what keeps the repair safe.
+
+    CELLAR leaves decision_date empty on many older CJEU judgments, so requiring it
+    exempted every one of them — a 1980 judgment went on "citing" the GDPR through the
+    Dutch acronym AVG. But only a JUDGMENT cannot cite something enacted after it:
+    legislation.gov.uk serves the AMENDED text, so a 2006 SI properly cites a 2009
+    Regulation inserted into it later. Falling back to effective_date without the
+    case-law clause put 46,126 such edges in the deletion set."""
+    rows = [
+        # an undated judgment, dated only by its identifier year → repairable
+        ("ECLI:EU:C:1980:140", "judgment", None, "1980-12-31"),
+        # a consolidated SI citing a later Regulation → legitimate, must survive
+        ("ssi/2006/44", "legislation", None, "2006-12-31"),
+    ]
+    for sid, doc_type, decided, effective in rows:
+        catalogue.conn.execute(
+            "INSERT INTO documents (stable_id, source, doc_type, title, decision_date, "
+            "effective_date, version, is_latest, has_text, has_embedding, added_by, "
+            "topic_tags, upstream_status, fetched_at) "
+            "VALUES (?,?,?,?,?,?,1,1,1,0,'harvest','[]','live','2026-01-01')",
+            (sid, "t", doc_type, sid, decided, effective))
+        catalogue.conn.execute(
+            "INSERT INTO relations (src_id, dst_id, resolution_status, relationship_type, "
+            "extracted_via) VALUES (?, '32016R0679', 'resolved', 'mentions', 'regex')", (sid,))
+    catalogue.conn.commit()
+    from raglex.ops.probes import run_probes, run_repair
+
+    p = run_probes(catalogue, only=["anachronistic_eu_citation"])[0]
+    assert p.count == 1 and p.samples[0]["src_id"] == "ECLI:EU:C:1980:140"
+    run_repair(catalogue, "anachronistic_eu_citation")
+    left = catalogue.conn.execute(
+        "SELECT src_id FROM relations WHERE dst_id = '32016R0679'").fetchall()
+    assert [r["src_id"] for r in left] == ["ssi/2006/44"]
+
+
 def test_led_acronym_guard():
     from raglex.citations import extract_citations
 

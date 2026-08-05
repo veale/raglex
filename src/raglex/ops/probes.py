@@ -229,6 +229,23 @@ def _celex_year_expr(cat) -> str:
 #: Checking only the first left the consolidated half of every anachronism in place —
 #: a 1991 judgment "citing" the GDPR had the base edge repaired and went on showing the
 #: same false citation through its applicable-version edge.
+#: When a document was DECIDED, for a test that only needs the year. CELLAR leaves
+#: decision_date empty on a large share of older CJEU judgments (Rönfeldt, 1991, is one),
+#: and requiring it exempted every one of them from the anachronism guard — which is how
+#: a 1991 judgment went on "citing" the GDPR through an acronym match on "AVG".
+#: effective_date is derived from the identifier's own year at write time, which is the
+#: right fallback.
+#:
+#: Restricted to CASE LAW, and that restriction is the whole safety of this repair. Only
+#: a judgment cannot cite something enacted after it. Legislation can and constantly
+#: does: legislation.gov.uk serves the AMENDED text, so a 2006 Scottish SI properly
+#: cites a 2009 Regulation inserted into it later. Falling back to effective_date
+#: without this clause put 46,126 such edges in the deletion set — the previous
+#: "decision_date IS NOT NULL" was doing this scoping silently.
+_CASELAW = "s.doc_type IN ('judgment', 'decision', 'opinion')"
+_DECIDED = "COALESCE(s.decision_date, s.effective_date)"
+
+
 def _celex_shape_expr(column: str) -> str:
     return (f"(({column} LIKE '3%' AND LENGTH({column}) BETWEEN 9 AND 11)"
             f" OR ({column} LIKE '0%' AND LENGTH({column}) BETWEEN 18 AND 20))")
@@ -239,8 +256,8 @@ def probe_anachronistic_eu_citation(cat) -> ProbeResult:
     sql = f"""
     FROM relations r JOIN documents s ON s.stable_id = r.src_id
     WHERE {_celex_shape_expr('r.dst_id')} AND {guard}
-      AND s.decision_date IS NOT NULL
-      AND s.decision_date < (substr(r.dst_id, 2, 4) || '-01-01')
+      AND {_CASELAW} AND {_DECIDED} IS NOT NULL
+      AND {_DECIDED} < (substr(r.dst_id, 2, 4) || '-01-01')
     """
     n = _one(cat, f"SELECT COUNT(*) AS n {sql}")
     samples = _rows(cat, f"SELECT r.src_id, s.decision_date, r.dst_id, "
@@ -264,16 +281,16 @@ def repair_anachronistic_eu_citation(cat) -> dict:
               SELECT r.relation_id FROM relations r
               JOIN documents s ON s.stable_id = r.src_id
               WHERE {_celex_shape_expr('r.dst_id')} AND {guard_r}
-                AND s.decision_date IS NOT NULL
-                AND s.decision_date < (substr(r.dst_id, 2, 4) || '-01-01'))""")
+                AND {_CASELAW} AND {_DECIDED} IS NOT NULL
+                AND {_DECIDED} < (substr(r.dst_id, 2, 4) || '-01-01'))""")
         edges = cur.rowcount
         cur = cat.conn.execute(f"""
             DELETE FROM citations WHERE citation_id IN (
               SELECT c.citation_id FROM citations c
               JOIN documents s ON s.stable_id = c.src_id
               WHERE {_celex_shape_expr('c.candidate_id')} AND {guard_c}
-                AND s.decision_date IS NOT NULL
-                AND s.decision_date < (substr(c.candidate_id, 2, 4) || '-01-01'))""")
+                AND {_CASELAW} AND {_DECIDED} IS NOT NULL
+                AND {_DECIDED} < (substr(c.candidate_id, 2, 4) || '-01-01'))""")
         cites = cur.rowcount
     return {"edges_deleted": edges, "citations_deleted": cites}
 
