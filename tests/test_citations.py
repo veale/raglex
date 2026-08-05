@@ -1463,3 +1463,35 @@ def test_the_bsb_definition_is_not_learned_end_to_end():
     assert any(c.candidate_id == "ukpga/1998/42" for c in cites)
     assert not [d for d in shorthand_defs(text, cites) if "BSB" in d["shorthand"]]
     assert not [c for c in cites if c.method == "shorthand"]
+
+
+def test_pleading_pinpoints_that_read_as_written_law_resolve():
+    """Four defects reported from live OJ application notices, all in one sentence
+    shape a pleading uses constantly. Each previously either vanished or, worse,
+    carried forward onto whatever instrument was named last."""
+    from raglex.citations import extract_citations
+
+    def links(text):
+        return {(c.candidate_id, c.pinpoint) for c in extract_citations(text)}
+
+    # A sub-point is LETTERED under a numbered paragraph. Requiring digits threw the
+    # whole citation away rather than degrading to "Article 41(2)".
+    assert ("12012P", "Article 41(2)(c)") in links(
+        "in breach of Article 41(2)(c) of the Charter of Fundamental Rights of the "
+        "European Union")
+    # The paragraph may be spelled out, in English. This resolved to nothing, so a
+    # bare "Article 296" then carried forward to the last-named regulation.
+    tfeu = links("failed to state reasons, in breach of Article 8(1) of Regulation (EU) "
+                 "1049/2001 and Article 296, paragraph 2, TFEU.")
+    assert ("12016E", "Article 296(2)") in tfeu
+    assert ("32001R1049", "Article 296") not in tfeu
+    # A pleading argues in the alternative: "or" joins a list exactly as "and" does,
+    # and "thereof" names the instrument the sentence opened with.
+    assert links("Regulation (EC) No 1049/2001 requires an institution to assess whether "
+                 "the exceptions in Article 4(1) or 4(2) thereof apply.") >= {
+        ("32001R1049", "Article 4(1)"), ("32001R1049", "Article 4(2)")}
+    # Every notice ends by asking for costs under the Rules of Procedure, which no
+    # numeric grammar could reach — it is neither a Regulation nor a Directive.
+    assert links("Order the defendant to pay the costs pursuant to Articles 133 and 134 "
+                 "of the Rules of Procedure of the General Court.") >= {
+        ("32015Q0423(01)", "Article 133"), ("32015Q0423(01)", "Article 134")}

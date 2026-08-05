@@ -251,6 +251,11 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance & reports",
     preparatory: "preparatory documents",
+    // A question put to the Court is not a decision of it. Kept apart from "cases" (and
+    // out of the "other" bucket that swallowed it before): a pending reference is what
+    // is about to change, not what has been settled.
+    preliminary_references: "preliminary references (pending)",
+    pending_cases: "other pending proceedings",
     administrative: "admin decisions", other: "other",
   };
   // Counts come from the server's facets, which describe the WHOLE anchor-scoped set —
@@ -272,11 +277,32 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
     }
   }
   const tokens = [...facets.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 10);
-  const shown = groups;   // the narrowing happens server-side
+  // Live CJEU proceedings are lifted out of the run of citing documents and shown
+  // FIRST, in their own section: a pending reference is not a document that has said
+  // something about this provision, it is a question about to be answered — and read as
+  // one row among 900 settled ones (under "other", where doc_type note filed it) it was
+  // indistinguishable from a stray notice.
+  const isPending = (g: any) =>
+    g.src_kind === "preliminary_references" || g.src_kind === "pending_cases";
+  const pending: any[] = groups.filter(isPending);
+  const shown = groups.filter((g) => !isPending(g));   // the narrowing happens server-side
   const preparatory: any[] = Array.isArray(data.preparatory_groups) ? data.preparatory_groups : [];
+  const pendingFacet = (kind: string) =>
+    (crossed.find((f: any) => f.kind === kind) || {}).documents
+    || pending.filter((g) => g.src_kind === kind).length;
 
   const mentionGroup = (g: any, i: number, prefix: string) => (
-    <div className="mgroup" key={`${prefix}-${i}`}>
+    <div className={`mgroup${isPending(g) ? " mgroup-pending" : ""}`} key={`${prefix}-${i}`}>
+      {isPending(g) && (
+        <div className="mgroup-flag" title={g.src_kind === "preliminary_references"
+          ? "An Article 267 reference lodged with the Court and not yet decided"
+          : "A pending action before the Court — it does not ask what this provision means"}>
+          {g.src_kind === "preliminary_references" ? "Reference pending" : "Pending"}
+          {g.case_number ? ` · ${g.case_number}` : ""}
+          {g.pending_proceeding ? ` · ${g.pending_proceeding}` : ""}
+          {g.referring_court ? ` · referred by ${g.referring_court}` : ""}
+        </div>
+      )}
       <div className="mgroup-head">
         <DocLink className="mgroup-title" id={g.src_id}
           title="Open this document in a tray, with its linked passages highlighted (⌘-click for a new tab)"
@@ -326,6 +352,18 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
         <p className="muted" style={{ fontSize: 12 }}>
           {data.total} citing document{data.total === 1 ? "" : "s"}
           {slice ? " in this filter" : ""} · showing {groups.length}</p>)}
+      {pending.length > 0 && (
+        <section className="pending-mentions">
+          <h4>Before the Court{" "}
+            <span className="tag tag-pending">{pendingFacet("preliminary_references")} reference{pendingFacet("preliminary_references") === 1 ? "" : "s"}</span>
+            {pendingFacet("pending_cases") > 0 &&
+              <span className="tag">{pendingFacet("pending_cases")} other pending</span>}
+          </h4>
+          <p className="muted">Not yet decided. A preliminary reference asks the Court what
+            this text means; the other proceedings cite it without asking that.</p>
+          {pending.map((g, i) => mentionGroup(g, i, "pending"))}
+        </section>
+      )}
       {shown.map((g, i) => mentionGroup(g, i, "mention"))}
       {/* infinite-scroll sentinel: loads the next page of previews as it nears view */}
       {data.has_more && <div ref={sentinel} style={{ height: 1 }} />}
@@ -2345,6 +2383,95 @@ function OriginalSources({ meta }: { meta?: any }) {
   );
 }
 
+// "Before the Court": the Article 267 references pending on this instrument, with the
+// provisions each turns on. A statute page otherwise shows only settled law — this is
+// the part that is still moving, and it is the first thing an adviser needs to know.
+function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
+  const [data] = useAsync(() => api.pendingReferences(id), [id]);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  if (!data || data.error) return null;
+  const prelim: any[] = data.preliminary || [];
+  const other: any[] = data.other || [];
+  // One list: references first, then the direct actions (annulments, appeals, staff
+  // cases). They are all "what is before the Court on this instrument", and each row
+  // says which kind it is.
+  const rows: any[] = data.pending || [...prelim, ...other];
+  if (!rows.length) return null;
+
+  // Which provisions a reference is about, split the way the instrument is written.
+  const provisions = (anchors: string[]) => {
+    const recitals = anchors.filter((a) => /^recital/i.test(a));
+    const rest = anchors.filter((a) => !/^recital/i.test(a));
+    return { recitals, rest };
+  };
+
+  const row = (r: any) => {
+    const { recitals, rest } = provisions(r.anchors || []);
+    const isOpen = expanded === r.stable_id;
+    return (
+      <div className="pref-row" key={r.stable_id}>
+        <div className="pref-head">
+          <DocLink className="pref-case" id={r.stable_id} onOpen={() => open(r.stable_id)}
+            title="Open the pending notice (⌘-click for a new tab)">
+            {r.case_number || r.stable_id}</DocLink>
+          <span className="pref-title">{String(r.title || "")
+            .replace(/^Pending:\s*/, "").replace(/\s*\([CT]-\d+\/\d+\)\s*$/, "")}</span>
+          <span className={`tag${r.preliminary ? " tag-pending" : ""}`}
+            title={r.preliminary
+              ? "An Article 267 reference: a national court asking what this text means"
+              : "A direct action before the Court citing this instrument — it does not ask what the text means"}>
+            {r.procedure_label || (r.preliminary ? "Preliminary reference" : "Pending")}</span>
+          {r.ag_opinion && (
+            <DocLink className="tag tag-ag" id={r.ag_opinion.stable_id}
+              onOpen={() => open(r.ag_opinion.stable_id)}
+              title={`Opinion of the Advocate General${r.ag_opinion.advocate_general
+                ? ` ${r.ag_opinion.advocate_general}` : ""}${r.ag_opinion.date
+                ? `, ${r.ag_opinion.date}` : ""} — delivered, but the Court has not yet ruled`}>
+              AG opinion{r.ag_opinion.date ? ` · ${String(r.ag_opinion.date).slice(0, 4)}` : ""} ↗</DocLink>
+          )}
+        </div>
+        <div className="pref-meta muted">
+          {[r.referring_court, r.origin_country, r.date].filter(Boolean).join(" · ")}
+          {(r.anchors || []).length > 0 && (
+            <> · <a className="pref-provs" onClick={() => setExpanded(isOpen ? null : r.stable_id)}
+              title="The articles and recitals this reference turns on">
+              {rest.length + recitals.length} provision{rest.length + recitals.length === 1 ? "" : "s"} {isOpen ? "▾" : "▸"}</a></>
+          )}
+        </div>
+        {isOpen && (
+          <div className="pref-anchors">
+            {[...recitals, ...rest].map((a) => (
+              <a key={a} className="tag tag-btn" title={`Go to ${a} and see everything that cites it`}
+                onClick={() => open(id, a)}>{a}</a>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="panel pref-box">
+      <h3 className="pref-h">
+        Before the Court
+        <span className="muted">
+          {" — "}{prelim.length} preliminary reference{prelim.length === 1 ? "" : "s"}
+          {other.length > 0 && ` and ${other.length} other pending proceeding${other.length === 1 ? "" : "s"}`}
+          {data.with_ag_opinion ? `, ${data.with_ag_opinion} with an AG opinion` : ""}
+        </span>
+      </h3>
+      <div className="pref-list">{rows.map(row)}</div>
+      {data.stale_count > 0 && (
+        <p className="muted pref-stale">
+          {data.stale_count} further notice{data.stale_count === 1 ? " is" : "s are"} older than{" "}
+          {data.stale_after_years} years and no longer counted as live — a reference that
+          old has almost certainly been decided or withdrawn.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function StaticExportMenu({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -2475,6 +2602,23 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
               {doc.companion.date ? ` · ${doc.companion.date}` : ""}</span>
           </p>
         )}
+        {doc.counterpart && (
+          /* The same instrument on the other side of the 2020 split. Two separate laws
+             that started identical and drift apart with every amendment — a reader of
+             one needs a route to the other to check a citation's real force. */
+          <p className="companion-box counterpart-box">
+            <span className="companion-label">
+              {doc.counterpart.role === "eu_original" ? "EU original" : "UK assimilated version"}</span>{" "}
+            {doc.counterpart.stable_id
+              ? <DocLink id={doc.counterpart.stable_id} onOpen={() => open(doc.counterpart.stable_id)}
+                  title={doc.counterpart.note}>
+                  {doc.counterpart.title || doc.counterpart.stable_id} →</DocLink>
+              : <a href={doc.counterpart.url} target="_blank" rel="noopener noreferrer"
+                   title={doc.counterpart.note}>
+                  {doc.counterpart.celex || doc.counterpart.title} (not held — open the official text) ↗</a>}
+            <span className="muted"> {doc.counterpart.note}</span>
+          </p>
+        )}
         {(doc.also_cited_as || []).length > 0 && (
           <p className="also-cited muted" title="Alternative citation forms linked to this document (parallel-citation mining, report matching, your confirmations)">
             Also cited as {doc.also_cited_as.map((a: string, i: number) =>
@@ -2525,6 +2669,7 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
         </div>
       )}
       {d.doc_type === "legislation" && <LegStatusBanner id={d.stable_id} open={open} />}
+      {d.doc_type === "legislation" && <PendingReferencesBox id={d.stable_id} open={open} />}
       <div className="panel">
         <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
@@ -2590,6 +2735,11 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance & reports",
     preparatory: "preparatory documents",
+    // A question put to the Court is not a decision of it. Kept apart from "cases" (and
+    // out of the "other" bucket that swallowed it before): a pending reference is what
+    // is about to change, not what has been settled.
+    preliminary_references: "preliminary references (pending)",
+    pending_cases: "other pending proceedings",
     administrative: "admin decisions", other: "other",
   };
   const [slice, setSlice] = useState<string | null>(null);

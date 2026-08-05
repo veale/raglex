@@ -19,7 +19,7 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterator
 
 
@@ -967,6 +967,25 @@ def _anchor_key(text: str | None) -> str | None:
         return None
     typ = _ANCHOR_TYPES.get(m.group(1) or "", "")
     return f"{typ}:{m.group(2)}" if typ else m.group(2)
+
+
+#: Reading order of an instrument's own units, for listing the provisions a document
+#: cites: recitals precede the enacting terms, annexes follow them. Anything unrecognised
+#: sorts last, alphabetically, rather than being silently dropped.
+_PROVISION_ORDER = {"rec": 0, "art": 1, "annex": 3}
+
+
+def _provision_sort_key(anchor: str) -> tuple:
+    """Sort pinpoints the way the instrument reads — Recital 42, Article 5(1),
+    Article 22, Annex I — rather than by the string, which puts Article 22 before
+    Article 5 and files every recital after the articles."""
+    key = _anchor_key(anchor) or ""
+    unit, _, number = key.partition(":")
+    if not number:
+        unit, number = "", unit
+    parts = tuple(int(p) if p.isdigit() else 0
+                  for p in re.findall(r"\d+", number)) or (0,)
+    return (_PROVISION_ORDER.get(unit, 2), parts, anchor.lower())
 
 
 #: A paragraph pinpoint that SPANS a range — "para 135-140", "[135]-[140]", "paras 16
@@ -2058,6 +2077,10 @@ class Facade:
                 "inferred_by_count": max(0, inferred_total),
                 # the other half of a CJEU case — judgment ↔ AG Opinion (see _cjeu_companion)
                 "companion": self._cjeu_companion(cat, doc, meta),
+                # UK assimilated text ↔ the EU original it was made from. Live-service
+                # only: a static edition is a snapshot of ONE jurisdiction's law and
+                # must not sprout links into the other (see _eu_uk_counterpart).
+                "counterpart": self._eu_uk_counterpart(cat, doc),
                 "assets": [dict(a) for a in cat.assets_for(stable_id)],
                 "versions": [dict(v) for v in cat.list_versions(stable_id)],
             }
@@ -2068,7 +2091,61 @@ class Facade:
     # exists — so pair them deterministically off the CELEX rather than relying on the
     # opinion_in edge, which only 368 of the 8,553 held opinions actually carry (most were
     # pulled by a path that never minted it).
-    _CELEX_CASE_RE = re.compile(r"^(6\d{4})(CJ|CC)(\d+)$", re.IGNORECASE)
+    # …and the same pairing serves an ORDER (CO) and a still-pending application notice
+    # (CN): while the case is pending, the Opinion is the only thing there is to read, so
+    # a notice that has one must say so and link to it. The Opinion never retires the
+    # notice — only a judgment or order does (Catalogue.retire_pending_eu_notice).
+    _CELEX_CASE_RE = re.compile(r"^(6\d{4})(CJ|CC|CO|CN)(\d+)$", re.IGNORECASE)
+
+    def _eu_uk_counterpart(self, cat, doc) -> dict | None:
+        """The same instrument on the other side of the 2020 split: a UK assimilated text
+        ↔ the EU original it was made from.
+
+        The two texts are separate law and diverge with every amendment — which is
+        exactly why a reader of one wants a route to the other. Someone reading the
+        assimilated UK GDPR needs to check what the CJEU said about the article they are
+        on (persuasive, not binding, since s.6 EUWA 2018), and someone reading Regulation
+        2016/679 needs to see whether the UK still says the same words.
+
+        Derived from the durable ``assimilated_version_of`` edge in both directions, so
+        an unheld counterpart still yields a link to the official source rather than
+        nothing. This is a LIVE-SERVICE affordance: ``static_export`` drops it, because a
+        static edition of UK law cannot carry working links into an EU corpus it does
+        not contain.
+        """
+        from .resolve.matchers import assimilated_celex, assimilated_leg_path
+        stable_id = doc["stable_id"]
+        # UK assimilated text → the EU original (its own outgoing edge; the identifier
+        # form is authoritative enough to derive when the edge predates this feature).
+        celex = next((r["raw_citation_string"] for r in cat.relations_for(stable_id)
+                      if r["relationship_type"] == "assimilated_version_of"
+                      and r["raw_citation_string"]), None) or assimilated_celex(stable_id)
+        if celex and doc["source"] != "eu-legislation":
+            held = cat.find_document_id(celex)
+            row = cat.get_document(held) if held else None
+            return {"role": "eu_original", "celex": celex, "stable_id": held,
+                    "title": row["title"] if row is not None else None,
+                    "url": ("https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:"
+                            + celex),
+                    "note": "The EU original. Its CJEU case law is persuasive, not "
+                            "binding, on the assimilated text (s. 6 EUWA 2018)."}
+        # EU original → the UK assimilated text (an incoming edge from uk-legislation).
+        own_celex = str(_row_meta(doc).get("celex") or stable_id)
+        if not re.fullmatch(r"[0-9]{5}[A-Z]{1,2}[0-9]{4}", own_celex.upper()):
+            return None
+        for row in cat.relations_to(own_celex):
+            if row["relationship_type"] != "assimilated_version_of":
+                continue
+            uk = cat.get_document(row["src_id"])
+            if uk is None:
+                continue
+            path = assimilated_leg_path(row["src_id"]) or row["src_id"]
+            return {"role": "uk_assimilated", "stable_id": row["src_id"],
+                    "title": uk["title"],
+                    "url": f"https://www.legislation.gov.uk/{path}",
+                    "note": "The UK assimilated version of this instrument. It is "
+                            "separate law and has been amended separately since 2020."}
+        return None
 
     def _cjeu_companion(self, cat, doc, meta: dict) -> dict | None:
         """``{"role": "ag_opinion"|"judgment", …}`` for the counterpart document, when the
@@ -2078,8 +2155,11 @@ class Facade:
         if not m:
             return None
         year, kind, num = m.groups()
-        wanted = ([("CC", "ag_opinion")] if kind == "CJ"
-                  else [("CJ", "judgment")])
+        # A judgment, an order and a pending notice all want the AG's Opinion; the
+        # Opinion wants whichever of those the corpus holds — preferring the judgment,
+        # because once it exists the notice it superseded is no longer the answer.
+        wanted = ([("CC", "ag_opinion")] if kind in ("CJ", "CO", "CN")
+                  else [("CJ", "judgment"), ("CO", "order"), ("CN", "pending_notice")])
         for desc, role in wanted:
             other = cat.find_document_id(f"{year}{desc}{num}")
             if not other or other == doc["stable_id"]:
@@ -2087,9 +2167,16 @@ class Facade:
             row = cat.get_document(other)
             if row is None:
                 continue
+            # A retired notice is not the counterpart of anything: it was replaced by
+            # the very judgment this pairing should have found (an Opinion announcing
+            # "Pending: X" as its judgment, months after the Court gave one).
+            if role == "pending_notice" and row["search_excluded"]:
+                continue
             return {"role": role, "stable_id": other,
                     "title": row["title"], "celex": f"{year}{desc}{num}",
                     "oscola": _oscola_cite(row, _row_meta(row)),
+                    "pending": bool(_row_meta(row).get("pending")),
+                    "advocate_general": _row_meta(row).get("advocate_general"),
                     "date": str(row["decision_date"])[:10] if row["decision_date"] else None}
         return None
 
@@ -2204,7 +2291,8 @@ class Facade:
                              "src_jurisdiction": self._doc_bucket(
                                  src["source"], src["court"]) if src else None,
                              "src_kind": self._doc_kind(
-                                 src["source"], src["doc_type"], src["court"]) if src else None,
+                                 src["source"], src["doc_type"], src["court"],
+                                 **self._pending_flags(_row_meta(src))) if src else None,
                              # how heavily THIS citer is itself cited — a subtle
                              # authority cue next to each name
                              "src_cited_by": citer_counts.get(sid),
@@ -2212,6 +2300,189 @@ class Facade:
                              # the other passages in this document that cite it
                              "other_passages": others.get(sid) or []})
         return incoming
+
+    # The AG's Opinion (CC) and View (CV) in the same case. A pending notice's box says
+    # so, because an Opinion delivered is the strongest public signal of where a pending
+    # reference is going — and it is readable now, months before the judgment.
+    _AG_DESCRIPTORS = ("CC", "CV", "CA", "CP")
+
+    #: CELLAR's ``type_procedure`` code → what that proceeding is called in English. The
+    #: OJ notice's own heading ("Action brought", "Appeal brought") says how it started
+    #: but not what it IS: 802 of the corpus's live notices have no heading label at all,
+    #: and "Action brought" alone cannot tell an annulment from a staff case or an
+    #: infringement action. Two codes mean a preliminary reference — the ordinary one and
+    #: the urgent procedure (PPU) — and reading only the first filed 10 urgent references,
+    #: the fastest-moving cases the Court hears, as though they were something else.
+    _PROCEDURE_LABEL = {
+        "PREJ": "Preliminary reference",
+        "REFER_PREL_URG": "Preliminary reference (urgent, PPU)",
+        "ANNU": "Action for annulment",
+        "PVOI": "Appeal",
+        "FONC": "Staff case",
+        "CONS": "Infringement action",
+        "CARE": "Action for failure to act",
+        "RESP": "Damages action",
+        "COMP": "Damages action",
+    }
+
+    @classmethod
+    def _is_preliminary(cls, procedure: str | None) -> bool:
+        """Both preliminary-ruling codes, urgent included."""
+        code = str(procedure or "").upper()
+        return code.startswith("PREJ") or code.startswith("REFER_PREL")
+
+    @classmethod
+    def _procedure_label(cls, procedure: str | None, proceeding: str | None) -> str:
+        # CELLAR occasionally returns a URL-encoded qualifier ("ANNU%3DRI"); the code
+        # before it is still the procedure.
+        code = str(procedure or "").upper().split("%")[0].strip()
+        return (cls._PROCEDURE_LABEL.get(code)
+                or (proceeding or "").strip()
+                or (code.title() if code else "Pending proceeding"))
+
+    #: After this long, a notice still marked pending is almost certainly not a live
+    #: question: the reference was withdrawn or removed from the register, or its
+    #: judgment exists and we failed to pair them. Measured on this corpus's own
+    #: resolved pairs, an Article 267 reference takes a median 1.5 years and 2.6 years
+    #: at the 99th percentile (the CJEU's own reported average is ~16 months); the
+    #: longest observed here is 2.9. Five years is nearly double that tail, so the
+    #: filter cannot hide a genuinely slow case — it hides zombies. They are COUNTED
+    #: and returned separately (``stale``), never silently dropped.
+    _PENDING_STALE_YEARS = 5
+
+    def pending_references(self, stable_id: str, *, limit: int = 200) -> dict:
+        """Live CJEU proceedings citing this instrument — what is still an open question
+        about this statute, and on which provisions.
+
+        Article 267 references (``preliminary``) are reported apart from the other
+        pending proceedings (``other``: annulment actions, appeals, staff cases), because
+        only the first asks the Court what this text MEANS. Each entry carries the
+        articles and recitals that notice cites, so a reader can see at a glance that
+        four pending references turn on Article 22 — and the Advocate General's Opinion
+        where one has been delivered, which is readable long before the judgment.
+
+        A notice retired by its full English judgment is not here: it is no longer a
+        question, and the judgment carries a ``supersedes`` edge to it.
+        """
+        def _compute() -> dict:
+            from .adapters.eu_cellar import celex_case_number
+            from .eu_law import consolidation_base
+            with self._open() as (cat, _rs, _ts):
+                doc = cat.get_document(stable_id)
+                if doc is None:
+                    return {"error": "not found", "stable_id": stable_id}
+                # Every key this act may receive citations under: the base act, its dated
+                # consolidations, and the ECLI/alias identities. A reference lodged in
+                # 2019 cites "Regulation 2016/679", which lands on the base act, while the
+                # reader is looking at a 2021 consolidation of it.
+                base = consolidation_base(stable_id) or stable_id
+                ids = {stable_id, base, *(doc["ecli"] and [doc["ecli"]] or [])}
+                ids.update(cat.document_identity_ids(stable_id))
+                ids.update(sid for sid, _d in cat.legislative_versions(base))
+                notices: dict[str, dict] = {}
+                for row in cat.pending_eu_citers(sorted(i for i in ids if i)):
+                    meta = _row_meta(row)
+                    entry = notices.get(row["stable_id"])
+                    if entry is None:
+                        celex = str(meta.get("celex") or row["stable_id"])
+                        courts = meta.get("referring_courts") or []
+                        entry = notices[row["stable_id"]] = {
+                            "stable_id": row["stable_id"],
+                            "title": row["title"],
+                            "case_number": celex_case_number(celex),
+                            "date": str(row["decision_date"] or "")[:10] or None,
+                            "court": self.court_label(row["court"], "eu-cellar")
+                                     if row["court"] else None,
+                            "procedure": meta.get("pending_procedure"),
+                            "proceeding": meta.get("pending_proceeding"),
+                            "procedure_label": self._procedure_label(
+                                meta.get("pending_procedure"),
+                                meta.get("pending_proceeding")),
+                            "referring_court": courts[0] if courts else None,
+                            "origin_country": meta.get("origin_country"),
+                            "preliminary": self._is_preliminary(
+                                meta.get("pending_procedure")),
+                            "anchors": [],
+                        }
+                        # The Opinion, if the AG has delivered one. It does NOT end the
+                        # case (only a judgment or order retires the notice), so the
+                        # reference stays listed — annotated, not removed.
+                        for descriptor in self._AG_DESCRIPTORS:
+                            # 62026CN0449 → 62026CC0449. Court of Justice cases only:
+                            # the General Court has no Advocate General.
+                            if not re.fullmatch(r"6\d{4}CN\d{4}", celex, re.IGNORECASE):
+                                break
+                            opinion_id = cat.find_document_id(
+                                f"{celex[:5]}{descriptor}{celex[7:]}")
+                            if not opinion_id or opinion_id == row["stable_id"]:
+                                continue
+                            op = cat.get_document(opinion_id)
+                            if op is None:
+                                continue
+                            entry["ag_opinion"] = {
+                                "stable_id": opinion_id,
+                                "date": str(op["decision_date"] or "")[:10] or None,
+                                "advocate_general":
+                                    _row_meta(op).get("advocate_general"),
+                            }
+                            break
+                    if row["dst_anchor"]:
+                        entry["anchors"].append(row["dst_anchor"])
+                entries = []
+                for entry in notices.values():
+                    # Which provisions the reference turns on, deduplicated and ordered
+                    # the way the instrument itself is: recitals, then articles, then
+                    # annexes — not by how often the notice happened to repeat them.
+                    entry["anchors"] = sorted(dict.fromkeys(entry["anchors"]),
+                                              key=_provision_sort_key)
+                    entries.append(entry)
+                entries.sort(key=lambda e: (e["date"] or "", e["stable_id"]), reverse=True)
+                cutoff = (datetime.now(timezone.utc).date()
+                          - timedelta(days=round(self._PENDING_STALE_YEARS * 365.25))
+                          ).isoformat()
+                live = [e for e in entries if (e["date"] or "9999") >= cutoff]
+                stale = [e for e in entries if (e["date"] or "9999") < cutoff]
+                preliminary = [e for e in live if e["preliminary"]]
+                other = [e for e in live if not e["preliminary"]]
+                return {
+                    "stable_id": stable_id,
+                    # One list, references first: a pending T-case on this instrument is
+                    # as much "what is before the Court" as a reference is, and splitting
+                    # them into separate boxes hid the direct actions behind a toggle.
+                    # Each row carries its own procedure label, so they stay legible.
+                    "pending": (preliminary + other)[:limit],
+                    "preliminary": preliminary[:limit],
+                    "other": other[:limit],
+                    "preliminary_count": len(preliminary),
+                    "other_count": len(other),
+                    "with_ag_opinion": sum(1 for e in preliminary if e.get("ag_opinion")),
+                    # Counted, not listed: see _PENDING_STALE_YEARS.
+                    "stale_count": len(stale),
+                    "stale": stale[:limit],
+                    "stale_after_years": self._PENDING_STALE_YEARS,
+                }
+        return self._cached(f"pending-references:{stable_id}", 3600, _compute,
+                            placeholder={"stable_id": stable_id, "preliminary": [],
+                                         "other": [], "preliminary_count": None,
+                                         "other_count": None, "with_ag_opinion": 0},
+                            sync_wait=2.5)
+
+    def retire_resolved_pending_notices(self, *, limit: int = 5000) -> dict:
+        """Retire every CN/TN notice whose deciding judgment or order is now held in
+        full English — the order-independent sweep behind the feed's own retirement.
+
+        The feed can only retire a notice when it happens to re-enumerate the resolving
+        decision; a judgment that arrived through the ordinary CJEU feed left its notice
+        reading "Pending:" forever, fronting a case the corpus had already decided. This
+        pass pairs them from what is held, so the two harvest orders converge.
+        """
+        with self._open() as (cat, _rs, _ts):
+            pairs = cat.resolved_pending_eu_notices(limit=limit)
+            retired = [(n, d) for n, d in pairs if cat.retire_pending_eu_notice(n, d)]
+        if retired:
+            self._invalidate_caches()
+        return {"examined": len(pairs), "retired": len(retired),
+                "notices": [n for n, _d in retired][:200]}
 
     def cited_by_breakdown(self, stable_id: str) -> dict:
         """HONEST facet counts for the cited-by panel: distinct citing documents per
@@ -2237,7 +2508,9 @@ class Facade:
                 buckets: dict[tuple[str, str], int] = {}
                 for r in cat.citing_breakdown(ids_self):
                     key = (self._doc_bucket(r["source"], r["court"]),
-                           self._doc_kind(r["source"], r["doc_type"], r["court"]))
+                           self._doc_kind(r["source"], r["doc_type"], r["court"],
+                                          pending=bool(r["pending"]),
+                                          preliminary=bool(r["prej"])))
                     buckets[key] = buckets.get(key, 0) + r["docs"]
                 out = [{"jurisdiction": j, "kind": k, "documents": n}
                        for (j, k), n in sorted(buckets.items(), key=lambda kv: -kv[1])]
@@ -2263,8 +2536,9 @@ class Facade:
             sources = sorted({
                 r["source"] for r in cat.citing_breakdown(ids_self)
                 if self._doc_bucket(r["source"], r["court"]) == jurisdiction
-                and (not kind or self._doc_kind(r["source"], r["doc_type"],
-                                                r["court"]) == kind)})
+                and (not kind or self._doc_kind(r["source"], r["doc_type"], r["court"],
+                                                pending=bool(r["pending"]),
+                                                preliminary=bool(r["prej"])) == kind)})
             if not sources:
                 return {"stable_id": stable_id, "jurisdiction": jurisdiction,
                         "kind": kind, "incoming": []}
@@ -2540,16 +2814,22 @@ class Facade:
             "source_is_base_act": source_is_base_act,
             "unchanged": True,
             "virtual": True,
+            # Written for a reader, not for the pipeline. The old wording ("Recitals are
+            # inherited unchanged … without being copied into this consolidated
+            # expression") described our storage model and left the actual question —
+            # why does a consolidated text have no recitals of its own? — unanswered.
             "note": (
                 (
-                    "Recitals are inherited unchanged from the original act; "
-                    "they are displayed here without being copied into this "
-                    "consolidated expression."
+                    "A consolidated text does not normally reproduce the recitals: "
+                    "they belong to the act as originally adopted. These are that "
+                    "act's own recitals, shown here for reference — they are "
+                    "unchanged, and are not part of this consolidated text."
                     if source_is_base_act else
-                    "Recitals are inherited unchanged from the earliest held "
-                    "expression with a structured preamble while the original "
-                    "act's Formex rendition is refreshed; they are not copied "
-                    "into this consolidated expression."
+                    "A consolidated text does not normally reproduce the recitals: "
+                    "they belong to the act as originally adopted. These are taken "
+                    "from the earliest expression RagLex holds with a structured "
+                    "preamble (the original act's own rendition is being refreshed), "
+                    "are unchanged, and are not part of this consolidated text."
                 )
             ),
         }
@@ -2954,8 +3234,13 @@ class Facade:
                     # name the citing court and its jurisdiction, as the explorer does
                     "src_court_label": self.court_label(sdoc["court"], sdoc["source"]) if sdoc["court"] else None,
                     "src_jurisdiction": self._doc_bucket(sdoc["source"], sdoc["court"]),
-                    "src_kind": self._doc_kind(sdoc["source"], sdoc["doc_type"], sdoc["court"]),
+                    "src_kind": self._doc_kind(sdoc["source"], sdoc["doc_type"], sdoc["court"],
+                                               **self._pending_flags(_row_meta(sdoc))),
                     "src_doc_type": sdoc["doc_type"],
+                    # what makes it pending, for the tray's own labelling — the reader
+                    # should see "Request for a preliminary ruling" on the row, not have
+                    # to infer it from the chip it was filed under
+                    **self._pending_meta(sdoc, _row_meta(sdoc)),
                     "authority": _authority(sid, sdoc), "count": len(rs),
                     "version_inherited_count": sum(
                         bool(r.get("version_inherited")) for r in rs),
@@ -4837,7 +5122,47 @@ class Facade:
             return self._DPA_COUNTRY.get(c.split("-", 1)[1], "European Union")
         return self._jurisdiction_of(source)
 
-    def _doc_kind(self, source: str, doc_type: str, court: str | None) -> str:
+    @staticmethod
+    def _pending_flags(meta: dict | None) -> dict:
+        """``{"pending": …, "preliminary": …}`` for ``_doc_kind`` from a document's own
+        metadata bag — the row-level form of the flags ``citing_breakdown`` computes in
+        SQL. ``pending`` false once the notice is retired, so a resolved reference goes
+        back to being ordinary EU material."""
+        meta = meta or {}
+        pending = bool(meta.get("pending"))
+        return {"pending": pending,
+                "preliminary": pending and Facade._is_preliminary(
+                    meta.get("pending_procedure"))}
+
+    @staticmethod
+    def _pending_meta(row, meta: dict | None) -> dict:
+        """The display facts about a live notice (proceeding, case number, referring
+        court) — empty for everything else, so callers can splat it unconditionally."""
+        meta = meta or {}
+        if not meta.get("pending"):
+            return {}
+        from .adapters.eu_cellar import celex_case_number
+        courts = meta.get("referring_courts") or []
+        return {
+            "pending": True,
+            "pending_proceeding": meta.get("pending_proceeding"),
+            "pending_procedure": meta.get("pending_procedure"),
+            "case_number": celex_case_number(meta.get("celex") or row["stable_id"]),
+            "referring_court": courts[0] if courts else None,
+            "origin_country": meta.get("origin_country"),
+        }
+
+    def _doc_kind(self, source: str, doc_type: str, court: str | None, *,
+                  pending: bool = False, preliminary: bool = False) -> str:
+        # A LIVE CJEU application notice first. It is not a decision of anything — it is
+        # a question put to the Court, and reading a statute the difference matters more
+        # than any other distinction on the page: "12 references pending on Article 22"
+        # is tomorrow's law, whereas the same notices filed under "other EU material"
+        # (where doc_type "note" landed them) said nothing at all. A genuine Article 267
+        # reference is kept apart from the other pending proceedings — an annulment
+        # action is also pending, but it is not a question about interpretation.
+        if pending:
+            return "preliminary_references" if preliminary else "pending_cases"
         # GUIDANCE wins first: a regulator's guidance is guidance, not an
         # "administrative decision", even though it comes from an admin source (ICO,
         # EDPB) — otherwise guidance never appears as its own filter category.

@@ -654,6 +654,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 if (_sched_on("eu-pending-cases")
                         and time.time() - last_eu_pending_cases
                         >= (_sched_min("eu-pending-cases") or 1440) * 60):
+                    # Retire from what is HELD before harvesting more. The feed can only
+                    # retire a notice on a pass that re-enumerates its decision, so a
+                    # judgment harvested by the ordinary CJEU watch never reached its
+                    # notice; this local sweep closes that gap in both harvest orders.
+                    try:
+                        swept = facade.retire_resolved_pending_notices()
+                        if swept.get("retired"):
+                            print(f"[watch] eu-pending-cases: retired "
+                                  f"{swept['retired']} resolved notice(s)")
+                    except Exception as exc:  # noqa: BLE001 — never kill the tick
+                        print(f"[watch] eu-pending-cases: retirement sweep failed: {exc}")
                     started = jobs.start(
                         "harvest-source", "EU pending C/T cases (CELLAR)",
                         {

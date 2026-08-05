@@ -66,6 +66,9 @@ def build_plan(facade, params: dict) -> list[str]:
         for source, _n in _never_extracted_sources(facade):
             if want is None or source in want:
                 plan.append(f"rescan:{source}")
+    # Cheap, idempotent, and it changes what the corpus SHOWS (a pending notice
+    # fronting a decided case), so it runs before the roll-ups read the corpus.
+    plan.append("retire-notices")
     if not params.get("no_rollups"):
         plan += ["analyze", "counts", "authority"]
     return plan
@@ -89,6 +92,8 @@ def _run_step(facade, step: str, params: dict, on_progress: Callable, cancel_che
         return facade.db_maintenance(analyze=True, vacuum=bool(params.get("vacuum")))
     if kind == "vacuum":
         return facade.db_maintenance(analyze=True, vacuum=True)
+    if kind == "retire-notices":
+        return facade.retire_resolved_pending_notices()
     if kind == "counts":
         return facade.rebuild_citation_counts()
     if kind == "authority":

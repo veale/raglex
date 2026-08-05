@@ -427,6 +427,10 @@ export const api = {
     req<any>("/legislation/changes/propagate", { method: "POST", body: JSON.stringify({ id }) }),
   legislativeStatus: (id: string) => req<any>(`/legislation/status?id=${encodeURIComponent(id)}`),
   legislationVersions: (id: string) => req<any>(`/legislation/versions?id=${encodeURIComponent(id)}`),
+  // live CJEU proceedings on an instrument: Article 267 references apart from the other
+  // pending actions, each with the provisions it turns on
+  pendingReferences: (id: string) =>
+    req<any>(`/legislation/pending-references?id=${encodeURIComponent(id)}`),
   legislationVersionAt: (id: string, date: string) =>
     req<any>("/legislation/version", { method: "POST", body: JSON.stringify({ id, date }) }),
   detectCitations: (text: string) =>

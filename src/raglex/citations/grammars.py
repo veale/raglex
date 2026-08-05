@@ -138,6 +138,12 @@ _NAME_TO_CELEX = {
     # blacklist (Annex I) is the part the case law is about — "Annex I, point 29 UCPD".
     # Without the name here that reference resolves to nothing at all.
     "unfair commercial practices directive": "32005L0029", "ucpd": "32005L0029",
+    # The two courts' Rules of Procedure. Every OJ application notice ends by asking
+    # for costs "pursuant to Articles 133 and 134 of the Rules of Procedure of the
+    # General Court", and the reference resolved to nothing at all: the name is not a
+    # Regulation/Directive, so no numeric grammar could reach it.
+    "rules of procedure of the general court": "32015Q0423(01)",
+    "rules of procedure of the court of justice": "32012Q0929(01)",
 }
 # Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
 # resolves to the Law Enforcement Directive; the spelled-out names match case-
@@ -730,8 +736,14 @@ for _i, (_names, _celex) in enumerate(_EU_TREATIES):
     register(Grammar(
         f"eu_treaty_{_celex}", "treaty",
         re.compile(
-            rf"\bArt(?:icle|\.)?s?\.?\s*(?P<art>\d+[a-z]?(?:\(\d+[a-z]?\))*)"
-            rf"(?:\s*,?\s*(?:paragraphe|§)\s*(?P<fr_para>\d+))?\s*,?\s+"
+            # Sub-parts may be LETTERED as well as numbered: "Article 41(2)(c) of the
+            # Charter" is ordinary drafting, and requiring digits threw the whole
+            # citation away rather than degrading to "Article 41(2)".
+            rf"\bArt(?:icle|\.)?s?\.?\s*(?P<art>\d+[a-z]?(?:\((?:\d+[a-z]?|[a-z])\))*)"
+            # …and the paragraph may be spelled out, in English as well as French:
+            # "Article 296, paragraph 2, TFEU" resolved to nothing, so a bare
+            # "Article 296" then carried forward to whatever was last named.
+            rf"(?:\s*,?\s*(?:paragraphs?|paras?\.?|paragraphe|§)\s*(?P<fr_para>\d+))?\s*,?\s+"
             rf"(?:(?:of|du|de\s+la|des)\s+)?(?:{_names})\b",
             re.IGNORECASE,
         ),

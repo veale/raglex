@@ -6,12 +6,22 @@ import zipfile
 from raglex.adapters.eu_cellar import (
     EUCellarAdapter,
     classify_celex,
+    extract_formex,
     extract_formex_text,
     parse_national_judgements,
+    pending_formex_title,
     resolve_case_celex,
     unzip_formex,
 )
-from raglex.core.models import DocType, Record, RelationshipType, Stub
+from raglex.core.models import (
+    DocType,
+    ExtractedVia,
+    Record,
+    RelationshipType,
+    ResolutionStatus,
+    Stub,
+    TypedRelation,
+)
 
 
 def test_classify_celex_covers_courts_and_instruments():
@@ -205,10 +215,60 @@ def test_pending_t_notice_is_retrieved_named_tagged_and_aliased():
 
     assert rec.stable_id == "62024TN0631"
     assert rec.court == "General Court" and rec.doc_type == DocType.NOTE
-    assert rec.title == "Pending: International Electrotechnical Commission and ISO v Commission"
+    # Docketed like every decided case: "Pending: X v Y" alone gives a reader following
+    # a case no way to recognise it.
+    assert rec.title == ("Pending: International Electrotechnical Commission and ISO "
+                         "v Commission (T-631/24)")
     assert rec.topic_tags == ["Pending", "Action brought"]
     assert rec.extra["pending_procedure"] == "ANNU"
     assert rec.extra["aliases"] == ["62024TJ0631"]
+
+
+#: A real C-series preliminary-reference notice: the referring court's name contains a
+#: dash, the docket parenthetical carries the Court's short name for the case, and a
+#: footnote sits inside the first question's sentence.
+PENDING_REFERENCE_FORMEX = """<?xml version="1.0" encoding="UTF-8"?>
+<CJT><TI.CJT><TITLE><TI>
+ <P>Request for a preliminary ruling from the Okrazhen sad – Razgrad (Bulgaria) lodged on
+ 6 May 2026 – Rayonen sad – Tutrakan v O.K.M.</P>
+ <P>(Case C-448/26, Rayonen sad – Tutrakan)</P>
+</TI></TITLE><LG.PROC>Language of the case: Bulgarian</LG.PROC></TI.CJT>
+<CONTENTS>
+<GR.SEQ LEVEL="1"><TITLE><TI><P>Referring court</P></TI></TITLE>
+<P>Okrazhen sad – Razgrad</P></GR.SEQ>
+<GR.SEQ LEVEL="1"><TITLE><TI><P>Parties to the main proceedings</P></TI></TITLE>
+<P><HT TYPE="ITALIC">Appellant:</HT> Rayonen sad Tutrakan</P>
+<P><HT TYPE="ITALIC">Respondent:</HT> O.K.M.</P></GR.SEQ>
+<GR.SEQ LEVEL="1"><TITLE><TI><P>Questions referred</P></TI></TITLE>
+<LIST TYPE="ARAB">
+<ITEM><NP><NO.P>1.</NO.P><TXT>Must Article 5 of Directive 2008/115/EC<NOTE TYPE="FOOTNOTE"><P>OJ 2008 L 348, p. 98.</P></NOTE> be interpreted as precluding national legislation?</TXT></NP></ITEM>
+<ITEM><NP><NO.P>2.</NO.P><TXT>If the answer to Question 1 is in the negative, does Article 19(2) of the Charter preclude removal?</TXT></NP></ITEM>
+</LIST></GR.SEQ></CONTENTS></CJT>""".encode()
+
+
+def test_notice_title_survives_a_dash_inside_the_referring_courts_name():
+    # The party split anchors on the LODGING DATE, not on "some dash": a greedy match
+    # took the last one and titled this case "Tutrakan)".
+    assert pending_formex_title(PENDING_REFERENCE_FORMEX) == \
+        "Rayonen sad – Tutrakan v O.K.M (C-448/26)"
+
+
+def test_notice_is_parsed_as_a_form_not_as_a_wall_of_text():
+    text, segments = extract_formex(PENDING_REFERENCE_FORMEX)
+    labels = [s.label for s in segments]
+    # Each named section is a heading, each party its own line, each question its own
+    # segment labelled with the number the Court itself will use.
+    assert "Referring court" in labels and "Parties to the main proceedings" in labels
+    assert "Question 1" in labels and "Question 2" in labels
+    assert [s.kind for s in segments if s.label == "Referring court"] == ["heading"]
+    parties = [text[s.char_start:s.char_end] for s in segments
+               if s.label.startswith("Parties to the main proceedings —")]
+    assert parties == ["Appellant: Rayonen sad Tutrakan", "Respondent: O.K.M."]
+    q1 = next(text[s.char_start:s.char_end] for s in segments if s.label == "Question 1")
+    # The footnote is lifted OUT of the sentence it annotated — inline, it spliced a
+    # whole OJ citation into the middle of the question.
+    assert "Directive 2008/115/EC [1] be interpreted" in q1
+    assert q1.endswith("[1] OJ 2008 L 348, p. 98.")
 
 
 def test_pending_query_uses_dossier_for_c_and_t_resolution():
@@ -257,6 +317,93 @@ def test_full_english_decision_retires_but_does_not_delete_pending_notice(catalo
     assert any(r["relationship_type"] == "supersedes"
                and r["dst_id"] == pending.stable_id
                for r in catalogue.relations_for(final.stable_id))
+
+
+def _notice(stable_id: str, celex: str | None = None, **extra) -> Record:
+    rec = Record(source="eu-cellar", stable_id=stable_id, doc_type=DocType.NOTE,
+                 title=f"Pending: {stable_id}", raw_bytes=b"pending", text="application",
+                 source_language="en",
+                 extra={"pending": True, "celex": celex or stable_id,
+                        "aliases": [stable_id[:6] + "J" + stable_id[7:]], **extra})
+    rec.ensure_payload_hash()
+    return rec
+
+
+def test_an_ag_opinion_never_retires_the_pending_notice(catalogue):
+    """The Opinion is filed months before judgment and decides nothing. Suppressing the
+    notice on it would hide a live case behind a document that does not answer it."""
+    notice = _notice("62024CN0801")
+    opinion = Record(source="eu-cellar", stable_id="ECLI:EU:C:2026:17",
+                     ecli="ECLI:EU:C:2026:17", doc_type=DocType.OPINION,
+                     title="Opinion of AG Medina", raw_bytes=b"opinion", text="opinion",
+                     source_language="en", extra={"celex": "62024CC0801"})
+    opinion.ensure_payload_hash()
+    catalogue.upsert_document(notice)
+    catalogue.upsert_document(opinion)
+
+    assert catalogue.retire_pending_eu_notice("62024CN0801", "ECLI:EU:C:2026:17") is False
+    assert catalogue.get_document("62024CN0801")["search_excluded"] == 0
+    assert catalogue.document_meta("62024CN0801")["pending"] is True
+
+
+def test_retirement_survives_the_next_harvest_of_the_same_notice(catalogue):
+    """The pending feed re-enumerates a notice forever. Taking the incoming record's
+    (unset) search_excluded verbatim un-hid 67 notices on the live corpus."""
+    notice = _notice("62024TN0631")
+    final = Record(source="eu-cellar", stable_id="ECLI:EU:T:2026:1",
+                   ecli="ECLI:EU:T:2026:1", doc_type=DocType.JUDGMENT, title="IEC v Commission",
+                   raw_bytes=b"judgment", text="reasons", source_language="en",
+                   extra={"celex": "62024TJ0631"})
+    final.ensure_payload_hash()
+    catalogue.upsert_document(notice)
+    catalogue.upsert_document(final)
+    assert catalogue.retire_pending_eu_notice("62024TN0631", "ECLI:EU:T:2026:1")
+
+    catalogue.upsert_document(_notice("62024TN0631"))   # the next daily pass
+    assert catalogue.get_document("62024TN0631")["search_excluded"] == 1
+
+
+def test_retirement_hands_the_judgment_celex_back_to_the_judgment(catalogue):
+    """While pending, the notice holds the judgment's CELEX alias in trust — which is
+    why an AG Opinion's opinion_in edge landed on it. Retirement must hand it back."""
+    catalogue.upsert_document(_notice("62024CN0801"))
+    catalogue.put_alias("62024cj0801", "62024CN0801", source="adapter-alias")
+    judgment = Record(source="eu-cellar", stable_id="ECLI:EU:C:2026:472",
+                      ecli="ECLI:EU:C:2026:472", doc_type=DocType.JUDGMENT,
+                      title="NSD v Council", raw_bytes=b"judgment", text="reasons",
+                      source_language="en", extra={"celex": "62024CJ0801"})
+    judgment.ensure_payload_hash()
+    catalogue.upsert_document(judgment)
+    catalogue.add_relations("ECLI:EU:C:2026:17", [TypedRelation(
+        relationship_type=RelationshipType.OPINION_IN, raw_citation_string="62024CJ0801",
+        dst_id="62024CN0801", extracted_via=ExtractedVia.STRUCTURED,
+        resolution_status=ResolutionStatus.RESOLVED)])
+
+    assert catalogue.retire_pending_eu_notice("62024CN0801", "ECLI:EU:C:2026:472")
+    assert catalogue.find_document_id("62024CJ0801") == "ECLI:EU:C:2026:472"
+    opinion_edge = catalogue.relations_for("ECLI:EU:C:2026:17")[0]
+    assert opinion_edge["dst_id"] == "ECLI:EU:C:2026:472"
+
+
+def test_sweep_retires_notices_the_feed_never_paired(catalogue):
+    """The order-independent sweep: a judgment harvested by the ordinary CJEU feed left
+    its notice reading "Pending:" indefinitely (220 of them, live)."""
+    catalogue.upsert_document(_notice("62024CN0801"))
+    catalogue.upsert_document(_notice("62025CN0100"))          # still genuinely pending
+    for stable_id, celex, doc_type in (
+        ("ECLI:EU:C:2026:472", "62024CJ0801", DocType.JUDGMENT),
+        ("ECLI:EU:C:2026:17", "62025CC0100", DocType.OPINION),  # an Opinion resolves nothing
+    ):
+        rec = Record(source="eu-cellar", stable_id=stable_id, ecli=stable_id,
+                     doc_type=doc_type, title=stable_id, raw_bytes=stable_id.encode(),
+                     text="text", source_language="en", extra={"celex": celex})
+        rec.ensure_payload_hash()
+        catalogue.upsert_document(rec)
+
+    pairs = catalogue.resolved_pending_eu_notices()
+    assert pairs == [("62024CN0801", "ECLI:EU:C:2026:472")]
+    assert catalogue.retire_pending_eu_notice(*pairs[0])
+    assert catalogue.get_document("62025CN0100")["search_excluded"] == 0
 
 
 def test_fetch_builds_legislation_and_citation_edges():

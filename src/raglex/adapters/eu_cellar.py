@@ -633,6 +633,119 @@ def _formex_judgment_blocks(root) -> list[tuple[str, str, str, int]]:
     return blocks
 
 
+#: The OJ notice section headings whose numbered list items ARE the substance, and what
+#: one of those items should be called. "Questions referred" is the reason the document
+#: exists; the direct-action headings are its equivalents for an annulment or an appeal.
+_NOTICE_ITEM_LABEL = (
+    ("question", "Question"),          # Questions referred / Question referred
+    ("form of order", "Order sought"),
+    ("plea", "Plea"),                  # Pleas in law and main arguments
+    ("ground", "Ground"),
+)
+
+
+def _notice_item_label(heading: str) -> str:
+    h = (heading or "").lower()
+    for needle, label in _NOTICE_ITEM_LABEL:
+        if needle in h:
+            return label
+    return "Point"
+
+
+def _fmx_footnotes(elem) -> tuple[str, list[str]]:
+    """Body text with footnotes lifted OUT, plus the footnote texts in order.
+
+    A ``<NOTE>`` in Formex sits INSIDE the sentence it annotates, so rendering it in
+    place spliced a whole citation into the middle of a question: "Must Article 5 of
+    Directive 2008/115/EC *Directive of the European Parliament … (OJ 2008 L 348, p. 98).*
+    be interpreted as meaning that …". The reader saw a sentence that no longer parses
+    and a pinpoint that belongs to a different instrument. Printed law puts a marker
+    where the note was and the note at the foot — so do that.
+    """
+    notes: list[str] = []
+
+    def strip(node) -> str:
+        out: list[str] = []
+        if node.text and node.text.strip():
+            out.append(node.text.strip())
+        for child in node:
+            if _localname(child.tag) == "NOTE":
+                notes.append(" ".join(element_text(child).split()))
+                out.append(f"[{len(notes)}]")
+            else:
+                inner = strip(child)
+                if inner:
+                    out.append(inner)
+            if child.tail and child.tail.strip():
+                out.append(child.tail.strip())
+        return " ".join(out)
+
+    # Joining node texts with spaces leaves the punctuation loose — "Directive
+    # 2008/115/EC ( OJ 2008 L 348, p. 98 ) ." — which is both ugly and a worse target
+    # for the citation matcher than the string the OJ actually printed.
+    body = re.sub(r"\s+([,.;:?!)\]])", r"\1", strip(elem))
+    return re.sub(r"([(\[])\s+", r"\1", body).strip(), notes
+
+
+def _formex_notice_blocks(root) -> list[tuple[str, str, str, int]]:
+    """``(label, kind, text, level)`` blocks for a CJEU OJ application notice (``CJT``).
+
+    A notice is not prose: it is a short form with named sections — "Referring court",
+    "Parties to the main proceedings", "Questions referred" — and the questions are a
+    numbered list whose numbers the Court itself uses ("the first question referred").
+    Taken as flat ``GR.SEQ`` text (the old fallback), all of that collapsed into three
+    unlabelled blobs: three questions ran together into one paragraph, the parties ran
+    into their own heading, and nothing could be pinpointed. Here each heading is a
+    heading, each party a line, and each numbered item its own segment labelled with the
+    number the source gives it — so "Question 2" is citable and reads as it was printed.
+    """
+    contents = next((e for e in root.iter() if _localname(e.tag) == "CONTENTS"), None)
+    if contents is None:
+        return []
+    blocks: list[tuple[str, str, str, int]] = []
+    footnotes: list[str] = []
+
+    def emit(label: str, kind: str, node, level: int = 0) -> None:
+        text, notes = _fmx_footnotes(node)
+        if not text:
+            return
+        if notes:
+            # Numbered continuously across the notice, as the OJ numbers them.
+            text += "".join(
+                f"\n[{len(footnotes) + i + 1}] {n}" for i, n in enumerate(notes))
+            footnotes.extend(notes)
+        blocks.append((label, kind, text, level))
+
+    for section in (e for e in contents if _localname(e.tag) == "GR.SEQ"):
+        title = next((e for e in section if _localname(e.tag) == "TITLE"), None)
+        heading = " ".join(element_text(title).split()) if title is not None else ""
+        if heading:
+            blocks.append((heading[:80], "heading", heading, 1))
+        item_label = _notice_item_label(heading)
+        # The numbered items and the section's own prose are counted SEPARATELY: a
+        # "Form of order sought" opens with a line of prose ("The applicant claims that
+        # the Court should:") and then lists the heads of claim, which are the first and
+        # second — not the second and third.
+        items = paras = 0
+        for child in section:
+            name = _localname(child.tag)
+            if name == "TITLE":
+                continue
+            if name in ("LIST", "DLIST"):
+                for item in (e for e in child if _localname(e.tag) in ("ITEM", "DLIST.ITEM")):
+                    items += 1
+                    # The source's own number where it prints one ("1.", "(a)"), the
+                    # position where it prints a dash instead — never a renumbering.
+                    printed = (_fmx_first_child_text(item, "NO.P") or "").strip("().[] ")
+                    emit(f"{item_label} {printed or items}", "paragraph", item)
+                continue
+            if name in ("P", "NP", "TXT", "PARAG"):
+                paras += 1
+                emit(f"{heading[:40]} — {paras}" if heading else f"para {paras}",
+                     "paragraph", child)
+    return blocks
+
+
 def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
     """Text + structural segments from a Formex 4 instance (pure, §6b).
 
@@ -656,6 +769,16 @@ def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
             if text:
                 return text, segments
         # structural parse yielded nothing usable → fall through to whole-document text
+
+    # An OJ application notice (CJT): a short structured form, not a judgment. Its own
+    # walk keeps the sections named and the numbered questions separate (see
+    # _formex_notice_blocks); the judgment walk below would flatten them.
+    if _localname(root.tag) == "CJT":
+        notice_blocks = _formex_notice_blocks(root)
+        if notice_blocks:
+            text, segments = assemble(notice_blocks)
+            if text:
+                return text, segments
 
     # Judgment: walk CONTENTS.JUDGMENT in reading order so the section HEADINGS survive
     # alongside the numbered paragraphs (see _formex_judgment_blocks). Older judgments have
@@ -797,19 +920,39 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
     return clean_case_display_title(parties)
 
 
+#: The party name in a notice heading follows the LODGING/BRINGING DATE, not merely
+#: "some dash": "Request for a preliminary ruling from the Okrazhen sad – Razgrad
+#: (Bulgaria) lodged on 6 May 2026 – Rayonen sad – Tutrakan v O.K.M.". Anchoring on the
+#: date is what tells the dash in the referring court's name from the dash before the
+#: parties — a greedy ".*" took the LAST dash and titled that case "Tutrakan)".
 _PENDING_HEAD_RE = re.compile(
-    r"^(?:Action|Appeal|Request|Reference|Application)\b.*\s[–—]\s(?P<name>.+?)"
-    r"(?:\s*\((?:Joined\s+)?Cases?\s+[CT][-‑–]?\d+/\d+.*\))?$",
+    r"^(?:Action|Appeal|Request|Reference|Application)\b.*?"
+    r"(?:lodged|brought|made|submitted|received|filed)\s+on\s+"
+    r"\d{1,2}\s+[^\s,]+\s+\d{4}\s*[–—-]\s*(?P<name>.+)$",
+    re.IGNORECASE,
+)
+#: …and the fallback for a heading that names no date at all: the FIRST dash then, which
+#: is the only one that can precede the parties.
+_PENDING_HEAD_FALLBACK_RE = re.compile(
+    r"^(?:Action|Appeal|Request|Reference|Application)\b[^–—]*[–—]\s*(?P<name>.+)$",
+    re.IGNORECASE,
+)
+#: The docket parenthetical the OJ closes a notice heading with. Modern notices put the
+#: Court's short NAME for the case in it too — "(Case C-449/26, Freie Hansestadt
+#: Bremen)" — so it can no longer be matched as a bare case number.
+_PENDING_DOCKET_RE = re.compile(
+    r"\s*\((?:Joined\s+)?Cases?\s+(?P<no>[CT][-‑–]\d+/\d+)[^()]*\)\s*$",
     re.IGNORECASE,
 )
 
 
 def pending_formex_title(xml_bytes: bytes) -> str | None:
-    """Party name from a CN/TN OJ application notice's ``TI.CJT`` heading.
+    """Party name + docket from a CN/TN OJ application notice's ``TI.CJT`` heading.
 
-    Example: ``Action brought on 6 December 2024 – IEC and ISO v Commission
-    (Case T-631/24)`` becomes ``IEC and ISO v Commission``.  The docket remains in
-    the CELEX and citation formatter, so it is not duplicated in the display name.
+    ``Action brought on 6 December 2024 – IEC and ISO v Commission (Case T-631/24)``
+    becomes ``IEC and ISO v Commission (T-631/24)`` — the case number included, as it is
+    for every decided case in the corpus, because "Pending: UQ v Freie Hansestadt Bremen"
+    alone gives a reader no way to recognise the case they are following.
     """
     try:
         root = ET.fromstring(xml_bytes)
@@ -822,10 +965,19 @@ def pending_formex_title(xml_bytes: bytes) -> str | None:
         return None
     # Formex may append the C-series document number and language after the title.
     heading = re.split(r"\s+C/\d{4}/\d+\b|\s+Language of the case:", heading, 1)[0]
-    match = _PENDING_HEAD_RE.match(heading)
+    # Take the docket off before matching: it ends in a dash-bearing case NAME often
+    # enough that leaving it in is what breaks the party split.
+    docket = _PENDING_DOCKET_RE.search(heading)
+    if docket:
+        heading = heading[:docket.start()].strip()
+    match = _PENDING_HEAD_RE.match(heading) or _PENDING_HEAD_FALLBACK_RE.match(heading)
     if not match:
         return None
-    return clean_case_display_title(match.group("name").strip(" .,—-"))
+    name = clean_case_display_title(match.group("name").strip(" .,—-"))
+    if not name:
+        return None
+    number = docket.group("no").replace("‑", "-").replace("–", "-") if docket else None
+    return f"{name} ({number})" if number else name
 
 
 def pending_formex_proceeding(xml_bytes: bytes) -> str | None:
@@ -1268,6 +1420,11 @@ LIMIT {self.per_page}
         title = content_title or (None if generic else stub.title)
         if pending_notice:
             title = title or f"Case {celex_case_number(celex) or celex}"
+            # Always docketed, like every decided case: a title parsed from a heading
+            # already carries the number, a fallback title may not.
+            case_no = celex_case_number(celex)
+            if case_no and case_no not in title:
+                title = f"{title} ({case_no})"
             if not title.startswith("Pending:"):
                 title = f"Pending: {title}"
 

@@ -893,11 +893,21 @@ _ARTICLE_IN_LIST = re.compile(
 _ARTICLE_LIST = re.compile(
     r"\b(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+"
     rf"(?P<list>{_ARTICLE_NUMBER}"
-    r"(?:\s*(?:,\s*(?:(?:and|en|et|e|ed|&)\s+)?|"
-    r"(?:and|en|et|e|ed|&|to|through|à|–|—|-)\s+)"
+    # "or" belongs here as much as "and": a pleading argues in the alternative
+    # ("the exceptions in Article 4(1) or 4(2) thereof"), and without it the second
+    # limb of every such pair went unlinked while the first was linked.
+    r"(?:\s*(?:,\s*(?:(?:and|or|en|et|ou|e|ed|&)\s+)?|"
+    r"(?:and|or|en|et|ou|oder|e|ed|&|to|through|à|–|—|-)\s+)"
     r"(?:(?:Art(?:icle|\.)?s?\.?|artikelen?)\s+)?"
     rf"{_ARTICLE_NUMBER})+)"
     r"\s+(?:(?:of|du|de\s+la|des|van\s+de)\s+)?(?:the\s+)?",
+    re.IGNORECASE)
+#: "…of that Regulation", "…thereof" — an instrument named in the preceding sentence
+#: and referred back to. Only the demonstrative for a Directive was handled, so a list
+#: closing on any other instrument type resolved to nothing.
+_ARTICLE_LIST_ANAPHOR = re.compile(
+    r"\s*(?:thereof\b|(?:that|the\s+said|the\s+same)\s+"
+    r"(?P<kind>Regulation|Directive|Decision|Treaty|Convention|Charter)\b)",
     re.IGNORECASE)
 
 
@@ -913,14 +923,18 @@ def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
     occupied = [(c.char_start, c.char_end) for c in kept]
     for m in _ARTICLE_LIST.finditer(text):
         cand, kind = instrument_at(text[m.end(): m.end() + 120])
-        # EU drafting frequently uses "Articles 12 to 15 of that Directive" after
-        # naming the directive in the preceding sentence. Resolve the demonstrative
-        # to the nearest earlier directive rather than leaving the whole range blank.
-        if not cand and re.match(r"that\s+Directive\b", text[m.end():], re.IGNORECASE):
+        # EU drafting frequently refers back — "Articles 12 to 15 of that Directive",
+        # "the exceptions in Article 4(1) or 4(2) thereof" — to the instrument named in
+        # the preceding sentence. Resolve the anaphor to the nearest earlier instrument
+        # of that type ("thereof": of any type) rather than leaving the list blank.
+        anaphor = _ARTICLE_LIST_ANAPHOR.match(text[m.end():]) if not cand else None
+        if anaphor:
+            want = (anaphor.group("kind") or "").lower()
             prior = [c for c in kept if c.char_end <= m.start() and c.candidate_id
-                     and c.entity_kind == "directive"]
+                     and (c.entity_kind == want if want
+                          else _is_eu_candidate(c.candidate_id, c.entity_kind))]
             if prior:
-                cand, kind = prior[-1].candidate_id, "directive"
+                cand, kind = prior[-1].candidate_id, prior[-1].entity_kind
         # A judgment often introduces the instrument in a section heading before a run
         # of quoted provisions: ``The UK GDPR ... provisions`` then Articles 4–12,
         # including ``Articles 15 to 22 and 34``.  The list has no repeated instrument

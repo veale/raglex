@@ -585,7 +585,10 @@ def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_p
     assert mcp["recitals_text"].startswith("Consumer protection")
 
     page = StaticLawExporter(config).build(version_id).html.decode()
-    assert "Recitals are inherited unchanged from the original act" in page
+    # Phrased for a reader: it answers "why has this consolidated text no recitals of
+    # its own?", which the old storage-model wording left unsaid.
+    assert "A consolidated text does not normally reproduce the recitals" in page
+    assert "not part of this consolidated text" in page
     assert "Member States shall prohibit unfair practices." in page
     assert "inherited-recital" in page
 

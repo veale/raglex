@@ -408,6 +408,13 @@ def create_app(config: Config | None = None) -> FastAPI:
     def legislation_versions_ep(id: str) -> dict:
         return facade.legislation_versions(stable_id=id)
 
+    @app.get("/legislation/pending-references")
+    def pending_references_ep(id: str, limit: int = 200) -> dict:
+        """Live CJEU proceedings on this instrument — Article 267 references apart from
+        the other pending actions, each with the articles/recitals it turns on and the
+        AG's Opinion where one has been delivered."""
+        return facade.pending_references(id, limit=limit)
+
     @app.post("/legislation/version")
     def legislation_version_ep(payload: dict = Body(...)) -> dict:
         return facade.harvest_legislation_at(stable_id=payload["id"], date=payload["date"])

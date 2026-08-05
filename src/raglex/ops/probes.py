@@ -224,11 +224,21 @@ def _celex_year_expr(cat) -> str:
     return digits
 
 
+#: Both identifier forms that carry an EU instrument's YEAR in characters 2-5: the base
+#: CELEX (``32016R0679``) and a dated consolidation of it (``02016R0679-20160504``).
+#: Checking only the first left the consolidated half of every anachronism in place —
+#: a 1991 judgment "citing" the GDPR had the base edge repaired and went on showing the
+#: same false citation through its applicable-version edge.
+def _celex_shape_expr(column: str) -> str:
+    return (f"(({column} LIKE '3%' AND LENGTH({column}) BETWEEN 9 AND 11)"
+            f" OR ({column} LIKE '0%' AND LENGTH({column}) BETWEEN 18 AND 20))")
+
+
 def probe_anachronistic_eu_citation(cat) -> ProbeResult:
     guard = _celex_year_expr(cat).replace("x", "r.dst_id")
     sql = f"""
     FROM relations r JOIN documents s ON s.stable_id = r.src_id
-    WHERE r.dst_id LIKE '3%' AND LENGTH(r.dst_id) BETWEEN 9 AND 11 AND {guard}
+    WHERE {_celex_shape_expr('r.dst_id')} AND {guard}
       AND s.decision_date IS NOT NULL
       AND s.decision_date < (substr(r.dst_id, 2, 4) || '-01-01')
     """
@@ -253,7 +263,7 @@ def repair_anachronistic_eu_citation(cat) -> dict:
             DELETE FROM relations WHERE relation_id IN (
               SELECT r.relation_id FROM relations r
               JOIN documents s ON s.stable_id = r.src_id
-              WHERE r.dst_id LIKE '3%' AND LENGTH(r.dst_id) BETWEEN 9 AND 11 AND {guard_r}
+              WHERE {_celex_shape_expr('r.dst_id')} AND {guard_r}
                 AND s.decision_date IS NOT NULL
                 AND s.decision_date < (substr(r.dst_id, 2, 4) || '-01-01'))""")
         edges = cur.rowcount
@@ -261,8 +271,8 @@ def repair_anachronistic_eu_citation(cat) -> dict:
             DELETE FROM citations WHERE citation_id IN (
               SELECT c.citation_id FROM citations c
               JOIN documents s ON s.stable_id = c.src_id
-              WHERE c.candidate_id LIKE '3%' AND LENGTH(c.candidate_id) BETWEEN 9 AND 11
-                AND {guard_c} AND s.decision_date IS NOT NULL
+              WHERE {_celex_shape_expr('c.candidate_id')} AND {guard_c}
+                AND s.decision_date IS NOT NULL
                 AND s.decision_date < (substr(c.candidate_id, 2, 4) || '-01-01'))""")
         cites = cur.rowcount
     return {"edges_deleted": edges, "citations_deleted": cites}

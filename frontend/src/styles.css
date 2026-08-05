@@ -1535,6 +1535,37 @@ button.mini { font-size: 11px; padding: 1px 7px; }
   border-radius: var(--radius); font-size: .875rem; }
 .companion-label { font-weight: 600; }
 .companion-box a { margin: 0 var(--sp-2); }
+/* the same instrument on the other side of the 2020 split — a different jurisdiction's
+   law, so a different accent from the judgment↔opinion pairing above it */
+.counterpart-box { border-left-color: var(--note); }
+
+/* --- pending CJEU proceedings ------------------------------------------------
+   Everything else on a statute page is settled law. These two treatments say "this
+   part is still moving": a warm accent (not the blue used for held authority), and
+   the reference's own docket where a decided case would show its citation. */
+.pref-box { border-left: 3px solid var(--warn); }
+.pref-h { margin: 0 0 var(--sp-2); }
+.pref-h .muted { font-weight: 400; font-size: .875rem; }
+.pref-list { display: flex; flex-direction: column; }
+.pref-row { padding: var(--sp-2) 0; border-bottom: 1px solid var(--line-faint); }
+.pref-row:last-child { border-bottom: none; }
+.pref-head { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; }
+.pref-case { font-weight: 700; cursor: pointer; white-space: nowrap; }
+.pref-title { flex: 1; font-style: italic; }
+.tag-ag { background: color-mix(in srgb, var(--note) 22%, transparent);
+  border-color: color-mix(in srgb, var(--note) 45%, var(--line-faint)); cursor: pointer; }
+.pref-meta { font-size: .75rem; margin-top: 2px; }
+.pref-provs { cursor: pointer; }
+.pref-anchors { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin: var(--sp-2) 0 0; }
+.pref-stale { font-size: .75rem; margin: var(--sp-3) 0 0; }
+/* the same, inside the mentions tray */
+.pending-mentions { margin-bottom: var(--sp-4);
+  border-left: 3px solid var(--warn); padding-left: var(--sp-3); }
+.pending-mentions h4 { margin: 0 0 var(--sp-1); }
+.tag-pending { background: color-mix(in srgb, var(--warn) 25%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--line-faint)); }
+.mgroup-flag { font-size: .6875rem; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--warn); margin-bottom: 2px; }
 
 /* CJEU judgments carry their own section headings ("Legal context" › "European Union law"
    › "The GDPR", "Consideration of the questions referred"); Formex nests them, and the

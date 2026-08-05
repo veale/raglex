@@ -815,6 +815,18 @@ def _isodate(value: date | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _json_meta(meta_json: str | None) -> dict:
+    """A row's ``meta_json`` decoded, ``{}`` when absent or unparseable — for the scans
+    that read metadata off many rows at once (``document_meta`` is the single-row form)."""
+    if not meta_json:
+        return {}
+    try:
+        decoded = json.loads(meta_json)
+    except (ValueError, TypeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
 class Catalogue:
     """Relational spine over the corpus. Backend is chosen from the path/DSN: a
     ``postgresql://…`` DSN uses Postgres + pgvector + tsvector (the §7 production
@@ -1263,12 +1275,24 @@ class Catalogue:
         if commit:
             self.conn.commit()
 
+    # A CN/TN notice is retired by the DECIDING document only.  An Advocate General's
+    # Opinion (CC/CA) and a View (CV/CP) are filed in the same case and often months
+    # before judgment — they do not end the case, so they must never suppress the
+    # notice.  Only a judgment (CJ/TJ) or an order (CO/TO) closes it.
+    _DECISION_CELEX_RE = re.compile(r"^6\d{4}[CTF][JO]\d{4}$", re.IGNORECASE)
+
     def retire_pending_eu_notice(self, notice_id: str, decision_id: str) -> bool:
         """Hide a CN/TN application notice once its full English decision is held.
 
         The notice remains stored for audit/dedup and is linked from the resolving
         decision with ``supersedes``.  Returns False when the notice is not held (or is
         not a CN/TN identifier), making the operation safe on every scheduled pass.
+
+        Retirement also hands the guessed judgment CELEX back to the real decision: while
+        pending, the notice deliberately owns that alias (so a citation of "C-801/24"
+        resolves to something), and any edge that resolved through it — most visibly an
+        AG Opinion's ``opinion_in`` — is re-pointed at the decision here.  Left alone, an
+        Opinion went on announcing a retired notice as its judgment.
         """
         if not re.fullmatch(r"6\d{4}[CT]N\d{4}", notice_id or "", re.IGNORECASE):
             return False
@@ -1277,6 +1301,19 @@ class Catalogue:
         if notice is None or decision is None or not decision["has_text"] \
                 or str(decision["source_language"] or "").lower() != "en":
             return False
+        # The decision's own CELEX decides whether it CAN retire: a document stored
+        # under its ECLI carries it in meta. Where there is no CELEX to read, fall back
+        # to what the document IS — a judgment or an order closes the case; an Opinion
+        # (doc_type "opinion") and another notice never do, whatever else is true of
+        # them.
+        decision_celex = str((self.document_meta(decision_id) or {}).get("celex")
+                             or decision_id)
+        if re.fullmatch(r"6\d{4}[CTF][A-Z]\d{4}", decision_celex, re.IGNORECASE):
+            if not self._DECISION_CELEX_RE.match(decision_celex):
+                return False
+        elif str(decision["doc_type"]) not in ("judgment", "decision"):
+            return False
+        notice_celex = str((self.document_meta(notice_id) or {}).get("celex") or notice_id)
         meta = self.document_meta(notice_id)
         meta.update({
             "pending": False,
@@ -1300,7 +1337,62 @@ class Catalogue:
                 "UPDATE documents SET search_excluded = 1, meta_json = ? WHERE stable_id = ?",
                 (json.dumps(meta), notice_id),
             )
+            # The alias the notice was holding in trust, and the edges that took it.
+            for alias in {a.casefold() for a in ((meta.get("aliases") or [])
+                                                 + [decision_celex]) if a}:
+                self.conn.execute(
+                    "UPDATE citation_aliases SET dst_id = ?, source = 'celex-ecli' "
+                    "WHERE alias = ? AND dst_id = ?",
+                    (decision_id, alias, notice_id),
+                )
+            self.conn.execute(
+                "UPDATE relations SET dst_id = ? WHERE dst_id = ? AND src_id <> ? "
+                "AND LOWER(raw_citation_string) <> LOWER(?) "
+                "AND relationship_type <> 'supersedes'",
+                (decision_id, notice_id, decision_id, notice_celex),
+            )
         return True
+
+    def resolved_pending_eu_notices(self, limit: int = 5000) -> list[tuple[str, str]]:
+        """``(notice_id, decision_id)`` for every still-visible CN/TN notice whose
+        deciding document is already held in full English.
+
+        Retirement used to depend on the pending feed happening to re-enumerate the
+        resolving decision while the notice was in the corpus.  Anything harvested the
+        other way round — the judgment arriving through the ordinary CJEU feed — stayed
+        "Pending:" indefinitely (220 notices on the live corpus, some two years old, one
+        of them fronting a judgment we hold).  This is the order-independent sweep: it
+        pairs on the case identity the notice itself asserts (same year, court and case
+        number; J or O descriptor), which is exactly the pairing the dossier gives.
+        """
+        notices = self.conn.execute(
+            "SELECT stable_id, meta_json FROM documents "
+            "WHERE doc_type = 'note' AND search_excluded = 0 AND source = 'eu-cellar' "
+            "LIMIT ?", (limit,)).fetchall()
+        wanted: dict[str, str] = {}   # decision CELEX → notice id
+        for row in notices:
+            celex = str((_json_meta(row["meta_json"]) or {}).get("celex")
+                        or row["stable_id"]).upper()
+            if not re.fullmatch(r"6\d{4}[CTF]N\d{4}", celex):
+                continue
+            for descriptor in ("J", "O"):
+                wanted[celex[:6] + descriptor + celex[7:]] = row["stable_id"]
+        if not wanted:
+            return []
+        # The CELEX of a decision held under its ECLI lives in meta, which no index can
+        # answer — but the whole EU slice is ~64k rows against a 5M-document corpus, and
+        # this runs once a day, so one scan of that slice is cheaper than 8,000 lookups.
+        pairs: list[tuple[str, str]] = []
+        for row in self.conn.execute(
+            "SELECT stable_id, meta_json FROM documents WHERE source = 'eu-cellar' "
+            "AND has_text = 1 AND LOWER(COALESCE(source_language, '')) = 'en'"
+        ).fetchall():
+            celex = str((_json_meta(row["meta_json"]) or {}).get("celex")
+                        or row["stable_id"]).upper()
+            notice_id = wanted.get(celex)
+            if notice_id and notice_id != row["stable_id"]:
+                pairs.append((notice_id, row["stable_id"]))
+        return list(dict.fromkeys(pairs))
 
     # -- writes ------------------------------------------------------------
     # One body, two codes → the canonical one, applied at write time so every future
@@ -1349,7 +1441,16 @@ class Catalogue:
                 source_language=excluded.source_language, version=excluded.version,
                 landing_url=excluded.landing_url, raw_path=excluded.raw_path,
                 text_path=excluded.text_path, payload_hash=excluded.payload_hash,
-                has_text=excluded.has_text, search_excluded=excluded.search_excluded,
+                has_text=excluded.has_text,
+                -- A re-harvest must never UN-hide a document that was hidden by a
+                -- curatorial decision the adapter knows nothing about. A CN/TN notice
+                -- retired because its full English judgment landed is re-enumerated by
+                -- the pending feed forever after; taking excluded.search_excluded
+                -- verbatim resurrected it into search on the next pass (67 notices on
+                -- the live corpus). Exclusion is therefore sticky: a record can SET it,
+                -- only an explicit unretire clears it.
+                search_excluded=CASE WHEN documents.search_excluded = 1 THEN 1
+                                     ELSE excluded.search_excluded END,
                 extracted_via=excluded.extracted_via,
                 topic_tags=excluded.topic_tags, topic_score=excluded.topic_score,
                 fetched_at=excluded.fetched_at, meta_json=excluded.meta_json
@@ -3254,13 +3355,55 @@ class Catalogue:
         qs = ",".join("?" * len(ids))
         return self.conn.execute(
             f"""
-            SELECT d.source, d.court, d.doc_type, COUNT(DISTINCT r.src_id) AS docs
+            SELECT d.source, d.court, d.doc_type,
+                   -- the pending-notice split the facade turns into its own kinds:
+                   -- a live reference is not "other EU material" (see _doc_kind)
+                   -- both preliminary-ruling codes: the ordinary one and the urgent
+                   -- procedure (PPU), which is still an Article 267 reference
+                   CASE WHEN d.doc_type = 'note' AND d.search_excluded = 0
+                             AND (d.meta_json LIKE '%"pending_procedure": "PREJ%'
+                                  OR d.meta_json LIKE '%"pending_procedure": "REFER_PREL%')
+                        THEN 1 ELSE 0 END AS prej,
+                   CASE WHEN d.doc_type = 'note' AND d.search_excluded = 0
+                             AND d.meta_json LIKE '%"pending": true%'
+                        THEN 1 ELSE 0 END AS pending,
+                   COUNT(DISTINCT r.src_id) AS docs
             FROM relations r JOIN documents d ON d.stable_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
               AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
               AND r.relationship_type <> 'cited_by'
-            GROUP BY d.source, d.court, d.doc_type
+            GROUP BY d.source, d.court, d.doc_type, prej, pending
             """, ids).fetchall()
+
+    def pending_eu_citers(self, ids: list[str], *, limit: int = 400) -> list[sqlite3.Row]:
+        """Live CN/TN notices citing this document, with the pinpoints each cites.
+
+        The raw material for a statute's "pending before the Court" box: one row per
+        (notice, anchor), so the box can say not just THAT a reference is pending but
+        which articles and recitals it turns on.  Retired notices are excluded by the
+        same ``search_excluded`` flag that hides them from search — a resolved reference
+        belongs in the case law, not in a list of open questions.
+        """
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return []
+        qs = ",".join("?" * len(ids))
+        return self.conn.execute(
+            f"""
+            SELECT d.stable_id, d.title, d.court, d.decision_date, d.meta_json,
+                   d.topic_tags, r.dst_anchor, r.relationship_type,
+                   COUNT(*) AS occurrences
+            FROM relations r JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.extracted_via <> 'inferred' AND r.src_id <> r.dst_id
+              AND r.relationship_type <> 'cited_by'
+              AND d.doc_type = 'note' AND d.search_excluded = 0
+              AND d.meta_json LIKE '%"pending": true%'
+            GROUP BY d.stable_id, d.title, d.court, d.decision_date, d.meta_json,
+                     d.topic_tags, r.dst_anchor, r.relationship_type
+            ORDER BY d.decision_date DESC, d.stable_id
+            LIMIT ?
+            """, (*ids, limit * 12)).fetchall()
 
     def inferred_citer_count(self, ids: list[str]) -> int:
         """Distinct inferred-only citers (reported separately, never in cited-by)."""
