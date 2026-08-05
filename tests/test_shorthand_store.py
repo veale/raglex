@@ -374,3 +374,47 @@ def test_a_deleted_shorthand_is_gone(catalogue):
     _seed(catalogue)
     assert catalogue.delete_learned_shorthand("Suncor", "fc/2021/138") == 1
     assert catalogue.count_learned_shorthands() == 4
+
+
+# --- jurisdiction: the one disambiguator admitted after the coincidence test ----
+
+def test_jurisdiction_resolves_a_cross_border_homonym():
+    """"Human Rights Act" is held against the Canadian Act and the UK one. That is a
+    genuine homonym, not mislearning, and the citing document's own legal system
+    settles it independently of what else it cites — which is exactly what the removed
+    "cites exactly one of them" test could not do."""
+    from raglex.citations.stage import _resolved_by_jurisdiction as resolved
+
+    owners = {"ca/act/h-6", "ukpga/1998/42"}
+    assert resolved(owners, "ukpga/1998/42", "GB")
+    assert resolved(owners, "ca/act/h-6", "CA")
+    # and where the host system is unknown, nothing is resolved
+    assert not resolved(owners, "ukpga/1998/42", None)
+
+
+def test_supranational_owners_keep_a_name_contested():
+    """The counter-example that makes home-preference unsafe: "the ECHR" is held
+    against both the Convention and the Human Rights Act, and in a UK judgment it means
+    the CONVENTION. Preferring the document's own jurisdiction would mint the Act, so a
+    supranational owner is never excluded and the name stays withheld."""
+    from raglex.citations.stage import _resolved_by_jurisdiction as resolved
+
+    assert not resolved({"echr/convention", "ukpga/1998/42"}, "ukpga/1998/42", "GB")
+    assert not resolved({"32022R1925", "ewhc/ch/2021/1246"}, "ewhc/ch/2021/1246", "GB")
+
+
+def test_an_all_domestic_contest_is_still_mislearning():
+    """PACE's six owners are all UK — nothing external can resolve that, and it is the
+    case the whole guard exists for."""
+    from raglex.citations.stage import _resolved_by_jurisdiction as resolved
+
+    pace = {"ukpga/1967/58", "ukpga/1987/38", "ukpga/1988/33",
+            "ukpga/2000/23", "ukpga/2016/19", "uksi/2014/1704"}
+    assert not resolved(pace, "ukpga/2000/23", "GB")
+
+
+def test_unidentifiable_owner_blocks_resolution():
+    from raglex.citations.stage import _resolved_by_jurisdiction as resolved
+
+    # an id whose system can't be told is inexcludable, so the name stays contested
+    assert not resolved({"ukpga/1998/42", "mystery-source-id"}, "ukpga/1998/42", "GB")

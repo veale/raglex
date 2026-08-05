@@ -588,7 +588,7 @@ def extract_documents_parallel(
         cites, raw_defs = payload
         try:
             cites = _guard_cites(catalogue, doc, cites, stable_id=sid)
-            plan = _shorthand_plan(catalogue, cites, raw_defs)
+            plan = _shorthand_plan(catalogue, cites, raw_defs, doc)
         except Exception:  # noqa: BLE001
             log.exception("[cite-extract] %s failed in guards", sid)
             _count_done(sid, 0)
@@ -1016,7 +1016,68 @@ def reset_shorthand_cache() -> None:
     _SHORTHANDS = _ShorthandStore()
 
 
-def _stored_shorthands_for(catalogue: Catalogue, cites: list) -> list[tuple]:
+# --- whose law is it? -------------------------------------------------------
+# Supranational systems every national court cites in its own right. These are NEVER
+# excluded by the jurisdiction gate below, and that exception is the whole reason the
+# gate is safe: "the ECHR" is held against BOTH echr/convention and ukpga/1998/42, and
+# in a UK judgment it means the Convention — so a rule that simply preferred the
+# document's own jurisdiction would confidently mint the Human Rights Act. Leaving the
+# supranational owner in keeps such a name contested, and contested names don't travel.
+_SUPRANATIONAL = {"EU", "COE"}
+_CELEX_ID_RE = re.compile(r"^[0-9]{5}[A-Z]{1,2}[0-9]{4}$")
+
+
+def _candidate_jurisdiction(candidate_id: str | None) -> str | None:
+    """The legal system a candidate belongs to, or None when it can't be told.
+
+    None is not "no jurisdiction" — it is "unknown", and the gate treats it as
+    inexcludable, so an unrecognised id keeps a name contested rather than resolving it.
+    """
+    cid = (candidate_id or "").strip()
+    if not cid:
+        return None
+    if _CELEX_ID_RE.match(cid) or cid.lower().startswith(("european/", "celex/")) \
+            or cid.upper().startswith("ECLI:EU:"):
+        return "EU"
+    if cid.lower().startswith("echr/") or cid.upper().startswith("ECLI:CE:ECHR"):
+        return "COE"
+    if _is_uk_legislation_id(cid):
+        return "GB"
+    if "/" not in cid:
+        return None
+    head = cid.split("/", 1)[0].lower()
+    if head in ("ca", "us", "au", "nz", "ie", "sg", "hk", "in", "za"):
+        return head.upper()
+    # The court registry only, and only for a genuinely COURT-SHAPED head. ``classify``
+    # falls back to prefix matching, which happily reads "mystery-source-id" as Malaysia
+    # — and a wrong jurisdiction here is worse than none, because it lets the gate
+    # EXCLUDE an owner and so resolve a name it should have left contested.
+    if not re.fullmatch(r"[a-z]{2,12}", head):
+        return None
+    from .courts import classify
+
+    court = classify(head)
+    return court.jurisdiction if court else None
+
+
+def _host_jurisdiction(doc) -> str | None:
+    """The citing document's own system, read from its identifier and then its source."""
+    if doc is None:
+        return None
+    try:
+        own = _candidate_jurisdiction(doc["stable_id"])
+    except (KeyError, TypeError):
+        own = None
+    if own:
+        return own
+    src = (doc["source"] or "").lower() if doc is not None else ""
+    for code in ("uk", "ie", "ca", "au", "nz", "sg", "hk", "in", "za", "us"):
+        if src.startswith(f"{code}-"):
+            return "GB" if code == "uk" else code.upper()
+    return None
+
+
+def _stored_shorthands_for(catalogue: Catalogue, cites: list, doc=None) -> list[tuple]:
     """Stored shorthands applicable to this document: those whose parent candidate the
     document ALREADY cites, and about which the store is UNANIMOUS.
 
@@ -1044,13 +1105,37 @@ def _stored_shorthands_for(catalogue: Catalogue, cites: list) -> list[tuple]:
     by_cand, by_name = _SHORTHANDS.load(catalogue)
     if not by_cand:
         return []
+    host = _host_jurisdiction(doc)
     out: list[tuple] = []
     for cid in cited:
         for name, kind, abbrev in by_cand.get(cid, ()):
-            if len(by_name.get(name) or {cid}) > 1:
+            owners = by_name.get(name) or {cid}
+            if len(owners) > 1 and not _resolved_by_jurisdiction(owners, cid, host):
                 continue
             out.append((name, cid, kind, abbrev))
     return out
+
+
+def _resolved_by_jurisdiction(owners: set[str], cid: str, host: str | None) -> bool:
+    """Whether the citing document's own legal system settles a contested name.
+
+    This is the ONE disambiguator admitted after the coincidence test was removed,
+    because unlike "the document happens to cite this one" it is evidence independent
+    of the citation: a UK judgment writing "Human Rights Act" cannot mean the Canadian
+    Human Rights Act, whoever else it cites. Only FOREIGN DOMESTIC owners are excluded
+    — supranational ones stay (see ``_SUPRANATIONAL``), as do owners whose system can't
+    be identified, so anything the gate cannot positively rule out keeps the name
+    contested. Measured on the live corpus: 549 of 6,457 contested names become usable
+    in a UK document and 881 in a Canadian one, while "the ECHR", "ECtHR" and all six
+    all-UK owners of "PACE" stay withheld.
+    """
+    if not host:
+        return False
+    plausible = {
+        o for o in owners
+        if (j := _candidate_jurisdiction(o)) is None or j in _SUPRANATIONAL or j == host
+    }
+    return plausible == {cid}
 
 
 def extract_document(
@@ -1105,7 +1190,7 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     documents into one transaction (the run is restartable off the
     ``last_extracted_at`` stamp, so per-document durability buys nothing there)."""
     cites = _guard_cites(catalogue, doc, cites, stable_id=stable_id)
-    plan = _shorthand_plan(catalogue, cites, raw_defs)
+    plan = _shorthand_plan(catalogue, cites, raw_defs, doc)
     if plan is not None:
         from .extractor import attach_stored_shorthands
 
@@ -1243,7 +1328,7 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str) -> l
     return filtered
 
 
-def _shorthand_plan(catalogue: Catalogue, cites: list, raw_defs: list):
+def _shorthand_plan(catalogue: Catalogue, cites: list, raw_defs: list, doc=None):
     """``(stored, exclude, defs)`` for the corpus-wide shorthand pass, or None.
 
     Split out of :func:`_finish_document` so the parallel path can compute it in the
@@ -1259,7 +1344,7 @@ def _shorthand_plan(catalogue: Catalogue, cites: list, raw_defs: list):
     # links those guards exist to prevent.
     live = {c.candidate_id for c in cites if c.candidate_id}
     defs = [d for d in raw_defs if d["candidate_id"] in live]
-    stored = _stored_shorthands_for(catalogue, cites)
+    stored = _stored_shorthands_for(catalogue, cites, doc)
     return stored, {d["shorthand"] for d in defs}, defs
 
 

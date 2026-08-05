@@ -1235,6 +1235,9 @@ class EUCellarAdapter(BaseAdapter):
         self.per_page = per_page
         self.with_citations = with_citations
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
+        # per-CELEX enrichment, filled a batch at a time — see _prefetch_enrichment
+        self._cited_cache: dict[str, list[dict]] = {}
+        self._national_cache: dict[str, list[dict]] = {}
 
     # -- SPARQL ------------------------------------------------------------
     def _sparql(self, query: str) -> list[dict]:
@@ -1430,6 +1433,80 @@ SELECT DISTINCT ?cited_celex ?cited_ecli WHERE {{
 LIMIT 200
 """
 
+    # -- batched enrichment ---------------------------------------------------
+    # ``_cited_query`` and ``_national_query`` are asked ONCE PER DOCUMENT, and this
+    # endpoint answers each in 4–15s. Measured on one notice fetch: 0.18s to download
+    # the document, 9.3s in those two queries — 95% of the wall clock, and the whole
+    # reason the 1,161-notice repair was a three-hour job. The adapter already knows how
+    # to batch (see ``advocate_generals``): one ``FILTER(… IN (…))`` answers a whole
+    # chunk. Where the caller named its CELEXes up front — the ``celexes=`` targeted
+    # mode the repair uses — prefetch both for the lot and serve every later fetch from
+    # the cache, turning 2N round trips into 2⌈N/50⌉.
+    _PREFETCH_CHUNK = 50
+
+    def _cited_batch_query(self, celexes: list[str]) -> str:
+        listed = '", "'.join(celexes)
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex ?cited_celex ?cited_ecli WHERE {{
+  ?w cdm:resource_legal_id_celex ?wc .
+  FILTER(STR(?wc) IN ("{listed}"))
+  BIND(STR(?wc) AS ?celex)
+  ?w cdm:work_cites_work ?cw .
+  ?cw cdm:resource_legal_id_celex ?cited_celex .
+  OPTIONAL {{ ?cw cdm:case-law_ecli ?cited_ecli }}
+}}
+LIMIT {200 * len(celexes)}
+"""
+
+    def _national_batch_query(self, celexes: list[str]) -> str:
+        listed = '", "'.join(celexes)
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex ?njudg ?country WHERE {{
+  ?w cdm:resource_legal_id_celex ?wc .
+  FILTER(STR(?wc) IN ("{listed}"))
+  BIND(STR(?wc) AS ?celex)
+  OPTIONAL {{ ?w cdm:case-law_national-judgement ?njudg }}
+  OPTIONAL {{ ?w cdm:case-law_originates_in_country ?cu .
+             BIND(REPLACE(STR(?cu), "^.*country/", "") AS ?country) }}
+}}
+LIMIT {50 * len(celexes)}
+"""
+
+    def _prefetch_enrichment(self, celexes: list[str]) -> None:
+        """Fill the per-CELEX caches for a whole batch. Best-effort: a failure here
+        leaves the caches unset, and each fetch falls back to its own query."""
+        wanted = [c for c in dict.fromkeys(celexes) if c]
+        for start in range(0, len(wanted), self._PREFETCH_CHUNK):
+            chunk = wanted[start:start + self._PREFETCH_CHUNK]
+            for query, cache in (
+                (self._cited_batch_query(chunk), self._cited_cache),
+                (self._national_batch_query(chunk), self._national_cache),
+            ):
+                try:
+                    rows = self._sparql(query)
+                except Exception:  # noqa: BLE001 — enrichment is not worth failing over
+                    continue
+                # Seed every celex in the chunk, so "asked and got nothing" is cached
+                # too and doesn't fall through to a per-document query.
+                for c in chunk:
+                    cache.setdefault(c, [])
+                for r in rows:
+                    c = r.get("celex")
+                    if c in cache:
+                        cache[c].append(r)
+
+    def _cited_rows(self, celex: str) -> list[dict]:
+        if celex in self._cited_cache:
+            return self._cited_cache[celex]
+        return self._sparql(self._cited_query(celex))
+
+    def _national_rows(self, celex: str) -> list[dict]:
+        if celex in self._national_cache:
+            return self._national_cache[celex]
+        return self._sparql(self._national_query(celex))
+
     def _citing_query(self, celex: str) -> str:
         """CJEU cases that CITE the target case (inverse work_cites_work) — the
         forward-citation discovery for a judgment."""
@@ -1476,6 +1553,13 @@ LIMIT {self.per_page}
             rows = self._sparql(query)
             if not rows:
                 return
+            # One round trip each for the whole page's cited-works and referring-court
+            # enrichment, instead of two per document in fetch(). Only where the caller
+            # asked for a named set: a general crawl streams pages whose fetches may
+            # never happen, and prefetching those would buy latency for nothing.
+            if self.celexes:
+                self._prefetch_enrichment(
+                    [r.get("celex") for r in rows if r.get("celex")])
             yielded = 0
             for row in rows:
                 celex = row.get("celex")
@@ -1608,7 +1692,7 @@ LIMIT {self.per_page}
             )
         # 2) mentions edges to the cases this case cites (the CELLAR citation graph).
         if self.with_citations:
-            for cited in self._sparql(self._cited_query(celex)):
+            for cited in self._cited_rows(celex):
                 dst = cited.get("cited_ecli") or cited.get("cited_celex")
                 relations.append(
                     TypedRelation(
@@ -1639,7 +1723,7 @@ LIMIT {self.per_page}
         # The national case isn't in CELLAR — record it as a dangling edge now
         # (dst unresolved), preserving any scrape URL, so it surfaces in the §8
         # harvest worklist and resolves when a national adapter harvests it later.
-        nat_rows = self._sparql(self._national_query(celex))
+        nat_rows = self._national_rows(celex)
         origin_country = next((r["country"] for r in nat_rows if r.get("country")), None)
         referring_courts: list[str] = []
         for nref in parse_national_judgements([r["njudg"] for r in nat_rows if r.get("njudg")]):
