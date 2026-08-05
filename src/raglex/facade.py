@@ -4875,6 +4875,8 @@ class Facade:
         "bailii-parquet": "BAILII", "westlaw": "Westlaw import",
         "westlaw-rtf": "Westlaw import", "ofcom": "Ofcom", "ofcom-osa": "Ofcom (OSA)",
         "ofcom-enforcement": "Ofcom enforcement", "ico": "ICO",
+        "uk-ico-enforcement": "ICO enforcement", "uk-ico-audits": "ICO audits",
+        "uk-ico-consultations": "ICO consultations", "uk-ico-guidance": "ICO guidance",
         "eu-cellar": "EUR-Lex (CJEU)", "eu-legislation": "EUR-Lex",
         "eu-preparatory": "EUR-Lex (EU preparatory & Commission policy documents)",
         "eu-consumer-guidance": "European Commission consumer guidance",
@@ -4884,6 +4886,7 @@ class Facade:
         "nl-acm-guidance": "ACM", "it-agcm": "AGCM",
         "uk-cma": "Competition and Markets Authority",
         "uk-cma-guidance": "Competition and Markets Authority",
+        "uk-govuk-policy": "GOV.UK",
         "ie-legislation": "eISB (Ireland)", "ie-caselaw": "Irish courts",
         "au-caselaw": "Open Australian Legal Corpus", "au-legislation": "Federal Register (AU)",
         # A2AJ publish their own bulk corpus; it is not a CanLII scrape, so naming
@@ -5130,7 +5133,7 @@ class Facade:
     # binding decisions and Art 64 opinions, and three EU appeal bodies. They now answer the
     # "administrative decisions" filter, where a lawyer looking for them actually looks.
     _ADMIN_SOURCES = {
-        "edpb-oss", "ofcom-enforcement", "ico", "ie-dpc",
+        "edpb-oss", "ofcom-enforcement", "ico", "uk-ico-enforcement", "ie-dpc",
         # EU bodies: the Board itself (binding decisions + Art 64 opinions), the
         # Commission's competition/DMA registers, the sectoral appeal panels, the Ombudsman
         "edpb", "eu-dgcomp-antitrust", "dma-cases", "eu-esma-sanctions",
@@ -11093,6 +11096,133 @@ class Facade:
                 "provisions": len(parsed.provisions), "chars": len(parsed.text),
                 "version": parsed.version_note, "aliases": aliases,
                 "resolved_edges": resolved}
+
+    # The GOV.UK feeds that minted ids under their own source key before every GOV.UK
+    # feed moved to one namespace. Their stable_ids are "<source>/<gov.uk base path>",
+    # so the new id is the same path under "govuk/" — no re-fetch, no re-parse.
+    _LEGACY_GOVUK_PREFIXES = ("uk-cma-guidance", "uk-cma", "uk-ofgem", "uk-ofwat")
+    _GOVUK_NAMESPACE = "govuk"
+
+    def rekey_govuk_ids(self, *, apply: bool = False, limit: int | None = None,
+                        on_progress=None, cancel_check=None) -> dict:
+        """Move GOV.UK documents onto the shared ``govuk/<base_path>`` namespace.
+
+        Every GOV.UK feed now mints ids in one namespace, because the feeds genuinely
+        overlap — 268 CMA publications are also in the cross-government
+        ``policy_and_engagement`` corpus, and the CMA's own guidance was harvested by
+        both ``uk-cma`` and ``uk-cma-guidance``. Keyed by source, the same page is stored
+        two or three times; keyed by base path it is one document whichever feed found
+        it. Documents harvested before that change still carry the old keys and would
+        not dedupe against the new ones, so the next harvest would store twins.
+
+        This is a RE-KEY, not a re-harvest. :meth:`Catalogue.rekey_document` cascades
+        every reference — citations, relations, aliases, embeddings, tags, assets,
+        version history — so nothing is lost and nothing is downloaded again; where the
+        target id already exists (the ``uk-cma`` / ``uk-cma-guidance`` twins) the two
+        rows MERGE and the duplicate's edges fold into the survivor. Deleting the rows
+        instead would discard all of that and force a full re-fetch of ~6,400 documents
+        for no gain, and the corpus is append-only by design (§1.4a).
+
+        The retired id is kept as an alias of the new one, so a link, an export or an
+        edge minted against ``uk-cma/…`` still lands on the document.
+
+        Idempotent — an id already in the namespace is a no-op, so it is safe to re-run.
+        DRY RUN unless ``apply=True``; the dry run lists every planned change.
+        """
+        from collections import Counter
+
+        from .core.text import fold
+
+        st = {"scanned": 0, "rekeyed": 0, "merged": 0, "unchanged": 0, "applied": apply}
+        changes: list[dict] = []
+        with self._open() as (cat, _rs, _ts):
+            rows: list = []
+            for prefix in self._LEGACY_GOVUK_PREFIXES:
+                rows.extend(cat.conn.execute(
+                    "SELECT stable_id, source FROM documents WHERE stable_id LIKE ?",
+                    (f"{prefix}/%",)).fetchall())
+            # A document may be listed once per matching prefix ("uk-cma/" also matches
+            # nothing of "uk-cma-guidance/", but keep this honest against future prefixes).
+            seen_ids: set[str] = set()
+            rows = [r for r in rows
+                    if not (r["stable_id"] in seen_ids or seen_ids.add(r["stable_id"]))]
+            # Deterministic order, so a dry run and the apply that follows it plan the
+            # same survivor for each merged pair rather than whichever the DB listed first.
+            rows.sort(key=lambda r: r["stable_id"])
+            if limit:
+                rows = rows[:limit]
+            claimed: set[str] = set()
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                cur = r["stable_id"]
+                prefix, _, path = cur.partition("/")
+                # Only ever re-key a genuine "<legacy source>/<path>" id. Anything whose
+                # remainder is empty is malformed and is left exactly where it is.
+                if prefix not in self._LEGACY_GOVUK_PREFIXES or not path.strip("/"):
+                    st["unchanged"] += 1
+                    continue
+                target = f"{self._GOVUK_NAMESPACE}/{path.strip('/')}"
+                if target == cur:
+                    st["unchanged"] += 1
+                    continue
+                # A collision is usually created BY this run: the uk-cma and
+                # uk-cma-guidance copies of one page both want the same target, and only
+                # the second is a merge. A dry run that asked the database alone would
+                # call both a rename and under-report the merges the apply will do — the
+                # very number the reader is deciding on — so claimed targets are tracked.
+                merging = target in claimed or cat.get_document(target) is not None
+                claimed.add(target)
+                changes.append({"old": cur, "new": target, "source": r["source"],
+                                "kind": "merge" if merging else "rename"})
+                _progress(on_progress, stage="planning GOV.UK re-key", done=n,
+                          total=len(rows), item=cur)
+
+            if not apply:
+                st["changes"] = changes[:5000]
+                return st
+
+            # -- apply, in two passes -------------------------------------------
+            # EVERY document whose target is contested goes through the per-document
+            # path, not just the second one: it drops the loser's row and folds its
+            # references in, honouring the uniqueness keys. Routing only the "merge"
+            # member there and leaving its partner to the batch was a real bug — the
+            # batch then renamed the partner onto an id the merge had just created and
+            # hit a UNIQUE violation.
+            contested = {t for t, k in Counter(c["new"] for c in changes).items() if k > 1}
+            contested |= {c["new"] for c in changes
+                          if cat.get_document(c["new"]) is not None}
+            for c in (c for c in changes if c["new"] in contested):
+                action = cat.rekey_document(c["old"], c["new"], commit=False)
+                cat.put_alias(fold(c["old"]), c["new"], source="govuk-rekey", commit=False)
+                st["merged" if action == "merge" else "rekeyed"] += 1
+            cat.commit()
+
+            # Everything else is a pure RENAME, and pure renames go set-based: one
+            # statement per referencing column instead of eleven per document. The
+            # per-document path was measured at ~4 hours for 822 documents on the live
+            # corpus, because `citations` holds 41M rows with no plain index on
+            # candidate_id, so every move sequentially scanned it. By now the contested
+            # ids no longer carry a legacy prefix, so the sweep only sees clean renames.
+            plain = [c for c in changes if c["new"] not in contested]
+            if plain:
+                _progress(on_progress, stage="re-keying GOV.UK ids (batched)",
+                          done=0, total=len(plain))
+                counts = cat.reprefix_documents(
+                    self._LEGACY_GOVUK_PREFIXES, self._GOVUK_NAMESPACE, commit=False)
+                for c in plain:
+                    cat.put_alias(fold(c["old"]), c["new"], source="govuk-rekey",
+                                  commit=False)
+                st["rekeyed"] += counts.get("documents.stable_id", len(plain))
+                st["reference_updates"] = counts
+                cat.commit()
+                _progress(on_progress, stage="re-keying GOV.UK ids (batched)",
+                          done=len(plain), total=len(plain))
+        if apply:
+            self._invalidate_caches()
+        st["changes"] = changes[:5000]
+        return st
 
     def refix_westlaw_imports(self, *, apply: bool = False, limit: int | None = None,
                               on_progress=None, cancel_check=None) -> dict:

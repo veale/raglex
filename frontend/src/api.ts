@@ -33,6 +33,37 @@ function authHeaders(extra: Record<string, string> = {}, method?: string): Recor
   };
 }
 
+// An EU instrument's official title ends with the legislative footnote "(Text with EEA
+// relevance)". It is part of the citation of record, so it stays in the database and in
+// the harvested title — but on screen it costs a line on every heading, every search row
+// and every citer link while saying nothing about the law. It is stripped here, at the
+// one place every response enters the UI, rather than at the ~300 places a title is
+// rendered (the static export strips it in its own renderer for the same reason).
+const EEA_RELEVANCE = /\s*\(\s*Text with EEA relevance\.?\s*\)/gi;
+
+function isTitleKey(key: string): boolean {
+  return key === "title" || key.endsWith("_title");
+}
+
+/** Recursively strip the EEA footnote from every title-ish string in a payload. Only
+ *  values under a title key are touched, so document TEXT is never rewritten. */
+function hideEeaFootnote<T>(value: T, underTitleKey = false): T {
+  if (typeof value === "string") {
+    return (underTitleKey ? value.replace(EEA_RELEVANCE, "").trim() : value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => hideEeaFootnote(v, underTitleKey)) as unknown as T;
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = hideEeaFootnote(v, isTitleKey(k));
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
@@ -41,7 +72,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (res.status === 401) { window.dispatchEvent(new CustomEvent("raglex-unauthenticated")); }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json() as Promise<T>;
+  return hideEeaFootnote(await res.json()) as T;
 }
 
 // Multipart POST (file upload) — same auth, but let the browser set the multipart
@@ -52,7 +83,7 @@ async function postForm(path: string, fd: FormData): Promise<any> {
   });
   if (res.status === 401) { window.dispatchEvent(new CustomEvent("raglex-unauthenticated")); }
   if (!res.ok) throw new Error(`${res.status}`);
-  return res.json();
+  return hideEeaFootnote(await res.json());
 }
 
 // Auth surface (see src/raglex/web/auth.py). `me` tells the SPA whether enforcement is on

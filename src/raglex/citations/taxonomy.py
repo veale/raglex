@@ -150,6 +150,13 @@ UK_LEG_COUNTRY: dict[str, str] = {
     "nia": "N. Ireland", "apni": "N. Ireland", "nisi": "N. Ireland", "nisr": "N. Ireland",
     "nisro": "N. Ireland", "mnia": "N. Ireland",
 }
+_ICO_SUBTYPES = {
+    "uk-ico-enforcement": "ICO enforcement register",
+    "uk-ico-audits": "ICO audits & overview reports",
+    "uk-ico-consultations": "ICO consultations & responses",
+    "uk-ico-guidance": "ICO guidance & research",
+}
+
 _LEG_KIND_LABEL = {"primary": "Primary", "secondary": "Secondary", "assimilated": "Assimilated"}
 _CELEX_LEG_DESC = {"R": ("reg", "Regulation"), "L": ("dir", "Directive"),
                    "D": ("dec", "Decision")}
@@ -371,6 +378,13 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
     if source == "ofcom-enforcement":
         return Tax("guidance", CATEGORY_LABELS["guidance"], "ofcom-enforcement",
                    "Ofcom enforcement actions", {"source": "ofcom-enforcement"})
+    # The Information Commissioner's four collections. Named here rather than left to
+    # the doc_type fallthrough below, because the enforcement register is filed
+    # doc_type="decision" and would otherwise land in "Other / unrouted" — and because
+    # a reader wants "ICO enforcement" and "ICO guidance" as separate rows on the map.
+    if source in _ICO_SUBTYPES:
+        return Tax("guidance", CATEGORY_LABELS["guidance"], source,
+                   _ICO_SUBTYPES[source], {"source": source})
     # The Information Rights tribunal's own register is UK case law like any other
     # tribunal's — without this it fell through to "Other / unrouted".
     if source == "uk-ftt-ir":

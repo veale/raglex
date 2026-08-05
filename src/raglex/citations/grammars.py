@@ -170,6 +170,13 @@ _UK_ACT_TO_ID = {
     "foia": "ukpga/2000/36",
     "data protection act 2018": "ukpga/2018/12",
     "dpa 2018": "ukpga/2018/12",
+    "data protection act 1998": "ukpga/1998/29",
+    "dpa 1998": "ukpga/1998/29",
+    # The 2025 Act that amends the UK GDPR, the DPA 2018 and PECR — named constantly in
+    # current ICO guidance ("changes made by the Data (Use and Access) Act"). "DUAA" is
+    # unambiguous but new, so it is expanded only inside ICO sources for now.
+    "data (use and access) act 2025": "ukpga/2025/18",
+    "data (use and access) act": "ukpga/2025/18",
     "human rights act 1998": "ukpga/1998/42",
     # the Online Safety Act 2023 — Ofcom's online-safety guidance implements its
     # sections/parts, so precise "section N of the Online Safety Act 2023" pinpoints
@@ -208,6 +215,22 @@ _UK_SI_TO_ID = {
     "electronic commerce (ec directive) regulations": "uksi/2002/2013",
     "electronic commerce regulations 2002": "uksi/2002/2013",
     "e-commerce regulations 2002": "uksi/2002/2013",
+    # The rest of the Information Commissioner's statutory estate. Spelled-out names
+    # only: "EIR" is an EU implementing-regulation abbreviation and "NIS" is the
+    # directive, so both acronyms are expanded only inside ICO sources (see
+    # citations.stage._ICO_ALIASES). Without these names an ICO decision notice's
+    # "regulation 5(1) of the Environmental Information Regulations 2004" — the single
+    # most-cited provision in UK information-rights practice — resolved to nothing.
+    "environmental information regulations 2004": "uksi/2004/3391",
+    "environmental information regulations": "uksi/2004/3391",
+    "network and information systems regulations 2018": "uksi/2018/506",
+    "network and information systems regulations": "uksi/2018/506",
+    "inspire regulations 2009": "uksi/2009/3157",
+    "inspire regulations": "uksi/2009/3157",
+    "re-use of public sector information regulations 2015": "uksi/2015/1415",
+    "re-use of public sector information regulations": "uksi/2015/1415",
+    "data protection (charges and information) regulations 2018": "uksi/2018/480",
+    "data protection (charges and information) regulations": "uksi/2018/480",
 }
 # The bare acronym is matched case-SENSITIVELY (uppercase only), the spelled-out names
 # case-insensitively — the same discipline the EU acronyms use, so a lower-case "pecr"

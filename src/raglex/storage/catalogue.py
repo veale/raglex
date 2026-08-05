@@ -1245,6 +1245,50 @@ class Catalogue:
             self.conn.commit()
         return "merge" if merging else "rename"
 
+    def reprefix_documents(self, old_prefixes: tuple[str, ...], new_prefix: str, *,
+                           commit: bool = True) -> dict[str, int]:
+        """Bulk-move every document whose id starts ``<old>/`` to ``<new_prefix>/<rest>``,
+        cascading the same references :meth:`rekey_document` does — but as ONE statement
+        per referencing column instead of one per document.
+
+        Why this exists: ``rekey_document`` issues ~11 statements per document, and the
+        big referencing tables are not indexed on every id column (``citations`` holds
+        41M rows with no plain index on ``candidate_id``). Re-keying 822 documents one at
+        a time therefore meant ~9,000 sequential scans of multi-million-row tables — four
+        hours, and slowing. Set-based, it is 11 scans total. This is the same lesson the
+        resolve path already learned: never do per-document work that can be done per
+        batch.
+
+        **Rename only.** It cannot merge, so the caller must have established that no
+        target id is already taken (:meth:`get_document`), and it does not touch the
+        uniqueness-key conflict handling that a merge needs. Callers with collisions must
+        use ``rekey_document`` for those and this for the rest.
+        """
+        if not old_prefixes:
+            return {}
+        counts: dict[str, int] = {}
+        # "uk-cma/government/x" → "govuk/government/x". The prefixes are unambiguous
+        # because the pattern includes the separator: "uk-cma/%" cannot match
+        # "uk-cma-guidance/…". substr() is 1-based in both SQLite and Postgres, so the
+        # remainder starts at len(prefix) + 2 (past the prefix and its slash).
+        #
+        # References are moved BEFORE the documents row, matching rekey_document's order.
+        # The LIKE pattern is a bound PARAMETER, never a literal in the SQL — a literal %
+        # breaks the Postgres driver's paramstyle translation.
+        with self._atomic():
+            for table, col in (*self._DOC_ID_REFS, ("documents", "stable_id")):
+                for prefix in old_prefixes:
+                    cur = self.conn.execute(
+                        f"UPDATE {table} SET {col} = ? || substr({col}, ?) "
+                        f"WHERE {col} LIKE ?",
+                        (f"{new_prefix}/", len(prefix) + 2, f"{prefix}/%"))
+                    moved = getattr(cur, "rowcount", 0) or 0
+                    if moved > 0:
+                        counts[f"{table}.{col}"] = counts.get(f"{table}.{col}", 0) + moved
+        if commit:
+            self.conn.commit()
+        return counts
+
     # For a MERGE, the (col, uniqueness-key) that would clash if the target already holds
     # an equivalent row — those old rows are dropped instead of moved.
     _UNIQUE_KEYCOLS = {

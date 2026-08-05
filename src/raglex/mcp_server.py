@@ -561,6 +561,17 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.refix_westlaw_imports(apply=apply, limit=limit)
 
     @admin
+    def rekey_govuk_ids(apply: bool = False, limit: Optional[int] = None) -> dict:
+        """Move GOV.UK documents onto the shared ``govuk/<base_path>`` id namespace, so a
+        page carried by more than one GOV.UK feed is ONE document. Re-keys in place —
+        citations, relations, aliases, embeddings, tags and version history all move with
+        it, and nothing is re-downloaded; ``uk-cma`` / ``uk-cma-guidance`` twins of the
+        same page MERGE. The retired id stays resolvable as an alias. Idempotent. DRY RUN
+        unless ``apply=True``. Run this ONCE before harvesting the widened CMA feed or
+        uk-govuk-policy, or those harvests will store duplicates."""
+        return facade.rekey_govuk_ids(apply=apply, limit=limit)
+
+    @admin
     def backfill_ag_names(limit: int = 20000) -> dict:
         """Fill in WHO wrote each held AG Opinion, read from the Opinion's own first page
         ("OPINION OF ADVOCATE GENERAL EMILIOU delivered on 15 May 2025"). CELLAR omits the

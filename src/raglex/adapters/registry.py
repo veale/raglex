@@ -89,6 +89,7 @@ from .uk_cps_guidance import CPSProsecutionGuidanceAdapter
 from .uk_et import UKEmploymentTribunalAdapter
 from .uk_govuk_regulator import GOVUKRegulatorAdapter
 from .uk_fca_notices import FCANoticesAdapter
+from .uk_ico import ICOAdapter
 from .uk_legislation import UKLegislationAdapter
 from .uk_ftt_ir import InformationRightsAdapter
 from .eu_digital_strategy import DigitalStrategyLibraryAdapter
@@ -116,27 +117,51 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # decision-year/case-number identity deliberately matches the BAILII metadata seed,
     # replacing existing textless UKET stubs with the official full text.
     "uk-et": UKEmploymentTribunalAdapter,
+    # Every GOV.UK feed shares one stable_id namespace (``govuk/<base_path>``), because
+    # the feeds genuinely overlap: 268 of the CMA's publications are also in the
+    # cross-government policy corpus, and a page harvested by two feeds must be ONE
+    # document. The source column still records which feed found it.
+    # NB the CMA feed is the WHOLE organisation (~6,400 items), not the ~110-item
+    # consumer-enforcement facet it used to be: that facet was a tenth of the register
+    # and left mergers, CA98 antitrust cases and market investigations unharvested.
     "uk-cma": lambda **kw: GOVUKRegulatorAdapter(
-        source="uk-cma", document_type="cma_case", court="CMA",
-        search_filters={
-            "filter_format": "cma_case",
-            "filter_case_type": "consumer-enforcement",
-        },
-        **kw),
+        source="uk-cma", organisation="competition-and-markets-authority",
+        court="CMA", id_prefix="govuk", **kw),
+    # Kept as a distinct feed because guidance is what most readers of this corpus want
+    # first, and it is worth being able to run it alone — but it writes into the shared
+    # namespace, so it dedupes against the full CMA feed rather than storing a twin.
     "uk-cma-guidance": lambda **kw: GOVUKRegulatorAdapter(
         source="uk-cma-guidance",
         organisation="competition-and-markets-authority",
-        court="CMA",
+        court="CMA", id_prefix="govuk",
         search_filters={"filter_format": "guidance"},
         record_doc_type=DocType.GUIDANCE,
         require_recognized_legal_citation=False,
         **kw),
     "uk-ofgem": lambda **kw: GOVUKRegulatorAdapter(
-        source="uk-ofgem", organisation="ofgem", court="Ofgem", **kw),
+        source="uk-ofgem", organisation="ofgem", court="Ofgem",
+        id_prefix="govuk", **kw),
     "uk-ofwat": lambda **kw: GOVUKRegulatorAdapter(
         source="uk-ofwat", organisation="the-water-services-regulation-authority",
-        court="Ofwat", **kw),
+        court="Ofwat", id_prefix="govuk", **kw),
+    # The whole-of-government policy corpus (~25,000 items): policy papers, impact
+    # assessments, consultations and calls for evidence with their outcomes. No fixed
+    # publisher — each record is attributed to the body on its own "From:" line — and
+    # categorised by GOV.UK's own content-purpose subgroup and schema rather than by a
+    # taxonomy invented here.
+    "uk-govuk-policy": lambda **kw: GOVUKRegulatorAdapter(
+        source="uk-govuk-policy", supergroup="policy_and_engagement",
+        id_prefix="govuk", record_doc_type=DocType.GUIDANCE, **kw),
     "uk-fca-notices": FCANoticesAdapter,
+    # The Information Commissioner, in four collections sharing one adapter. The three
+    # registers ride the site's own XHR search endpoint (a JSON listing carrying a CMS
+    # revision stamp — a real change signal, so an unchanged item is never re-downloaded);
+    # the guidance corpus comes from the sitemap's lastmod. Each item's PDFs are the
+    # substance (the HTML page is a summary) and are inlined into the record.
+    "uk-ico-enforcement": ICOAdapter,
+    "uk-ico-audits": lambda **kw: ICOAdapter(collection="audits", **kw),
+    "uk-ico-consultations": lambda **kw: ICOAdapter(collection="consultations", **kw),
+    "uk-ico-guidance": lambda **kw: ICOAdapter(collection="guidance", **kw),
     # The Ministry of Justice's current consolidated Civil Procedure Rules: one
     # record per Part / Practice Direction, with exact rule-number aliases.
     "uk-cpr": UKCivilProcedureRulesAdapter,
@@ -511,10 +536,36 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (), ("Law Commission number", "project/document title"),
     ),
     "uk-cma": SourceInfo(
-        "uk-cma", "CMA consumer-enforcement cases", "guidance", "GB", False,
-        "The consumer-enforcement facet of the official CMA case register through "
-        "GOV.UK Search and Content APIs. Full decisions and undertakings are combined "
-        "with each case timeline.",
+        "uk-cma", "CMA publications (all)", "guidance", "GB", False,
+        "Everything the Competition and Markets Authority publishes on GOV.UK — the "
+        "whole organisation feed (~6,400 items), through the official Search and "
+        "Content Store APIs rather than the results page: merger and CA98 antitrust "
+        "cases, market studies and investigations, guidance, decisions, consultations "
+        "and reports. A publication is a container, so each item's child HTML "
+        "publications and attached PDFs are followed and inlined; where GOV.UK offers "
+        "the same document as accessible HTML and as a PDF, the HTML is taken and its "
+        "PDF twins skipped. Documents share the GOV.UK-wide id namespace, so an item "
+        "also carried by another GOV.UK feed is one document, not two.",
+        (), ("GOV.UK path", "CMA case reference (e.g. CMA207)"),
+    ),
+    "uk-govuk-policy": SourceInfo(
+        "uk-govuk-policy", "GOV.UK policy and engagement (all departments)",
+        "guidance", "GB", False,
+        "The whole-of-government policy corpus from GOV.UK's content-purpose "
+        "supergroup ``policy_and_engagement`` (~25,000 items): policy papers, impact "
+        "assessments, open and closed consultations with their outcomes, and calls for "
+        "evidence. Discovery is the official Search API newest-first, so an "
+        "incremental run stops at the cursor and a backfill pages the whole set. "
+        "Each record is attributed to the body on its own \"From:\" line rather than "
+        "to a single fixed publisher, and is tagged with GOV.UK's own categorisation — "
+        "the content-purpose subgroup (policy / consultations / calls for evidence), "
+        "the document schema (policy_paper, impact_assessment, consultation_outcome…) "
+        "and the publishing organisation's slug. The legal-relevance gate applies: "
+        "everything is held and deduped, but citation-free operational material stays "
+        "out of search.",
+        (SourceOption("organisation", "One department only",
+                      "e.g. home-office, hm-treasury"),),
+        ("GOV.UK path", "publication title"),
     ),
     "uk-cma-guidance": SourceInfo(
         "uk-cma-guidance", "CMA guidance and regulation", "guidance", "GB", False,
@@ -1425,9 +1476,63 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (), ("neutral citation ([2008] UKHL 1)",),
     ),
     "uk-ico": SourceInfo(
-        "uk-ico", "ICO enforcement actions", "guidance", "GB", False,
-        "Information Commissioner's Office enforcement and decision publications.",
-        (), ("ICO enforcement page",),
+        "uk-ico", "Example scrape recipe (unverified template)", "scrape", "GB", False,
+        "A built-in illustration of the recipe abstraction, pointed at an ICO listing "
+        "page whose selectors were never verified against the live DOM. Superseded for "
+        "real work by the uk-ico-* sources below; kept only as a worked example of a "
+        "user-supplied recipe.",
+        (), ("listing page URL",),
+    ),
+    "uk-ico-enforcement": SourceInfo(
+        "uk-ico-enforcement", "ICO enforcement register", "administrative", "GB", False,
+        "The Information Commissioner's enforcement action register: enforcement "
+        "notices, monetary penalty notices, reprimands, prosecutions, undertakings and "
+        "assessment notices. The HTML page is a summary — the notice itself is a PDF, "
+        "which is downloaded, text-extracted (OCR'd if it is a scan) and inlined so the "
+        "whole action is one searchable record. Each item carries the ICO's own type "
+        "and sector facets, and the instruments it turns on: an interprets edge and a "
+        "topic tag per regime (PECR, the UK GDPR, the DPA 2018, FOIA, the EIR…), plus a "
+        "declared governing instrument where one dominates, so later bare pinpoints "
+        "(\"regulation 21(1)(b)\", \"Article 5(1)(f)\") return to the right law. "
+        "Discovery walks the register's JSON listing every run and re-fetches only the "
+        "items whose CMS revision stamp moved.",
+        (SourceOption("min_interval", "Seconds between requests", "2.0 (robots says 6)"),),
+        ("ICO enforcement item URL", "organisation name"),
+    ),
+    "uk-ico-audits": SourceInfo(
+        "uk-ico-audits", "ICO audits and overview reports", "guidance", "GB", False,
+        "Consensual audits, follow-up audits and sector overview reports published "
+        "under \"Action we've taken\". Each item's executive-summary PDF is inlined; "
+        "the audit type and any named regime are recorded as facets.",
+        (SourceOption("min_interval", "Seconds between requests", "2.0"),),
+        ("ICO audit page URL", "audited organisation"),
+    ),
+    "uk-ico-consultations": SourceInfo(
+        "uk-ico-consultations", "ICO consultations and consultation responses",
+        "guidance", "GB", False,
+        "Both consultation registers in one source: the Commissioner's responses to "
+        "other bodies' consultations and calls for evidence (DSIT, Ofcom, the Home "
+        "Office, Senedd Cymru…), and the ICO's own and stakeholder consultations on "
+        "draft guidance. Opening/closing dates and the open/closed status are kept as "
+        "fields; the response or draft-guidance PDF is inlined. Welsh-language twins of "
+        "an English document are skipped.",
+        (SourceOption("min_interval", "Seconds between requests", "2.0"),),
+        ("ICO consultation page URL", "consultation title"),
+    ),
+    "uk-ico-guidance": SourceInfo(
+        "uk-ico-guidance", "ICO guidance and research library", "guidance", "GB", False,
+        "The ICO's guidance corpus from its own sitemap: /for-organisations/ (the UK "
+        "GDPR guide, FOI and EIR guidance, direct marketing and PECR, law enforcement "
+        "processing, NIS, eIDAS), /for-the-public/, and the research, impact and "
+        "evaluation library — whose reports' PDFs are followed and inlined. Guides are "
+        "trees of short section pages, so each page is titled by the guide it belongs "
+        "to (\"A guide to lawful basis — Consent\"). The sitemap's lastmod is both the "
+        "cursor and the change signal, so an unrevised page is never re-downloaded.",
+        (SourceOption("sections", "Subtrees to harvest",
+                      "for-organisations,for-the-public,"
+                      "about-the-ico/research-reports-impact-and-evaluation"),
+         SourceOption("min_interval", "Seconds between requests", "2.0")),
+        ("ICO guidance page URL", "guidance title"),
     ),
 }
 
@@ -1462,6 +1567,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "uk-utaac": "early-stop", "uk-iac": "early-stop", "uk-legislation": "early-stop",
     "uk-cma": "early-stop", "uk-cma-guidance": "early-stop",
     "uk-ofgem": "early-stop", "uk-ofwat": "early-stop",
+    # newest-first Search API, same as the other GOV.UK feeds
+    "uk-govuk-policy": "early-stop",
     "uk-fca-notices": "early-stop",
     "au-nsw-caselaw": "early-stop", "au-fca": "early-stop", "au-hca": "early-stop",
     "ca-scc-live": "early-stop", "ca-tcc-live": "early-stop",
@@ -1496,6 +1603,12 @@ INCREMENTAL_MODE: dict[str, str] = {
     "au-wa": "full-walk", "au-esafety-osa": "full-walk",
     "ie-legislation": "full-walk",
     "uk-ico": "full-walk",  # scrape recipe (ICO portal page)
+    # The registers' JSON listing is ordered by the item's own DATE, not by its publish
+    # stamp, so there is nothing to early-stop on — but it is cheap JSON, and only items
+    # whose stamp moved are fetched. The guidance sitemap is likewise walked whole and
+    # filtered on lastmod.
+    "uk-ico-enforcement": "full-walk", "uk-ico-audits": "full-walk",
+    "uk-ico-consultations": "full-walk", "uk-ico-guidance": "full-walk",
     "uk-cpr": "full-walk", "uk-cps-guidance": "full-walk",
     "uk-lawcom-reports": "full-walk",
     "uk-judiciary": "full-walk",   # a fingerprint check, not a feed

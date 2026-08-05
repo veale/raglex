@@ -783,6 +783,30 @@ def cmd_import_westlaw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rekey_govuk(args: argparse.Namespace) -> int:
+    """Move GOV.UK documents onto the shared ``govuk/<base_path>`` namespace so the
+    feeds dedupe. Dry run by default; ``--apply`` performs the re-keys."""
+    from .facade import Facade
+
+    st = Facade(Config.from_env()).rekey_govuk_ids(
+        apply=args.apply, limit=args.limit, on_progress=lambda **p: None)
+    verb = "re-keyed" if args.apply else "would re-key"
+    # On a dry run nothing has moved, so the applied counters are all zero — count the
+    # plan instead, or the run reports "would re-key=3 (merged=0 renamed=0)".
+    merged = st["merged"] if args.apply else sum(
+        1 for c in st["changes"] if c["kind"] == "merge")
+    renamed = st["rekeyed"] if args.apply else len(st["changes"]) - merged
+    print(f"scanned={st['scanned']} {verb}={len(st['changes'])} "
+          f"(merged={merged} renamed={renamed} unchanged={st['unchanged']})")
+    for c in st["changes"][:40]:
+        print(f"  {c['kind']:6} {c['old']}  →  {c['new']}")
+    if len(st["changes"]) > 40:
+        print(f"  … and {len(st['changes']) - 40} more")
+    if not args.apply and st["changes"]:
+        print("\n(dry run — re-run with --apply to perform these re-keys)")
+    return 0
+
+
 def cmd_refix_westlaw(args: argparse.Namespace) -> int:
     """Repair already-imported Westlaw documents whose id predates the current identity
     rules (opaque ``westlaw:<hash>`` → the report-citation slug), cascading every
@@ -1296,6 +1320,15 @@ def build_parser() -> argparse.ArgumentParser:
     wlf.add_argument("--apply", action="store_true",
                      help="apply the re-keys (default: dry run — just report the plan)")
     wlf.set_defaults(func=cmd_refix_westlaw)
+
+    gvk = sub.add_parser(
+        "rekey-govuk",
+        help="move GOV.UK docs onto the shared govuk/<base_path> id namespace "
+             "(run once before harvesting the widened CMA / policy feeds)")
+    gvk.add_argument("--apply", action="store_true",
+                     help="apply the re-keys (default: dry run — just report the plan)")
+    gvk.add_argument("--limit", type=int, default=None, help="re-key at most N documents")
+    gvk.set_defaults(func=cmd_rekey_govuk)
 
     ecr = sub.add_parser("repair-ecr",
                          help="re-chain dead European Court Reports aliases to held ECLIs (series-guarded)")

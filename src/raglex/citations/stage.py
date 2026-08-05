@@ -738,6 +738,16 @@ _UK_NAME_HEURISTICS = {"uk_statute_named", "uk_act_section"}
 # The year-suffixed forms are listed too: a judgment that writes "RIPA 2000" or
 # "IPA 2016" once and the bare acronym thereafter must have both caught, and an alias
 # matches the phrase it is given rather than a prefix of it.
+#
+# The ICO's own vocabulary is the same case. In an Information Commissioner publication
+# "the EIR" is the Environmental Information Regulations 2004 every time, "the NIS
+# Regulations" the 2018 ones, and "the DPA" the Data Protection Act 2018 — while in the
+# wider corpus EIR is an EU implementing regulation, NIS is a directive, and DPA is a
+# deferred prosecution agreement. PECR, FOIA and the UK GDPR already have deterministic
+# grammars and are deliberately NOT restated here; what these rows add is the acronyms
+# no corpus-wide grammar can safely own, plus the ICO's habit of writing "the
+# Commissioner" for itself. ("the GDPR" is not an alias — it is handled by
+# ``_rebind_assimilated_eu_law``, because a protected shorthand cannot be aliased.)
 _SOURCE_ALIASES: dict[str, dict[str, str]] = {
     "uk-ipt": {
         "RIPA": "ukpga/2000/23",
@@ -746,6 +756,26 @@ _SOURCE_ALIASES: dict[str, dict[str, str]] = {
         "IPA 2016": "ukpga/2016/25",
     },
 }
+
+_ICO_ALIASES: dict[str, str] = {
+    "EIR": "uksi/2004/3391",
+    "EIR 2004": "uksi/2004/3391",
+    "the EIR": "uksi/2004/3391",
+    "Environmental Information Regulations": "uksi/2004/3391",
+    "NIS Regulations": "uksi/2018/506",
+    "NIS Regs": "uksi/2018/506",
+    "DUAA": "ukpga/2025/18",
+    "DUA Act": "ukpga/2025/18",
+    "eIDAS": "european/regulation/2014/0910",
+    "eIDAS Regulation": "european/regulation/2014/0910",
+    "INSPIRE Regulations": "uksi/2009/3157",
+    "RPSI Regulations": "uksi/2015/1415",
+    "RPSI": "uksi/2015/1415",
+}
+for _key in ("uk-ico-enforcement", "uk-ico-audits", "uk-ico-consultations",
+             "uk-ico-guidance"):
+    _SOURCE_ALIASES[_key] = dict(_ICO_ALIASES)
+del _key
 
 
 # Conventional abbreviations that are only safe once the document has NAMED the Act in
@@ -779,9 +809,26 @@ _HOST_DEFINED_IN_TEXT = re.compile(
     re.IGNORECASE)
 
 
+# The host noun a document uses for its own parent instrument, taken from the LAST WORD
+# of the instrument's own name. A code of practice under an Act says "the Act"; an ICO
+# enforcement notice under PECR says "the Regulations" for twenty paragraphs and never
+# once says "the Act" about them — it says "the Act" about the DPA 2018, which is a
+# different instrument, so binding "the Act" to a set of Regulations would be actively
+# wrong. An instrument whose name ends in none of these (the UK GDPR) gets no noun: it
+# has no conventional short form beyond its own acronym, which a grammar already owns.
+_BASIS_HOST_NOUNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (r"Acts?\s*(?:\d{4})?$", ("the Act",)),
+    (r"Regulations?\s*(?:\d{4})?$", ("the Regulations", "the Regulation")),
+    (r"Order\s*(?:\d{4})?$", ("the Order",)),
+    (r"Rules\s*(?:\d{4})?$", ("the Rules",)),
+    (r"Code(?:\s+of\s+Practice)?\s*(?:\d{4})?$", ("the Code",)),
+)
+
+
 def _statutory_basis_alias(doc, text: str | None) -> dict[str, str]:
-    """``{"the Act": <candidate>}`` from the harvester's recorded ``statutory_basis``,
-    when the document does not define the phrase itself."""
+    """``{"the Act": <candidate>}`` — or ``{"the Regulations": …}`` for a statutory
+    instrument — from the harvester's recorded ``statutory_basis``, when the document
+    does not define the phrase itself."""
     if doc is None or not text or _HOST_DEFINED_IN_TEXT.search(text):
         return {}
     try:
@@ -791,12 +838,16 @@ def _statutory_basis_alias(doc, text: str | None) -> dict[str, str]:
     basis = (meta.get("statutory_basis") or "").strip()
     if not basis:
         return {}
+    nouns = next((n for pat, n in _BASIS_HOST_NOUNS
+                  if re.search(pat, basis, re.IGNORECASE)), None)
+    if not nouns:
+        return {}
     from .extractor import grammar_citations
     # Resolve the recorded name the same way the text would have been read, so the
     # alias can only ever point where a citation of that name would have pointed.
     for c in grammar_citations(basis):
         if c.candidate_id and (c.entity_kind or "") in ("act", "regulation"):
-            return {"the Act": c.candidate_id}
+            return dict.fromkeys(nouns, c.candidate_id)
     return {}
 
 
@@ -843,7 +894,15 @@ def _is_uk_legislation_id(candidate_id: str | None) -> bool:
 
 
 def _gate_domestic_statute_names(doc, cites: list) -> list:
-    """Drop UK domestic-legislation candidates from hosts that cannot mean them.
+    """Correct candidate instruments that the host document cannot have meant.
+
+    Two corrections, both keyed on WHO wrote the document rather than on which grammar
+    fired — which is what makes them complete, since a candidate can also arrive by a
+    learned shorthand or a carried-forward pinpoint that carries no method name:
+
+    * an Irish or EU-level host cannot mean a UK Act by name (see below); and
+    * a UK data-protection regulator saying "the GDPR" means the UK one
+      (:func:`_rebind_assimilated_eu_law`).
 
     Applied TWICE per document, and it has to be. The corpus-wide shorthand store is
     consulted after the first pass, and it re-attached exactly what the guard had just
@@ -851,6 +910,7 @@ def _gate_domestic_statute_names(doc, cites: list) -> list:
     487 Irish judgments in a 4,000-row sample, and the bare "s. 50A" pinpoints then
     carried forward off it. A guard that runs once is a guard the next stage undoes.
     """
+    cites = _rebind_assimilated_eu_law(doc, cites)
     if not (_is_irish_host(doc) or _is_eu_guidance(doc)):
         return cites
     return [
@@ -858,6 +918,45 @@ def _gate_domestic_statute_names(doc, cites: list) -> list:
         if (c.method in _UK_NAME_HEURISTICS
             or (_is_uk_legislation_id(c.candidate_id)
                 and c.method not in _UK_EXPLICIT_METHODS))
+        else c
+        for c in cites
+    ]
+
+
+# EU instruments that the UK assimilated whole, and where the domestic version lives.
+# The corpus keys the two separately on purpose — the assimilated text is UK-amendable
+# and has diverged (the DUAA 2025 amends the UK GDPR; the EU GDPR is untouched by it) —
+# so a citation must land on the one the author meant.
+_ASSIMILATED_EU_LAW = {
+    "32016R0679": "european/regulation/2016/0679",   # (UK) GDPR
+    "32014R0910": "european/regulation/2014/0910",   # eIDAS
+}
+# Hosts whose "the GDPR" is the UK GDPR by definition: the Information Commissioner has
+# no jurisdiction over the EU instrument, and every post-2021 ICO notice writes "the UK
+# GDPR" once and "the GDPR" for the next forty paragraphs. Prefix-matched, so every
+# uk-ico-* collection is covered by one entry.
+_ASSIMILATED_HOST_PREFIXES = ("uk-ico",)
+# …except when the citation ITSELF says which one. "EU GDPR", "Regulation (EU) 2016/679"
+# and "the European Union GDPR" are explicit, and an ICO consultation response comparing
+# the two regimes must keep them apart.
+_EXPLICITLY_EU = re.compile(r"\bEU\b|\bEuropean\s+Union\b|\bEC\b|\(EU\)", re.IGNORECASE)
+
+
+def _rebind_assimilated_eu_law(doc, cites: list) -> list:
+    """Point an assimilated instrument's citations at the UK text, inside UK regulators.
+
+    Anchors survive untouched: both instruments are stored with ``Article N`` /
+    ``Recital N`` segments, so a pinpoint that met the EU original meets the UK one.
+    """
+    if doc is None:
+        return cites
+    source = str(doc["source"] or "").lower()
+    if not source.startswith(_ASSIMILATED_HOST_PREFIXES):
+        return cites
+    return [
+        replace(c, candidate_id=_ASSIMILATED_EU_LAW[c.candidate_id])
+        if (c.candidate_id in _ASSIMILATED_EU_LAW
+            and not _EXPLICITLY_EU.search(c.raw or ""))
         else c
         for c in cites
     ]
