@@ -974,3 +974,39 @@ def test_unzip_picks_the_document_not_the_oj_masthead():
         zf.writestr("aaa_index.xml", b'<?xml version="1.0"?>\n<PUBLICATION></PUBLICATION>')
         zf.writestr("zzz_item.xml", document)
     assert b"<CJT>" in (unzip_formex(buf2.getvalue()) or b"")
+
+
+def test_unzip_skips_the_bibliographic_manifest_too():
+    """The real archive has TWO wrappers, and the second one is the trap.
+
+      C_202402318EN.toc.fmx.xml     <PUBLICATION>  masthead
+      C_202402318EN.doc.fmx.xml     <DOC><BIB.DOC> manifest — REF.PHYS points on
+      C_202402318EN.000101.fmx.xml  <CJT>          the notice
+
+    Preferring the ".doc." member — "the document instance" — swapped the masthead for
+    the manifest, whose text is its own field values ("20240315034 483657 2024 2318 T
+    ELI:…"), so the repair pass re-titled 944 notices "Pending: Case T-48/24" a second
+    time. The root element says what a file is; the filename doesn't.
+    """
+    import io as _io
+    import zipfile as _zip
+
+    toc = (b'<?xml version="1.0" encoding="UTF-8"?>\n<PUBLICATION><OJ>'
+           b'<ITEM.PUB DOC.INSTANCE="C_202402318EN.doc.fmx.xml"/></OJ></PUBLICATION>')
+    manifest = (b'<?xml version="1.0" encoding="UTF-8"?>\n<DOC><BIB.DOC>'
+                b"<PROD.ID>20240315034</PROD.ID><AUTHOR>T</AUTHOR></BIB.DOC>"
+                b'<FMX><DOC.MAIN.PUB NO.SEQ="0001">'
+                b'<REF.PHYS FILE="C_202402318EN.000101.fmx.xml" TYPE="DOC.XML"/>'
+                b"</DOC.MAIN.PUB></FMX></DOC>")
+    notice = (b'<?xml version="1.0" encoding="UTF-8"?>\n<CJT><TI.CJT><TITLE><TI>'
+              b"<P>Action brought on 30 January 2024 - CE v EIB</P>"
+              b"<P>(Case T-48/24)</P></TI></TITLE></TI.CJT></CJT>")
+    buf = _io.BytesIO()
+    with _zip.ZipFile(buf, "w") as zf:
+        zf.writestr("C_202402318EN.toc.fmx.xml", toc)
+        zf.writestr("C_202402318EN.doc.fmx.xml", manifest)
+        zf.writestr("C_202402318EN.000101.fmx.xml", notice)
+    picked = unzip_formex(buf.getvalue())
+    assert picked is not None and b"<CJT>" in picked
+    assert b"BIB.DOC" not in picked
+    assert pending_formex_title(picked) == "CE v EIB (T-48/24)"
