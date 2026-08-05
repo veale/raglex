@@ -1181,6 +1181,82 @@ def build_static_export_cache(
     return manifest
 
 
+# Fields the cached payload carries for the builder's own bookkeeping — the manifest, the
+# status line, a future consumer — but that the page script never reads. They are dropped
+# on the way INTO the page, not on the way into the cache: the cache stays the full record
+# (``static_export_status`` reads ``stats`` straight out of it), and every edition already
+# built gets the smaller file on its next render instead of an hours-long rebuild.
+_PAGE_UNUSED_GROUP_FIELDS = frozenset({
+    "doc_type", "has_inherited", "has_version_inherited", "target_keys",
+    "whole_instrument", "relationships", "has_text", "raw_ext", "source", "mentions",
+})
+_PAGE_UNUSED_SNIPPET_FIELDS = frozenset({"raw"})
+_PAGE_UNUSED_SECTION_FIELDS = frozenset({"kind"})
+_PAGE_UNUSED_TOP_FIELDS = frozenset({"stats", "inherited_counts"})
+
+
+def _slim_snippet(snippet: dict, link_urls: list[str]) -> dict:
+    """One excerpt, without the bytes the page never reads.
+
+    An excerpt's "try exact passage" link is its document's own URL with a text fragment
+    on the end, so every excerpt of the same document repeats that URL in full — 5.6 MB of
+    it on the GDPR edition. Where the head is a URL the row already carries, it becomes
+    ``[index, fragment]`` and the script joins the two back together; anything else is
+    left exactly as it was.
+    """
+    row = {k: v for k, v in snippet.items() if k not in _PAGE_UNUSED_SNIPPET_FIELDS}
+    url = row.get("passage_url")
+    if isinstance(url, str) and url:
+        for index, head in enumerate(link_urls):
+            if head and url.startswith(head) and len(url) > len(head):
+                row["passage_url"] = [index, url[len(head):]]
+                break
+    return row
+
+
+def _slim_for_page(data: dict) -> dict:
+    """The same page, with the bytes it never reads left out.
+
+    Two thirds of an edition is citing-document rows and the law's own text, and both
+    carried a duplicate: every section shipped its text twice (once whole, once split into
+    the ``paragraphs`` the script actually renders), and every excerpt shipped its raw
+    form beside the cleaned one. On a 2.2 MB edition that is ~470 kB — a fifth of the file
+    — for nothing. Shallow-copied, never mutated in place: ``build`` renders from the same
+    dict it then reads its own statistics out of.
+    """
+    slim = {k: v for k, v in data.items() if k not in _PAGE_UNUSED_TOP_FIELDS}
+
+    law = dict(slim.get("law") or {})
+    law.pop("provision_mappings", None)   # the page reads the derived ``comparisons``
+    sections = []
+    for section in law.get("sections") or []:
+        row = {k: v for k, v in section.items()
+               if k not in _PAGE_UNUSED_SECTION_FIELDS}
+        # ``section.text`` is only ever a fallback for a section that arrived without
+        # paragraphs; where they exist it is the same prose a second time.
+        if row.get("paragraphs"):
+            row.pop("text", None)
+        sections.append(row)
+    if sections:
+        law["sections"] = sections
+    slim["law"] = law
+
+    groups = []
+    for group in slim.get("groups") or []:
+        row = {k: v for k, v in group.items()
+               if k not in _PAGE_UNUSED_GROUP_FIELDS}
+        snippets = row.get("snippets")
+        if snippets:
+            urls = [str(link.get("url") or "") for link in (row.get("links") or [])]
+            row["snippets"] = [
+                _slim_snippet(snippet, urls) for snippet in snippets
+            ]
+        groups.append(row)
+    if groups:
+        slim["groups"] = groups
+    return slim
+
+
 def _escape_for_script(payload: str) -> str:
     # A source title or snippet containing ``</script>`` must remain inert data.
     return (
@@ -1196,12 +1272,30 @@ def _json_for_script(data: dict) -> str:
         json.dumps(data, ensure_ascii=False, separators=(",", ":")))
 
 
+def _slim_payload_json(data_json: str) -> str:
+    """``_slim_for_page`` for a payload that is already a string.
+
+    The cached path used to hand the payload straight through, on the reasoning that a
+    payload of tens of megabytes should not be re-parsed. It is worth one parse: the round
+    trip runs at roughly a hundred megabytes a second, and it takes a fifth off the file
+    every reader downloads and every browser then has to parse itself. A payload this
+    cannot make sense of is passed through untouched — a smaller page is never worth a
+    failed build."""
+    try:
+        return _json_dump(_slim_for_page(json.loads(data_json)))
+    except Exception:  # noqa: BLE001 — see above: optimisation, not correctness
+        return data_json
+
+
+def _json_dump(data: dict) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
 def render_static_page(
     *, title: str, data_json: str, note: str | None = None,
     index_link: dict | None = None, page_title: str | None = None,
 ) -> str:
-    """Render the page around an already-serialised payload — the cached path, which
-    never re-parses a payload that may be tens of megabytes.
+    """Render the page around an already-serialised payload.
 
     ``page_title`` is what the browser tab and a bookmark carry. The <h1> is the
     instrument's full official name, which is far too long for either, so a bundle passes
@@ -1214,7 +1308,7 @@ def render_static_page(
         "__ATTRIBUTION_BLOCK__": _attribution_block(note, index_link),
         "__STYLE__": _STYLE,
         "__SCRIPT__": _SCRIPT,
-        "__DATA__": _escape_for_script(data_json),
+        "__DATA__": _escape_for_script(_slim_payload_json(data_json)),
     }
     for token, value in replacements.items():
         page = page.replace(token, value)
@@ -1226,7 +1320,7 @@ def render_static_html(
 ) -> str:
     return render_static_page(
         title=data["law"]["title"],
-        data_json=json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+        data_json=_json_dump(data),   # slimmed inside render_static_page
         note=note,
         index_link=index_link,
     )
@@ -1590,12 +1684,25 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
 /* What is still before the Court. A snapshot page states it as one line — counts per
    kind of proceeding, each a filter into the list — because it cannot spend the first
    screen on a list it also cannot refresh. */
-.pending-line { margin: .5rem 0 0; font-size: 1rem; }
-.pending-count, .pending-all {
-  background: none; border: 0; padding: 0; font: inherit; color: var(--link);
-  cursor: pointer; text-decoration: underline dotted;
+/* Marked in highlighter yellow, the way a reader would mark it in Word, and clipped to
+   the words rather than the column: this is the one line on the page that is true only
+   on the day it was built, and it should not read as part of the instrument's own
+   typography. */
+.pending-line { margin: .6rem 0 0; font-size: 1rem; line-height: 1.7; }
+.pending-highlight {
+  padding: .18rem .34rem;
+  background: #ffff00;
+  color: #000;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
-.pending-all { margin-left: .35rem; font-weight: 600; }
+.pending-count, .pending-all {
+  background: none; border: 0; padding: 0; font: inherit; color: inherit;
+  cursor: pointer; text-decoration: underline;
+}
+.pending-count:hover, .pending-all:hover { text-decoration-thickness: 2px; }
+.pending-count:focus-visible, .pending-all:focus-visible { outline: 2px solid #000; }
+.pending-all { font-weight: 600; white-space: nowrap; }
 .pending-row { padding: .6rem 0; border-bottom: 1px solid var(--rule); }
 .pending-row:last-child { border-bottom: 0; }
 .pending-case { margin: 0; }
@@ -1657,6 +1764,10 @@ mark { padding: 0 .08em; background: var(--mark); color: inherit; }
 .source-links a + a::before { content: " · "; color: var(--quiet); text-decoration: none; }
 .no-source { color: #7d322a; }
 .more { display: block; margin: 1rem auto 0; padding: .3rem .7rem; background: transparent; }
+/* An author `display` beats the browser's own [hidden] rule, so anything the script
+   hides by setting .hidden — "+ show more" with nothing more to show — stayed on
+   screen. Say it once, for everything. */
+[hidden] { display: none !important; }
 .empty { padding: 1.4rem 0; color: var(--quiet); }
 body.sidebar-closed .page-head, body.sidebar-closed .page { grid-template-columns: minmax(0, 52rem); }
 body.sidebar-closed .contents { display: none; }
@@ -2138,20 +2249,45 @@ _SCRIPT = r"""
   // A snapshot page cannot spend its first screen on a list, and cannot fetch one
   // later, so the summary IS the affordance: counts per kind of proceeding, each one
   // a filter into the same dialog.
-  const pending = DATA.pending || null;
+  const pending = data.pending || null;
   let pendingFilter = "";
+
+  // "Action for annulment" pluralises on its head noun, not its tail — "action for
+  // annulments" is not a thing — and "Preliminary reference (urgent, PPU)" must keep its
+  // parenthetical, and its capitals, outside the inflection.
+  function pluralKind(label) {
+    const [, head, tail] = /^(.*?)(\s*\([^)]*\))?$/.exec(String(label || ""));
+    const at = head.search(/\s+(?:for|of|to|against|by|under)\s+/);
+    const stem = at < 0 ? head : head.slice(0, at);
+    const rest = at < 0 ? "" : head.slice(at);
+    const plural = /[^aeiou]y$/i.test(stem) ? stem.slice(0, -1) + "ies"
+      : /(?:s|x|z|ch|sh)$/i.test(stem) ? stem + "es"
+      : stem + "s";
+    return plural + rest + (tail || "");
+  }
+  // Only the first letter drops out of title case: "(urgent, PPU)" is an abbreviation and
+  // an AG is an AG.
+  const lowerFirst = (text) => String(text || "").charAt(0).toLowerCase()
+    + String(text || "").slice(1);
+  const kindPhrase = (label, n) =>
+    `${number(n)} pending ${lowerFirst(n === 1 ? label : pluralKind(label))}`;
 
   function renderPendingLine() {
     if (!pending || !pending.groups || !pending.groups.length) return;
+    // "12 pending preliminary references (3 with an AG Opinion); 4 pending actions for
+    // annulment. See all 16" — every count opens the list filtered to its own kind.
     const parts = pending.groups.map((g) => {
-      const label = g.n === 1 ? g.label.toLowerCase() : g.label.toLowerCase() + "s";
-      const ag = g.with_ag ? ` (${g.with_ag} with an AG opinion)` : "";
+      const ag = g.with_ag
+        ? ` (${number(g.with_ag)} with ${g.with_ag === 1 ? "an AG Opinion" : "AG Opinions"})`
+        : "";
       return `<button class="pending-count" data-kind="${esc(g.label)}"`
-        + ` title="Show only these">${g.n} ${esc(label)}${esc(ag)}</button>`;
+        + ` title="Show only these">${esc(kindPhrase(g.label, g.n))}${esc(ag)}</button>`;
     });
     const line = $("pending-line");
-    line.innerHTML = "<strong>Before the Court:</strong> " + parts.join(", ")
-      + ` <button class="pending-all" data-kind="">See all ${pending.total}</button>`;
+    line.innerHTML = '<span class="pending-highlight">'
+      + "<strong>Before the Court:</strong> " + parts.join("; ") + ". "
+      + `<button class="pending-all" data-kind="">See all ${number(pending.total)}</button>`
+      + "</span>";
     line.hidden = false;
     for (const button of line.querySelectorAll("[data-kind]")) {
       button.addEventListener("click", () => openPending(button.dataset.kind || ""));
@@ -2176,9 +2312,10 @@ _SCRIPT = r"""
     const rows = pendingFilter
       ? (pending.cases || []).filter((r) => r.label === pendingFilter)
       : (pending.cases || []);
-    $("pending-sub").textContent = pendingFilter
-      ? `${rows.length} ${pendingFilter.toLowerCase()}${rows.length === 1 ? "" : "s"} pending, as at ${DATA.generated_at.slice(0, 10)}`
-      : `${rows.length} proceeding${rows.length === 1 ? "" : "s"} pending, as at ${DATA.generated_at.slice(0, 10)}`;
+    const asAt = `, as at ${data.generated_at.slice(0, 10)}`;
+    $("pending-sub").textContent = (pendingFilter
+      ? kindPhrase(pendingFilter, rows.length)
+      : `${number(rows.length)} pending proceeding${rows.length === 1 ? "" : "s"}`) + asAt;
     $("pending-filters").innerHTML = [{ label: "", n: pending.total }]
       .concat(pending.groups || [])
       .map((g) => `<button class="facet-token${(g.label || "") === pendingFilter ? " on" : ""}"`
@@ -2198,7 +2335,17 @@ _SCRIPT = r"""
   });
   renderPendingLine();
 
-  function snippetHtml(snippet) {
+  // The "try exact passage" link, as stored: either the whole URL, or [which of this
+  // document's links it extends, what it adds] — the same URL, minus the copy of the
+  // document's address that every one of its excerpts would otherwise carry.
+  function passageUrl(snippet, group) {
+    const stored = snippet.passage_url;
+    if (!Array.isArray(stored)) return stored || "";
+    const link = ((group || {}).links || [])[stored[0]];
+    return link ? String(link.url) + stored[1] : "";
+  }
+
+  function snippetHtml(snippet, group) {
     const text = String(snippet.text || "");
     const mark = snippet.mark;
     let passage = esc(text);
@@ -2207,8 +2354,9 @@ _SCRIPT = r"""
         esc(text.slice(mark[0], mark[1])) + "</mark>" + esc(text.slice(mark[1]));
     }
     const where = snippet.where ? `<p class="where">${esc(snippet.where)}</p>` : "";
-    const link = snippet.passage_url
-      ? `<p class="source-links"><a href="${esc(snippet.passage_url)}" target="_blank" rel="noopener noreferrer">try exact passage →</a></p>`
+    const url = passageUrl(snippet, group);
+    const link = url
+      ? `<p class="source-links"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">try exact passage →</a></p>`
       : "";
     return `<div class="snippet">${where}<p>${passage}</p>${link}</div>`;
   }
@@ -2244,7 +2392,7 @@ _SCRIPT = r"""
       group.version_mentions_by_key[state.key] ? "includes citations to the base act" : null]
       .filter(Boolean).map(esc).join(" · ");
     const excerpts = excerptsForSelection.length
-      ? excerptsForSelection.map(snippetHtml).join("")
+      ? excerptsForSelection.map((snippet) => snippetHtml(snippet, group)).join("")
       : `<p class="result-meta">RagLex has the reference, but no excerpt is available.</p>`;
     // This row is in the list because it cited a DIFFERENT law. Offer the two texts
     // side by side, per predecessor, so the reader can judge the mapping themselves.
