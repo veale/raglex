@@ -426,7 +426,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_analyze = 0.0
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
         last_static_bundle = time.time()  # nor republish the export folder on every restart
-        last_eu_consolidations = time.time()  # explicit first backfill is queued at deploy
+        # Same durable read as the pending docket below, for the opposite failure: seeded
+        # to time.time(), a WEEKLY sweep never ran at all on a box that is redeployed more
+        # often than weekly, because every restart pushed it another seven days out.
+        last_eu_consolidations = _last_started_epoch(f, "harvest-source",
+                                                     label="EU consolidation sweep")
         # The pending C/T docket's cadence has to survive a restart. It used to start at
         # 0.0 ("seed at boot"), and because the timestamp lives only in this loop, every
         # scheduler start — every deploy — began another hour-long pass over the same
