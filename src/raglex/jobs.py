@@ -390,6 +390,11 @@ RUNNERS: dict[str, Callable] = {
     "reparse-source": lambda f, p, cb, cancel: f.reparse_source(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
+    # Re-derive held CN/TN notices from their raw: the structured form, the docketed
+    # title, and their citations (which were mined out of the old flat parse's text).
+    "reparse-pending-notices": lambda f, p, cb, cancel: f.reparse_pending_eu_notices(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
     # Re-anchor drifted citation offsets to a source's current text (the repair for a
     # reparse that regenerated text without re-extraction) — no grammar, no re-resolution;
     # resumable from the stable_id cursor.

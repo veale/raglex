@@ -7718,6 +7718,65 @@ class Facade:
             Resolver(cat).run()
         return fixed
 
+    def reparse_pending_eu_notices(self, *, limit: int = 20000, on_progress=None,
+                                   cancel_check=None) -> dict:
+        """Re-derive already-held CN/TN notices from their immutable raw: the structured
+        form (named sections, one segment per numbered question, footnotes lifted out of
+        the sentences they were spliced into), the docketed title, and the citations —
+        which are re-mined because the pinpoints were being read out of the mangled text
+        the old flat parse produced.
+
+        A projection refresh, not a re-fetch (§1.2): the OJ notice itself never changes.
+        """
+        from pathlib import Path
+
+        from .adapters.eu_cellar import (
+            celex_case_number, extract_formex, pending_formex_title,
+        )
+        from .citations import extract_document
+
+        out = {"candidates": 0, "reparsed": 0, "retitled": 0, "recited": 0}
+        with self._open() as (cat, _rs, ts):
+            rows = [r for r in cat.list_documents(source="eu-cellar", limit=200000)
+                    if str(r["doc_type"]) == "note"][:limit]
+            out["candidates"] = len(rows)
+            for i, row in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                _progress(on_progress, stage="reparsing pending notices", done=i,
+                          total=len(rows), item=row["stable_id"])
+                doc = cat.get_document(row["stable_id"])
+                if doc is None or not doc["raw_path"] or not doc["payload_hash"]:
+                    continue
+                try:
+                    raw = Path(doc["raw_path"]).read_bytes()
+                except OSError:
+                    continue
+                text, segments = extract_formex(raw)
+                if text:
+                    ts.put(doc["payload_hash"], text)
+                    ts.put_segments(doc["payload_hash"], segments)
+                    out["reparsed"] += 1
+                    extract_document(cat, ts, row["stable_id"])
+                    out["recited"] += 1
+                meta = _row_meta(doc)
+                if not meta.get("pending"):
+                    continue        # retired: its title is history, leave it alone
+                celex = str(meta.get("celex") or row["stable_id"])
+                name = pending_formex_title(raw)
+                case_no = celex_case_number(celex)
+                if not name:
+                    continue
+                title = name if not case_no or case_no in name else f"{name} ({case_no})"
+                title = title if title.startswith("Pending:") else f"Pending: {title}"
+                if title != (doc["title"] or ""):
+                    cat.update_document_fields(row["stable_id"], {"title": title},
+                                               curate=False)
+                    out["retitled"] += 1
+            Resolver(cat).run()
+        self._invalidate_caches()
+        return out
+
     def reparse_all(self, *, doc_type: str | None = "legislation") -> dict:
         """Re-derive text+segments for every structural document (default: legislation)
         — run after a parser upgrade so already-harvested docs pick up the new
