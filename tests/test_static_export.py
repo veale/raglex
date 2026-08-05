@@ -397,3 +397,105 @@ def test_provision_headings_name_their_citers_and_subsections_do_not():
     # small, quiet prose — and the names survive printing even though the buttons don't
     assert ".mentions-line {" in _STYLE and "font-size: .88rem" in _STYLE
     assert ".cite-link { color: var(--ink); text-decoration: none; }" in _STYLE
+
+
+# -- the page's own script, checked without a browser -----------------------
+def test_page_script_only_touches_ids_and_names_that_exist():
+    """The whole interactive half of an edition is one IIFE, so a single undefined name
+    at its top level takes out every listener bound after it — silently, on a page that
+    still looks right. That is exactly what happened: the pending-proceedings block read
+    ``DATA`` where the payload is called ``data``, and from there the mentions dialog's
+    [ close ] button, its backdrop, "+ show more" and the sort control were never bound.
+    Nothing here needs a browser: the payload has one name, and every element the script
+    reaches for has to be in the template."""
+    from raglex.static_export import _HTML_TEMPLATE, _SCRIPT
+
+    assert re.search(r"\bDATA\b", _SCRIPT) is None, "the payload is bound as `data`"
+    wanted = set(re.findall(r'\$\("([^"]+)"\)', _SCRIPT))
+    present = set(re.findall(r'id="([^"]+)"', _HTML_TEMPLATE))
+    assert wanted, "the script addresses elements by id"
+    assert wanted <= present, f"script reaches for ids the page has not got: {wanted - present}"
+
+
+def test_hidden_beats_an_author_display_rule():
+    """``+ show more`` hides itself by setting ``.hidden`` — which the browser honours
+    with a ``display: none`` weaker than any author rule, so ``.more { display: block }``
+    kept it on screen with nothing left to show."""
+    from raglex.static_export import _SCRIPT, _STYLE
+
+    assert '$("more-results").hidden = visible.length >= rows.length;' in _SCRIPT
+    assert "[hidden] { display: none !important; }" in _STYLE
+
+
+# -- the bytes a reader downloads -------------------------------------------
+def test_the_page_leaves_out_what_it_never_reads():
+    """A section shipped its text twice — once whole, once as the paragraphs the script
+    actually renders — and every row carried builder bookkeeping the page never opens.
+    Dropped on the way into the page, not into the cache: an edition already built gets
+    the smaller file on its next render rather than an hours-long rebuild."""
+    from raglex.static_export import _slim_for_page
+
+    data = {
+        "stats": {"documents": 1, "mentions": 2},
+        "law": {
+            "title": "Example Act",
+            "provision_mappings": [{"heavy": "x" * 100}],
+            "sections": [
+                {"key": "s:1", "label": "s. 1", "kind": "section", "text": "One.\nTwo.",
+                 "paragraphs": [{"text": "One."}, {"text": "Two."}]},
+                # no paragraphs: the whole text is all the page will have
+                {"key": "s:2", "label": "s. 2", "text": "Three."},
+            ],
+        },
+        "groups": [{
+            "id": "d/1", "cite": "R v A", "doc_type": "cases", "has_text": True,
+            "raw_ext": "html", "relationships": ["mentions"], "target_keys": ["s:1"],
+            "links": [{"url": "https://example.org/a", "label": "source"}],
+            "snippets": [{"text": "…", "raw": "<p>…</p>",
+                          "passage_url": "https://example.org/a#:~:text=x"}],
+        }],
+    }
+    slim = _slim_for_page(data)
+
+    assert "stats" not in slim and "provision_mappings" not in slim["law"]
+    assert "text" not in slim["law"]["sections"][0]      # the paragraphs carry it
+    assert slim["law"]["sections"][1]["text"] == "Three."  # nothing else does
+    group = slim["groups"][0]
+    assert not {"doc_type", "has_text", "raw_ext", "relationships", "target_keys"} & set(group)
+    assert group["cite"] == "R v A"
+    # the excerpt's link is split against the row's own url, and rejoins to the same thing
+    assert group["snippets"][0]["passage_url"] == [0, "#:~:text=x"]
+    assert "raw" not in group["snippets"][0]
+    # the source payload is untouched — `build` reads its own statistics back out of it
+    assert data["stats"]["documents"] == 1
+    assert data["law"]["sections"][0]["text"] == "One.\nTwo."
+    assert data["groups"][0]["snippets"][0]["passage_url"] == "https://example.org/a#:~:text=x"
+    # and slimming a page that has already been slimmed changes nothing
+    assert _slim_for_page(slim) == slim
+
+
+def test_the_script_rejoins_a_split_passage_link():
+    from raglex.static_export import _SCRIPT
+
+    assert "function passageUrl(snippet, group)" in _SCRIPT
+    assert "if (!Array.isArray(stored)) return stored || \"\";" in _SCRIPT
+    assert "snippetHtml(snippet, group)" in _SCRIPT
+
+
+# -- what is still before the Court -----------------------------------------
+def test_pending_proceedings_are_counted_in_english_and_marked_up_in_yellow():
+    """"8 pending actions for annulment", not "8 action for annulments" — the head noun
+    inflects, and a parenthetical qualifier ("(urgent, PPU)") keeps its capitals."""
+    from raglex.static_export import _SCRIPT, _STYLE
+
+    assert "function pluralKind(label)" in _SCRIPT
+    assert "const at = head.search(/\\s+(?:for|of|to|against|by|under)\\s+/);" in _SCRIPT
+    assert "`${number(n)} pending ${lowerFirst(n === 1 ? label : pluralKind(label))}`" in _SCRIPT
+    # each count filters the list, and the whole line ends with the way into all of it
+    assert 'class="pending-count" data-kind="${esc(g.label)}"' in _SCRIPT
+    assert 'class="pending-all" data-kind=""' in _SCRIPT
+    assert 'openPending(button.dataset.kind || "")' in _SCRIPT
+    # highlighter yellow, clipped to the words as they wrap
+    assert ".pending-highlight {" in _STYLE
+    assert "background: #ffff00;" in _STYLE
+    assert "box-decoration-break: clone;" in _STYLE
