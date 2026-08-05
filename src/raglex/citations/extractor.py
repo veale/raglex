@@ -108,8 +108,13 @@ def _disambiguate_online_safety_act(cites: list[Citation]) -> list[Citation]:
 # quoted or cued name is trusted in any bracket.
 _SHORTHAND_DEF = re.compile(
     # quoted or cued name, any bracket
+    # Both curly single quotes are listed. Without ‘…’ the Home Office's own house
+    # style was invisible: the communications-data and bulk-acquisition IPA codes write
+    # ("Part 3 … of the Investigatory Powers Act 2016 (‘the Act’)") and so defined
+    # nothing, while their six sibling codes — identical but for the quote character —
+    # defined "the Act" and resolved their provisions.
     r"[\[({]\s*(?:(?:herein)?after\s+|hereafter\s+|henceforth\s+|collectively\s+|or\s+)?"
-    r"(?:the\s+)?[\"“']\s*(?P<q>[A-Za-z][\w'’&.\- ]{1,45}?)\s*[\"”']\s*[\])}]"
+    r"(?:the\s+)?[\"“‘']\s*(?P<q>[A-Za-z][\w'’&.\- ]{1,45}?)\s*[\"”’']\s*[\])}]"
     r"|[\[({]\s*(?:(?:herein)?after|hereafter|henceforth)\s+(?:the\s+)?"
     r"(?P<cue>[A-Z][\w'’&.\- ]{1,45}?)\s*[\])}]"
     # bare name, square brackets only (OSCOLA short-title convention)
