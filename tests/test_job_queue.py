@@ -133,3 +133,48 @@ def test_static_exports_skip_the_queue(tmp_path, monkeypatch):
     assert kinds == ["static-bundle", "static-export", "test-job"]
     jm.cancel(waiting["job_id"])   # don't let it promote into this test's teardown
     gate.set()
+
+
+def test_a_consolidation_import_never_waits_behind_the_queue(tmp_path, monkeypatch):
+    """It is triggered by a reader OPENING an EU act whose dated versions are absent, and
+    it decides which text that page shows. Queued behind a multi-hour harvest it arrives
+    long after the reader has gone, and the act keeps serving un-consolidated text."""
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "1")
+    gate = threading.Event()
+
+    def runner(f, p, cb, cancel):
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "test-job", runner)
+    monkeypatch.setitem(jobs_mod.RUNNERS, "sync-eu-consolidations", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    assert "queued" not in jm.start("test-job", "a long harvest", {"n": 1})
+    assert jm.start("test-job", "another", {"n": 2}).get("queued")   # cap reached
+    # …but the consolidation import runs anyway
+    r = jm.start("sync-eu-consolidations", "consolidations for 32002L0021",
+                 {"stable_id": "32002L0021"})
+    assert "queued" not in r, r
+    gate.set()
+
+
+def test_two_imports_of_the_same_act_still_dedup(tmp_path, monkeypatch):
+    """Exempt from QUEUEING, not from dedup: a second reader opening the same act joins
+    the first import rather than starting a duplicate Cellar walk."""
+    gate = threading.Event()
+
+    def runner(f, p, cb, cancel):
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "sync-eu-consolidations", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    first = jm.start("sync-eu-consolidations", "a", {"stable_id": "32002L0021"})
+    second = jm.start("sync-eu-consolidations", "a", {"stable_id": "32002L0021"})
+    assert second.get("already_running") and second["job_id"] == first["job_id"]
+    # a DIFFERENT act is its own job
+    other = jm.start("sync-eu-consolidations", "b", {"stable_id": "32016R0679"})
+    assert other["job_id"] != first["job_id"]
+    gate.set()

@@ -73,7 +73,15 @@ DEDUP_KINDS = frozenset({
 # current); making it queue behind a six-hour import means the download never arrives.
 # They're read-only passes over the corpus, so running one over the concurrency cap costs
 # little. Dedup still applies — a second click of the same export joins the first.
-QUEUE_EXEMPT_KINDS = frozenset({"static-export", "static-bundle"})
+#
+# A consolidation import is the same shape of work for the same reason: it is triggered by
+# a reader OPENING an EU act whose dated versions are absent, and it decides which text
+# that page shows. Queued behind a multi-hour harvest it arrives long after the reader has
+# gone, and the act keeps serving its un-consolidated text until then. It fetches one
+# act's expressions from Cellar — small, bounded, and mostly deduped before any download.
+QUEUE_EXEMPT_KINDS = frozenset({
+    "static-export", "static-bundle", "sync-eu-consolidations",
+})
 
 # Resume is an explicit contract, not a blanket promise that "idempotent" means no
 # repeated work. ``checkpoint`` jobs stamp each completed document with a stable root
