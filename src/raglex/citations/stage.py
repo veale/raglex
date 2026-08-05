@@ -765,17 +765,54 @@ _UNLOCKED_BY_FULL_NAME: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 
 
+# A code of practice defines its parent Act once and then says "the Act". Usually it
+# does so in the text, in brackets, and the extractor's document-scoped host pass binds
+# it (see ``_HOST_NOUNS``). Where the wording defeats that bracket, the harvester
+# already knows the answer with certainty and recorded it: ``meta_json.statutory_basis``
+# names the instrument the code is made under. Using it needs no NLP — but only as a
+# FALLBACK, because a definition the document actually makes is better evidence than
+# metadata about the document, and its position bounds where the binding starts.
+_QUOTE = "\"'“”‘’"
+_HOST_DEFINED_IN_TEXT = re.compile(
+    rf"[(\[]\s*[{_QUOTE}]?\s*the\s+(?:(?:18|19|20)\d{{2}}\s+)?"
+    rf"(?:Act|Code|Regulations?|Order|Rules)\s*[{_QUOTE}]?\s*[)\]]",
+    re.IGNORECASE)
+
+
+def _statutory_basis_alias(doc, text: str | None) -> dict[str, str]:
+    """``{"the Act": <candidate>}`` from the harvester's recorded ``statutory_basis``,
+    when the document does not define the phrase itself."""
+    if doc is None or not text or _HOST_DEFINED_IN_TEXT.search(text):
+        return {}
+    try:
+        meta = json.loads(doc["meta_json"] or "{}")
+    except (TypeError, ValueError):
+        return {}
+    basis = (meta.get("statutory_basis") or "").strip()
+    if not basis:
+        return {}
+    from .extractor import grammar_citations
+    # Resolve the recorded name the same way the text would have been read, so the
+    # alias can only ever point where a citation of that name would have pointed.
+    for c in grammar_citations(basis):
+        if c.candidate_id and (c.entity_kind or "") in ("act", "regulation"):
+            return {"the Act": c.candidate_id}
+    return {}
+
+
 def aliases_for_document(doc, aliases: dict[str, str] | None,
                          text: str | None = None) -> dict[str, str] | None:
     """The corpus-wide shorthand rules, plus what this document's SOURCE guarantees, plus
-    the conventional abbreviations its own text has earned by naming the Act in full.
+    the conventional abbreviations its own text has earned by naming the Act in full,
+    plus the parent Act a code of practice records in its metadata.
 
-    Both additions are per-document and must stay that way: a bulk rescan mixes sources
+    All of these are per-document and must stay that way: a bulk rescan mixes sources
     and subjects in one pool, so an alias map built once for the run would carry one
     judgment's certainties into the next.
     """
     extra: dict[str, str] = {}
     extra.update(_SOURCE_ALIASES.get((doc["source"] or "") if doc is not None else "", {}))
+    extra.update(_statutory_basis_alias(doc, text))
     if text:
         lowered = text.lower()
         for full_name, target, abbreviations in _UNLOCKED_BY_FULL_NAME:
@@ -981,11 +1018,26 @@ def reset_shorthand_cache() -> None:
 
 def _stored_shorthands_for(catalogue: Catalogue, cites: list) -> list[tuple]:
     """Stored shorthands applicable to this document: those whose parent candidate the
-    document ALREADY cites, minus anything ambiguous.
+    document ALREADY cites, and about which the store is UNANIMOUS.
 
     Ambiguity guard — a shorthand registered against more than one candidate is never
-    guessed. It applies only when exactly one of its candidates is cited here (then the
-    document itself has disambiguated it); otherwise it is dropped."""
+    applied. The rule used to be weaker: a contested name applied whenever exactly one
+    of its candidates was cited here, on the reasoning that the document had then
+    disambiguated it. It hadn't. A document citing act X says nothing about what an
+    abbreviation it never defines means, so the test fires on coincidence — and the
+    store is contested precisely where it has mislearned. Measured on the live corpus:
+    "PACE" was held against six different acts (1967, 1987, 1988, 2000, 2016 and an SI),
+    not one of them the Police and Criminal Evidence Act 1984, and in KJF v Surrey
+    Police — which never spells PACE out — "s. 8(1) of PACE" was recorded as a citation
+    of RIPA s.8(1), because RIPA was the one owner that judgment happened to cite. That
+    edge then propagates through provision mappings into "predecessor case law" on the
+    successor Act. A missing edge is recoverable; a confident wrong one is not.
+
+    Where an abbreviation genuinely has two referents that matter (DPA 1998 / DPA 2018,
+    RIPA / IPA), the deterministic route is ``_UNLOCKED_BY_FULL_NAME`` above, which
+    requires the document to name the Act in full — evidence, rather than coincidence.
+    A document that DEFINES its own shorthand never needed the store: that is the
+    in-document pass, which runs first and wins the span."""
     cited = {c.candidate_id for c in cites if c.candidate_id}
     if not cited:
         return []
@@ -995,8 +1047,7 @@ def _stored_shorthands_for(catalogue: Catalogue, cites: list) -> list[tuple]:
     out: list[tuple] = []
     for cid in cited:
         for name, kind, abbrev in by_cand.get(cid, ()):
-            owners = by_name.get(name) or {cid}
-            if len(owners) > 1 and len(owners & cited) != 1:
+            if len(by_name.get(name) or {cid}) > 1:
                 continue
             out.append((name, cid, kind, abbrev))
     return out

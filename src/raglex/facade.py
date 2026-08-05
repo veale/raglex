@@ -3109,6 +3109,12 @@ class Facade:
             anchor_like = _paragraph_anchor_like(want_span) if want_span else []
             identity_ids = cat.document_identity_ids(stable_id)
             rels = []
+            # The heuristic edges are excluded from the answer — they aren't citations —
+            # but they must not be excluded SILENTLY. When a provision has none of the
+            # one kind and plenty of the other, "no citer pins to s. 16" is a false
+            # negative dressed as a finding, and the reader has no way to tell.
+            # ``_anchor_matched`` is applied to these below, on the same anchor rules.
+            dropped_inferred = []
             seen_relation_ids: set[int] = set()
             for identity_id in identity_ids:
                 for row in cat.relations_to(
@@ -3117,11 +3123,13 @@ class Facade:
                     anchor_prefixes=anchor_prefixes,
                     anchor_like=anchor_like,
                 ):
-                    if row["extracted_via"] == "inferred":
-                        continue
                     rid = int(row["relation_id"])
-                    if rid not in seen_relation_ids:
-                        seen_relation_ids.add(rid)
+                    if rid in seen_relation_ids:
+                        continue
+                    seen_relation_ids.add(rid)
+                    if row["extracted_via"] == "inferred":
+                        dropped_inferred.append(dict(row))
+                    else:
                         rels.append(dict(row))
             direct_keys = {
                 (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
@@ -3145,57 +3153,71 @@ class Facade:
                 projected["version_inherited"] = True
                 rels.append(projected)
             rels = self._collapse_version_citers(cat, rels)
-            if anchor and exact:
-                # A specific SUB-provision: the sub-paragraph mention badges want only the
-                # documents pinned to exactly this pinpoint (Article 47(1)), not the whole
-                # Article 47 family. Match on a whitespace/case-normalised anchor so
-                # "Article 47(1)" and "article 47 (1)" coincide.
-                def _norm(a: str | None) -> str:
-                    return re.sub(r"\s+", "", (a or "")).lower()
-                want = _norm(anchor)
-                rels = [r for r in rels if _norm(r["dst_anchor"]) == want]
-            elif anchor and want_span:
-                # A JUDGMENT PARAGRAPH — the citable unit of case law, and the one the
-                # string matcher below cannot handle. The unit word is optional on both
-                # sides ("[110]" / "para 110"), and a pinpoint may span a RANGE, so the
-                # test is numeric overlap rather than a match on the written form.
-                rels = [r for r in rels
-                        if _paragraph_spans_overlap(want_span, r["dst_anchor"])]
-            elif anchor and any(k.startswith("para:") for k in
-                                _anchor_key_variants(_anchor_key(anchor))):
-                # Multi-level paragraph numbering ("para 3.19" of a code of practice):
-                # not a judgment paragraph, so it folds on the canonical key, which
-                # keeps 3.19 apart from 3.
-                keys = _anchor_key_variants(_anchor_key(anchor))
-                rels = [r for r in rels
-                        if _anchor_key_variants(_anchor_key(r["dst_anchor"])) & keys]
-            elif anchor:
-                # A provision heading represents its whole family. "Mentions of
-                # Article 22" includes citations pinned to Article 22(1), 22(2), …;
-                # exact string equality made the UI inherit whichever subparagraph
-                # happened to appear first and hid the rest.
-                parent = re.sub(r"(?:\([^()]+\))+\s*$", "", anchor).strip()
-                family = re.compile(rf"^{re.escape(parent)}(?:\([^()]+\))*$", re.IGNORECASE)
-                matched = [r for r in rels if family.match((r["dst_anchor"] or "").strip())]
-                if not matched:
-                    # The reader's "See all mentions" sends the whole SEGMENT LABEL
-                    # ("Article 17 Right to erasure (right to be forgotten)") while
-                    # edges pin to the bare unit ("Article 17", "Article 17(2)") —
-                    # the title text made the exact family match find nothing, so the
-                    # tray claimed nothing mentions a heavily-cited provision. Fall
-                    # back to the canonical anchor key (the server-side mirror of the
-                    # reader's own anchorKey()): unit type + number alone, which
-                    # still keeps Article 17 distinct from Article 170 and from
-                    # Recital 17.
-                    #
-                    # Compared as VARIANTS, so a judgment paragraph matches whichever
-                    # way each side spelled it ("[110]" against a stored "para 110").
+
+            def _anchor_matched(rows: list[dict]) -> list[dict]:
+                """``rows`` narrowed to the ones pinned to ``anchor``. Factored out so the
+                heuristic edges can be tested against exactly the same rules — a count of
+                what was withheld is only meaningful if it answers the same question."""
+                if anchor and exact:
+                    # A specific SUB-provision: the sub-paragraph mention badges want only
+                    # the documents pinned to exactly this pinpoint (Article 47(1)), not
+                    # the whole Article 47 family. Match on a whitespace/case-normalised
+                    # anchor so "Article 47(1)" and "article 47 (1)" coincide.
+                    def _norm(a: str | None) -> str:
+                        return re.sub(r"\s+", "", (a or "")).lower()
+                    want = _norm(anchor)
+                    return [r for r in rows if _norm(r["dst_anchor"]) == want]
+                if anchor and want_span:
+                    # A JUDGMENT PARAGRAPH — the citable unit of case law, and the one the
+                    # string matcher below cannot handle. The unit word is optional on both
+                    # sides ("[110]" / "para 110"), and a pinpoint may span a RANGE, so the
+                    # test is numeric overlap rather than a match on the written form.
+                    return [r for r in rows
+                            if _paragraph_spans_overlap(want_span, r["dst_anchor"])]
+                if anchor and any(k.startswith("para:") for k in
+                                  _anchor_key_variants(_anchor_key(anchor))):
+                    # Multi-level paragraph numbering ("para 3.19" of a code of practice):
+                    # not a judgment paragraph, so it folds on the canonical key, which
+                    # keeps 3.19 apart from 3.
                     keys = _anchor_key_variants(_anchor_key(anchor))
-                    if keys:
-                        matched = [
-                            r for r in rels
+                    return [r for r in rows
                             if _anchor_key_variants(_anchor_key(r["dst_anchor"])) & keys]
-                rels = matched
+                if anchor:
+                    # A provision heading represents its whole family. "Mentions of
+                    # Article 22" includes citations pinned to Article 22(1), 22(2), …;
+                    # exact string equality made the UI inherit whichever subparagraph
+                    # happened to appear first and hid the rest.
+                    parent = re.sub(r"(?:\([^()]+\))+\s*$", "", anchor).strip()
+                    family = re.compile(rf"^{re.escape(parent)}(?:\([^()]+\))*$",
+                                        re.IGNORECASE)
+                    matched = [r for r in rows
+                               if family.match((r["dst_anchor"] or "").strip())]
+                    if not matched:
+                        # The reader's "See all mentions" sends the whole SEGMENT LABEL
+                        # ("Article 17 Right to erasure (right to be forgotten)") while
+                        # edges pin to the bare unit ("Article 17", "Article 17(2)") —
+                        # the title text made the exact family match find nothing, so the
+                        # tray claimed nothing mentions a heavily-cited provision. Fall
+                        # back to the canonical anchor key (the server-side mirror of the
+                        # reader's own anchorKey()): unit type + number alone, which
+                        # still keeps Article 17 distinct from Article 170 and from
+                        # Recital 17.
+                        #
+                        # Compared as VARIANTS, so a judgment paragraph matches whichever
+                        # way each side spelled it ("[110]" against a stored "para 110").
+                        keys = _anchor_key_variants(_anchor_key(anchor))
+                        if keys:
+                            matched = [
+                                r for r in rows
+                                if _anchor_key_variants(_anchor_key(r["dst_anchor"]))
+                                & keys]
+                    return matched
+                return rows
+
+            rels = _anchor_matched(rels)
+            withheld_inferred = (
+                len({r["src_id"] for r in _anchor_matched(dropped_inferred)})
+                if anchor and dropped_inferred else 0)
             by_src: dict[str, list] = {}
             for r in rels:
                 by_src.setdefault(r["src_id"], []).append(r)
@@ -3440,6 +3462,9 @@ class Facade:
                     "jurisdiction": want_j, "kind": kind,
                     "facets": facets,
                     "total": total_groups, "groups": page,
+                    # documents that pin to this anchor ONLY through a heuristic
+                    # (carry-forward) edge, which is excluded from the answer above
+                    "withheld_inferred_citers": withheld_inferred or None,
                     "offset": offset, "limit": limit,
                     "has_more": end < total_groups,
                     # preparatory + the per-anchor rollup are whole-set summaries, so they
@@ -3648,6 +3673,21 @@ class Facade:
                 nav.append(f"No citer pins specifically to {anchor!r}. Drop `anchor` to see "
                            "every document citing this instrument, or check the provision "
                            "label with lookup() / get_document_body().")
+                # …but "none" must not be reported as a finding when the only reason is
+                # that the pinpoints came from the carry-forward heuristic. Those are
+                # excluded from this list on purpose (they are guesses, not citations),
+                # and a reader who is not told cannot distinguish "no court has construed
+                # this provision" from "the evidence is here but unverified".
+                held_back = m.get("withheld_inferred_citers")
+                if held_back:
+                    nav.append(
+                        f"BUT {held_back} document(s) DO pin to {anchor!r} through "
+                        "carry-forward — a bare 'section N' attached to the last "
+                        "instrument named nearby. Those are heuristic guesses, so they "
+                        "are excluded here rather than shown as citations; treat this as "
+                        "'unverified evidence exists', not as 'nothing engages this "
+                        f"provision'. search_text() for the provision, or read the "
+                        "candidates, to confirm.")
             elif (jurisdiction or kind) and m.get("facets"):
                 have = ", ".join(f"{x['jurisdiction']} ({x['documents']})"
                                  for x in m["facets"].get("jurisdiction", [])[:6])

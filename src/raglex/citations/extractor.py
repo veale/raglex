@@ -256,6 +256,38 @@ def _party_short_form(party: str | None) -> str | None:
 
 _STATUTE_KINDS = ("act", "regulation", "directive", "treaty", "eu_instrument")
 
+# --- the host a document defines for ITSELF ------------------------------------
+# A statutory code of practice names its parent Act once and then calls it "the Act"
+# for the rest of the document: "…Part 2 (interception) of the Investigatory Powers
+# Act 2016 ("the Act")", then 184 further "section 18 of the Act". Those are the
+# document's most important references — a code of practice IS guidance ON those
+# provisions — and every one of them was dropped, because "the Act" is (rightly)
+# refused as a corpus-wide shorthand by ``_GENERIC_SHORTHAND`` and because
+# ``_EXPLICIT_HOST_RE`` stops carry-forward wherever the text names its own host.
+#
+# Both refusals are correct GLOBALLY and wrong LOCALLY. "the Act" is document-
+# relative — corpus-wide it would misattribute every "the Act" in 108,390 held UK
+# instruments — but inside the document that defined it, it is as explicit as the
+# full title. So these bind here and travel nowhere: they are never harvested into
+# ``learned_shorthands`` (see ``_def_rows``, which only ever sees ``defs``), and they
+# only link a mention that carries a PROVISION ("s. 18 of the Act"), never a bare one,
+# so the edge always says which provision it is about.
+_HOST_NOUNS = {
+    "act", "code", "regulation", "regulations", "order", "rules", "directive",
+    "convention", "charter", "treaty", "agreement", "protocol", "scheme", "statute",
+}
+# "the Act", "the 2016 Act", "the Code", "the 1998 Regulations" — an instrument noun,
+# optionally qualified by the year that distinguishes it from its neighbours.
+_HOST_NAME_RE = re.compile(
+    r"(?i)^(?:the\s+)?(?:(?:18|19|20)\d{2}\s+)?([A-Za-z]+)$")
+
+
+def _is_host_noun(name: str) -> bool:
+    """Whether ``name`` is an instrument noun a document may bind to itself — as
+    opposed to a role noun ("the appellant"), which never names an authority."""
+    m = _HOST_NAME_RE.match((name or "").strip())
+    return bool(m) and m.group(1).casefold() in _HOST_NOUNS
+
 # --- what may become a shorthand ---------------------------------------------
 # A shorthand links every later bare mention of a name to one authority, and the
 # corpus-wide store then carries that name into OTHER documents. So a name that is
@@ -517,17 +549,32 @@ def _is_abbrev(name: str) -> bool:
     return bool(letters) and sum(ch.isupper() for ch in letters) >= max(2, len(letters) - 1)
 
 
-def _collect_shorthand_defs(text: str, kept: list[Citation]) -> dict[str, tuple[Citation, bool]]:
+def _collect_shorthand_defs(
+    text: str, kept: list[Citation],
+    hosts_out: dict[str, tuple[Citation, bool]] | None = None,
+) -> dict[str, tuple[Citation, bool]]:
     """The shorthand DEFINITIONS this document establishes: name → (host citation,
     is_abbrev). Abbreviations (FMIOA) link on a bare later mention; case short-names
     (Dunsmuir) link only with a pincite. Split out of ``_attach_shorthands`` so the
-    stage can harvest the same definitions into the corpus-wide store."""
+    stage can harvest the same definitions into the corpus-wide store.
+
+    ``hosts_out``, if given, collects the DOCUMENT-SCOPED host bindings separately —
+    "the Act" / "the 2016 Act" / "the Code" bound to a statute this document names in
+    full (see ``_HOST_NOUNS``). They are kept apart from ``defs`` precisely because
+    they must not reach the corpus-wide store."""
     defs: dict[str, tuple[Citation, bool]] = {}
 
     def _register(name: str, host: Citation, *, abbrev: bool) -> None:
         name = (name or "").strip(" '\"“”’")
         if valid_shorthand(name) and name not in defs:
             defs[name] = (host, abbrev)
+            return
+        # Refused as a shorthand — but an instrument noun bound to a statute the
+        # document has just named IS a definition, valid inside this document.
+        if (hosts_out is not None and name not in hosts_out
+                and host.candidate_id and _is_host_noun(name)
+                and (host.entity_kind or "") in _STATUTE_KINDS):
+            hosts_out[name] = (host, True)
 
     for c in kept:
         if not c.candidate_id:
@@ -653,6 +700,26 @@ def _shorthand_use_re(name: str, abbrev: bool, bare: bool = True) -> "re.Pattern
     return re.compile(pat, re.IGNORECASE if (not abbrev or year_act) else 0)
 
 
+def _provision_pinpoint(prov: str | None) -> str | None:
+    """A matched provision phrase ("Section 18", "regs 3 and 13(1)", "Schedule 3")
+    normalised to the anchor form the corpus stores ("s. 18", "reg. 3 and 13(1)",
+    "Sch. 3"). Shared by the shorthand and alias passes so both spell an anchor the
+    same way — an anchor that disagrees by a space or a word never matches."""
+    if not prov:
+        return None
+    if re.match(r"(?i)^Sched", prov):
+        pin = re.sub(r"(?i)^Sched(?:ule)?\.?\s*", "Sch. ", prov)
+    elif re.match(r"(?i)^(?:regulations?|regs?\.?)", prov):
+        pin = re.sub(r"(?i)^(?:regulations?|regs?\.?)\s*", "reg. ", prov)
+    elif re.match(r"(?i)^(?:articles?|arts?\.?)", prov):
+        pin = re.sub(r"(?i)^(?:articles?|arts?\.?)\s*", "Article ", prov)
+    elif re.match(r"(?i)^(?:paragraphs?|paras?\.?)", prov):
+        pin = re.sub(r"(?i)^(?:paragraphs?|paras?\.?)\s*", "para ", prov)
+    else:
+        pin = re.sub(r"(?i)^(?:sections?|ss?\.?)\s*", "s. ", prov)
+    return re.sub(r"\s+(\([^)]*\))", r"\1", pin)
+
+
 def _link_shorthand_uses(
     text: str, name: str, *, entity_kind: str | None, candidate_id: str | None,
     abbrev: bool, out: list[Citation], occupied: list[tuple[int, int]],
@@ -672,19 +739,7 @@ def _link_shorthand_uses(
             continue
         run = m.groupdict().get("run") or m.groupdict().get("run2")
         prov = m.groupdict().get("prov") or m.groupdict().get("postprov")
-        provision_pin = None
-        if prov:
-            if re.match(r"(?i)^Sched", prov):
-                provision_pin = re.sub(r"(?i)^Sched(?:ule)?\.?\s*", "Sch. ", prov)
-            elif re.match(r"(?i)^(?:regulations?|regs?\.?)", prov):
-                provision_pin = re.sub(
-                    r"(?i)^(?:regulations?|regs?\.?)\s*", "reg. ", prov
-                )
-            else:
-                provision_pin = re.sub(
-                    r"(?i)^(?:sections?|ss?\.?)\s*", "s. ", prov
-                )
-            provision_pin = re.sub(r"\s+(\([^)]*\))", r"\1", provision_pin)
+        provision_pin = _provision_pinpoint(prov)
         out.append(Citation(
             raw=m.group(0), entity_kind=entity_kind, candidate_id=candidate_id,
             pinpoint=_pin_text(run) if run else provision_pin,
@@ -713,10 +768,13 @@ def shorthand_name_from_use(raw: str) -> str:
 
 
 def _attach_shorthands(text: str, kept: list[Citation],
-                       defs: dict[str, tuple[Citation, bool]] | None = None) -> list[Citation]:
+                       defs: dict[str, tuple[Citation, bool]] | None = None,
+                       hosts: dict[str, tuple[Citation, bool]] | None = None,
+                       ) -> list[Citation]:
     if defs is None:
-        defs = _collect_shorthand_defs(text, kept)
-    if not defs:
+        hosts = {} if hosts is None else hosts
+        defs = _collect_shorthand_defs(text, kept, hosts)
+    if not defs and not hosts:
         return kept
     out = list(kept)
     occupied = [(c.char_start, c.char_end) for c in kept]
@@ -725,6 +783,16 @@ def _attach_shorthands(text: str, kept: list[Citation],
         _link_shorthand_uses(
             text, name, entity_kind=host.entity_kind, candidate_id=host.candidate_id,
             abbrev=abbrev, out=out, occupied=occupied, after=host.char_start)
+    # Document-scoped hosts last, so a real shorthand always wins the span, and with
+    # ``bare=False`` so only a mention carrying a provision links. A bare "the Act"
+    # would add an edge the document already has from the full-title mention, and
+    # carries nothing a reader could check.
+    for name in sorted(hosts or {}, key=len, reverse=True):
+        host, _abbrev = hosts[name]
+        _link_shorthand_uses(
+            text, name, entity_kind=host.entity_kind, candidate_id=host.candidate_id,
+            abbrev=True, out=out, occupied=occupied, after=host.char_start,
+            method="doc_host", confidence=0.75, bare=False)
     return out
 
 
@@ -1403,10 +1471,34 @@ def all_grammar_citations(text: str) -> list[Citation]:
             + danish_citations(text) + german_citations(text))
 
 
+# The provision an alias mention pins to. "section 16 of RIPA" is a citation OF s.16,
+# but the alias pass recorded only the four letters and left the pinpoint to the
+# carry-forward heuristic, which files its guesses as ``inferred`` — and
+# ``document_mentions`` excludes those, because they aren't citations. So Big Brother
+# Watch v UK, which describes RIPA s.16 as doing the "heavy lifting" of the statute's
+# safeguards and pins to it eighteen times, was absent from
+# ``citing_documents(target='ukpga/2000/23', anchor='s. 16')`` — which then reported,
+# in terms, that no citer pins to it. A pinpoint the text states explicitly is not a
+# heuristic, so capturing it here turns those into ordinary, checkable edges.
+_ALIAS_PROV_UNIT = (r"(?:sections?|ss?\.?|regulations?|regs?\.?|articles?|arts?\.?"
+                    r"|paragraphs?|paras?\.?)")
+_ALIAS_PROV_NUM = r"\d+[A-Za-z]?(?:\s*\([^)]*\))*"
+_ALIAS_PROV_BEFORE = (rf"(?P<prov>{_ALIAS_PROV_UNIT}\s*{_ALIAS_PROV_NUM}"
+                      rf"|Sched(?:ule)?s?\.?\s*[IVXLC\d]+)\s+(?:of|to|in)\s+(?:the\s+)?")
+# The trailing form ("RIPA, s 17") must not reach forward across the NEXT reference:
+# in "section 8(4) of RIPA, s. 15 of RIPA" the ", s. 15" belongs to the second
+# mention, so a provision that is itself followed by "of"/"to" is not this one's.
+_ALIAS_PROV_AFTER = (rf"\s*,\s*(?P<postprov>{_ALIAS_PROV_UNIT}\s*{_ALIAS_PROV_NUM}"
+                     rf"|Sched(?:ule)?s?\.?\s*[IVXLC\d]+)(?!\s+(?:of|to)\b)")
+
+
 def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
     """Citations from user-defined shorthand *rules* ("UK GDPR" → a document id):
     every occurrence of a phrase becomes a link to its target, so the rule propagates
-    across the corpus. Word-boundary, case-insensitive; longer phrases win overlaps."""
+    across the corpus. Word-boundary, case-insensitive; longer phrases win overlaps.
+
+    A mention that names a PROVISION of the aliased instrument ("section 16 of RIPA",
+    "RIPA, s 16") carries that pinpoint onto the edge — see ``_ALIAS_PROV_BEFORE``."""
     found: list[Citation] = []
     for phrase, target in sorted(aliases.items(), key=lambda kv: -len(kv[0])):
         if not phrase or not target:
@@ -1425,10 +1517,20 @@ def alias_citations(text: str, aliases: dict[str, str]) -> list[Citation]:
         # silently never matches. Apply the boundary per edge only when it helps.
         lb = r"\b" if phrase[0].isalnum() or phrase[0] == "_" else ""
         rb = r"\b" if phrase[-1].isalnum() or phrase[-1] == "_" else ""
-        for m in re.finditer(rf"{lb}{re.escape(phrase)}{rb}", text, re.IGNORECASE):
-            found.append(Citation(raw=m.group(0), entity_kind="named", candidate_id=target,
-                                  pinpoint=None, char_start=m.start(), char_end=m.end(),
-                                  method="named_alias"))
+        core = rf"{lb}{re.escape(phrase)}{rb}"
+        # The pinpointed forms are tried as part of the SAME match, so the span covers
+        # the provision words too and the longest-match dedupe keeps this over a bare
+        # alias hit at the same place.
+        pat = (rf"(?:{_ALIAS_PROV_BEFORE}{core})"
+               rf"|(?:{core}{_ALIAS_PROV_AFTER})"
+               rf"|{core}")
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            g = m.groupdict()
+            found.append(Citation(
+                raw=m.group(0), entity_kind="named", candidate_id=target,
+                pinpoint=_provision_pinpoint(g.get("prov") or g.get("postprov")),
+                char_start=m.start(), char_end=m.end(),
+                method="named_alias"))
     return found
 
 
@@ -1573,13 +1675,16 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     else:
         extra = [c for c in llm.extract(text) if not _overlaps_any(c, grammar)]
         base = _attach_case_pinpoints(text, _dedupe_overlaps(grammar + extra))
-    defs = _collect_shorthand_defs(text, base)
+    hosts: dict[str, tuple[Citation, bool]] = {}
+    defs = _collect_shorthand_defs(text, base, hosts)
     if defs_out is not None:
+        # ``hosts`` deliberately excluded: a document-scoped host binding is only true
+        # inside the document that made it.
         defs_out.extend(_def_rows(defs))
     return _attach_carry_forward(
         text,
         _attach_section_lists(text, _attach_article_lists(
-            text, _attach_shorthands(text, base, defs))),
+            text, _attach_shorthands(text, base, defs, hosts))),
         home_id=home_id, home_kind=home_kind)
 
 

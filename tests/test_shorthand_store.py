@@ -114,10 +114,21 @@ def test_stored_case_shortname_requires_a_pincite(catalogue, tmp_path):
     assert ("fc/2021/138", "para 12") in _global(pincited)
 
 
-def test_ambiguous_shorthand_is_not_guessed(catalogue, tmp_path):
-    # "Vector" is registered against two different cases. In a document citing BOTH
-    # parents there is no basis to choose, so nothing links; in a document citing only
-    # one, the document itself has disambiguated it and that one links.
+def test_contested_shorthand_never_travels(catalogue, tmp_path):
+    # "Vector" is registered against two different cases, so the store contradicts
+    # itself about what the word means and NEITHER reading travels — not even into a
+    # document that cites only one of the two parents.
+    #
+    # That last clause is the 2026-08 change. The rule used to let a contested name
+    # through whenever exactly one of its candidates was cited, reasoning that the
+    # document had disambiguated it. It hadn't: a document citing act X says nothing
+    # about what an abbreviation it never defines means, so the test fires on
+    # coincidence — and a contested entry is contested precisely because it was
+    # mislearned. On the live corpus "PACE" was held against six acts, none of them
+    # the Police and Criminal Evidence Act 1984, and a judgment that never spells PACE
+    # out had "s. 8(1) of PACE" recorded as a citation of RIPA s.8(1) — RIPA being the
+    # one owner it happened to cite. A document that defines its own shorthand never
+    # needed the store; the in-document pass runs first and wins the span.
     ts = TextStore(tmp_path / "text")
     _establish(catalogue, ts, "Vector Energy Ltd v Canada, 2021 FC 138 at para 1 [Vector].",
                prefix="fc/2019/def")
@@ -130,7 +141,7 @@ def test_ambiguous_shorthand_is_not_guessed(catalogue, tmp_path):
 
     one = _run(catalogue, ts, "fc/2019/3",
                "Only 2021 FC 138 was cited. Vector, at para 7, is relevant.")
-    assert _global(one) == {("fc/2021/138", "para 7")}
+    assert not _global(one)
 
 
 def test_in_document_definition_beats_the_stored_one(catalogue, tmp_path):
