@@ -1495,3 +1495,24 @@ def test_pleading_pinpoints_that_read_as_written_law_resolve():
     assert links("Order the defendant to pay the costs pursuant to Articles 133 and 134 "
                  "of the Rules of Procedure of the General Court.") >= {
         ("32015Q0423(01)", "Article 133"), ("32015Q0423(01)", "Article 134")}
+
+
+def test_ukut_aac_number_match_survives_a_non_numeric_id_tail(tmp_path):
+    """``ukut/aac/2019/b1`` is a real id shape, and the zero-pad fallback ran
+    ``int()`` over every id under that year — so one such sibling raised ValueError
+    out of find_existing and took the citing document's whole guard pass with it
+    ("failed in guards"), losing its re-extraction entirely."""
+    from datetime import date
+
+    from raglex.core.models import DocType, ExtractedVia, Record
+    from raglex.storage import Catalogue
+
+    cat = Catalogue(tmp_path / "c.sqlite")
+    for sid in ("ukut/aac/2019/b1", "ukut/aac/2019/0310"):
+        rec = Record(source="x", stable_id=sid, doc_type=DocType.JUDGMENT,
+                     decision_date=date(2019, 1, 1), text="t", raw_bytes=b"t",
+                     extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec)
+    # the zero-padded sibling still resolves, and "b1" is simply not a match
+    assert cat.find_document_id("ukut/aac/2019/310") == "ukut/aac/2019/0310"

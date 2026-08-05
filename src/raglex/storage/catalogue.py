@@ -655,6 +655,14 @@ def anchor_norm_sql(column: str = "dst_anchor") -> str:
 ANCHOR_NORM_SQL = anchor_norm_sql()
 
 
+def _trailing_int(stable_id: str) -> int | None:
+    """The last path segment as an int, or None when it isn't one. Ids are not all
+    numeric at the tail ("ukut/aac/2019/b1", "ukftt/tc/2021/tc08273"), and treating
+    that as an error rather than a non-match killed the caller's whole guard pass."""
+    tail = (stable_id or "").rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
 def decided_by_sql(alias: str = "d") -> str:
     """A date to compare a document against, in SQL, ``YYYY-MM-DD``.
 
@@ -3603,8 +3611,13 @@ class Catalogue:
                 (f"ukut/aac/{m.group(1)}/%", f"ukut/acc/{m.group(1)}/%"),
             ).fetchall()
             wanted = int(m.group(2))
+            # The LIKE admits any tail under that year, and not every UKUT AAC id ends
+            # in a bare number — ".../b1" and similar suffixed forms exist — so a plain
+            # int() raised ValueError out of find_existing and killed the whole
+            # document's guard pass ("failed in guards"), losing its re-extraction.
+            # A non-numeric tail simply isn't the number we're matching.
             hits = [r["stable_id"] for r in rows
-                    if int(r["stable_id"].rsplit("/", 1)[-1]) == wanted]
+                    if _trailing_int(r["stable_id"]) == wanted]
             if len(hits) == 1:
                 return hits[0]
         return None
