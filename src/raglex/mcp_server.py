@@ -561,6 +561,18 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.refix_westlaw_imports(apply=apply, limit=limit)
 
     @admin
+    def merge_assimilated_duplicates(apply: bool = False,
+                                     limit: Optional[int] = None) -> dict:
+        """Fold assimilated EU law held twice onto one node. legislation.gov.uk serves an
+        assimilated instrument on two paths and the corpus took both as identities —
+        ``eur/2016/679`` and ``european/regulation/2016/0679`` — so 4,171 instruments
+        were stored twice, the UK GDPR among them, with 40,042 citations landing on the
+        copy nothing else pointed at. The canonical node wins; the duplicate's text,
+        edges, aliases and tags fold into it and its id stays resolvable as an alias.
+        Idempotent. DRY RUN unless ``apply=True``."""
+        return facade.merge_assimilated_duplicates(apply=apply, limit=limit)
+
+    @admin
     def rekey_govuk_ids(apply: bool = False, limit: Optional[int] = None) -> dict:
         """Move GOV.UK documents onto the shared ``govuk/<base_path>`` id namespace, so a
         page carried by more than one GOV.UK feed is ONE document. Re-keys in place —

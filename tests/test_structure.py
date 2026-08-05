@@ -235,3 +235,55 @@ def test_document_body_lines_carry_the_sub_part_anchor(tmp_path):
     got = f.document_body(act)
     lines = [ln for s in got["segments"] for ln in s.get("lines", [])] or got["lines"]
     assert [ln.get("anchor") for ln in lines] == ["(1)", "(2)", "(2)(a)", "(2)(b)"]
+
+
+def test_an_article_led_regulation_does_not_lose_its_articles_to_its_sections():
+    """An assimilated EU regulation divides its chapters into <section> elements —
+    "Section 1 Transparency and modalities" — whose children are the citable articles.
+    <section> is also a UK Act's own unit, emitted whole without descending, so the walk
+    stopped at Chapter III's sections and never reached Articles 12 to 23: the UK GDPR
+    indexed 57 of its ~99 articles, and no citation of Article 15 could land."""
+    from raglex.formats.akoma_ntoso import parse_akn
+
+    akn = b"""<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+      <act><body>
+        <chapter eId="chapter-III"><num>CHAPTER III</num>
+          <heading>Rights of the data subject</heading>
+          <section eId="chapter-III-section-1">
+            <num>Section 1</num><heading>Transparency and modalities</heading>
+            <article eId="article-12"><num>Article 12</num>
+              <heading>Transparent information</heading>
+              <paragraph><content><p>The controller shall take appropriate measures.</p>
+              </content></paragraph></article>
+            <article eId="article-15"><num>Article 15</num>
+              <heading>Right of access</heading>
+              <paragraph><content><p>The data subject shall have the right.</p>
+              </content></paragraph></article>
+          </section>
+        </chapter>
+      </body></act></akomaNtoso>"""
+    parsed = parse_akn(akn)
+    labels = [s.label for s in parsed.segments]
+    assert any(l.startswith("Article 12") for l in labels), labels
+    assert any(l.startswith("Article 15") for l in labels), labels
+    assert "The data subject shall have the right." in parsed.text
+    # the Section survives as a heading, not as a citable unit swallowing the articles
+    assert any(l.startswith("Section 1") for l in labels)
+
+
+def test_an_act_still_cites_by_section():
+    """The rule keys on the instrument's own shape, so an Act — which has sections and
+    no articles — is untouched."""
+    from raglex.formats.akoma_ntoso import parse_akn
+
+    akn = b"""<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+      <act><body>
+        <part><num>Part 1</num><heading>General</heading>
+          <section eId="section-5"><num>5</num><heading>Duties</heading>
+            <subsection><content><p>A person must comply.</p></content></subsection>
+          </section>
+        </part>
+      </body></act></akomaNtoso>"""
+    parsed = parse_akn(akn)
+    assert any((s.label or "").startswith("s. 5") for s in parsed.segments), \
+        [s.label for s in parsed.segments]

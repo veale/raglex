@@ -108,6 +108,12 @@ def _eu_celex(kind: str, a: str, b: str) -> str | None:
 # instrument's short name belongs here.
 _NAME_TO_CELEX = {
     "gdpr": "32016R0679", "avg": "32016R0679", "dsgvo": "32016R0679", "rgpd": "32016R0679",
+    # Spelled out. The acronym was covered and the UK form has its own grammar, but the
+    # instrument's actual NAME resolved to nothing at all — so a document that introduces
+    # it properly ("the General Data Protection Regulation") before using the acronym got
+    # no edge from the sentence that names it. Inside a UK regulator's material this then
+    # rebinds to the assimilated instrument like every other form (citations.stage).
+    "general data protection regulation": "32016R0679",
     # the digital-regulation instruments, cited by acronym or full name in guidance/cases
     "dma": "32022R1925", "digital markets act": "32022R1925",
     "dsa": "32022R2065", "digital services act": "32022R2065",

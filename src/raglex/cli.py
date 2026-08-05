@@ -783,6 +783,27 @@ def cmd_import_westlaw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge_assimilated(args: argparse.Namespace) -> int:
+    """Fold assimilated EU law held under both legislation.gov.uk paths onto one node."""
+    from .facade import Facade
+
+    st = Facade(Config.from_env()).merge_assimilated_duplicates(
+        apply=args.apply, limit=args.limit, on_progress=lambda **p: None)
+    verb = "folded" if args.apply else "would fold"
+    merged = st["merged"] if args.apply else sum(
+        1 for c in st["changes"] if c["kind"] == "merge")
+    print(f"scanned={st['scanned']} {verb}={len(st['changes'])} "
+          f"(merged={merged} renamed={len(st['changes']) - merged} "
+          f"unchanged={st['unchanged']})")
+    for c in st["changes"][:30]:
+        print(f"  {c['kind']:6} {c['old']}  \u2192  {c['new']}")
+    if len(st["changes"]) > 30:
+        print(f"  \u2026 and {len(st['changes']) - 30} more")
+    if not args.apply and st["changes"]:
+        print("\n(dry run \u2014 re-run with --apply)")
+    return 0
+
+
 def cmd_rekey_govuk(args: argparse.Namespace) -> int:
     """Move GOV.UK documents onto the shared ``govuk/<base_path>`` namespace so the
     feeds dedupe. Dry run by default; ``--apply`` performs the re-keys."""
@@ -1329,6 +1350,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="apply the re-keys (default: dry run — just report the plan)")
     gvk.add_argument("--limit", type=int, default=None, help="re-key at most N documents")
     gvk.set_defaults(func=cmd_rekey_govuk)
+
+    mas = sub.add_parser(
+        "merge-assimilated",
+        help="fold assimilated EU law held under both legislation.gov.uk paths "
+             "(eur/2016/679 + european/regulation/2016/0679) onto one node")
+    mas.add_argument("--apply", action="store_true",
+                     help="apply (default: dry run \u2014 just report the plan)")
+    mas.add_argument("--limit", type=int, default=None)
+    mas.set_defaults(func=cmd_merge_assimilated)
 
     ecr = sub.add_parser("repair-ecr",
                          help="re-chain dead European Court Reports aliases to held ECLIs (series-guarded)")

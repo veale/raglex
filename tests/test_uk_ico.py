@@ -406,13 +406,25 @@ def test_gdpr_in_an_ico_document_rebinds_to_the_uk_instrument():
             _gate_domestic_statute_names(_doc("uk-caselaw"), cites)} == {"32016R0679"}
 
 
-def test_an_explicitly_eu_citation_is_left_alone_in_an_ico_document():
+def test_every_gdpr_form_in_an_ico_document_maps_to_the_uk_instrument():
+    """Whatever form it takes. "Regulation (EU) 2016/679" is the assimilated
+    instrument's own formal name — it keeps the EU's numbering — and every occurrence in
+    the live corpus was in an enforcement notice, which the Commissioner has no power to
+    write about the EU instrument at all."""
     from raglex.citations.extractor import extract_citations
     from raglex.citations.stage import _gate_domestic_statute_names
 
-    cites = extract_citations("compared with Regulation (EU) 2016/679")
-    rebound = _gate_domestic_statute_names(_doc("uk-ico-consultations"), cites)
-    assert {c.candidate_id for c in rebound} == {"32016R0679"}
+    for text in ("contrary to Article 5(1)(f) of Regulation (EU) 2016/679",
+                 "in breach of Article 6 GDPR",
+                 "under the General Data Protection Regulation",
+                 "the EU GDPR standard"):
+        cites = extract_citations(text)
+        rebound = _gate_domestic_statute_names(_doc("uk-ico-enforcement"), cites)
+        assert {c.candidate_id for c in rebound} == {UK_GDPR}, text
+    # a non-ICO host keeps the EU instrument
+    cites = extract_citations("in breach of Article 6 GDPR")
+    assert {c.candidate_id for c in
+            _gate_domestic_statute_names(_doc("uk-caselaw"), cites)} == {"32016R0679"}
 
 
 def test_statutory_basis_binds_the_noun_the_instrument_actually_uses():
@@ -434,3 +446,61 @@ def test_statutory_basis_binds_the_noun_the_instrument_actually_uses():
 def test_ico_guidance_sections_constant_covers_the_requested_directories():
     prefixes = {p for p, _, _ in GUIDANCE_SECTIONS}
     assert {"/for-organisations/", "/for-the-public/"} <= prefixes
+
+
+# ── the post-exit-day rule for UK judgments ──────────────────────────────────
+def _judgment(source="uk-caselaw", when="2024-03-01", doc_type="judgment"):
+    return {"source": source, "court": "ewhc", "stable_id": "ewhc/2024/1",
+            "doc_type": doc_type, "decision_date": when, "meta_json": "{}"}
+
+
+def test_a_uk_judgment_after_exit_day_reads_the_gdpr_as_the_uk_one():
+    """The only data protection regulation a UK court has applied since IP completion
+    day. A heuristic, and deliberately biased: an unqualified "GDPR" in a 2024 English
+    judgment pointing at the EU instrument is the commoner and the more misleading
+    error."""
+    from raglex.citations.extractor import extract_citations
+    from raglex.citations.stage import _gate_domestic_statute_names
+
+    text = "The claimant relies on Article 15 GDPR."
+    cites = extract_citations(text)
+    after = _gate_domestic_statute_names(_judgment(when="2024-03-01"), cites, text)
+    assert {c.candidate_id for c in after} == {UK_GDPR}
+    assert {c.pinpoint for c in after} == {"Article 15"}
+
+
+def test_a_uk_judgment_before_exit_day_is_left_alone():
+    """Before 1 January 2021 there was only the EU instrument."""
+    from raglex.citations.extractor import extract_citations
+    from raglex.citations.stage import _gate_domestic_statute_names
+
+    text = "The claimant relies on Article 15 GDPR."
+    cites = extract_citations(text)
+    before = _gate_domestic_statute_names(_judgment(when="2019-06-01"), cites, text)
+    assert {c.candidate_id for c in before} == {"32016R0679"}
+
+
+def test_a_judgment_that_distinguishes_the_eu_gdpr_is_left_alone():
+    """The document opting out of the heuristic by saying so. Tested on the whole text,
+    because the acronym grammar's matched text for "the EU GDPR" is just "GDPR"."""
+    from raglex.citations.extractor import extract_citations
+    from raglex.citations.stage import _gate_domestic_statute_names
+
+    text = ("The EU GDPR continues to apply to the Irish controller, whereas "
+            "Article 15 GDPR in its assimilated form governs here.")
+    cites = extract_citations(text)
+    kept = _gate_domestic_statute_names(_judgment(when="2024-03-01"), cites, text)
+    assert "32016R0679" in {c.candidate_id for c in kept}
+
+
+def test_the_rule_does_not_reach_non_uk_or_non_judgment_hosts():
+    from raglex.citations.extractor import extract_citations
+    from raglex.citations.stage import _gate_domestic_statute_names
+
+    text = "Article 15 GDPR"
+    cites = extract_citations(text)
+    for doc in (_judgment(source="ie-caselaw"),          # Irish court
+                _judgment(source="eu-cellar"),           # CJEU
+                _judgment(doc_type="legislation")):      # not a judgment
+        out = _gate_domestic_statute_names(doc, cites, text)
+        assert {c.candidate_id for c in out} == {"32016R0679"}, doc["source"]

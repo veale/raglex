@@ -587,7 +587,7 @@ def extract_documents_parallel(
         """
         cites, raw_defs = payload
         try:
-            cites = _guard_cites(catalogue, doc, cites, stable_id=sid)
+            cites = _guard_cites(catalogue, doc, cites, stable_id=sid, text=text)
             plan = _shorthand_plan(catalogue, cites, raw_defs, doc)
         except Exception:  # noqa: BLE001
             log.exception("[cite-extract] %s failed in guards", sid)
@@ -612,7 +612,7 @@ def extract_documents_parallel(
                 return
             from .extractor import attach_stored_shorthands
             cites = attach_stored_shorthands(text, cites, stored, exclude=exclude)
-            cites = _gate_domestic_statute_names(doc, cites)
+            cites = _gate_domestic_statute_names(doc, cites, text)
         _learn_fresh_shorthands(catalogue, defs, sid)
         _write(sid, doc, text, cites)
 
@@ -620,7 +620,7 @@ def extract_documents_parallel(
         """Shorthand scan came back: re-gate (the store is corpus-wide and will happily
         bind a UK act into an Irish judgment), learn this document's own, then write."""
         _cites, _stored, _exclude, defs = w.pending or ([], (), frozenset(), [])
-        cites = _gate_domestic_statute_names(doc, cites)
+        cites = _gate_domestic_statute_names(doc, cites, text)
         _learn_fresh_shorthands(catalogue, defs, sid)
         _write(sid, doc, text, cites)
 
@@ -659,7 +659,7 @@ def extract_documents_parallel(
                             try:
                                 cites = attach_stored_shorthands(
                                     text, cites, stored, exclude=exclude)
-                                cites = _gate_domestic_statute_names(doc, cites)
+                                cites = _gate_domestic_statute_names(doc, cites, text)
                             except Exception:  # noqa: BLE001
                                 log.exception("[cite-extract] %s failed in attach", sid)
                             _learn_fresh_shorthands(catalogue, defs, sid)
@@ -893,7 +893,7 @@ def _is_uk_legislation_id(candidate_id: str | None) -> bool:
     return bool(candidate_id and _UK_LEGISLATION_ID_RE.match(candidate_id))
 
 
-def _gate_domestic_statute_names(doc, cites: list) -> list:
+def _gate_domestic_statute_names(doc, cites: list, text: str | None = None) -> list:
     """Correct candidate instruments that the host document cannot have meant.
 
     Two corrections, both keyed on WHO wrote the document rather than on which grammar
@@ -910,7 +910,7 @@ def _gate_domestic_statute_names(doc, cites: list) -> list:
     487 Irish judgments in a 4,000-row sample, and the bare "s. 50A" pinpoints then
     carried forward off it. A guard that runs once is a guard the next stage undoes.
     """
-    cites = _rebind_assimilated_eu_law(doc, cites)
+    cites = _rebind_assimilated_eu_law(doc, cites, text)
     if not (_is_irish_host(doc) or _is_eu_guidance(doc)):
         return cites
     return [
@@ -936,14 +936,81 @@ _ASSIMILATED_EU_LAW = {
 # GDPR" once and "the GDPR" for the next forty paragraphs. Prefix-matched, so every
 # uk-ico-* collection is covered by one entry.
 _ASSIMILATED_HOST_PREFIXES = ("uk-ico",)
-# …except when the citation ITSELF says which one. "EU GDPR", "Regulation (EU) 2016/679"
-# and "the European Union GDPR" are explicit, and an ICO consultation response comparing
-# the two regimes must keep them apart.
-_EXPLICITLY_EU = re.compile(r"\bEU\b|\bEuropean\s+Union\b|\bEC\b|\(EU\)", re.IGNORECASE)
+
+# The UK judgment sources. A judgment handed down AFTER exit day that says "the GDPR" is,
+# on the balance of probabilities, applying the assimilated one — that is the only data
+# protection regulation a UK court has applied since. Deliberately a heuristic, and
+# deliberately biased: an unqualified "GDPR" in a 2024 English judgment pointing at the
+# EU instrument is the more common and the more misleading error.
+_UK_JUDGMENT_SOURCE_PREFIXES = (
+    "uk-", "bailii", "westlaw", "hol",
+)
+#: IP completion day. The UK GDPR exists from 1 January 2021; before that there was only
+#: the EU instrument, so a judgment predating it is left alone.
+_EXIT_DAY = "2021-01-01"
+_UK_JUDGMENT_TYPES = frozenset({"judgment", "decision"})
+
+# The one thing that stops either rule: the document ITSELF distinguishing the regimes.
+# This has to be tested against the whole text, not the matched citation — the acronym
+# grammar's matched text for "the EU GDPR" is just "GDPR", so the contrast is invisible
+# by the time a single citation is in hand.
+_SAYS_EU_GDPR = re.compile(
+    r"\b(?:EU|European\s+Union|Union)\s+GDPR\b"
+    r"|\bGDPR\s+\(EU\)"
+    r"|\bEU\s+General\s+Data\s+Protection\s+Regulation\b",
+    re.IGNORECASE)
 
 
-def _rebind_assimilated_eu_law(doc, cites: list) -> list:
-    """Point an assimilated instrument's citations at the UK text, inside UK regulators.
+def _doc_field(doc, name: str) -> str:
+    """One column of a document row, tolerating a row that doesn't carry it.
+
+    The guards run against several row shapes — a full catalogue row, and the trimmed
+    ones some callers assemble — so a missing column has to read as "unknown", not raise.
+    """
+    try:
+        if hasattr(doc, "keys") and name not in doc.keys():
+            return ""
+        return str(doc[name] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _is_post_exit_uk_judgment(doc) -> bool:
+    """A UK court or tribunal decision handed down on or after IP completion day."""
+    if doc is None:
+        return False
+    if not _doc_field(doc, "source").lower().startswith(_UK_JUDGMENT_SOURCE_PREFIXES):
+        return False
+    if _doc_field(doc, "doc_type").lower() not in _UK_JUDGMENT_TYPES:
+        return False
+    return _doc_field(doc, "decision_date")[:10] >= _EXIT_DAY
+# There is deliberately NO exception for a citation that looks European. Inside an ICO
+# publication every reference to the GDPR is a reference to the UK one, in whatever form
+# it is written:
+#
+#   * "Regulation (EU) 2016/679" is the assimilated instrument's own formal NAME — the UK
+#     GDPR *is* Regulation (EU) 2016/679 as it forms part of domestic law, keeping the
+#     EU's numbering — so "(EU)" says nothing about which legal order applies. Every
+#     occurrence in the live corpus was in an enforcement notice, which the Commissioner
+#     has no power to write about the EU instrument at all.
+#   * A phrase-level test cannot see the difference anyway: the acronym grammar's matched
+#     text for "the EU GDPR" is just "GDPR", so the contrast never reaches this point.
+#
+# The cost is a consultation response that genuinely compares the two regimes, where an
+# "EU GDPR" mention will link to the UK instrument. That is the accepted trade for a rule
+# that is predictable everywhere else.
+
+
+def _rebind_assimilated_eu_law(doc, cites: list, text: str | None = None) -> list:
+    """Point an assimilated instrument's citations at the UK text, inside UK hosts.
+
+    Two hosts qualify: a UK data-protection regulator (always — the Commissioner has no
+    jurisdiction over the EU instrument) and a UK judgment handed down on or after exit
+    day (a heuristic, because that is the only GDPR a UK court has applied since).
+
+    Either way the document can opt out by saying so: text that distinguishes "the EU
+    GDPR" is left entirely alone, which is what protects a judgment comparing the regimes
+    and a consultation response discussing Brussels.
 
     Anchors survive untouched: both instruments are stored with ``Article N`` /
     ``Recital N`` segments, so a pinpoint that met the EU original meets the UK one.
@@ -951,13 +1018,14 @@ def _rebind_assimilated_eu_law(doc, cites: list) -> list:
     if doc is None:
         return cites
     source = str(doc["source"] or "").lower()
-    if not source.startswith(_ASSIMILATED_HOST_PREFIXES):
+    if not (source.startswith(_ASSIMILATED_HOST_PREFIXES)
+            or _is_post_exit_uk_judgment(doc)):
+        return cites
+    if text and _SAYS_EU_GDPR.search(text):
         return cites
     return [
         replace(c, candidate_id=_ASSIMILATED_EU_LAW[c.candidate_id])
-        if (c.candidate_id in _ASSIMILATED_EU_LAW
-            and not _EXPLICITLY_EU.search(c.raw or ""))
-        else c
+        if c.candidate_id in _ASSIMILATED_EU_LAW else c
         for c in cites
     ]
 
@@ -1312,7 +1380,7 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
     half stays serial by design. ``commit=False`` lets a bulk caller batch many
     documents into one transaction (the run is restartable off the
     ``last_extracted_at`` stamp, so per-document durability buys nothing there)."""
-    cites = _guard_cites(catalogue, doc, cites, stable_id=stable_id)
+    cites = _guard_cites(catalogue, doc, cites, stable_id=stable_id, text=text)
     plan = _shorthand_plan(catalogue, cites, raw_defs, doc)
     if plan is not None:
         from .extractor import attach_stored_shorthands
@@ -1324,13 +1392,14 @@ def _finish_document(catalogue: Catalogue, doc, text: str, cites, raw_defs,
             cites = attach_stored_shorthands(text, cites, stored, exclude=exclude)
             # Re-gate: the store is corpus-wide, so it will happily bind a UK act into
             # an Irish judgment under a name both jurisdictions use.
-            cites = _gate_domestic_statute_names(doc, cites)
+            cites = _gate_domestic_statute_names(doc, cites, text)
         _learn_fresh_shorthands(catalogue, defs, stable_id)
     return _finish_writes(catalogue, doc, text, cites, stable_id=stable_id,
                           run_id=run_id, commit=commit)
 
 
-def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str) -> list:
+def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str,
+                 text: str | None = None) -> list:
     """Every jurisdiction/precision guard that runs BEFORE the shorthand store.
 
     Pure list work plus two narrow catalogue lookups, so it is cheap enough to stay in
@@ -1403,7 +1472,7 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str) -> l
     # (CELEX), CJEU/ECHR (ECLI) and English/Irish case-law (neutral-citation) links are
     # all unambiguous and kept. Domestic (ICO etc.) guidance is deliberately NOT gated —
     # there a "Data Protection Act 2018" reference IS to the national statute.
-    cites = _gate_domestic_statute_names(doc, cites)
+    cites = _gate_domestic_statute_names(doc, cites, text)
 
     # Bare "the Charter" is EU-local shorthand: in a national text it may mean a
     # domestic constitutional charter. Explicit "EU Charter", CFREU and the formal

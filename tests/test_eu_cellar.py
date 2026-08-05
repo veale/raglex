@@ -1129,3 +1129,57 @@ def test_non_english_decision_is_not_re_fetched_every_run():
     # unknown or missing provenance is always due — never silently skip
     assert _english_recheck_due(Row(fetched_at="")) is True
     assert _english_recheck_due(None) is True
+
+
+def test_a_deduped_recheck_still_records_that_it_looked(catalogue):
+    """The backoff above keys on ``fetched_at`` — but ``fetched_at`` is written only by
+    ``upsert_document``, and a re-fetch whose bytes are unchanged dedups *before* that.
+    So the 14-day window opened once and never re-armed: the document stayed permanently
+    overdue and was re-downloaded on every run for ever. Live corpus when this was found:
+    35,967 CJEU decisions in exactly that state, one run fetching 547 of them to store 0.
+
+    A re-check that finds nothing new is still a re-check, and has to be written down."""
+    from datetime import date, timedelta
+
+    from raglex.core.models import DocType, ExtractedVia, Record
+    from raglex.pipeline.runner import _english_recheck_due
+
+    stale = (date.today() - timedelta(days=40)).isoformat() + "T09:00:00+00:00"
+    rec = Record(source="eu-cellar", stable_id="ECLI:EU:C:2025:873",
+                 doc_type=DocType.JUDGMENT, title="Some case", text="Arrêt de la Cour",
+                 raw_bytes=b"<xml/>", raw_ext="xml",
+                 extracted_via=ExtractedVia.STRUCTURED)
+    rec.ensure_payload_hash()
+    catalogue.upsert_document(rec)
+    catalogue.conn.execute("UPDATE documents SET fetched_at = ? WHERE stable_id = ?",
+                           (stale, rec.stable_id))
+    catalogue.conn.commit()
+
+    held = catalogue.get_document(rec.stable_id)
+    assert _english_recheck_due(held) is True          # overdue, so it gets fetched…
+    assert held["source_language"] is None             # …and can never look English
+
+    catalogue.note_refetch(rec.stable_id, source_language="fr")
+
+    after = catalogue.get_document(rec.stable_id)
+    assert _english_recheck_due(after) is False        # the window has re-armed
+    assert after["source_language"] == "fr"            # and the finding stuck
+    # the document itself is untouched — this records the LOOK, not a new version
+    assert after["payload_hash"] == held["payload_hash"]
+    assert after["version"] == held["version"]
+
+
+def test_note_refetch_never_overwrites_a_known_language(catalogue):
+    """COALESCE, not assignment: an English rendition already recorded must not be
+    demoted by a later look that happened to fetch another language."""
+    from raglex.core.models import DocType, ExtractedVia, Record
+
+    rec = Record(source="eu-cellar", stable_id="ECLI:EU:C:2025:99",
+                 doc_type=DocType.JUDGMENT, text="Judgment of the Court",
+                 source_language="en", language="en",
+                 raw_bytes=b"<xml/>", raw_ext="xml",
+                 extracted_via=ExtractedVia.STRUCTURED)
+    rec.ensure_payload_hash()
+    catalogue.upsert_document(rec)
+    catalogue.note_refetch(rec.stable_id, source_language="fr")
+    assert catalogue.get_document(rec.stable_id)["source_language"] == "en"

@@ -186,17 +186,40 @@ def _relations(root: ET.Element) -> list[TypedRelation]:
     return rels
 
 
+def _article_led(root: ET.Element) -> bool:
+    """Does this instrument's body cite by ARTICLE rather than by section?
+
+    An assimilated EU regulation does, and it also divides its chapters into
+    ``<section>`` elements — "Section 1 Transparency and modalities" — whose children are
+    the articles. That collides with a UK Act, where ``<section>`` IS the citable unit
+    and is emitted whole without descending. So in the UK GDPR the parser stopped at
+    Chapter III's four sections and never reached Articles 12 to 23: 57 of ~99 articles
+    were indexed, and no citation of Article 15 could land on anything.
+
+    The instrument itself says which it is. Where articles are present, a section is a
+    grouping heading; where they are not, nothing changes.
+    """
+    body = None
+    for elem in root.iter():
+        if localname(elem.tag).lower() in ("body", "mainbody"):
+            body = elem
+            break
+    scope = body if body is not None else root
+    return any(localname(e.tag).lower() == "article" for e in scope.iter())
+
+
 def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
-          ctx: dict | None = None) -> None:
+          ctx: dict | None = None, *, units: frozenset[str] | set[str] = _UNIT_TAGS,
+          headings: frozenset[str] | set[str] = _HEADING_TAGS) -> None:
     ctx = ctx or {}
     for child in elem:
         name = localname(child.tag).lower()
-        if name in _UNIT_TAGS:
+        if name in units:
             text = flow_text(child, skip_tags=_AKN_SKIP, line_tags=_AKN_LINES)
             if text.strip():
                 kind = "paragraph" if ctx.get("schedule") else "section"
                 blocks.append((_label(child, "section", ctx), kind, text, level))
-        elif name in _HEADING_TAGS:
+        elif name in headings:
             header = _heading_only(child)
             if header:
                 # a Part heading inside a schedule is named per schedule, so two
@@ -206,7 +229,7 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
             # a Part only qualifies a pinpoint when it divides a SCHEDULE; a Part of
             # the Act's body doesn't appear in a section citation ("s 5", not "pt 2 s 5")
             sub = dict(ctx, part=_part_of(child)) if (name == "part" and ctx.get("schedule")) else ctx
-            _walk(child, level + 1, blocks, sub)
+            _walk(child, level + 1, blocks, sub, units=units, headings=headings)
         elif name in _PASS_TAGS:
             # <hcontainer> carries its role in @name: a schedule opens a new
             # pinpoint context, a crossheading is just a heading
@@ -221,8 +244,10 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
                     heading = _child_text(child, "heading") or ""
                     lab = f"Sch {num} {heading}".strip() if num else header
                     blocks.append((lab, "schedule", header, level))
-                _walk(child, level + 1, blocks, dict(ctx, schedule=num, part=None))
-            elif role in _HCONTAINER_UNITS and not ctx.get("schedule"):
+                _walk(child, level + 1, blocks, dict(ctx, schedule=num, part=None),
+                      units=units, headings=headings)
+            elif (role in _HCONTAINER_UNITS and role in units
+                  and not ctx.get("schedule")):
                 # An SI's regulation: a citable unit in its own right, so emit it whole
                 # rather than descending to its sub-paragraphs. (Inside a schedule the
                 # paragraph rule above already governs, and must keep doing so.)
@@ -232,7 +257,7 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
                         _label(child, "section", ctx, unit=_HCONTAINER_UNITS[role]),
                         "section", text, level))
             else:
-                _walk(child, level, blocks, ctx)
+                _walk(child, level, blocks, ctx, units=units, headings=headings)
 
 
 def parse_akn(data: bytes) -> ParsedDoc:
@@ -242,7 +267,12 @@ def parse_akn(data: bytes) -> ParsedDoc:
         return ParsedDoc()
 
     blocks: list[tuple[str, str, str, int]] = []
-    _walk(root, 0, blocks)
+    # An article-led instrument's <section> is a chapter subdivision, not a unit.
+    if _article_led(root):
+        _walk(root, 0, blocks, units=_UNIT_TAGS - {"section"},
+              headings=_HEADING_TAGS | {"section"})
+    else:
+        _walk(root, 0, blocks)
     if not blocks:  # unrecognised shape — fall back to whole-document text
         blocks = [(_title(root) or "document", "section", element_text(root), 0)]
 

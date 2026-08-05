@@ -545,6 +545,36 @@ def fire_webhook(webhook: dict | None, result: dict, *, timeout: float = 20.0) -
 # --- the build ------------------------------------------------------------
 
 
+def _repoint_to_current_versions(facade: Facade, items: list[dict]) -> list[dict]:
+    """Move each edition onto the newest readable expression of its law, in place.
+
+    Returns the moves made, for the run record — an operator should be able to see that
+    an edition changed which text it publishes, and to what.
+    """
+    moves: list[dict] = []
+    with facade._open() as (cat, _rs, _ts):
+        for item in items:
+            current = str(item.get("stable_id") or "")
+            try:
+                newer = cat.latest_readable_version(current)
+            except Exception:  # noqa: BLE001 — a bad id must not fail the whole export
+                continue
+            if not newer or newer == current:
+                continue
+            row = cat.get_document(newer)
+            if row is None:
+                continue
+            moves.append({"from": current, "to": newer,
+                          "title": item.get("title") or ""})
+            item["stable_id"] = newer
+            # The title moves with it: a consolidation carries the date in its own name,
+            # and an edition labelled with the superseded one would misdescribe the text
+            # underneath. The operator's SHORT name and note are theirs, and are kept.
+            if row["title"]:
+                item["title"] = row["title"]
+    return moves
+
+
 def build_bundle(
     facade: Facade,
     params: dict | None = None,
@@ -576,6 +606,17 @@ def build_bundle(
     def check_cancelled() -> None:
         if cancel_check and cancel_check():
             raise RuntimeError("static bundle export cancelled")
+
+    # An edition names one expression of a law, and laws are consolidated again. Left
+    # alone, a set published from "the ePrivacy Directive as at 2009-12-19" keeps
+    # publishing that text for ever, quietly going out of date. So before building,
+    # every item is re-pointed at the newest held expression that HAS TEXT and is in
+    # force today — the same rule the reader applies when it opens an act — and the
+    # move is written back to the configuration, so the set tracks forward from here
+    # rather than needing this decision made again next time.
+    repointed = _repoint_to_current_versions(facade, items)
+    if repointed:
+        save_config(facade.settings, {"items": items}, facade.config)
 
     entries: list[dict] = []
     files: list[tuple[str, bytes]] = []
@@ -667,6 +708,9 @@ def build_bundle(
         "finished_at": _now().isoformat(timespec="seconds"),
         "started_at": started.isoformat(timespec="seconds"),
         "refreshed": bool(refresh),
+        # Editions moved onto a newer consolidation by this run — the set changed which
+        # text it publishes, which the operator should be told rather than discover.
+        **({"repointed": repointed} if repointed else {}),
     }
     if want_zip:
         emit(len(items) + 1, f"packing {len(files)} files into a zip")

@@ -405,6 +405,17 @@ class Pipeline:
                     log.exception("unexpected error storing %s", record.stable_id)
                     continue
 
+                if not stored and refreshed and held_id:
+                    # We re-fetched this document ON PURPOSE — to see whether its English
+                    # rendition had appeared — and the bytes came back unchanged, so
+                    # _ingest deduped it and nothing was written. Record the attempt
+                    # anyway. Without this the backoff below can never re-arm:
+                    # ``fetched_at`` is only written on a store, so a document that never
+                    # changes stays permanently overdue and is re-downloaded on EVERY
+                    # run. Measured on the live corpus: 35,967 CJEU decisions in exactly
+                    # that state, a run fetching 547 of them to store 0.
+                    self.catalogue.note_refetch(
+                        held_id, source_language=record.source_language)
                 if stored:
                     stats.stored += 1
                     stats.stored_ids.append(record.stable_id)

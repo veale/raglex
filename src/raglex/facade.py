@@ -3918,6 +3918,11 @@ class Facade:
         return out
 
     def list_documents(self, **filters) -> list[dict]:
+        # SEARCHING collapses an instrument's point-in-time expressions to the one a
+        # reader wants; BROWSING (no query) does not, because iterating a source or an
+        # id prefix is how the versions themselves are reached. Callers that need every
+        # version of a searched name can still say collapse_versions=False.
+        filters.setdefault("collapse_versions", bool(filters.get("query")))
         with self._open() as (cat, _rs, _ts):
             rows = [dict(r) for r in cat.list_documents(**filters)]
         # Enrich with the jurisdiction bucket + natural-language court name, so the
@@ -11102,6 +11107,72 @@ class Facade:
     # so the new id is the same path under "govuk/" — no re-fetch, no re-parse.
     _LEGACY_GOVUK_PREFIXES = ("uk-cma-guidance", "uk-cma", "uk-ofgem", "uk-ofwat")
     _GOVUK_NAMESPACE = "govuk"
+
+    def merge_assimilated_duplicates(self, *, apply: bool = False,
+                                     limit: int | None = None,
+                                     on_progress=None, cancel_check=None) -> dict:
+        """Fold assimilated EU law held twice onto one node.
+
+        legislation.gov.uk serves an assimilated instrument on two paths, and the corpus
+        took both as identities: the type-code form the Atom feeds emit
+        (``eur/2016/679``) and the canonical form the reader, the citation grammars and
+        every stored edge use (``european/regulation/2016/0679``). 4,171 instruments were
+        therefore stored twice — the UK GDPR among them — and 40,042 citations landed on
+        the copy nothing else pointed at, which is why a heavily-cited instrument could
+        show almost no citations on the page a reader actually opens.
+
+        The canonical node wins. :meth:`Catalogue.rekey_document` merges the serving-form
+        copy into it, carrying its text, edges, aliases and tags; where only the
+        serving-form node exists it is a plain rename, so nothing is lost either way. The
+        retired id stays resolvable as an alias.
+
+        Idempotent. DRY RUN unless ``apply=True``.
+        """
+        from .core.text import fold
+        from .resolve.matchers import assimilated_canonical_path
+
+        st = {"scanned": 0, "merged": 0, "renamed": 0, "unchanged": 0, "applied": apply}
+        changes: list[dict] = []
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id FROM documents WHERE stable_id LIKE ? OR "
+                "stable_id LIKE ? OR stable_id LIKE ? OR stable_id LIKE ? "
+                "ORDER BY stable_id",
+                ("eur/%", "eudr/%", "eudn/%", "eudc/%")).fetchall()
+            if limit:
+                rows = rows[:limit]
+            for n, r in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                cur = str(r["stable_id"])
+                # A dated expression keeps its suffix: eur/2016/679@2024-01-01 belongs on
+                # european/regulation/2016/0679@2024-01-01, beside its own base.
+                stem, version = cat.version_base_and_date(cur)
+                canonical = assimilated_canonical_path(stem)
+                target = (f"{canonical}@{version}" if canonical and version
+                          else canonical)
+                if not target or target == cur:
+                    st["unchanged"] += 1
+                    continue
+                merging = cat.get_document(target) is not None
+                changes.append({"old": cur, "new": target,
+                                "kind": "merge" if merging else "rename"})
+                if apply:
+                    action = cat.rekey_document(cur, target, commit=False)
+                    cat.put_alias(fold(cur), target, source="assimilated-merge",
+                                  commit=False)
+                    st["merged" if action == "merge" else "renamed"] += 1
+                    if n % 200 == 0:
+                        cat.commit()
+                _progress(on_progress, stage="merging assimilated duplicates", done=n,
+                          total=len(rows), item=cur)
+            if apply:
+                cat.commit()
+        if apply:
+            self._invalidate_caches()
+        st["changes"] = changes[:5000]
+        return st
 
     def rekey_govuk_ids(self, *, apply: bool = False, limit: int | None = None,
                         on_progress=None, cancel_check=None) -> dict:

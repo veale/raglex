@@ -42,6 +42,21 @@ from .leg_effects import parse_changes_feed, parse_unapplied_effects, summarise_
 
 BASE_URL = "https://www.legislation.gov.uk"
 
+
+def _canonical_leg_id(path: str) -> str:
+    """The identity a legislation.gov.uk path is stored under.
+
+    For everything except assimilated EU law this IS the path. Assimilated law is served
+    on two of them — ``eur/2016/679`` (the type-code form, which alone has ``/data.akn``
+    and dated URIs) and ``european/regulation/2016/0679`` (what the reader, the citation
+    grammars and every stored edge use). One instrument, so one node: the canonical form
+    wins and the serving form stays in the URL.
+    """
+    from ..resolve.matchers import assimilated_canonical_path
+
+    return assimilated_canonical_path(path) or path
+
+
 # Default feed scope: UK-wide primary + secondary legislation. Devolved/NI types can
 # be added via ``types=`` (e.g. ``asp,asc,nia,wsi``).
 DEFAULT_FEED_TYPES = ("ukpga", "uksi")
@@ -175,7 +190,10 @@ class UKLegislationAdapter(BaseAdapter):
             return
         from ..resolve.matchers import assimilated_leg_path
 
-        for leg_id in self.ids:
+        for requested in self.ids:
+            # A caller may name assimilated law either way ("-o ids=eur/2016/679");
+            # both mean one instrument, so both key to the canonical identity.
+            leg_id = _canonical_leg_id(requested)
             if self.version_date:  # point-in-time copy, keyed distinctly as id@date
                 # The IDENTITY stays the id the corpus knows; only the URI moves.
                 # Assimilated EU law is keyed european/regulation/2016/0679, whose
@@ -226,7 +244,14 @@ class UKLegislationAdapter(BaseAdapter):
                 if head not in UK_LEG_TYPES:
                     continue  # drafts / impact assessments / non-legislation ids
                 yield Stub(
-                    stable_id=e.path,
+                    # IDENTITY is canonical, the URI is whatever serves it. Assimilated
+                    # EU law answers on two paths — legislation.gov.uk's feeds emit the
+                    # type-code form (eur/2016/679) while citations, the reader and the
+                    # grammars all use european/regulation/2016/0679 — and minting the
+                    # feed's form kept the corpus holding both. 4,171 assimilated
+                    # instruments ended up stored twice, the UK GDPR among them, with
+                    # 40,042 citations landing on the copy nothing else pointed at.
+                    stable_id=_canonical_leg_id(e.path),
                     landing_url=f"{BASE_URL}/{e.path}",
                     raw_url=f"{BASE_URL}/{e.path}/data.akn",
                     hint_date=_iso_date(e.published),

@@ -1245,6 +1245,36 @@ class Catalogue:
             self.conn.commit()
         return "merge" if merging else "rename"
 
+    def note_refetch(self, stable_id: str, *, source_language: str | None = None,
+                     commit: bool = True) -> None:
+        """Record that a held document was re-fetched, even though its bytes were
+        unchanged and it therefore never reached :meth:`upsert_document`.
+
+        ``fetched_at`` is otherwise written ONLY on a store, which quietly breaks any
+        backoff that keys on it: the pending-CJEU feed re-fetches a decision to see
+        whether an English rendition has appeared, gets the same bytes, dedups — and the
+        row still shows the last date it *changed*, not the last date it was *checked*.
+        So the "not for another 14 days" window opens once and then never re-arms, and
+        the feed re-downloads the same thousands of documents on every run for ever.
+
+        ``source_language`` is the other half: a document whose language was never
+        recorded can never satisfy an "is it English yet?" test, so it stays due for ever
+        no matter how often it is checked. The rendition we just downloaded is
+        authoritative about that, so write it down.
+        """
+        sets = ["fetched_at = ?"]
+        params: list = [_now()]
+        if source_language:
+            sets.append("source_language = COALESCE(source_language, ?)")
+            params.append(source_language)
+            sets.append("language = COALESCE(language, ?)")
+            params.append(source_language)
+        self.conn.execute(
+            f"UPDATE documents SET {', '.join(sets)} WHERE stable_id = ?",
+            (*params, stable_id))
+        if commit:
+            self.conn.commit()
+
     def reprefix_documents(self, old_prefixes: tuple[str, ...], new_prefix: str, *,
                            commit: bool = True) -> dict[str, int]:
         """Bulk-move every document whose id starts ``<old>/`` to ``<new_prefix>/<rest>``,
@@ -2060,6 +2090,45 @@ class Catalogue:
             and (version_date := self._version_date(row)) and version_date <= cutoff
         }, key=lambda item: (item[1], item[0]))
         return versions[-1] if versions else None
+
+    def latest_readable_version(self, stable_id: str, on_date: str | None = None
+                                ) -> str | None:
+        """The id an instrument should be READ (or published) under today, or None when
+        that is the id given.
+
+        Same rule as :meth:`applicable_consolidation` — newest held expression that has
+        text and is not future-dated — but it accepts a dated expression as well as a
+        base act, and it covers the version series that carry no ``consolidates`` edge.
+        Only the CELLAR consolidations have those edges (10,098 of them); the Dutch
+        ``BWBR…@date`` series and the assimilated ``european/…@date`` series have none,
+        so an edge-only lookup silently reported "already current" for every one of them.
+        """
+        from ..eu_law import consolidation_base, is_consolidation
+
+        given = str(stable_id or "")
+        if not given:
+            return None
+        # A CELLAR consolidation names its base act in a different SECTOR (02002L0058-…
+        # consolidates 32002L0058), so the family is found through the edge, not the id.
+        base = consolidation_base(given) if is_consolidation(given) else None
+        if base is None:
+            stem, version = self.version_base_and_date(given)
+            base = stem if version else given
+        current = self.applicable_consolidation(base, on_date)
+        if current is not None:
+            return current[0] if current[0] != given else None
+        # No edges for this family: fall back to the id shape. Both the base row and its
+        # dated siblings are considered, and the same collapse rule picks between them.
+        rows = self.conn.execute(
+            "SELECT stable_id, has_text, meta_json, NULL AS dst_anchor FROM documents "
+            "WHERE stable_id = ? OR stable_id LIKE ?",
+            (base, f"{base}@%"),
+        ).fetchall()
+        if not rows:
+            return None
+        best = self.collapse_version_rows(rows, on_date=on_date)
+        winner = str(best[0]["stable_id"]) if best else given
+        return winner if winner != given else None
 
     def version_inherited_mentions_for(
         self, version_id: str, *, limit: int | None = 5000,
@@ -6461,6 +6530,66 @@ class Catalogue:
         return (lead + self._RELEVANCE_BANDS + self._sort_clause("date"),
                 [*lparams, q, f"{q}%", f"%{q}%"])
 
+    #: A held point-in-time expression is keyed ``<base>@<YYYY-MM-DD>`` (or, for CELLAR
+    #: consolidations, ``…-YYYYMMDD``). Both forms are recognised so one rule covers the
+    #: EU, Dutch and UK version series alike.
+    _VERSION_SUFFIX = re.compile(r"(?:@(\d{4}-\d{2}-\d{2})|-(\d{4})(\d{2})(\d{2}))$")
+
+    @classmethod
+    def version_base_and_date(cls, stable_id: str) -> tuple[str, str | None]:
+        """``("BWBR0006622", "2013-08-31")`` for a dated expression; ``(id, None)`` for a
+        base act. Pure, so the collapse below is testable without a database."""
+        sid = str(stable_id or "")
+        m = cls._VERSION_SUFFIX.search(sid)
+        if not m:
+            return sid, None
+        if m.group(1):
+            return sid[: m.start()], m.group(1)
+        return sid[: m.start()], f"{m.group(2)}-{m.group(3)}-{m.group(4)}"
+
+    @classmethod
+    def collapse_version_rows(cls, rows, *, on_date: str | None = None) -> list:
+        """One row per instrument: its latest READABLE expression in force today.
+
+        A search for "Wegenverkeerswet 1994" returned eight rows with identical titles —
+        eight of that law's 182 held snapshots — and never the law itself. The corpus
+        holds 68,797 dated expressions, so on any versioned instrument the snapshots
+        crowd out everything else and the thing you were looking for is not on the page.
+
+        This is the same rule the reader applies when it opens an act
+        (:meth:`applicable_consolidation`), stated over a result set instead of one base
+        id: prefer the newest version that HAS TEXT and is not future-dated; a textless
+        snapshot is skipped rather than returned, because a version can be held as a
+        metadata record with no text at all. An instrument with no usable dated version
+        falls back to its base row, and a base act with no versions is simply itself —
+        nothing is hidden that has anywhere else to be seen.
+
+        Order is preserved: the surviving row takes the position of the best-ranked row
+        of its family, so relevance ordering upstream still decides the page.
+        """
+        cutoff = str(on_date or date.today().isoformat())[:10]
+        best: dict[str, object] = {}
+        rank: dict[str, int] = {}
+        for position, row in enumerate(rows):
+            base, version = cls.version_base_and_date(str(row["stable_id"] or ""))
+            rank.setdefault(base, position)
+            incumbent = best.get(base)
+            if incumbent is None or cls._better_version(row, incumbent, cutoff):
+                best[base] = row
+        return [best[b] for b in sorted(best, key=lambda b: rank[b])]
+
+    @classmethod
+    def _better_version(cls, row, incumbent, cutoff: str) -> bool:
+        """Is ``row`` the one to show, against the family's current pick?"""
+        def key(r):
+            _base, version = cls.version_base_and_date(str(r["stable_id"] or ""))
+            has_text = bool(r["has_text"]) if "has_text" in r.keys() else True
+            # A future-dated snapshot is held deliberately but is not the law today, so
+            # it ranks below every applicable one — and below the base act.
+            applicable = version is None or version <= cutoff
+            return (has_text, applicable, version or "")
+        return key(row) > key(incumbent)
+
     def list_documents(
         self,
         *,
@@ -6476,9 +6605,14 @@ class Catalogue:
         cited_by: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        collapse_versions: bool = False,
     ) -> list[sqlite3.Row]:
         """Browse/filter documents — lets an agent iterate, e.g., a law's sections
-        to augment each with secondary material."""
+        to augment each with secondary material.
+
+        ``collapse_versions`` folds each instrument's held point-in-time expressions down
+        to the one a reader wants (:meth:`collapse_version_rows`).
+        """
         # No DISTINCT: every filter is an EXISTS (including tag, below), so rows can't
         # fan out. ``SELECT DISTINCT d.*`` forced a full sort/hash of the whole table
         # before the LIMIT could apply — invisible at 20k documents, but at 4.9M it
@@ -6496,9 +6630,53 @@ class Catalogue:
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY d.effective_date DESC, d.stable_id LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        return self.conn.execute(sql, params).fetchall()
+        # Collapsing discards rows AFTER the database has ranked them, so ask for enough
+        # that a heavily-versioned instrument cannot fill the page on its own: the Dutch
+        # road-traffic act alone holds 182 snapshots. Bounded, because this is a search
+        # box — a family that still overflows the fetch simply contributes its best row.
+        want = limit if not collapse_versions else min(max(limit * 25, 200), 1000)
+        order, oparams = self._doc_order_by(query)
+        sql += f" {order} LIMIT ? OFFSET ?"
+        params.extend([*oparams, want, offset])
+        rows = self.conn.execute(sql, params).fetchall()
+        if collapse_versions:
+            rows = self.collapse_version_rows(rows)[:limit]
+        return rows
+
+    def _doc_order_by(self, query: str | None) -> tuple[str, list]:
+        """The ORDER BY for a document listing, and its bound parameters.
+
+        With NO query this is the pure date order the Corpus browser relies on, served
+        straight off the ``(effective_date DESC, stable_id)`` index — do not add anything
+        to this path, it is the one that has to stay index-only at 5M rows.
+
+        With a query it becomes a RANKING, because date order alone made the search
+        unusable for its main job: "Digital Economy Act 2017" put ten commencement orders
+        above the Act itself, so at the eight rows an autocomplete shows, the Act — an
+        exact title match — did not appear at all. Three tiers, cheapest first:
+
+        0. the title IS the query;
+        1. the title starts with it (so "Data Protection Act" reaches the Act before the
+           regulations made under it);
+        2. everything else the filter matched.
+
+        Ties break on HOW MUCH THE CORPUS CITES IT, read from the ``citation_counts``
+        roll-up — the cached aggregate, never a live count over the citations table. It
+        is a correlated lookup on an indexed column, evaluated only for rows the filter
+        already kept, and MAX() rather than SUM() because the roll-up is grouped by
+        (candidate_id, entity_kind) and the same instrument can appear under several.
+        """
+        if not query:
+            return "ORDER BY d.effective_date DESC, d.stable_id", []
+        folded = " ".join(str(query).split()).lower()
+        rank = ("CASE WHEN lower(d.title) = ? THEN 0 "
+                "     WHEN lower(d.title) LIKE ? THEN 1 ELSE 2 END")
+        cites = ("(SELECT COALESCE(MAX(cc.documents), 0) FROM citation_counts cc "
+                 " WHERE cc.candidate_id = d.stable_id)")
+        return (f"ORDER BY {rank}, {cites} DESC, d.effective_date DESC, d.stable_id",
+                # the LIKE pattern is a bound parameter — a literal % in the SQL breaks
+                # the Postgres driver's paramstyle translation
+                [folded, f"{folded}%"])
 
     def documents_by_alias_text(self, query: str, *, limit: int = 200) -> list[str]:
         """Document ids whose "also cited as" forms contain every word of ``query``.
