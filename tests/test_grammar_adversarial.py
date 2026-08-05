@@ -258,3 +258,38 @@ def test_cjeu_joined_case_long_intro_still_defines_shortname():
     assert len(sh) == 1
     assert sh[0].candidate_id in {"62015CJ0203", "62015CJ0698", "ECLI:EU:C:2016:970"}
     assert sh[0].pinpoint == "para 105"
+
+
+def test_bare_acronym_followed_by_a_proper_noun_is_a_name():
+    """"Syndicat professionnel Data et Marketing France (DMA France)" — a party
+    defining its own abbreviation — linked to the Digital Markets Act. A citation
+    continues into prose, a pinpoint or punctuation, never into another proper noun.
+    """
+    from raglex.citations.extractor import extract_citations
+
+    def cands(t):
+        return {c.candidate_id for c in extract_citations(t) if c.candidate_id}
+
+    assert "32022R1925" not in cands(
+        "Syndicat professionnel Data et Marketing France (DMA France), represented by")
+    # …while the real thing is untouched, bare or pinpointed
+    assert "32022R1925" in cands("The obligations under the DMA and the DSA apply.")
+    assert "32022R1925" in cands("Article 6 of the DMA requires gatekeepers to comply.")
+    assert "32022R1925" in cands("the Digital Markets Act (DMA) applies")
+
+
+def test_instrument_number_interrupted_by_a_bracketed_number_is_dropped():
+    """CELLAR's own Formex for 62025CN0245 reads "Regulation No 2024/1[68]9" — the AI
+    Act with a stray "[68]" typeset into the number. The grammar matched the "2024/1"
+    prefix and minted five confident references to a Regulation 2024/1, pinned to
+    Article 86(1) and Annex III point 8."""
+    from raglex.citations.extractor import extract_citations
+
+    got = [(c.candidate_id, c.pinpoint) for c in extract_citations(
+        "Is Article 86(1) of Regulation (EC) No 2024/1[68]9 to be interpreted as")
+        if c.candidate_id]
+    assert got == []
+    # the correctly written number still resolves, pinpoint and all
+    clean = [(c.candidate_id, c.pinpoint) for c in extract_citations(
+        "Article 86(1) of Regulation (EU) 2024/1689 applies here.") if c.candidate_id]
+    assert ("32024R1689", "Article 86(1)") in clean

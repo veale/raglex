@@ -685,12 +685,28 @@ register(Grammar(
         r"(?:No\.?\s*)?(?P<a>\d{1,4})/(?P<b>\d{1,4})(?:/(?:EU|EC|EEC|JHA|CFSP|PESC|Euratom))?\b",
         re.IGNORECASE,
     ),
-    lambda m: (
+    lambda m: _eu_numeric(m),
+))
+
+
+#: An instrument number INTERRUPTED by a bracketed number is not that instrument. The
+#: OJ's own Formex for 62025CN0245 reads "Regulation No 2024/1[68]9" — the AI Act,
+#: 2024/1689, with a stray "[68]" typeset into the middle of it (the footnote beside it
+#: spells the number correctly). The grammar matched the "2024/1" prefix and minted five
+#: confident references to a Regulation 2024/1, pinned to "Article 86(1)" and "Annex III,
+#: point 8". A source typo we cannot repair is still a source typo we must not launder
+#: into a citation of a different instrument.
+_INTERRUPTED_NUMBER_RE = re.compile(r"^\[\d{1,4}\]\d")
+
+
+def _eu_numeric(m: "re.Match[str]") -> Normalised:
+    if _INTERRUPTED_NUMBER_RE.match(m.string[m.end():m.end() + 10]):
+        return None, None, DROP
+    return (
         _eu_celex(m.group("kind"), m.group("a"), m.group("b")),
         _eu_pinpoint_of(m),
         m.group("kind").lower(),
-    ),
-))
+    )
 
 # "Article 10 of the Convention" / "Article 8 ECHR" / "Art. 6 of the European Convention on
 # Human Rights" → the European Convention on Human Rights (ETS No. 5). Without this, a bare
@@ -792,12 +808,26 @@ _DETERMINER_RE = re.compile(
     r"(?i)\b(?:the|of|de|het|der|die|das|dem|den|des|la|le|les|du|del|el|il)\s+$")
 
 
+#: A BARE acronym followed by a capitalised word is somebody's name, not a citation:
+#: "Syndicat professionnel Data et Marketing France (DMA France)" — a party defining
+#: its own abbreviation — was linked to the Digital Markets Act. A real citation
+#: continues into prose, a pinpoint, or punctuation, never into another proper noun.
+#: Unit words are excepted because "DMA Article 6" is a (rarer) citation form, and the
+#: guard is skipped entirely where a pinpoint already proves the reference.
+_ACRONYM_NAME_TAIL_RE = re.compile(
+    r"^\s+(?!Article|Articles|Art|Recital|Recitals|Chapter|Annex|Section|Regulation"
+    r"|Directive|Act\b)[A-Z][A-Za-zÀ-ÿ'’-]+")
+
+
 def _eu_acronym(m: "re.Match[str]") -> Normalised:
     name = m.group("name")
     if name in _NEEDS_DETERMINER and not _eu_prefixed(m):
         pre = m.string[max(0, m.start("name") - 12):m.start("name")]
         if not _DETERMINER_RE.search(pre):
             return None, None, DROP
+    if not _eu_prefixed(m) and _ACRONYM_NAME_TAIL_RE.match(
+            m.string[m.end("name"):m.end("name") + 32]):
+        return None, None, DROP
     if name == "DSA" and not _eu_prefixed(m):
         # UK immigration judgments use DSA for the Duty Solicitor Advice scheme:
         # phrases such as "both the DSA scheme" satisfy the determiner rule above
