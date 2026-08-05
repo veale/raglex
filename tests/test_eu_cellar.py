@@ -1066,3 +1066,37 @@ def test_referring_court_parenthetical_is_not_the_party_separator():
         "</TI></TITLE></TI.CJT></CJT>"
     ).encode()
     assert formex_case_title(notice) == "Peek & Cloppenburg KG v Cassina SpA"
+
+
+def test_html_fallback_does_not_shred_inline_markup():
+    """get_text("\\n") separates EVERY string, including inline ones, and EUR-Lex wraps
+    footnote markers, dashes and case numbers in their own <span>/<sup>. So
+    "Case C-159/25" arrived as three lines, no grammar could match it, and — the
+    complaint that surfaced it — the numbered paragraphs stopped being paragraphs.
+    Measured on a 1,851-document eu-cellar sample: 146 (7.9%) shredded this way,
+    overwhelmingly 2025-26 documents, which have no Formex rendition yet.
+    """
+    html = (
+        b"<html><body><div id='document1'>"
+        b"<p>delivered on 19 March 2026 (<span><sup>1</sup></span>)</p>"
+        b"<p>Case C<span>\xe2\x80\x91</span>159/25 [Rowicz]</p>"
+        b"<p>1. The first paragraph of the Opinion.</p>"
+        b"<p>2. The second paragraph, citing Article 47 of the Charter.</p>"
+        b"</div></body></html>"
+    )
+    text = EUCellarAdapter._html_to_text(html)
+    assert "Case C‑159/25 [Rowicz]" in text
+    assert "(1)" in text
+    # both numbered paragraphs survive as paragraphs, number and text on one line
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    assert any(ln.startswith("1. The first paragraph") for ln in lines)
+    assert any(ln.startswith("2. The second paragraph") for ln in lines)
+
+
+def test_html_fallback_still_breaks_on_block_boundaries():
+    html = (b"<html><body><div id='document1'>"
+            b"<p>First block.</p><p>Second block.</p>"
+            b"<ul><li>item one</li><li>item two</li></ul>"
+            b"</div></body></html>")
+    lines = [ln for ln in (EUCellarAdapter._html_to_text(html) or "").split("\n") if ln.strip()]
+    assert lines == ["First block.", "Second block.", "item one", "item two"]

@@ -187,6 +187,15 @@ def concise_case_title(raw: str) -> str:
     return parties or (f"Case {case_no}" if case_no else raw)
 
 
+#: Tags that end a line of rendered text. Everything else — span, sup, a, i, b, em —
+#: is INLINE and must not introduce a break, or a citation split across markup is split
+#: across lines too.
+_HTML_BLOCK_TAGS = (
+    "p", "div", "li", "tr", "td", "th", "table", "blockquote", "section", "article",
+    "h1", "h2", "h3", "h4", "h5", "h6", "dt", "dd", "pre", "hr",
+)
+
+
 def html_case_title(html_bytes: bytes | None) -> str | None:
     """Concise title from EUR-Lex's hidden, language-neutral display heading."""
     if not html_bytes:
@@ -1911,7 +1920,25 @@ LIMIT {self.per_page}
             if body is None:
                 return None
             import re as _re
-            text = body.get_text("\n", strip=True)
+            # ``get_text("\n")`` puts the separator between EVERY string, including the
+            # inline ones — and EUR-Lex wraps footnote markers, dashes and case numbers
+            # in their own <span>/<sup>. So "Case C‑159/25" arrived as three lines
+            # ("Case C", "‑", "159/25"), no grammar could match it, and the document was
+            # left with an empty title and nothing but carry-forward guesses. Measured
+            # on a 1,851-document sample of eu-cellar: 146 (7.9%) shredded this way,
+            # overwhelmingly 2025-26 documents, which are the ones with no Formex
+            # rendition yet and so take this HTML fallback.
+            #
+            # Break on BLOCK boundaries only, and let inline runs join up as the page
+            # renders them.
+            for br in body.find_all("br"):
+                br.replace_with("\n")
+            for tag in body.find_all(_HTML_BLOCK_TAGS):
+                tag.insert_before("\n")
+                tag.insert_after("\n")
+            text = body.get_text("")
+            # tidy: trailing space per line, then runs of blank lines
+            text = "\n".join(line.strip() for line in text.split("\n"))
             return _re.sub(r"\n{3,}", "\n\n", text).strip() or None
         except Exception:  # noqa: BLE001 — best-effort
             return None
