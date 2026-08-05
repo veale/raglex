@@ -7832,6 +7832,57 @@ class Facade:
         self._invalidate_caches()
         return out
 
+    def retitle_preparatory_documents(self, *, limit: int = 5000,
+                                      on_progress=None, cancel_check=None) -> dict:
+        """Give held preparatory documents their own titles, read from what we already
+        store — no re-fetch.
+
+        A proposal's title is on its face ("Proposal for a REGULATION … laying down
+        additional procedural rules relating to the enforcement of Regulation (EU)
+        2016/679"), above the enacting terms the HTML parser keeps; 332 of 963 were
+        therefore titled with their own CELEX. Reports what it could NOT fix, because
+        most of those are metadata-only records with no English rendition at all — a
+        gap upstream, not one this pass can close.
+        """
+        from pathlib import Path
+
+        from .adapters.eu_preparatory import title_from_html, title_from_text
+
+        out = {"untitled": 0, "retitled": 0, "no_content": 0, "unreadable": 0}
+        with self._open() as (cat, _rs, ts):
+            rows = cat.list_documents(source="eu-preparatory", limit=limit)
+            for i, row in enumerate(rows, 1):
+                if cancel_check and cancel_check():
+                    break
+                doc = cat.get_document(row["stable_id"])
+                if doc is None or (doc["title"] or "") != row["stable_id"]:
+                    continue
+                out["untitled"] += 1
+                _progress(on_progress, stage="retitling preparatory documents",
+                          done=i, total=len(rows), item=row["stable_id"])
+                if not doc["has_text"] and not doc["raw_path"]:
+                    out["no_content"] += 1
+                    continue
+                title = None
+                if doc["has_text"] and doc["payload_hash"]:
+                    try:
+                        title = title_from_text(ts.get(doc["payload_hash"]))
+                    except OSError:
+                        title = None
+                if not title and doc["raw_path"]:
+                    try:
+                        title = title_from_html(Path(doc["raw_path"]).read_bytes())
+                    except OSError:
+                        title = None
+                if title and title != row["stable_id"]:
+                    cat.update_document_fields(row["stable_id"], {"title": title},
+                                               curate=False)
+                    out["retitled"] += 1
+                else:
+                    out["unreadable" if doc["has_text"] else "no_content"] += 1
+        self._invalidate_caches()
+        return out
+
     def reparse_all(self, *, doc_type: str | None = "legislation") -> dict:
         """Re-derive text+segments for every structural document (default: legislation)
         — run after a parser upgrade so already-harvested docs pick up the new

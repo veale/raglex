@@ -20,6 +20,9 @@ _PRINTED_ID = re.compile(r"\b(COM|SWD|SEC|JOIN)\s*[(/]\s*(\d{4})\s*[)/]\s*(\d{1,
 _TITLE_HEAD = re.compile(
     r"^(?:COMMISSION STAFF WORKING DOCUMENT|COMMUNICATION FROM THE COMMISSION|"
     r"REPORT FROM THE COMMISSION|GREEN PAPER|WHITE PAPER|JOINT COMMUNICATION|"
+    # A re-tabled proposal says so first — "Amended proposal for a European Parliament
+    # and Council Directive …" — and anchoring on the bare phrase missed every one.
+    r"(?:AMENDED|REVISED|MODIFIED|DRAFT)\s+PROPOSAL FOR (?:A|AN)\b|"
     r"PROPOSAL FOR (?:A|AN)\b)", re.I)
 
 
@@ -75,6 +78,84 @@ def title_from_text(text: str | None) -> str | None:
                 break
         return " — ".join(parts)[:300]
     return None
+
+
+#: Where the header ends and the document proper begins.
+_TITLE_STOP = re.compile(
+    r"^(?:EXPLANATORY MEMORANDUM|Accompanying|Brussels,|EN\s+EN$|\{|"
+    r"THE EUROPEAN PARLIAMENT AND THE COUNCIL|\d{4}/\d{4}\s*\()", re.I)
+
+
+def _html_lines(raw: bytes | None) -> str:
+    """Block-level HTML → one line per block, tags and entities gone. Enough structure
+    for the header readers below; not an extraction path."""
+    if not raw:
+        return ""
+    import html as _html
+
+    blob = raw.decode("utf-8", "ignore")
+    blob = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", blob)
+    blob = re.sub(r"(?i)<\s*(br|/p|/div|/h[1-6]|/tr|/td|/li)[^>]*>", "\n", blob)
+    blob = re.sub(r"<[^>]+>", " ", blob)
+    lines = [re.sub(r"[ \t ]+", " ", _html.unescape(x)).strip()
+             for x in blob.splitlines()]
+    return "\n".join(x for x in lines if x)
+
+
+def title_from_html(raw: bytes | None) -> str | None:
+    """The COM header's title, read off the raw rendition.
+
+    A proposal's title — "Proposal for a REGULATION OF THE EUROPEAN PARLIAMENT AND OF
+    THE COUNCIL laying down additional procedural rules relating to the enforcement of
+    Regulation (EU) 2016/679" — sits ABOVE the enacting terms, and the legislation HTML
+    parser keeps the enacting terms. That is right for an act, whose title is metadata,
+    and wrong for a proposal, whose title is on its face: the stored text of 52023PC0348
+    begins "Subject matter", so there was nothing left for ``title_from_text`` to read
+    and 332 of 963 preparatory documents were titled with their own CELEX.
+
+    EUR-Lex splits that one sentence across several block elements, so the parts are
+    rejoined with spaces (not the " — " that separates a staff working document's title
+    from the document it accompanies), and the shouted instrument type is title-cased.
+    """
+    lines = [x for x in _html_lines(raw).splitlines() if x][:120]
+    for i, line in enumerate(lines):
+        if not _TITLE_HEAD.match(line):
+            continue
+        parts = [line]
+        for nxt in lines[i + 1:i + 8]:
+            if _TITLE_STOP.match(nxt) or _PRINTED_ID.search(nxt):
+                break
+            parts.append(nxt)
+            if len(" ".join(parts)) >= 220:
+                break
+        title = " ".join(_soften_caps(part) for part in parts)
+        title = re.sub(r"\s+", " ", title).strip(" .,;")
+        return title[:300] or None
+    return None
+
+
+#: Words a title keeps lower-case when the source SHOUTED the whole line. Without this,
+#: "REGULATION OF THE EUROPEAN PARLIAMENT AND OF THE COUNCIL" title-cases to "Regulation
+#: Of The European Parliament And Of The Council".
+_TITLE_MINOR = {"of", "the", "and", "for", "on", "to", "in", "a", "an", "by", "with",
+                "as", "at", "from", "or", "nor", "per", "via"}
+
+
+def _soften_caps(part: str) -> str:
+    """Title-case a shouted line, leaving mixed-case text and acronyms alone."""
+    if not part.isupper() or len(part) <= 3:
+        return part
+    words = []
+    for i, word in enumerate(part.split()):
+        lowered = word.lower()
+        stripped = lowered.strip("(),.:;")
+        if i and stripped in _TITLE_MINOR:
+            words.append(lowered)
+        elif len(stripped) <= 4 and any(ch.isdigit() for ch in word):
+            words.append(word)          # "2016/679", "No 1049/2001"
+        else:
+            words.append(lowered[:1].upper() + lowered[1:])
+    return " ".join(words)
 
 
 class EUPreparatoryAdapter(EULegislationAdapter):
@@ -221,7 +302,12 @@ SELECT DISTINCT ?title ?proposalCelex ?adopted ?adoptedRelated WHERE {{
         if source_title and (not rec.title or rec.title == rec.stable_id):
             rec.title = source_title
         if not rec.title or rec.title == rec.stable_id:
-            rec.title = title_from_text(rec.text) or rec.stable_id
+            # The parsed body first (it is the document), then the raw rendition's own
+            # header — which is where a proposal's title actually is.
+            rec.title = (title_from_text(rec.text)
+                         or (title_from_html(rec.raw_bytes)
+                             if rec.raw_ext in ("html", "htm") else None)
+                         or rec.stable_id)
         aliases = printed_aliases(rec.stable_id, rec.title, rec.text)
         rec.extra.update({"celex": rec.stable_id, "preparatory_subtype": preparatory_subtype(rec.stable_id)[0],
                           "aliases": list(dict.fromkeys([*(rec.extra.get("aliases") or []), *aliases]))})
@@ -229,7 +315,17 @@ SELECT DISTINCT ?title ?proposalCelex ?adopted ?adoptedRelated WHERE {{
         # then use hundreds of orphaned "Article N" references. The title is strong
         # enough to supply that one home; mixed/comparative titles deliberately do not.
         from .eu_consumer_guidance import title_default_instrument
-        default_instrument = title_default_instrument(rec.title)
+        # …but NOT for a document that has articles of its OWN. A proposal's title names
+        # the instrument it would amend ("Proposal for a DIRECTIVE amending Directive
+        # 2011/83/EU"), while every bare "Article 5" in its text is a reference to the
+        # proposed text itself. Treating the title as the default home would file the
+        # proposal's own provisions against the act it amends — and this rule became
+        # reachable for proposals only now, because until this commit they had no title
+        # at all. Communications and policy papers have no enacting terms, so the rule
+        # still applies to them.
+        subtype = preparatory_subtype(rec.stable_id)[0]
+        default_instrument = (None if subtype in ("proposals", "joint")
+                              else title_default_instrument(rec.title))
         if default_instrument:
             rec.extra["citation_default_instrument"] = default_instrument
         for target in stub.hints.get("adopted_as") or ():

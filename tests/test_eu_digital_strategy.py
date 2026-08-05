@@ -177,3 +177,46 @@ def test_fetch_stores_the_document_and_records_its_annexes(monkeypatch):
     assert rec.extra["download_url"].endswith("/131215")
     assert [f["title"] for f in rec.extra["other_files"]] == ["Communication to the Commission"]
     assert rec.extra["issuer"].startswith("European Commission")
+
+
+def test_a_proposals_title_is_read_from_its_own_face():
+    """A proposal's title sits ABOVE the enacting terms, and the HTML parser keeps the
+    enacting terms — right for an act, wrong for a proposal. 52023PC0348's stored text
+    begins "Subject matter", so 332 of 963 preparatory documents were titled with their
+    own CELEX."""
+    from raglex.adapters.eu_preparatory import title_from_html, title_from_text
+
+    html = (b"<html><body><p>EUROPEAN COMMISSION</p><p>Brussels, 4.7.2023</p>"
+            b"<p>COM(2023) 348 final</p><p>2023/0202(COD)</p>"
+            b"<p>Proposal for a</p>"
+            b"<p>REGULATION OF THE EUROPEAN PARLIAMENT AND OF THE COUNCIL</p>"
+            b"<p>laying down additional procedural rules relating to the enforcement "
+            b"of Regulation (EU) 2016/679</p>"
+            b"<p>EXPLANATORY MEMORANDUM</p><p>1. CONTEXT OF THE PROPOSAL</p></body></html>")
+    title = title_from_html(html)
+    # Rejoined across the block elements EUR-Lex splits it over, and the shouted line
+    # softened — not "Regulation Of The European Parliament And Of The Council".
+    assert title == ("Proposal for a Regulation of the European Parliament and of the "
+                     "Council laying down additional procedural rules relating to the "
+                     "enforcement of Regulation (EU) 2016/679")
+    # The explanatory memorandum is where the title stops.
+    assert "EXPLANATORY" not in title
+    # The parsed body has no header to read, which is the whole problem.
+    assert title_from_text("Subject matter\nThis Regulation lays down procedural rules.") is None
+
+
+def test_a_proposal_does_not_adopt_the_act_it_amends_as_its_citation_home():
+    """The title names the instrument the proposal would amend; every bare "Article 5"
+    in its text is a reference to the PROPOSED text. Filing the proposal's own
+    provisions against the act it amends would be wrong — and this rule only became
+    reachable for proposals once they had titles at all."""
+    from raglex.adapters.eu_consumer_guidance import title_default_instrument
+    from raglex.adapters.eu_preparatory import preparatory_subtype
+
+    title = ("Proposal for a Directive of the European Parliament and of the Council "
+             "amending Directive 2011/83/EU")
+    # The rule itself still recognises the directive …
+    assert title_default_instrument(title) == {"id": "32011L0083", "kind": "directive"}
+    # … and the adapter refuses to apply it to a document with enacting terms of its own.
+    assert preparatory_subtype("52023PC0348")[0] == "proposals"
+    assert preparatory_subtype("52023DC0348")[0] == "communications"
