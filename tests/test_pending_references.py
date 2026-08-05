@@ -166,3 +166,28 @@ def test_a_static_edition_does_not_inherit_the_counterpart_link(config):
     data = StaticLawExporter(facade=f).build_data("european/regulation/2016/0679")
     assert "counterpart" not in data
     assert "eur-lex.europa.eu" not in str(data)
+
+
+def test_a_dated_consolidation_still_links_to_its_uk_counterpart(config):
+    """The link has to appear where people actually read: on the dated consolidation
+    (02016R0679-20160504), not only on the undated base act the edge points at."""
+    f = Facade(config)
+    for stable_id, celex in (("32016R0679", "32016R0679"),
+                             ("02016R0679-20160504", "02016R0679-20160504")):
+        _store(f, Record(source="eu-legislation", stable_id=stable_id,
+                         doc_type=DocType.LEGISLATION, title="Regulation (EU) 2016/679",
+                         raw_bytes=stable_id.encode(), text="Article 1 …",
+                         source_language="en", extra={"celex": celex}))
+    _store(f, Record(
+        source="uk-legislation", stable_id="european/regulation/2016/0679",
+        doc_type=DocType.LEGISLATION, title="Assimilated Regulation (EU) 2016/679",
+        raw_bytes=b"uk gdpr", text="Article 1 …", source_language="en",
+        relations=[TypedRelation(
+            relationship_type=RelationshipType.ASSIMILATED_VERSION_OF,
+            raw_citation_string="32016R0679", dst_id="32016R0679",
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED)]))
+
+    counterpart = f.get_document("02016R0679-20160504")["counterpart"]
+    assert counterpart["role"] == "uk_assimilated"
+    assert counterpart["stable_id"] == "european/regulation/2016/0679"

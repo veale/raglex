@@ -580,6 +580,22 @@ function SpeechBubble({ n }: { n: number }) {
 // A compact prev / "11–20 of N" / next pager, so a long list shows one short page at a
 // time instead of running the whole admin page to thousands of rows. Renders nothing when
 // everything already fits on one page.
+// Cap a long list at a readable height with a "show all" toggle. The panels under the
+// operative text are reference material, not the reading surface: a document citing 300
+// authorities pushed everything below it off the page, and the reader had to scroll past
+// all of it to reach the next panel. The count is always visible, so nothing is hidden
+// silently — only deferred.
+function useShowMore<T>(items: T[], initial = 12): [T[], any] {
+  const [all, setAll] = useState(false);
+  const hidden = Math.max(0, items.length - initial);
+  const control = hidden === 0 ? null : (
+    <a className="mini-link show-more" onClick={() => setAll((v) => !v)}
+      title={all ? "Collapse this list again" : `Show the remaining ${hidden}`}>
+      {all ? `▴ Show fewer` : `▾ Show all ${items.length}`}</a>
+  );
+  return [all ? items : items.slice(0, initial), control];
+}
+
 function Pager({ page, pageSize, total, onPage, noun = "items" }:
   { page: number; pageSize: number; total: number; onPage: (p: number) => void; noun?: string }) {
   const pages = Math.ceil(total / pageSize);
@@ -2387,9 +2403,24 @@ function OriginalSources({ meta }: { meta?: any }) {
 // provisions each turns on. A statute page otherwise shows only settled law — this is
 // the part that is still moving, and it is the first thing an adviser needs to know.
 function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
-  const [data] = useAsync(() => api.pendingReferences(id), [id]);
+  // The aggregate is cached server-side (stale-while-revalidate); a COLD load returns
+  // {preliminary: [], _warming: true} and computes in the background. Without the poll
+  // the box read "no references pending" on every first visit to a statute — and the
+  // cache is dropped whenever the citation graph changes, so first visits are common.
+  const [data, , reload] = useAsync<any>(() => api.pendingReferences(id), [id]);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    if (!data?._warming) return;
+    const iv = setInterval(() => reload(), 2500);
+    return () => clearInterval(iv);
+  }, [data?._warming]);
   if (!data || data.error) return null;
+  if (data._warming) return (
+    <div className="panel pref-box">
+      <p className="muted loading-pulse">⏳ Finding the cases pending before the Court…</p>
+    </div>
+  );
   const prelim: any[] = data.preliminary || [];
   const other: any[] = data.other || [];
   // One list: references first, then the direct actions (annulments, appeals, staff
@@ -2397,6 +2428,7 @@ function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?:
   // says which kind it is.
   const rows: any[] = data.pending || [...prelim, ...other];
   if (!rows.length) return null;
+  const visible = showAll ? rows : rows.slice(0, 10);
 
   // Which provisions a reference is about, split the way the instrument is written.
   const provisions = (anchors: string[]) => {
@@ -2460,7 +2492,15 @@ function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?:
           {data.with_ag_opinion ? `, ${data.with_ag_opinion} with an AG opinion` : ""}
         </span>
       </h3>
-      <div className="pref-list">{rows.map(row)}</div>
+      <div className="pref-list">{visible.map(row)}</div>
+      {rows.length > visible.length && (
+        <a className="mini-link show-more" onClick={() => setShowAll(true)}
+          title="Show every pending proceeding on this instrument">
+          ▾ Show all {rows.length}</a>
+      )}
+      {showAll && rows.length > 10 && (
+        <a className="mini-link show-more" onClick={() => setShowAll(false)}>▴ Show fewer</a>
+      )}
       {data.stale_count > 0 && (
         <p className="muted pref-stale">
           {data.stale_count} further notice{data.stale_count === 1 ? " is" : "s are"} older than{" "}
@@ -2688,16 +2728,8 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
       {d.doc_type === "legislation" && <VersionPanel id={d.stable_id} open={open} />}
       {canWrite && <AugmentPanel docId={d.stable_id} onDone={reload} pinAnchor={pinAnchor} clearPin={() => setPinAnchor("")} />}
       <div className="grid2">
-        <div className="panel">
-          <h3>Citations (outgoing) <span className="muted">— reclassify, re-point, or reject (✗) a wrong citation</span></h3>
-          {(doc.relations || []).length === 0 && <p className="muted">none</p>}
-          <table><tbody>
-            {(doc.relations || []).map((r: any) => (
-              <RelationRow key={r.relation_id} r={r} open={open} onDone={reload} />
-            ))}
-          </tbody></table>
-          {doc.suppressed_count > 0 && <p className="muted">+ {doc.suppressed_count} suppressed (rejected) citation(s) hidden</p>}
-        </div>
+        <OutgoingCitationsPanel relations={doc.relations || []} open={open}
+          suppressed={doc.suppressed_count} onDone={reload} />
         <div className="panel">
           <h3>Attachments</h3>
           {(doc.assets || []).length === 0 && <p className="muted">none</p>}
@@ -2706,6 +2738,27 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Everything this document cites, as editable rows. Its own component so the list can
+// be capped with a hook: a judgment citing 300 authorities rendered 300 rows and buried
+// the panels after it.
+function OutgoingCitationsPanel({ relations, open, suppressed, onDone }:
+  { relations: any[]; open: (id: string, a?: string) => void; suppressed?: number; onDone: () => void }) {
+  const [visible, showMore] = useShowMore(relations);
+  return (
+    <div className="panel">
+      <h3>Citations (outgoing) <span className="muted">— reclassify, re-point, or reject (✗) a wrong citation</span></h3>
+      {relations.length === 0 && <p className="muted">none</p>}
+      <table><tbody>
+        {visible.map((r: any) => (
+          <RelationRow key={r.relation_id} r={r} open={open} onDone={onDone} />
+        ))}
+      </tbody></table>
+      {showMore}
+      {(suppressed || 0) > 0 && <p className="muted">+ {suppressed} suppressed (rejected) citation(s) hidden</p>}
     </div>
   );
 }
@@ -2936,6 +2989,7 @@ function InheritedProvisionMentions({ incoming, mappings, open }:
     ? incoming.filter((r: any) => r.inherited_current_anchor === anchor) : incoming;
   const kinds = [...new Set(shown.map((r: any) => r.mapping_type || "functional_predecessor"))];
   const kind = kinds.length === 1 ? mappingKind(kinds[0] as string) : null;
+  const [visible, showMore] = useShowMore(shown);
   return <div className="panel">
     <select className="sort-select" style={{ float: "right" }} value={anchor}
       onChange={(e) => setAnchor(e.target.value)} aria-label="current provision filter">
@@ -2947,7 +3001,10 @@ function InheritedProvisionMentions({ incoming, mappings, open }:
     <p className="muted" style={{ fontSize: 12 }}>
       {kind ? kind.blurb : "These authors cited a corresponding provision of another instrument, not this one. Each row says what the mapping claims; all remain distinct from direct citations."}
     </p>
-    <table><tbody>{shown.map((r: any) => <tr key={`${r.src_id}-${r.mapping_id}`}>
+    {/* Two real columns, not "whatever the longest title leaves over": auto layout gave
+        the citing document ~80% and squeezed the mapping — the shorter, more structured
+        side — into a sliver that wrapped over five lines per row. */}
+    <table className="two-col"><tbody>{visible.map((r: any) => <tr key={`${r.src_id}-${r.mapping_id}`}>
       <td><DocLink id={r.src_id} anchor={r.src_anchor}
         onOpen={() => open(r.src_id, r.src_anchor)}>{r.src_title || r.src_id}</DocLink></td>
       <td className="muted">{r.inherited_current_anchor} ←{" "}
@@ -2956,6 +3013,7 @@ function InheritedProvisionMentions({ incoming, mappings, open }:
           {r.inherited_from_title || r.inherited_from_id} {r.inherited_from_anchor}</DocLink>
         {!kind && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }}>{mappingKind(r.mapping_type).row}</span>}</td>
     </tr>)}</tbody></table>
+    {showMore}
   </div>;
 }
 
@@ -6760,6 +6818,7 @@ function EffectsBanner({ id, open }: { id: string; open: (id: string, a?: string
 function ChangesPanel({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
   const [changes, _e, reload] = useAsync(() => api.legislationChanges(id), [id]);
   const [msg, setMsg] = useState("");
+  const [visibleChanges, changesMore] = useShowMore((changes || []) as any[]);
   const scan = async () => {
     setMsg("scanning the Changes-to-Legislation feed…");
     try {
@@ -6775,13 +6834,14 @@ function ChangesPanel({ id, open }: { id: string; open: (id: string, a?: string)
         <button onClick={scan} title="Fetch the affecting-side feed and flag affected acts we hold for re-pull">↻ scan changes</button></div>
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</p>}
       {(changes || []).length === 0 && <p className="muted">none recorded yet — use “scan changes”.</p>}
-      {(changes || []).map((c: any, i: number) => (
+      {visibleChanges.map((c: any, i: number) => (
         <div key={i} style={{ fontSize: 13 }}>
           <DocLink id={c.affected_id} onOpen={() => open(c.affected_id)}>{c.affected_title || c.affected_id}</DocLink>
           {c.affected_provision && <span className="muted"> · {c.affected_provision}</span>}
           {c.effect_type && <span className="tag" style={{ marginLeft: 6 }}>{c.effect_type}</span>}
         </div>
       ))}
+      {changesMore}
     </div>
   );
 }
@@ -6823,6 +6883,7 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
   const [kind, setKind] = useState("functional_predecessor");
   const [msg, setMsg] = useState("");
   const mappings = data?.mappings || [];
+  const [visibleMappings, mappingsMore] = useShowMore(mappings as any[]);
   const save = async () => {
     const parsed = rows.split(/\r?\n/).map((line) => {
       const parts = line.split(/\s*(?:=>|=|\t)\s*/, 2);
@@ -6869,7 +6930,7 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
       {msg && <p className={msg.startsWith("error") ? "err" : "ok"}>{msg}</p>}
       {mappings.length > 0 && <table className="grid"><thead><tr>
         <th>current provision</th><th>corresponds to</th><th>kind</th><th>inherited mentions</th><th></th>
-      </tr></thead><tbody>{mappings.map((m: any) => <tr key={m.mapping_id}>
+      </tr></thead><tbody>{visibleMappings.map((m: any) => <tr key={m.mapping_id}>
         <td>{m.current_anchor}</td>
         <td><DocLink id={m.previous_doc_id} anchor={m.previous_anchor}
           onOpen={() => open(m.previous_doc_id, m.previous_anchor)}>
@@ -6881,6 +6942,7 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
           await api.deleteProvisionMapping(m.mapping_id); reload();
         }}>✗</a></td>
       </tr>)}</tbody></table>}
+      {mappingsMore}
     </div>
   );
 }

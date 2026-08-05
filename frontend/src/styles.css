@@ -1558,6 +1558,20 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .pref-provs { cursor: pointer; }
 .pref-anchors { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin: var(--sp-2) 0 0; }
 .pref-stale { font-size: .75rem; margin: var(--sp-3) 0 0; }
+
+/* A two-column reference table where BOTH columns carry real content. Auto layout
+   apportions width by the longest cell, so a 90-character document title took ~80% and
+   the structured right-hand column — the one you actually scan — wrapped over five
+   lines in a sliver. Fixed layout splits it deliberately instead. */
+table.two-col { table-layout: fixed; width: 100%; }
+table.two-col td { vertical-align: top; overflow-wrap: anywhere; }
+table.two-col td:first-child { width: 55%; padding-right: var(--sp-4); }
+@media (max-width: 720px) {
+  table.two-col, table.two-col tbody, table.two-col tr, table.two-col td { display: block; width: auto; }
+  table.two-col td:first-child { width: auto; padding-right: 0; }
+}
+/* the "show all N" affordance under a capped list */
+.show-more { display: inline-block; margin-top: var(--sp-2); cursor: pointer; }
 /* the same, inside the mentions tray */
 .pending-mentions { margin-bottom: var(--sp-4);
   border-left: 3px solid var(--warn); padding-left: var(--sp-3); }

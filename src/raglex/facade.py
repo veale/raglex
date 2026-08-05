@@ -2113,6 +2113,7 @@ class Facade:
         static edition of UK law cannot carry working links into an EU corpus it does
         not contain.
         """
+        from .eu_law import consolidation_base
         from .resolve.matchers import assimilated_celex, assimilated_leg_path
         stable_id = doc["stable_id"]
         # UK assimilated text → the EU original (its own outgoing edge; the identifier
@@ -2130,7 +2131,11 @@ class Facade:
                     "note": "The EU original. Its CJEU case law is persuasive, not "
                             "binding, on the assimilated text (s. 6 EUWA 2018)."}
         # EU original → the UK assimilated text (an incoming edge from uk-legislation).
+        # A reader is normally on a DATED consolidation (02016R0679-20160504), and the
+        # assimilated edge points at the base act — so ask the base act's identity, or
+        # the link only ever appeared on the undated record nobody reads.
         own_celex = str(_row_meta(doc).get("celex") or stable_id)
+        own_celex = consolidation_base(own_celex) or own_celex
         if not re.fullmatch(r"[0-9]{5}[A-Z]{1,2}[0-9]{4}", own_celex.upper()):
             return None
         for row in cat.relations_to(own_celex):
