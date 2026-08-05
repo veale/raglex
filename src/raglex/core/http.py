@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
 
 import httpx
@@ -72,6 +73,11 @@ class RateLimitedClient:
         self.max_retries = max_retries
         self._sleep = sleep
         self._last_request_at = 0.0
+        # Reservation clock for the pacer: the monotonic time the NEXT request
+        # may start. Held under a lock so concurrent callers queue rather than
+        # race (see _pace).
+        self._next_slot_at = 0.0
+        self._pace_lock = threading.Lock()
         # Route through the configured proxy by default (§5a requires_proxy); an
         # explicit proxy arg overrides, None falls back to RAGLEX_PROXY.
         self._client = client or httpx.Client(
@@ -91,8 +97,22 @@ class RateLimitedClient:
         self._client.close()
 
     def _pace(self) -> None:
-        """Block until ``min_interval`` has elapsed since the last request."""
-        wait = self.min_interval - (time.monotonic() - self._last_request_at)
+        """Block until ``min_interval`` has elapsed since the last request.
+
+        Thread-safe, and that is what makes concurrent fetching POLITE rather than a
+        multiplier on the request rate. The reservation (read the last time, claim the
+        next slot) happens under the lock and the sleep happens outside it, so N threads
+        sharing this client queue up and emit at most one request per ``min_interval``
+        BETWEEN THEM — the same aggregate rate a serial crawl produced, with the network
+        latency overlapped instead of paid one document at a time. Without the lock two
+        threads would both observe the interval elapsed and fire together, quietly
+        doubling the rate the source was promised.
+        """
+        with self._pace_lock:
+            now = time.monotonic()
+            start_at = max(now, self._next_slot_at)
+            self._next_slot_at = start_at + self.min_interval
+        wait = start_at - now
         if wait > 0:
             self._sleep(wait)
         self._last_request_at = time.monotonic()

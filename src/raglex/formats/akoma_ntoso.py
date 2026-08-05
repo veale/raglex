@@ -186,6 +186,24 @@ def _relations(root: ET.Element) -> list[TypedRelation]:
     return rels
 
 
+#: Unit element → the ``kind`` its segments are recorded under. Everything not named
+#: here keeps the historical "section", so Acts, SIs and judgments are unaffected.
+#:
+#: An ARTICLE is not a section, and saying so had a visible cost: the UK GDPR's segments
+#: are labelled "Article 15" and anchor correctly, but they were typed "section", so
+#: asking that document for ``outline_kind='article'`` returned an empty list and the
+#: articles could only be found by asking for sections. The parser was applying UK-Act
+#: typing to a UK-hosted assimilated EU instrument.
+_UNIT_KINDS = {"article": "article"}
+
+
+def _unit_kind(name: str, ctx: dict) -> str:
+    # Inside a schedule the citable unit is the paragraph, whatever the element is called.
+    if ctx.get("schedule"):
+        return "paragraph"
+    return _UNIT_KINDS.get(name, "section")
+
+
 def _article_led(root: ET.Element) -> bool:
     """Does this instrument's body cite by ARTICLE rather than by section?
 
@@ -217,7 +235,7 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
         if name in units:
             text = flow_text(child, skip_tags=_AKN_SKIP, line_tags=_AKN_LINES)
             if text.strip():
-                kind = "paragraph" if ctx.get("schedule") else "section"
+                kind = _unit_kind(name, ctx)
                 blocks.append((_label(child, "section", ctx), kind, text, level))
         elif name in headings:
             header = _heading_only(child)
@@ -255,7 +273,7 @@ def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],
                 if text.strip():
                     blocks.append((
                         _label(child, "section", ctx, unit=_HCONTAINER_UNITS[role]),
-                        "section", text, level))
+                        _unit_kind(role, ctx), text, level))
             else:
                 _walk(child, level, blocks, ctx, units=units, headings=headings)
 

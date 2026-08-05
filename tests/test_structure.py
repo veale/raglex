@@ -287,3 +287,36 @@ def test_an_act_still_cites_by_section():
     parsed = parse_akn(akn)
     assert any((s.label or "").startswith("s. 5") for s in parsed.segments), \
         [s.label for s in parsed.segments]
+
+
+def test_an_article_is_typed_article_not_section():
+    """The labels were right — "Article 15" anchors correctly — but the segments were
+    RECORDED as kind 'section', so asking the UK GDPR for outline_kind='article'
+    returned an empty list and its articles could only be found by asking for sections.
+    The parser was applying UK-Act typing to an assimilated EU instrument."""
+    from raglex.formats.akoma_ntoso import parse_akn
+
+    akn = b"""<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+      <act><body>
+        <chapter><num>CHAPTER I</num><heading>General</heading>
+          <article eId="article-15"><num>Article 15</num><heading>Right of access</heading>
+            <paragraph><content><p>The data subject shall have the right.</p></content></paragraph>
+          </article>
+        </chapter>
+      </body></act></akomaNtoso>"""
+    segs = {s.label: s.kind for s in parse_akn(akn).segments}
+    assert segs["Article 15 Right of access"] == "article"
+
+
+def test_an_acts_sections_are_still_sections():
+    """Only articles change kind; Acts, SIs and judgments keep the historical typing."""
+    from raglex.formats.akoma_ntoso import parse_akn
+
+    akn = b"""<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+      <act><body>
+        <section eId="section-5"><num>5</num><heading>Duties</heading>
+          <subsection><content><p>A person must comply.</p></content></subsection>
+        </section>
+      </body></act></akomaNtoso>"""
+    segs = {s.label: s.kind for s in parse_akn(akn).segments}
+    assert segs["s. 5 Duties"] == "section"

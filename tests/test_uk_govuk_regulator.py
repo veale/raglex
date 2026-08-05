@@ -321,3 +321,98 @@ def test_dry_run_predicts_the_merges_the_apply_will_do():
     assert applied["merged"] == 1 and applied["rekeyed"] == 2
     # …and the plan named the same survivor the apply kept
     assert [c["old"] for c in applied["changes"]] == [c["old"] for c in plan["changes"]]
+
+
+# ── concurrency must overlap the waiting, not spend more of the allowance ─────
+def test_the_pacer_holds_the_aggregate_rate_under_concurrency():
+    """Concurrent fetching is only polite if the shared pacer is thread-safe. Without the
+    lock two threads both observe the interval elapsed and fire together, quietly
+    doubling the rate the source was promised."""
+    import threading
+    import time
+
+    from raglex.core.http import RateLimitedClient
+
+    slept: list[float] = []
+    lock = threading.Lock()
+
+    def fake_sleep(s):
+        with lock:
+            slept.append(s)
+        time.sleep(min(s, 0.001))          # keep the test fast, keep the ordering
+
+    client = RateLimitedClient("t", min_interval=0.05, sleep=fake_sleep,
+                               client=object())
+    threads = [threading.Thread(target=client._pace) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Eight callers, so seven of them must have waited, and the reservations must be
+    # spread across the interval rather than all claiming "now".
+    assert len(slept) >= 7, slept
+    assert max(slept) >= 0.05 * 6, slept    # the last caller waits ~7 intervals
+
+
+def test_one_documents_attachments_are_fetched_together():
+    """A publication costs ~3.6 requests and each was paid serially. They are independent
+    fetches for the SAME document, so they overlap — one document at a time still, which
+    is what keeps watermark, dedup and resume semantics untouched."""
+    import threading
+
+    inflight, peak = [0], [0]
+    lock = threading.Lock()
+
+    class _SlowClient:
+        def get(self, url, **kw):
+            with lock:
+                inflight[0] += 1
+                peak[0] = max(peak[0], inflight[0])
+            try:
+                import time
+                time.sleep(0.05)
+                return _Response(None, content=b"%PDF-1.4")
+            finally:
+                with lock:
+                    inflight[0] -= 1
+
+    adapter = GOVUKRegulatorAdapter(source="uk-govuk-policy",
+                                    supergroup="policy_and_engagement",
+                                    client=_SlowClient())
+    got = adapter._fetch_bytes_many([f"https://assets.test/{n}.pdf" for n in range(6)])
+    assert len(got) == 6
+    assert peak[0] > 1, "attachments were still fetched one at a time"
+
+
+def test_a_failing_attachment_costs_only_itself():
+    """A 404 attachment must cost that attachment, not the publication."""
+    class _Flaky:
+        def get(self, url, **kw):
+            if url.endswith("2.pdf"):
+                raise FetchError("404")
+            return _Response(None, content=b"ok")
+
+    adapter = GOVUKRegulatorAdapter(source="uk-govuk-policy",
+                                    supergroup="policy_and_engagement",
+                                    client=_Flaky())
+    got = adapter._fetch_bytes_many([f"https://assets.test/{n}.pdf" for n in range(4)])
+    assert set(got) == {f"https://assets.test/{n}.pdf" for n in (0, 1, 3)}
+
+
+def test_a_rate_limit_still_reaches_the_pipeline():
+    """The one failure that must NOT be swallowed: the pipeline pauses the source's queue
+    on it, rather than hammering on through the rest of the corpus."""
+    import pytest
+
+    from raglex.core.errors import RateLimitException
+
+    class _Limited:
+        def get(self, url, **kw):
+            raise RateLimitException("uk-govuk-policy", retry_after=30)
+
+    adapter = GOVUKRegulatorAdapter(source="uk-govuk-policy",
+                                    supergroup="policy_and_engagement",
+                                    client=_Limited())
+    with pytest.raises(RateLimitException):
+        adapter._fetch_bytes_many([f"https://assets.test/{n}.pdf" for n in range(3)])

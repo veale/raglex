@@ -204,6 +204,36 @@ def _decades(years: list[dict] | None) -> dict:
     return dict(sorted(out.items()))
 
 
+#: A reparse below this many segments, against a document that had many, is a
+#: FLATTENING rather than an improvement. One segment means the parser found no
+#: structure at all and handed back the whole document as a single block.
+_FLATTEN_FLOOR = 2
+
+
+def _would_flatten(ts, payload_hash: str | None, fresh: list) -> bool:
+    """Would writing ``fresh`` replace real structure with one undifferentiated block?
+
+    A reparse is supposed to be a projection refresh, and it is normally an improvement —
+    but it overwrites unconditionally, and a parser that fails to recognise a document's
+    shape returns the whole text as ONE segment rather than raising. Run over a corpus
+    that is a rescue for the majority, that silently destroys the minority: the UK GDPR's
+    base act went from its articles to a single 197,522-character blob, which is what the
+    reader then displayed.
+
+    The raw is immutable, so nothing is lost permanently — but the projection is what is
+    served, and a whole-source sweep can flatten thousands of documents before anyone
+    notices one. Refuse the write and report it; a genuine improvement never has to pass
+    through one segment to get there.
+    """
+    if len(fresh) >= _FLATTEN_FLOOR or not payload_hash:
+        return False
+    try:
+        held = ts.get_segments(payload_hash) or []
+    except OSError:
+        return False
+    return len(held) >= _FLATTEN_FLOOR
+
+
 def _segment_at(ts, doc, char_start: int | None) -> str | None:
     """The label of the structural unit containing ``char_start`` ("para 42",
     "Article 6"), so a free-text hit can be linked to the passage it matched."""
@@ -7793,6 +7823,9 @@ class Facade:
                 text, segments = pd.text, pd.segments
             if not text:
                 return {"stable_id": stable_id, "reparsed": False, "reason": "parser produced no text"}
+            if _would_flatten(ts, doc["payload_hash"], segments):
+                return {"stable_id": stable_id, "reparsed": False,
+                        "reason": "would flatten held structure", "segments": len(segments)}
             ts.put(doc["payload_hash"], text)            # overwrite (same hash → same path)
             ts.put_segments(doc["payload_hash"], segments)
             return {"stable_id": stable_id, "reparsed": True, "format": fmt,
@@ -8255,6 +8288,10 @@ class Facade:
                         return "skip"
                     pd = parse_format(fmt, raw)
                     if not pd.text:
+                        return "skip"
+                    # Never trade real structure for one undifferentiated block — over a
+                    # whole source this flattens thousands of documents unseen.
+                    if _would_flatten(ts, r["payload_hash"], pd.segments):
                         return "skip"
                     ts.put(r["payload_hash"], pd.text)
                     ts.put_segments(r["payload_hash"], pd.segments)

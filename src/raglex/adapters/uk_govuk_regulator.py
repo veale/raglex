@@ -150,7 +150,12 @@ def content_text(content: dict) -> str:
 
 
 class GOVUKRegulatorAdapter(BaseAdapter):
-    min_interval = 0.75
+    # GOV.UK publishes a rate limit of 10 requests per second. 0.75s serial was 1.33/s —
+    # 13% of the allowance — and a publication costs ~3.6 requests, so the 25,174-item
+    # policy corpus projected to 19 hours of almost pure sleeping. 0.2s is 5/s: half the
+    # published limit, and the pacer is shared and thread-safe, so the concurrent
+    # attachment fetches below queue on it rather than multiplying it.
+    min_interval = 0.2
     page_size = 200
 
     def __init__(
@@ -247,6 +252,60 @@ class GOVUKRegulatorAdapter(BaseAdapter):
             if max_pages is not None and pages >= max_pages:
                 return
 
+    #: How many of ONE document's attachments to fetch at once. The aggregate request
+    #: rate is still the shared pacer's (see RateLimitedClient._pace), so this overlaps
+    #: waiting rather than spending more of the source's allowance — GOV.UK publishes a
+    #: 10 req/s limit and ``min_interval`` keeps us well inside it. Bounded small because
+    #: a publication rarely has more than a handful.
+    attachment_workers = 6
+
+    def _fetch_many(self, urls, read):
+        """``{url: value}`` for several of ONE document's attachments, fetched at once.
+
+        A failure is an ABSENT KEY, never an exception: a 404 attachment or a PDF the
+        extractor chokes on must cost that attachment, not the publication. The one
+        exception is the source pushing back — a rate limit has to reach the pipeline so
+        it can pause the queue rather than hammering on through the rest of the corpus.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        urls = list(dict.fromkeys(u for u in urls if u))
+        if not urls:
+            return {}
+        if len(urls) == 1:                      # no pool for the common case
+            try:
+                return {urls[0]: read(self._client.get(urls[0]))}
+            except RateLimitException:
+                raise
+            except Exception:                   # noqa: BLE001
+                return {}
+        out: dict = {}
+        rate_limited: list[BaseException] = []
+
+        def one(url):
+            try:
+                return url, read(self._client.get(url))
+            except RateLimitException as exc:
+                rate_limited.append(exc)
+                return url, None
+            except Exception:                   # noqa: BLE001 — see docstring
+                return url, None
+
+        with ThreadPoolExecutor(max_workers=min(self.attachment_workers,
+                                                len(urls))) as pool:
+            for url, value in pool.map(one, urls):
+                if value is not None:
+                    out[url] = value
+        if rate_limited:
+            raise rate_limited[0]
+        return out
+
+    def _fetch_json_many(self, urls) -> dict:
+        return self._fetch_many(urls, lambda r: r.json())
+
+    def _fetch_bytes_many(self, urls) -> dict:
+        return self._fetch_many(urls, lambda r: r.content)
+
     def fetch(self, stub: Stub) -> Record | None:
         response = self._client.get(stub.raw_url)
         try:
@@ -258,21 +317,28 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         attachment_meta: list[dict] = []
         html_attachment_titles: set[str] = set()
         pdf_rendition_keys: set[str] = set()
+        wanted_pdfs: list[tuple[str, str]] = []
         aliases: list[str] = []
         # A GOV.UK publication is a container. Its full, accessible guidance often
         # lives in one or more child ``html_publication`` Content Store records, not
         # in the parent's body (CMA207 is the canonical example). Follow those
         # internal attachments before falling back to the equivalent PDF.
-        for attachment in details.get("attachments") or ():
-            if not isinstance(attachment, dict):
-                continue
+        html_children = [a for a in (details.get("attachments") or ())
+                         if isinstance(a, dict) and a.get("attachment_type") == "html"
+                         and str(a.get("url") or "").startswith("/")]
+        # A document's own attachments are INDEPENDENT fetches, and each was paid for one
+        # at a time: a publication costs ~3.6 requests, so the wall clock was ~3.6× the
+        # pacing floor per document — 19 hours for the 25,174-item policy corpus, almost
+        # all of it sleeping. Fetched concurrently the document costs about one request's
+        # latency instead. The pacer is shared and thread-safe, so the AGGREGATE request
+        # rate is unchanged — this overlaps the waiting, it does not spend more of the
+        # source's allowance. One document at a time still, so watermark, dedup, resume
+        # and progress semantics are all untouched.
+        children = self._fetch_json_many(f"{CONTENT}{str(a['url'])}" for a in html_children)
+        for attachment in html_children:
             url = str(attachment.get("url") or "")
-            if attachment.get("attachment_type") != "html" or not url.startswith("/"):
-                continue
-            try:
-                child_response = self._client.get(f"{CONTENT}{url}")
-                child = child_response.json()
-            except (FetchError, ValueError):
+            child = children.get(f"{CONTENT}{url}")
+            if child is None:
                 continue
             body = content_text(child)
             if not body:
@@ -320,13 +386,19 @@ class GOVUKRegulatorAdapter(BaseAdapter):
                 })
                 continue
             pdf_rendition_keys.add(title_key)
+            wanted_pdfs.append((url, title))
+        # Which PDFs to take is decided ABOVE without any I/O, because the rendition
+        # rules are order-dependent (a PDF is skipped for a twin already seen). Only once
+        # the set is settled are they downloaded, and then concurrently.
+        pdf_bodies = self._fetch_bytes_many(url for url, _t in wanted_pdfs)
+        for url, title in wanted_pdfs:
+            pdf = pdf_bodies.get(url)
+            if pdf is None:
+                continue
             try:
-                pdf = self._client.get(url).content
                 extracted = extract_bytes(pdf, ext="pdf", mime="application/pdf")
-            except RateLimitException:
-                raise            # the source is pushing back — pause its queue
-            except Exception:    # noqa: BLE001 — a 404, or a PDF the extractor chokes
-                continue         # on, must cost this attachment, not the publication
+            except Exception:    # noqa: BLE001 — a PDF the extractor chokes on must cost
+                continue         # this attachment, not the publication
             body = (extracted.text or "").strip()
             if body:
                 text += "\n\n" + body

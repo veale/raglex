@@ -257,3 +257,32 @@ def test_a_build_repoints_an_edition_off_a_retired_id():
     assert moves and moves[0]["to"] == "european/regulation/2016/0679"
     assert items[0]["stable_id"] == "european/regulation/2016/0679"
     assert items[0]["short"] == "UK GDPR"     # the operator's own naming is kept
+
+
+# ── a reparse must never flatten what it rewrites ────────────────────────────
+def test_a_reparse_refuses_to_replace_structure_with_one_blob():
+    """A parser that does not recognise a document's shape returns the whole text as ONE
+    segment rather than raising, and the reparse overwrites unconditionally. The UK
+    GDPR's base act went from its 120 articles to a single 197,522-character block, which
+    is what the reader then displayed."""
+    from raglex.core.models import Segment
+    from raglex.facade import _would_flatten
+
+    class _TS:
+        def __init__(self, held):
+            self.held = held
+
+        def get_segments(self, _ph):
+            return self.held
+
+    def _segs(n):
+        return [Segment(label=f"Article {i}", kind="section", level=1,
+                        char_start=i, char_end=i + 1) for i in range(n)]
+
+    many = _TS(_segs(120))
+    assert _would_flatten(many, "ph", _segs(1)) is True      # 120 → 1 is a flattening
+    assert _would_flatten(many, "ph", _segs(119)) is False   # a real reparse is allowed
+    assert _would_flatten(many, "ph", _segs(200)) is False   # so is an improvement
+    # a document that never had structure is not protected from gaining none
+    assert _would_flatten(_TS(_segs(1)), "ph", _segs(1)) is False
+    assert _would_flatten(_TS([]), "ph", _segs(1)) is False
