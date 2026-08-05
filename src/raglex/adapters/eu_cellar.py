@@ -963,6 +963,17 @@ _OJ_SUMMARY_HEAD_RE = re.compile(
 #: What the endnote leaves behind when a caption is split in the wrong place —
 #: "OJ C 6, 8.1.2005". Never a party name.
 _OJ_REF_ONLY_RE = re.compile(r"^[\s).,]*OJ\s+[CL]\s*\d+", re.IGNORECASE)
+#: The referring court's own parenthetical carries a dash — "(Bundesgerichtshof –
+#: Germany) — Peek & Cloppenburg KG v Cassina SpA" — and the heading rule stops at the
+#: FIRST dash, so the capture opened mid-parenthetical and the case was titled
+#: "Germany) — Peek & Cloppenburg…". The same trap ``_PENDING_HEAD_RE`` anchors on a
+#: date to avoid. Here the tell is unambiguous: a close-paren with no open before it.
+_PAREN_TAIL_RE = re.compile(r"^[^()]*\)\s*[–—-]\s*(?P<rest>.+)$", re.DOTALL)
+
+
+def _strip_parenthetical_tail(name: str) -> str:
+    m = _PAREN_TAIL_RE.match(name.strip())
+    return m.group("rest") if m else name
 
 
 def formex_case_title(xml_bytes: bytes) -> str | None:
@@ -997,7 +1008,7 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
         # docket when the heading has that shape; it is the only text that is a name.
         oj = _OJ_SUMMARY_HEAD_RE.search(header_title)
         if oj:
-            parties = oj.group("name").strip(" .,—-")
+            parties = _strip_parenthetical_tail(oj.group("name")).strip(" .,—-")
         else:
             m = re.search(r"\bCase\s+[CTF]?[-‑–]?\d+/\d+\s*(.+?)(?:\(Request\b|$)",
                           header_title, re.IGNORECASE)

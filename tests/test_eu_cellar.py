@@ -1046,3 +1046,23 @@ def test_ag_opinion_caption_still_reads_the_other_way_round():
     from raglex.adapters.eu_cellar import formex_case_title
 
     assert formex_case_title(opinion) == "VB v Natsionalna agentsia za prihodite"
+
+
+def test_referring_court_parenthetical_is_not_the_party_separator():
+    """"…(Bundesgerichtshof – Germany) — Peek & Cloppenburg KG v Cassina SpA".
+
+    The heading rule stops at the FIRST dash, which here sits inside the referring
+    court's own parenthetical, so the capture opened mid-parenthetical and the case
+    was titled "Germany) — Peek & Cloppenburg KG v Cassina SpA". Same trap
+    _PENDING_HEAD_RE anchors on a date to avoid.
+    """
+    from raglex.adapters.eu_cellar import formex_case_title
+
+    notice = (
+        '<?xml version="1.0" encoding="UTF-8"?><CJT><TI.CJT><TITLE><TI><P>'
+        "Judgment of the Court (Fourth Chamber) of 17 April 2008 (reference for a "
+        "preliminary ruling from the Bundesgerichtshof – Germany) — Peek &amp; "
+        "Cloppenburg KG v Cassina SpA</P><P>(Case C-456/06)</P>"
+        "</TI></TITLE></TI.CJT></CJT>"
+    ).encode()
+    assert formex_case_title(notice) == "Peek & Cloppenburg KG v Cassina SpA"
