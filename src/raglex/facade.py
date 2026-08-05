@@ -7779,6 +7779,59 @@ class Facade:
         self._invalidate_caches()
         return out
 
+    def repair_oj_wrapper_notices(self, *, limit: int = 2000, batch: int = 40,
+                                  on_progress=None, cancel_check=None) -> dict:
+        """Re-fetch notices whose stored raw is the OJ issue's masthead, not the notice.
+
+        The Formex archive ships the issue's contents wrapper beside the item, and the
+        unzip used to take the archive's first member — so 993 notices were stored as an
+        OJ front page: no parties to read a case name from ("Pending: Case T-8/24") and
+        no questions. The wrapper is what we kept, so reparsing cannot recover them;
+        only the source can. Identified from the stored bytes rather than from the
+        symptom, and re-fetched in batches through the normal pipeline.
+        """
+        from pathlib import Path
+
+        from .adapters.eu_cellar import _PUBLICATION_ROOT
+        from .adapters.registry import get_adapter
+        from .citations import extract_corpus
+        from .pipeline import Pipeline
+
+        damaged: list[str] = []
+        with self._open() as (cat, _rs, _ts):
+            for row in cat.list_documents(source="eu-cellar", limit=200000):
+                if str(row["doc_type"]) != "note" or len(damaged) >= limit:
+                    continue
+                doc = cat.get_document(row["stable_id"])
+                if doc is None or not doc["raw_path"]:
+                    continue
+                try:
+                    head = Path(doc["raw_path"]).read_bytes()[:400]
+                except OSError:
+                    continue
+                if _PUBLICATION_ROOT.search(head):
+                    celex = str((_row_meta(doc) or {}).get("celex") or row["stable_id"])
+                    damaged.append(celex)
+        out = {"damaged": len(damaged), "refetched": 0}
+        for start in range(0, len(damaged), batch):
+            if cancel_check and cancel_check():
+                break
+            chunk = damaged[start:start + batch]
+            _progress(on_progress, stage="re-fetching OJ-wrapper notices",
+                      done=start, total=len(damaged), item=chunk[0])
+            with self._open() as (cat, rs, ts):
+                adapter = get_adapter("eu-cellar", celexes=",".join(chunk))
+                # backfill ignores the watermark, refetch_held re-pulls what we hold —
+                # the point is precisely to replace the stored bytes.
+                Pipeline(cat, rs, textstore=ts).run(
+                    adapter, backfill=True, refetch_held=True)
+                for celex in chunk:
+                    extract_corpus(cat, ts, stable_id=celex)
+                Resolver(cat).run()
+            out["refetched"] += len(chunk)
+        self._invalidate_caches()
+        return out
+
     def reparse_all(self, *, doc_type: str | None = "legislation") -> dict:
         """Re-derive text+segments for every structural document (default: legislation)
         — run after a parser upgrade so already-harvested docs pick up the new

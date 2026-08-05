@@ -392,6 +392,11 @@ RUNNERS: dict[str, Callable] = {
         on_progress=cb, cancel_check=cancel),
     # Re-derive held CN/TN notices from their raw: the structured form, the docketed
     # title, and their citations (which were mined out of the old flat parse's text).
+    # Re-fetch notices stored as the OJ issue's masthead instead of the notice itself
+    # (their raw is the wrapper, so no local reparse can recover them).
+    "repair-oj-wrapper-notices": lambda f, p, cb, cancel: f.repair_oj_wrapper_notices(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
     "reparse-pending-notices": lambda f, p, cb, cancel: f.reparse_pending_eu_notices(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),

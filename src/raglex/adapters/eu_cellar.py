@@ -1127,6 +1127,7 @@ class EUCellarAdapter(BaseAdapter):
         legislation_celex: str | None = None,
         cited_by_celex: str | None = None,
         pending_cases: bool = False,
+        celexes: tuple[str, ...] | list[str] | str = (),
         per_page: int = 100,
         with_citations: bool = True,
         client: RateLimitedClient | None = None,
@@ -1141,6 +1142,13 @@ class EUCellarAdapter(BaseAdapter):
         # same CELLAR dossier, so the catalogue can retire the notice once a full
         # English decision is actually available.
         self.pending_cases = pending_cases
+        # A named set of CELEXes to (re-)fetch, for repairing specific held documents
+        # from source — the OJ-wrapper notices, whose stored raw is the masthead and so
+        # cannot be repaired by reparsing. Comma-separated when it arrives from a job's
+        # options dict.
+        self.celexes = tuple(
+            c.strip().upper() for c in
+            (celexes.split(",") if isinstance(celexes, str) else celexes) if str(c).strip())
         self.per_page = per_page
         self.with_citations = with_citations
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
@@ -1204,6 +1212,27 @@ SELECT DISTINCT ?celex ?ecli ?date ?rtype ?title WHERE {{
 }}
 ORDER BY DESC(?date) ?celex
 LIMIT {self.per_page} OFFSET {offset}
+"""
+
+    def _by_celex_query(self, celexes: tuple[str, ...]) -> str:
+        """Metadata for a named set of CELEXes — the repair feed. Same shape as the
+        pending query's notice branch, so a re-fetched notice keeps its pending hints."""
+        listed = '", "'.join(celexes)
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?celex ?ecli ?date ?rtype ?procedure ?dossier WHERE {{
+  ?work cdm:resource_legal_id_celex ?c .
+  FILTER(STR(?c) IN ("{listed}"))
+  BIND(STR(?c) AS ?celex)
+  OPTIONAL {{ ?work cdm:case-law_ecli ?ecli }}
+  OPTIONAL {{ ?work cdm:work_date_document ?date }}
+  OPTIONAL {{ ?work cdm:work_part_of_dossier ?dossier }}
+  OPTIONAL {{ ?work cdm:communication_cjeu_has_type_procedure_concept_type_procedure ?p .
+             BIND(REPLACE(STR(?p), "^.*/", "") AS ?procedure) }}
+  OPTIONAL {{ ?work cdm:work_has_resource-type ?rt .
+             BIND(REPLACE(STR(?rt), "^.*resource-type/", "") AS ?rtype) }}
+}}
+LIMIT {max(50, len(celexes) * 2)}
 """
 
     def _pending_query(self, since: str | None, offset: int) -> str:
@@ -1348,13 +1377,13 @@ LIMIT {self.per_page}
 
     # -- adapter contract --------------------------------------------------
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        targeted = bool(self.cited_by_celex or self.legislation_celex)
+        targeted = bool(self.cited_by_celex or self.legislation_celex or self.celexes)
         offset = 0
         pages = 0
         seen: set[str] = set()
         while True:
-            if self.cited_by_celex:
-                query = self._citing_query(self.cited_by_celex)
+            if self.celexes:
+                query = self._by_celex_query(self.celexes)
             elif self.legislation_celex:
                 query = self._discover_query(since)
             elif self.pending_cases:
