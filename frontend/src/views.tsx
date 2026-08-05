@@ -2708,8 +2708,12 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
           }}>Return to the applicable consolidation</button>
         </div>
       )}
-      {d.doc_type === "legislation" && <LegStatusBanner id={d.stable_id} open={open} />}
+      {/* Above the currency banner, not below it: on a consolidated act that banner runs
+          to several paragraphs (version state, amendments, effects), which pushed "what
+          is still before the Court" off the first screen — the one thing on the page that
+          is not yet settled law. */}
       {d.doc_type === "legislation" && <PendingReferencesBox id={d.stable_id} open={open} />}
+      {d.doc_type === "legislation" && <LegStatusBanner id={d.stable_id} open={open} />}
       <div className="panel">
         <Reader id={d.stable_id} incoming={doc.incoming || []} pinpoint={pinpoint}
           oscola={doc.oscola} title={d.title || d.stable_id} landingUrl={d.landing_url} />
