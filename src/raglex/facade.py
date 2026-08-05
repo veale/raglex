@@ -7823,16 +7823,18 @@ class Facade:
                                   on_progress=None, cancel_check=None) -> dict:
         """Re-fetch notices whose stored raw is the OJ issue's masthead, not the notice.
 
-        The Formex archive ships the issue's contents wrapper beside the item, and the
-        unzip used to take the archive's first member — so 993 notices were stored as an
-        OJ front page: no parties to read a case name from ("Pending: Case T-8/24") and
-        no questions. The wrapper is what we kept, so reparsing cannot recover them;
-        only the source can. Identified from the stored bytes rather than from the
-        symptom, and re-fetched in batches through the normal pipeline.
+        The Formex archive ships TWO wrappers beside the item — the issue's masthead and
+        a bibliographic manifest — and the unzip took first one and then the other, so
+        these notices were stored as an OJ front page or as a run of manifest fields: no
+        parties to read a case name from ("Pending: Case T-8/24") and no questions. The
+        wrapper is what we kept, so reparsing cannot recover them; only the source can.
+        Identified from the stored bytes rather than from the symptom — which is what
+        lets one pass clean up after both mistakes — and re-fetched in batches through
+        the normal pipeline.
         """
         from pathlib import Path
 
-        from .adapters.eu_cellar import _PUBLICATION_ROOT
+        from .adapters.eu_cellar import _is_wrapper
         from .adapters.registry import get_adapter
         from .citations import extract_corpus
         from .pipeline import Pipeline
@@ -7846,10 +7848,13 @@ class Facade:
                 if doc is None or not doc["raw_path"]:
                     continue
                 try:
-                    head = Path(doc["raw_path"]).read_bytes()[:400]
+                    # 1200 bytes, not 400: the manifest is recognised by <BIB.DOC>
+                    # following its <DOC> root, which sits past the XML declaration and
+                    # the schema URL. A 400-byte read sees the root and misses the proof.
+                    head = Path(doc["raw_path"]).read_bytes()[:1200]
                 except OSError:
                     continue
-                if _PUBLICATION_ROOT.search(head):
+                if _is_wrapper(head):
                     celex = str((_row_meta(doc) or {}).get("celex") or row["stable_id"])
                     damaged.append(celex)
         out = {"damaged": len(damaged), "refetched": 0}
