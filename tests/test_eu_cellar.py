@@ -1010,3 +1010,39 @@ def test_unzip_skips_the_bibliographic_manifest_too():
     assert picked is not None and b"<CJT>" in picked
     assert b"BIB.DOC" not in picked
     assert pending_formex_title(picked) == "CE v EIB (T-48/24)"
+
+
+def test_oj_summary_notice_title_is_the_parties_not_the_endnote():
+    """An OJ judgment-summary notice puts its parties BEFORE the docket:
+
+        Judgment of the Court (Second Chamber) of 13 December 2007 —
+        Commission of the European Communities v Ireland (Case C-418/04) OJ C 6, 8.1.2005
+
+    The AG-opinion caption rule takes what follows the case number, which here is the
+    endnote, so these were titled ") OJ C 6, 8.1.2005" — and two of them, whose endnote
+    sat elsewhere, were titled nothing at all. Latent until the wrapper repair started
+    re-fetching notices whose stored raw had been the OJ masthead.
+    """
+    notice = (
+        '<?xml version="1.0" encoding="UTF-8"?><CJT NNC="YES"><TI.CJT><TITLE><TI>'
+        "<P>Judgment of the Court (Second Chamber) of "
+        '<DATE ISO="20071213">13 December 2007</DATE> — Commission of the European '
+        "Communities v Ireland</P><P>(Case C-418/04)"
+        '<NOTE NOTE.ID="E0001"><P><REF.DOC.OJ COLL="C">OJ C 6, 8.1.2005</REF.DOC.OJ>.'
+        "</P></NOTE></P></TI></TITLE></TI.CJT></CJT>"
+    ).encode()
+    from raglex.adapters.eu_cellar import formex_case_title
+
+    assert formex_case_title(notice) == "Commission of the European Communities v Ireland"
+
+
+def test_ag_opinion_caption_still_reads_the_other_way_round():
+    # The pattern the OJ rule must not displace: parties AFTER the case number.
+    opinion = (
+        '<?xml version="1.0" encoding="UTF-8"?><OPI><TITLE><TI>'
+        "<P>Case C-340/21 VB v Natsionalna agentsia za prihodite (Request for a "
+        "preliminary ruling)</P></TI></TITLE></OPI>"
+    ).encode()
+    from raglex.adapters.eu_cellar import formex_case_title
+
+    assert formex_case_title(opinion) == "VB v Natsionalna agentsia za prihodite"

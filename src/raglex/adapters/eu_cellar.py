@@ -952,6 +952,19 @@ def _clean_parties(parties: str) -> str:
     return core(parties)
 
 
+#: An OJ judgment/order SUMMARY notice heading: an act-and-date preamble, an em-dash,
+#: the parties, then the docket. Unlike a pending-application notice the parties precede
+#: the case number, and unlike an AG opinion caption there is nothing usable after it.
+_OJ_SUMMARY_HEAD_RE = re.compile(
+    r"^(?:Judgment|Order|Opinion)\b[^–—]*[–—]\s*(?P<name>.+?)\s*"
+    r"\((?:Joined\s+)?Cases?\s+(?P<no>[CTF][-‑–]?\d+/\d+)",
+    re.IGNORECASE,
+)
+#: What the endnote leaves behind when a caption is split in the wrong place —
+#: "OJ C 6, 8.1.2005". Never a party name.
+_OJ_REF_ONLY_RE = re.compile(r"^[\s).,]*OJ\s+[CL]\s*\d+", re.IGNORECASE)
+
+
 def formex_case_title(xml_bytes: bytes) -> str | None:
     """A concise case name from a CJEU Formex judgment — the ``<PARTIES>`` line + the
     ``<NO.CASE>`` number, e.g. "ZZ v Secretary of State for the Home Department (C-300/11)".
@@ -974,12 +987,29 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
     # previously these opinions fell back to a blank title or, worse, their ECLI.
     if not parties and header_title:
         header_title = re.sub(r"\s+", " ", header_title)
-        m = re.search(r"\bCase\s+[CTF]?[-‑–]?\d+/\d+\s*(.+?)(?:\(Request\b|$)",
-                      header_title, re.IGNORECASE)
-        if m:
-            parties = m.group(1).strip(" .,—-")
+        # …but an OJ JUDGMENT-SUMMARY notice puts the parties the other way round:
+        #
+        #   Judgment of the Court (Second Chamber) of 13 December 2007 —
+        #   Commission of the European Communities v Ireland (Case C-418/04) OJ C 6, 8.1.2005
+        #
+        # The AG pattern below takes what follows the case number, which here is the
+        # endnote — titling C-418/04 ") OJ C 6, 8.1.2005". Anchor on the dash BEFORE the
+        # docket when the heading has that shape; it is the only text that is a name.
+        oj = _OJ_SUMMARY_HEAD_RE.search(header_title)
+        if oj:
+            parties = oj.group("name").strip(" .,—-")
+        else:
+            m = re.search(r"\bCase\s+[CTF]?[-‑–]?\d+/\d+\s*(.+?)(?:\(Request\b|$)",
+                          header_title, re.IGNORECASE)
+            if m:
+                parties = m.group(1).strip(" .,—-")
+        if parties:
             # Formex inline nodes concatenate around the party separator.
             parties = re.sub(r"(?<=[A-Za-zÀ-ÿ])v(?=[A-ZÀ-Þ])", " v ", parties)
+            # A caption fragment is not a name. Whatever survived must contain a letter
+            # and must not be the OJ reference the endnote leaves behind.
+            if not re.search(r"[A-Za-zÀ-ÿ]{2}", parties) or _OJ_REF_ONLY_RE.match(parties):
+                parties = None
     if not parties:
         return None
     parties = _clean_parties(re.sub(r"\s+", " ", parties))
