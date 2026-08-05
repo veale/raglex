@@ -1012,6 +1012,27 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.reparse_all(doc_type=doc_type)
 
     @admin
+    def jobs_list(limit: int = 30) -> dict:
+        """What the corpus is doing: every job running, queued or lately finished, with
+        its progress. The companion to ``cancel_job`` — you need the id from here."""
+        from .jobs import JobManager
+
+        rows = JobManager(facade, origin="mcp").list(limit=limit)
+        return {"jobs": [
+            {k: j.get(k) for k in
+             ("id", "kind", "label", "status", "origin", "progress", "started_at")}
+            for j in rows]}
+
+    @admin
+    def cancel_job(job_id: str) -> dict:
+        """Stop a job, whether it is RUNNING or merely queued. A running job is
+        cancelled cooperatively at its next checkpoint, so it stops without leaving a
+        half-written batch; a queued one is simply dropped, having spent nothing."""
+        from .jobs import JobManager
+
+        return JobManager(facade, origin="mcp").cancel(job_id)
+
+    @admin
     def repair_eu_annexes(limit: int = 100000, after_stable_id: str = "") -> dict:
         """Start a resumable local repair of held EU Formex packages whose annexes
         were split into secondary XML members. Reparse and citation re-extraction are

@@ -5488,8 +5488,14 @@ export function JobsPanel() {
   }, [openId, jobs]);
 
   const active = jobs.filter((j) => j.status === "running");
-  const recent = jobs.filter((j) => j.status !== "running").slice(0, 4);
-  if (active.length === 0 && recent.length === 0) return null;
+  // Queued jobs are their own thing, not history. Lumped in with the finished ones they
+  // were capped at four, sorted among "done"/"error" rows, and offered no cancel — so a
+  // queue you no longer wanted could only be cleared from the API. They are the jobs most
+  // worth cancelling: nothing has been spent on them yet.
+  const waiting = jobs.filter((j) => j.status === "queued");
+  const recent = jobs.filter((j) => j.status !== "running" && j.status !== "queued")
+    .slice(0, 4);
+  if (active.length === 0 && waiting.length === 0 && recent.length === 0) return null;
   const icon = (s: string) => (s === "cancelled" ? "⊘" : s === "error" ? "✗" : s === "done" ? "✓" : "●");
   return (
     <div className={`jobs-dock${collapsed ? " collapsed" : ""}`}>
@@ -5531,6 +5537,19 @@ export function JobsPanel() {
             </div>
           );
         })}
+        {waiting.length > 0 && <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+          Waiting for a slot — {waiting.length} queued
+        </div>}
+        {waiting.map((j, n) => (
+          <div key={j.id} className="job-done row" title={j.last} style={{ alignItems: "center", gap: 6 }}>
+            <span style={{ flex: 1 }}>
+              <span className="muted">{n + 1}.</span> {j.label || j.kind}
+              {j.origin === "scheduler" && <span className="tag" style={{ marginLeft: 6, fontSize: 10 }} title="Started by the background scheduler, not from this UI">scheduler</span>}
+            </span>
+            <button className="mini" title="Drop this job from the queue. Nothing has run yet, so nothing is lost."
+              onClick={() => api.cancelJob(j.id)}>cancel</button>
+          </div>
+        ))}
         {recent.map((j) => (
           <div key={j.id} className="job-done muted row" title={j.last} style={{ alignItems: "center", gap: 6 }}>
             <span style={{ flex: 1 }}>{icon(j.status)} {j.label || j.kind} — {j.last || j.status}</span>
