@@ -1040,3 +1040,48 @@ def test_a_predecessor_is_carried_through_to_the_uk_article():
         ("Article 15", "Article 12")]
     assert got["mappings"][0]["source_jurisdiction"] == "European Union"
     assert got["mappings"][0]["inherit_before"] == "2020-12-31"
+
+
+def test_anchors_fall_back_to_the_readable_version():
+    """Assimilated law's base node is fetched from a path that serves a landing page
+    rather than the text, so it carries no article structure — the UK GDPR's base parsed
+    to one segment. The version the reader actually opens has the articles."""
+    import os
+    import tempfile
+    from datetime import date
+
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record, Segment
+    from raglex.facade import Facade
+
+    os.environ["RAGLEX_DATA_DIR"] = tempfile.mkdtemp()
+    f = Facade(Config.from_env())
+
+    def _hold(sid, labels, when):
+        text, segs, pos = "", [], 0
+        for label in labels:
+            body = f"{label} body.\n"
+            segs.append(Segment(label=label, kind="section", level=1,
+                                char_start=pos, char_end=pos + len(body)))
+            text += body
+            pos += len(body)
+        rec = Record(source="uk-legislation", stable_id=sid,
+                     doc_type=DocType.LEGISLATION, title=sid, decision_date=when,
+                     language="en", text=text or "landing page",
+                     raw_bytes=(text or sid).encode(), raw_ext="xml", segments=segs,
+                     extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        with f._open() as (cat, _rs, ts):
+            path = str(ts.put(rec.payload_hash, rec.text))
+            ts.put_segments(rec.payload_hash, rec.segments)
+            cat.upsert_document(rec, text_path=path)
+
+    _hold("32016R0679", ["Article 15", "Article 21"], date(2016, 4, 27))
+    _hold("european/regulation/2016/0679", [], date(2021, 1, 1))          # no articles
+    _hold("european/regulation/2016/0679@2024-01-01",
+          ["Article 15", "Article 21"], date(2024, 1, 1))
+
+    st = f.map_assimilated_provisions(apply=True)
+    assert st["mappings"] == 2, st
+    got = f.provision_mappings(stable_id="european/regulation/2016/0679")
+    assert {m["current_anchor"] for m in got["mappings"]} == {"Article 15", "Article 21"}

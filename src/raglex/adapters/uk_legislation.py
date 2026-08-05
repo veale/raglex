@@ -208,10 +208,16 @@ class UKLegislationAdapter(BaseAdapter):
                     hints={"base_id": leg_id, "version_date": self.version_date},
                 )
             else:
+                # Same split as the dated branch above, and for the same reason:
+                # /european/regulation/2016/0679/data.akn is a 404 — only the type-code
+                # form serves representations. Asking for the canonical path fetched a
+                # landing page instead of the Act, so the UK GDPR's base node parsed to
+                # ONE segment and held no articles at all.
+                uri_path = assimilated_leg_path(leg_id) or leg_id
                 yield Stub(
                     stable_id=leg_id,
-                    landing_url=f"{BASE_URL}/{leg_id}",
-                    raw_url=f"{BASE_URL}/{leg_id}/data.akn",
+                    landing_url=f"{BASE_URL}/{uri_path}",
+                    raw_url=f"{BASE_URL}/{uri_path}/data.akn",
                     court=None,
                 )
 

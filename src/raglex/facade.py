@@ -11120,7 +11120,20 @@ class Facade:
 
         Keyed on the folded form so the two sides compare, and valued with the label as
         the document actually writes it, because that is what a pinpoint has to match.
+
+        Falls back to the instrument's latest readable version when the base act itself
+        carries no article structure — which is the ordinary case for assimilated law,
+        whose base node is fetched from a path that serves a landing page rather than the
+        text. That version is what the reader opens anyway.
         """
+        anchors = self._anchors_of(cat, ts, stable_id)
+        if not anchors:
+            current = cat.latest_readable_version(stable_id)
+            if current:
+                anchors = self._anchors_of(cat, ts, current)
+        return anchors
+
+    def _anchors_of(self, cat, ts, stable_id: str) -> dict[str, str]:
         doc = cat.get_document(stable_id)
         if doc is None or not doc["payload_hash"]:
             return {}
