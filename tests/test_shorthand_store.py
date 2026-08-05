@@ -418,3 +418,47 @@ def test_unidentifiable_owner_blocks_resolution():
 
     # an id whose system can't be told is inexcludable, so the name stays contested
     assert not resolved({"ukpga/1998/42", "mystery-source-id"}, "ukpga/1998/42", "GB")
+
+
+def test_casing_does_not_split_a_contested_name(monkeypatch):
+    """The store keys on the literal name, so it held BOTH "the 1981 Act" (nine owners
+    — contested, refused) and "The 1981 Act" (one owner — unanimous, allowed). A
+    year-Act form matches case-INSENSITIVELY, so the capitalised variant applied exactly
+    the link the ambiguity guard had just refused. Contestedness is judged over every
+    casing the matcher would actually hit."""
+    from raglex.citations import stage
+
+    by_cand = {
+        "ukpga/1981/61": [("The 1981 Act", "act", True)],
+        "ukpga/1981/22": [("the 1981 Act", "act", True)],
+        "ukpga/1981/45": [("the 1981 Act", "act", True)],
+    }
+
+    class _Store:
+        def load(self, _cat):
+            by_name: dict[str, set[str]] = {}
+            for cid, rows in by_cand.items():
+                for name, _k, _a in rows:
+                    by_name.setdefault(name, set()).add(cid)
+                    by_name.setdefault(stage._fold_name(name), set()).add(cid)
+            return by_cand, by_name
+
+    monkeypatch.setattr(stage, "_SHORTHANDS", _Store())
+
+    class C:
+        def __init__(self, cid):
+            self.candidate_id = cid
+
+    doc = {"stable_id": "ewhc/admin/2012/1117", "source": "uk-caselaw"}
+    got = stage._stored_shorthands_for(None, [C("ukpga/1981/61")], doc)
+    assert [g[0] for g in got] == []
+
+
+def test_a_case_sensitive_abbreviation_is_not_folded():
+    """"PACE" (an acronym, matched case-sensitively) and "Pace" (a party short-name)
+    are genuinely different keys, and folding them would be wrong."""
+    from raglex.citations import stage
+
+    assert stage._matches_case_insensitively("PACE", abbrev=True) is False
+    assert stage._matches_case_insensitively("Pace", abbrev=False) is True
+    assert stage._matches_case_insensitively("the 1981 Act", abbrev=True) is True

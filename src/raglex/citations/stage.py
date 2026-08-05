@@ -979,6 +979,14 @@ class _ShorthandStore:
             for cid, rows in by_cand.items():
                 for name, _kind, _abbrev in rows:
                     by_name.setdefault(name, set()).add(cid)
+                    # …and again folded. Casing SPLITS the store: it holds both
+                    # "the 1981 Act" (nine owners — contested, refused) and "The 1981
+                    # Act" (one owner — unanimous, allowed) as separate keys, while a
+                    # year-Act form MATCHES case-insensitively. So the capitalised
+                    # variant smuggled in exactly the link the ambiguity guard had just
+                    # refused. Contestedness must be judged over every casing the
+                    # matcher would actually hit.
+                    by_name.setdefault(_fold_name(name), set()).add(cid)
             self._by_candidate, self._by_name = by_cand, by_name
             self._settled |= {(n, c) for c, rows in by_cand.items() for n, _k, _a in rows}
             self._loaded_at = time.monotonic()
@@ -1025,6 +1033,19 @@ def reset_shorthand_cache() -> None:
 # supranational owner in keeps such a name contested, and contested names don't travel.
 _SUPRANATIONAL = {"EU", "COE"}
 _CELEX_ID_RE = re.compile(r"^[0-9]{5}[A-Z]{1,2}[0-9]{4}$")
+#: A year-Act shorthand ("the 1981 Act") is matched case-insensitively by
+#: ``_shorthand_use_re``, and a case-name is too. Only a distinctive ABBREVIATION is
+#: matched case-sensitively, which is what keeps "Pace" (a party) apart from "PACE".
+_YEAR_ACT_RE = re.compile(r"(?i)^the\s+(?:18|19|20)\d{2}\s+Act$")
+
+
+def _fold_name(name: str) -> str:
+    return f"\x00fold\x00{(name or '').casefold()}"
+
+
+def _matches_case_insensitively(name: str, abbrev: bool) -> bool:
+    """Mirror of the flag ``_shorthand_use_re`` compiles with."""
+    return (not abbrev) or bool(_YEAR_ACT_RE.match(name or ""))
 
 
 def _candidate_jurisdiction(candidate_id: str | None) -> str | None:
@@ -1110,6 +1131,9 @@ def _stored_shorthands_for(catalogue: Catalogue, cites: list, doc=None) -> list[
     for cid in cited:
         for name, kind, abbrev in by_cand.get(cid, ()):
             owners = by_name.get(name) or {cid}
+            if _matches_case_insensitively(name, abbrev):
+                # this name will match other casings too, so it inherits their contests
+                owners = owners | (by_name.get(_fold_name(name)) or set())
             if len(owners) > 1 and not _resolved_by_jurisdiction(owners, cid, host):
                 continue
             out.append((name, cid, kind, abbrev))
