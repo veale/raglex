@@ -611,7 +611,10 @@ def build_bundle(
             # browser history entry all get the short name plus the set it belongs to,
             # never the instrument's 40-word official title.
             page_title=cached_export_page_title(
-                status, short=item.get("short"), index_title=config["index_title"]))
+                status, short=item.get("short"), index_title=config["index_title"]),
+            # The contents column heads itself with the name the SET gave this law
+            # ("GDPR"), not the citable stem the catalogue holds it under.
+            short_title=item.get("short") or None)
         filename = f"{item['slug']}.html"
         files.append((filename, html_bytes))
         entries.append({

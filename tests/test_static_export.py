@@ -499,3 +499,58 @@ def test_pending_proceedings_are_counted_in_english_and_marked_up_in_yellow():
     assert ".pending-highlight {" in _STYLE
     assert "background: #ffff00;" in _STYLE
     assert "box-decoration-break: clone;" in _STYLE
+
+
+# -- the page's own furniture ------------------------------------------------
+def test_the_contents_column_names_the_law_and_the_set_it_belongs_to():
+    """There is no [ contents ] button any more: it existed only to hide the one piece of
+    navigation the page has. The column heads itself instead — this law, then the way
+    back to the set."""
+    from raglex.static_export import _HTML_TEMPLATE, _SCRIPT, _STYLE, _sidebar_head
+
+    assert "contents-toggle" not in _HTML_TEMPLATE
+    assert "contents-toggle" not in _SCRIPT
+    assert "sidebar-closed" not in _STYLE
+    assert "__SIDEBAR_HEAD__" in _HTML_TEMPLATE
+
+    head = _sidebar_head("GDPR", {"href": "index.html", "title": "UCL Digital Laws"})
+    assert '<p class="contents-title">GDPR</p>' in head
+    assert '<a href="index.html">Back to UCL Digital Laws</a>' in head
+    # a standalone edition belongs to no set, so it is offered no way back to one
+    assert "contents-back" not in _sidebar_head("GDPR", None)
+    # …and the contents' own link styling must not swallow the way back
+    assert ".contents nav a, .contents nav button {" in _STYLE
+
+
+def test_an_eu_title_drops_the_eea_footnote():
+    """"(Text with EEA relevance)" is part of the citation of record and says nothing
+    about the law. It goes from the heading and the contents column — never from the
+    payload, whose title is what the published FILENAME is slugged from."""
+    from raglex.static_export import _display_title, _sidebar_head
+
+    full = ("Regulation (EU) 2016/679 of the European Parliament and of the Council of "
+            "27 April 2016 on the protection of natural persons … (Text with EEA relevance)")
+    assert _display_title(full).endswith("natural persons …")
+    assert _display_title("Directive 2002/58/EC (Text with EEA relevance.)") \
+        == "Directive 2002/58/EC"
+    # nothing to strip, nothing changed
+    assert _display_title("Data Protection Act 2018") == "Data Protection Act 2018"
+    assert _display_title(None) == ""
+    assert "EEA relevance" not in _sidebar_head(full, None)
+
+
+def test_a_pending_row_is_two_lines_with_a_way_to_the_notice():
+    """Case number, parties in italic and the kind of proceeding in brackets on one line;
+    the provisions it turns on and a link to EUR-Lex on the next. No date, and no bordered
+    pill — this page sets everything else in plain prose."""
+    from raglex.static_export import _SCRIPT, _STYLE
+
+    assert "pending-label" not in _SCRIPT and "pending-label" not in _STYLE
+    assert "row.date" not in _SCRIPT.split("function pendingRowHtml")[1].split("\n  }")[0]
+    assert '<span class="pending-kind">(${esc(kind)})</span>' in _SCRIPT
+    assert '(row.anchors || []).map(esc).join(", ")' in _SCRIPT
+    # the CELEX number IS the address of the notice, so no payload field is needed
+    assert '"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:"' in _SCRIPT
+    assert ">EUR-Lex →</a>" in _SCRIPT
+    # the Court's fictitious-name disclaimer is not part of a party name
+    assert "The name of the present case is a fictitious name" in _SCRIPT

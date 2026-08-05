@@ -174,10 +174,12 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
     assert "Only <i>this</i> file says so." not in dpa
     assert osa.index("Held by") < osa.index("Only <i>this</i>")
 
-    # every edition links back to the index, by its title, under the custom text
-    assert 'Return to <a href="index.html">Statutes</a>.' in osa
-    assert 'Return to <a href="index.html">Statutes</a>.' in dpa
-    assert osa.index("Only <i>this</i>") < osa.index("Return to")
+    # Every edition links back to the index by its title — from the contents column,
+    # under the name the set gave the law, where a reader looks for navigation.
+    assert '<p class="contents-back"><a href="index.html">Back to Statutes</a></p>' in osa
+    assert '<p class="contents-back"><a href="index.html">Back to Statutes</a></p>' in dpa
+    assert '<p class="contents-title">OSA</p>' in osa
+    assert '<p class="contents-title">Data Protection Act 2018</p>' in dpa
 
     # The tab, not the <h1>: the short name the operator gave the law, and the set.
     assert "<title>Crossreferenced OSA - Statutes</title>" in osa

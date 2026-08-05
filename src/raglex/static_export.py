@@ -192,22 +192,38 @@ def _attribution_html() -> str:
         os.environ.get("RAGLEX_STATIC_EXPORT_ATTRIBUTION") or _DEFAULT_ATTRIBUTION)
 
 
-def _attribution_block(
-    note: str | None = None, index_link: dict | None = None
-) -> str:
+def _attribution_block(note: str | None = None) -> str:
     """The attribution paragraph, plus — when this edition is one item of a bundle — its
-    own line directly beneath, and a way back to the bundle's index page. All in the same
-    style, in that order, under the title."""
+    own line directly beneath, in the same style, under the title. The way back to the
+    bundle's index is not here: it sits in the contents column, where a reader looks for
+    navigation."""
     paragraphs = [f'<p class="attribution">{_attribution_html()}</p>']
     paragraphs.extend(editorial_paragraphs(note, "attribution"))
+    return "\n      ".join(paragraphs)
+
+
+#: An EU instrument's official title ends with a legislative footnote about the EEA
+#: Agreement. It is part of the citation of record and says nothing about the law, and on
+#: a page whose whole top line is the title it costs a line every time.
+_EEA_RELEVANCE = re.compile(r"\s*\(\s*Text with EEA relevance\.?\s*\)", re.IGNORECASE)
+
+
+def _display_title(title: str | None) -> str:
+    """The instrument's name as a heading, rather than as a catalogue entry."""
+    return _EEA_RELEVANCE.sub("", str(title or "")).strip()
+
+
+def _sidebar_head(title: str | None, index_link: dict | None) -> str:
+    """The contents column's own heading: which law this is, and — for one edition of a
+    set — the way back to the set. This replaced a ``[ contents ]`` button, which existed
+    only to hide the one piece of navigation the page has."""
+    lines = [f'<p class="contents-title">{html.escape(_display_title(title))}</p>']
     if index_link and index_link.get("href"):
         href = html.escape(str(index_link["href"]), quote=True)
         label = html.escape(str(index_link.get("title") or "the index"))
-        paragraphs.append(
-            f'<p class="attribution return-to-index">Return to <a href="{href}">'
-            f"{label}</a>.</p>"
-        )
-    return "\n      ".join(paragraphs)
+        lines.append(
+            f'<p class="contents-back"><a href="{href}">Back to {label}</a></p>')
+    return "\n        ".join(lines)
 
 
 def _flag_assets(jurisdictions: set[str]) -> dict[str, str]:
@@ -1114,7 +1130,7 @@ def cached_export_page_title(
 
 def render_cached_export(
     status: dict, *, note: str | None = None, index_link: dict | None = None,
-    page_title: str | None = None,
+    page_title: str | None = None, short_title: str | None = None,
 ) -> bytes:
     """Render the page for a cached edition, applying the CURRENT attribution, this
     edition's own note, and (for a bundle item) the way back to its index page.
@@ -1126,6 +1142,7 @@ def render_cached_export(
         note=note,
         index_link=index_link,
         page_title=page_title or cached_export_page_title(status),
+        short_title=short_title or status.get("short_title") or None,
     ).encode("utf-8")
 
 
@@ -1294,18 +1311,21 @@ def _json_dump(data: dict) -> str:
 def render_static_page(
     *, title: str, data_json: str, note: str | None = None,
     index_link: dict | None = None, page_title: str | None = None,
+    short_title: str | None = None,
 ) -> str:
     """Render the page around an already-serialised payload.
 
-    ``page_title`` is what the browser tab and a bookmark carry. The <h1> is the
-    instrument's full official name, which is far too long for either, so a bundle passes
-    the short name it gave the law and the name of the set it belongs to.
+    ``page_title`` is what the browser tab and a bookmark carry, and ``short_title`` is
+    what the contents column calls this law. The <h1> is the instrument's full official
+    name, which is far too long for either, so a bundle passes the short name it gave the
+    law and the name of the set it belongs to.
     """
     page = _HTML_TEMPLATE
     replacements = {
         "__PAGE_TITLE__": html.escape(page_title or f"{title} — citations", quote=True),
-        "__TITLE__": html.escape(title),
-        "__ATTRIBUTION_BLOCK__": _attribution_block(note, index_link),
+        "__TITLE__": html.escape(_display_title(title)),
+        "__SIDEBAR_HEAD__": _sidebar_head(short_title or title, index_link),
+        "__ATTRIBUTION_BLOCK__": _attribution_block(note),
         "__STYLE__": _STYLE,
         "__SCRIPT__": _SCRIPT,
         "__DATA__": _escape_for_script(_slim_payload_json(data_json)),
@@ -1323,6 +1343,7 @@ def render_static_html(
         data_json=_json_dump(data),   # slimmed inside render_static_page
         note=note,
         index_link=index_link,
+        short_title=data["law"].get("short_title") or None,
     )
 
 
@@ -1337,7 +1358,6 @@ _HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <header class="page-head">
-    <button class="contents-toggle" id="contents-toggle" type="button" aria-expanded="true">[ contents ]</button>
     <div>
       <h1>__TITLE__</h1>
       __ATTRIBUTION_BLOCK__
@@ -1348,6 +1368,11 @@ _HTML_TEMPLATE = """<!doctype html>
   </header>
   <div class="page">
     <aside class="contents" id="contents">
+      <!-- What this is, and the way back to the set it belongs to — the contents column
+           is the page's only navigation, so it names itself before it lists anything. -->
+      <div class="contents-head">
+        __SIDEBAR_HEAD__
+      </div>
       <nav id="contents-nav" aria-label="Law contents"></nav>
     </aside>
     <main id="law"></main>
@@ -1468,13 +1493,9 @@ a:visited { color: var(--link-visited); }
   line-height: 1.4;
 }
 .attribution + .attribution { margin-top: .3rem; }
-.contents-toggle {
-  justify-self: start;
-  align-self: start;
-  padding: .25rem .5rem;
-  border-color: transparent;
-  background: transparent;
-}
+/* The title block sits over the text, not over the contents column — the first column of
+   the head is the contents column's width, and nothing occupies it. */
+.page-head > div { grid-column: 2; }
 .page {
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 52rem);
@@ -1491,7 +1512,14 @@ a:visited { color: var(--link-visited); }
   border-right: 1px solid var(--rule);
 }
 .contents nav { margin-top: 0; }
-.contents a, .contents button {
+.contents-head {
+  margin-bottom: .55rem;
+  padding-bottom: .5rem;
+  border-bottom: 1px solid var(--rule);
+}
+.contents-title { margin: 0; font-size: 1.05rem; line-height: 1.25; text-wrap: balance; }
+.contents-back { margin: .3rem 0 0; font-size: .95rem; line-height: 1.25; }
+.contents nav a, .contents nav button {
   display: flex;
   width: 100%;
   justify-content: space-between;
@@ -1505,7 +1533,7 @@ a:visited { color: var(--link-visited); }
   line-height: 1.22;
 }
 .contents a:visited { color: var(--link-visited); }
-.contents a:hover, .contents button:hover { text-decoration: underline; outline: 0; }
+.contents a:hover, .contents nav button:hover { text-decoration: underline; outline: 0; }
 .contents .count { color: inherit; font-variant-numeric: tabular-nums; }
 .contents .all-mentions { border-bottom: 1px solid var(--ink); }
 .contents .all-mentions + :not(.all-mentions) { margin-top: .45rem; }
@@ -1703,15 +1731,21 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
 .pending-count:hover, .pending-all:hover { text-decoration-thickness: 2px; }
 .pending-count:focus-visible, .pending-all:focus-visible { outline: 2px solid #000; }
 .pending-all { font-weight: 600; white-space: nowrap; }
-.pending-row { padding: .6rem 0; border-bottom: 1px solid var(--rule); }
+/* Two lines and a hairline: the case, then what it turns on and where to read it. */
+.pending-row { padding: .38rem 0; border-bottom: 1px solid var(--faint-rule); }
 .pending-row:last-child { border-bottom: 0; }
-.pending-case { margin: 0; }
-.pending-title { margin: .1rem 0 0; font-style: italic; }
-.pending-label {
-  display: inline-block; margin-left: .35rem; padding: 0 .3rem;
-  border: 1px solid var(--rule); border-radius: 3px; font-size: .8rem; color: var(--quiet);
+.pending-case { margin: 0; line-height: 1.35; }
+.pending-kind { color: var(--quiet); }
+.pending-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.2rem;
+  margin: 0;
+  color: var(--quiet);
+  font-size: 1rem;
 }
-.pending-anchors { margin: .2rem 0 0; font-size: .9rem; color: var(--quiet); }
+/* The source link sits at the end of the line whether or not provisions precede it. */
+.pending-meta a { margin-left: auto; white-space: nowrap; }
 .compare-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1769,14 +1803,9 @@ mark { padding: 0 .08em; background: var(--mark); color: inherit; }
    screen. Say it once, for everything. */
 [hidden] { display: none !important; }
 .empty { padding: 1.4rem 0; color: var(--quiet); }
-body.sidebar-closed .page-head, body.sidebar-closed .page { grid-template-columns: minmax(0, 52rem); }
-body.sidebar-closed .contents { display: none; }
-body.sidebar-closed .page-head, body.sidebar-closed .page { padding-left: max(2rem, calc((100vw - 52rem) / 2)); }
-body.sidebar-closed .page-head > div { grid-column: 1; }
 @media (max-width: 760px) {
   body { font-size: 16px; }
   .page-head { display: block; padding: 1.2rem 1.1rem; }
-  .contents-toggle { margin-bottom: .8rem; }
   .page { display: block; padding: 0 1.1rem 3rem; }
   .contents {
     position: relative;
@@ -1786,7 +1815,6 @@ body.sidebar-closed .page-head > div { grid-column: 1; }
     border-right: 0;
     border-bottom: 1px solid var(--ink);
   }
-  body.sidebar-closed .page-head, body.sidebar-closed .page { padding-left: 1.1rem; }
   .result-head { display: block; }
   .filters { display: block; }
   .filters label { display: block; margin-top: .8rem; }
@@ -1796,7 +1824,7 @@ body.sidebar-closed .page-head > div { grid-column: 1; }
   .law-paragraph.indent-3 { margin-left: 2.4rem; }
 }
 @media print {
-  .contents-toggle, .contents, .mention-ref, dialog { display: none !important; }
+  .contents, .mention-ref, dialog { display: none !important; }
   /* The names are the SENTENCE, not decoration on it — hiding the buttons would print
      "Mentioned by , and 18 more". They stay, as ink; only the way in goes. */
   .cite-link { color: var(--ink); text-decoration: none; }
@@ -2054,13 +2082,6 @@ _SCRIPT = r"""
     $("law").appendChild(article);
   }
 
-  $("contents-toggle").addEventListener("click", () => {
-    document.body.classList.toggle("sidebar-closed");
-    const open = !document.body.classList.contains("sidebar-closed");
-    $("contents-toggle").setAttribute("aria-expanded", String(open));
-    $("contents-toggle").textContent = open ? "[ contents ]" : "[ show contents ]";
-  });
-
   const kindNames = {
     cases: "case law", administrative: "admin decisions",
     legislation: "legislation", guidance: "guidance & reports",
@@ -2294,16 +2315,51 @@ _SCRIPT = r"""
     }
   }
 
-  function pendingRowHtml(row) {
-    const anchors = (row.anchors || []).length
-      ? `<p class="pending-anchors">${(row.anchors || []).map((a) => esc(a)).join(" · ")}</p>`
+  // A pending notice is identified by its CELEX number, which is all EUR-Lex needs to
+  // show the notice itself. No URL is carried in the payload for these, and none needs to
+  // be: the number IS the address.
+  const CELEX_ID = /^\d{5}[A-Z]{1,2}\d{4}(?:\(\d+\))?$/i;
+  function pendingUrl(row) {
+    const id = String(row.id || "").split("/").pop().trim();
+    return CELEX_ID.test(id)
+      ? "https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:" + encodeURIComponent(id)
       : "";
-    const meta = [row.court, row.date].filter(Boolean).map(esc).join(" · ");
+  }
+
+  // "C-287/26 Bundesverband … v RR (Preliminary reference)", then the provisions it turns
+  // on and the way out to the notice. Two lines, and the kind of proceeding is said in
+  // brackets rather than in a bordered pill: this page sets everything else in plain
+  // prose, and a row of little boxes reads as furniture from somewhere else.
+  // What the OJ notice's title carries besides the parties: the case number the line
+  // already opens with, the Court's fictitious-name disclaimer as a whole sentence, and
+  // the lodging date. The anonymised NAME the Court gives such a case ("Waldfelber") is
+  // kept — it is how the case will be cited.
+  const NAME_NOISE = [
+    [/\s*The name of the present case is a fictitious name\.?\s*(?:It does not correspond to the real name of any party to the proceedings\.?)?/i, ""],
+    [/\(\s*Case\s+[CT][-‑]\d+\/\d+\s*,\s*([^)]+)\)/i, "($1)"],
+    [/\s*\(\s*(?:Case\s+)?[CT][-‑]\d+\/\d+[^)]*\)\s*$/i, ""],
+    [/,\s*lodged on\s+\d{1,2}\s+\w+\s+\d{4}\.?\s*$/i, ""],
+  ];
+
+  function pendingRowHtml(row) {
+    let name = String(row.title || "");
+    for (const [pattern, replacement] of NAME_NOISE) name = name.replace(pattern, replacement);
+    name = name.trim();
+    const kind = [row.label, row.court, row.ag ? "AG Opinion delivered" : null]
+      .filter(Boolean).join(", ");
+    const anchors = (row.anchors || []).map(esc).join(", ");
+    const url = pendingUrl(row);
+    const link = url
+      ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">EUR-Lex →</a>`
+      : "";
     return `<div class="pending-row"><p class="pending-case"><strong>${esc(row.case)}</strong>`
-      + ` <span class="pending-label">${esc(row.label)}</span>`
-      + (row.ag ? ' <span class="pending-label">AG opinion delivered</span>' : "")
-      + `</p><p class="pending-title">${esc(row.title)}</p>`
-      + (meta ? `<p class="where">${meta}</p>` : "") + anchors + "</div>";
+      + (name ? ` <em>${esc(name)}</em>` : "")
+      + (kind ? ` <span class="pending-kind">(${esc(kind)})</span>` : "")
+      + "</p>"
+      + (anchors || link
+         ? `<p class="pending-meta">${anchors ? `<span>${anchors}</span>` : ""}${link}</p>`
+         : "")
+      + "</div>";
   }
 
   function openPending(kind) {
