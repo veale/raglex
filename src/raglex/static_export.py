@@ -674,6 +674,10 @@ class StaticLawExporter:
                 "date": r.get("date"),
                 "court": r.get("referring_court"),
                 "ag": bool(r.get("ag_opinion")),
+                # The Opinion's own CELEX, so the page can link straight to it. It is
+                # NOT the notice's with a descriptor swapped — an urgent reference gets
+                # a View (CV) rather than an Opinion (CC) — so it is carried, not guessed.
+                "ag_id": (r.get("ag_opinion") or {}).get("stable_id"),
                 "anchors": r.get("anchors") or [],
             } for r in rows],
         }
@@ -1187,6 +1191,10 @@ def build_static_export_cache(
         "filename": f"{_slug(title)[:80]}.html",
         "documents": data["stats"]["documents"],
         "mentions": data["stats"]["mentions"],
+        # What is still before the Court, for the index page — which reads this manifest
+        # and never the payload, and would otherwise have to open tens of megabytes per
+        # edition to count them.
+        "pending": int((data.get("pending") or {}).get("total") or 0),
         "bytes": len(payload.encode("utf-8")),
         "generated_at": data["generated_at"],
     }
@@ -1496,6 +1504,15 @@ a:visited { color: var(--link-visited); }
 /* The title block sits over the text, not over the contents column — the first column of
    the head is the contents column's width, and nothing occupies it. */
 .page-head > div { grid-column: 2; }
+/* A page with no contents column at all — the bundle's index — is one column, centred on
+   the same measure the text would have had. (This was the [ contents ] button's collapsed
+   state; the button is gone, but the layout it left behind is what the index is.) */
+body.no-sidebar .page-head, body.no-sidebar .page {
+  grid-template-columns: minmax(0, 52rem);
+  padding-left: max(2rem, calc((100vw - 52rem) / 2));
+}
+body.no-sidebar .contents { display: none; }
+body.no-sidebar .page-head > div { grid-column: 1; }
 .page {
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 52rem);
@@ -1815,6 +1832,7 @@ mark { padding: 0 .08em; background: var(--mark); color: inherit; }
     border-right: 0;
     border-bottom: 1px solid var(--ink);
   }
+  body.no-sidebar .page-head, body.no-sidebar .page { padding-left: 1.1rem; }
   .result-head { display: block; }
   .filters { display: block; }
   .filters label { display: block; margin-top: .8rem; }
@@ -2315,15 +2333,31 @@ _SCRIPT = r"""
     }
   }
 
-  // A pending notice is identified by its CELEX number, which is all EUR-Lex needs to
-  // show the notice itself. No URL is carried in the payload for these, and none needs to
-  // be: the number IS the address.
+  // A document of the Court is identified by its CELEX number, which is all EUR-Lex needs
+  // to show it. No URL is carried for these, and none needs to be: the number IS the
+  // address.
   const CELEX_ID = /^\d{5}[A-Z]{1,2}\d{4}(?:\(\d+\))?$/i;
-  function pendingUrl(row) {
-    const id = String(row.id || "").split("/").pop().trim();
+  function celexUrl(value) {
+    const id = String(value || "").split("/").pop().trim();
     return CELEX_ID.test(id)
       ? "https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:" + encodeURIComponent(id)
       : "";
+  }
+  const externalLink = (url, text) =>
+    `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
+
+  // An Opinion delivered is the strongest public signal of where a pending reference is
+  // going, and it is readable NOW — months before the judgment. So it is a link, not a
+  // note. A payload built before the Opinion's own id was carried falls back to the
+  // ordinary Opinion descriptor (CN → CC) for the same case, which is what it is in all
+  // but the urgent procedure.
+  function agOpinionHtml(row) {
+    const text = "AG Opinion delivered";
+    const notice = String(row.id || "").split("/").pop().trim();
+    const url = celexUrl(row.ag_id)
+      || (/^6\d{4}CN\d{4}$/i.test(notice)
+          ? celexUrl(notice.slice(0, 5) + "CC" + notice.slice(7)) : "");
+    return url ? externalLink(url, text) : esc(text);
   }
 
   // "C-287/26 Bundesverband … v RR (Preliminary reference)", then the provisions it turns
@@ -2345,16 +2379,15 @@ _SCRIPT = r"""
     let name = String(row.title || "");
     for (const [pattern, replacement] of NAME_NOISE) name = name.replace(pattern, replacement);
     name = name.trim();
-    const kind = [row.label, row.court, row.ag ? "AG Opinion delivered" : null]
-      .filter(Boolean).join(", ");
+    // Escaped piece by piece: one of these is a link, so the whole cannot be.
+    const kind = [esc(row.label), row.court ? esc(row.court) : "",
+                  row.ag ? agOpinionHtml(row) : ""].filter(Boolean).join(", ");
     const anchors = (row.anchors || []).map(esc).join(", ");
-    const url = pendingUrl(row);
-    const link = url
-      ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">EUR-Lex →</a>`
-      : "";
+    const url = celexUrl(row.id);
+    const link = url ? externalLink(url, "EUR-Lex →") : "";
     return `<div class="pending-row"><p class="pending-case"><strong>${esc(row.case)}</strong>`
       + (name ? ` <em>${esc(name)}</em>` : "")
-      + (kind ? ` <span class="pending-kind">(${esc(kind)})</span>` : "")
+      + (kind ? ` <span class="pending-kind">(${kind})</span>` : "")
       + "</p>"
       + (anchors || link
          ? `<p class="pending-meta">${anchors ? `<span>${anchors}</span>` : ""}${link}</p>`

@@ -94,6 +94,7 @@ def test_index_groups_by_jurisdiction_and_states_both_counts():
         [
             {"filename": "gdpr.html", "title": "GDPR", "short": "GDPR",
              "jurisdiction": "European Union", "documents": 1200, "mentions": 4800,
+             "pending": 34,
              "exported": "27 May 2026", "note": "The <b>consolidated</b> text."},
             {"filename": "osa.html", "title": "Online Safety Act 2023",
              "jurisdiction": "United Kingdom", "documents": 0, "mentions": 0,
@@ -107,7 +108,9 @@ def test_index_groups_by_jurisdiction_and_states_both_counts():
     # Both totals, and the citation count is the bigger one: a document can cite twice.
     # One sentence, in commas — the annotation reads as prose, not as a field list.
     assert ("Last updated 27 May 2026, cited by 1,200 documents, "
-            "4,800 citations in all.") in page
+            "4,800 citations in all, 34 pending CJEU cases.") in page
+    # …and a law with nothing before the Court says nothing about it
+    assert "pending CJEU" not in page.split("osa.html")[1]
     assert "·" not in page.split("<body")[1]                # no dotted fields in the list
     assert "<h2>" in page and "European Union" in page and "United Kingdom" in page
     assert '<span class="export-short">GDPR:</span>' in page

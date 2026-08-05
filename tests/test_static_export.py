@@ -547,10 +547,26 @@ def test_a_pending_row_is_two_lines_with_a_way_to_the_notice():
 
     assert "pending-label" not in _SCRIPT and "pending-label" not in _STYLE
     assert "row.date" not in _SCRIPT.split("function pendingRowHtml")[1].split("\n  }")[0]
-    assert '<span class="pending-kind">(${esc(kind)})</span>' in _SCRIPT
+    assert '<span class="pending-kind">(${kind})</span>' in _SCRIPT
     assert '(row.anchors || []).map(esc).join(", ")' in _SCRIPT
     # the CELEX number IS the address of the notice, so no payload field is needed
     assert '"https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:"' in _SCRIPT
-    assert ">EUR-Lex →</a>" in _SCRIPT
+    assert 'externalLink(url, "EUR-Lex →")' in _SCRIPT
     # the Court's fictitious-name disclaimer is not part of a party name
     assert "The name of the present case is a fictitious name" in _SCRIPT
+
+
+def test_a_delivered_ag_opinion_is_a_link_to_the_opinion():
+    """An Opinion delivered is readable months before the judgment, so saying so is not
+    an annotation — it is a way in. It links to the Opinion's OWN celex, carried in the
+    payload, because an urgent reference gets a View (CV) rather than an Opinion (CC) and
+    swapping descriptors would send that reader nowhere."""
+    from raglex.static_export import _SCRIPT
+
+    assert "function agOpinionHtml(row)" in _SCRIPT
+    assert "celexUrl(row.ag_id)" in _SCRIPT
+    assert 'row.ag ? agOpinionHtml(row) : ""' in _SCRIPT
+    # …and the notice keeps its own link, at the end of the second line
+    assert 'const url = celexUrl(row.id);' in _SCRIPT
+    # a payload built before ag_id existed still links, via the ordinary descriptor
+    assert 'notice.slice(0, 5) + "CC" + notice.slice(7)' in _SCRIPT

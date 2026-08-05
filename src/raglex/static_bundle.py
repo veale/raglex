@@ -368,7 +368,7 @@ _INDEX_TEMPLATE = """<!doctype html>
 .export-meta, .export-note { margin: 0; color: var(--ink); font-size: 1rem; }
 </style>
 </head>
-<body class="sidebar-closed">
+<body class="no-sidebar">
   <header class="page-head">
     <div>
       <h1>__TITLE__</h1>
@@ -428,6 +428,12 @@ def render_index_html(
             # is the number a reader of the edition itself will see.
             if entry.get("mentions"):
                 meta.append(f"{int(entry['mentions']):,} citations in all")
+            # Only where there ARE any: a UK statute has nothing before the Court of
+            # Justice, and a clause saying "0 pending" would be noise on every line.
+            pending = int(entry.get("pending") or 0)
+            if pending:
+                meta.append(f"{pending:,} pending CJEU "
+                            f"{'case' if pending == 1 else 'cases'}")
             note_paragraphs = editorial_paragraphs(
                 apply_placeholders(entry.get("note") or "", when=generated_at,
                                    count=len(entries)),
@@ -627,6 +633,7 @@ def build_bundle(
             "note": item.get("note") or "",
             "documents": int(status.get("documents") or 0),
             "mentions": int(status.get("mentions") or 0),
+            "pending": int(status.get("pending") or 0),
             "bytes": len(html_bytes),
             "exported": format_export_date(status.get("generated_at") or started),
         })
@@ -652,8 +659,8 @@ def build_bundle(
         "output_dir": str(out_dir),
         "files": [
             {k: entry[k] for k in
-             ("filename", "title", "jurisdiction", "documents", "mentions", "bytes",
-              "exported")}
+             ("filename", "title", "jurisdiction", "documents", "mentions", "pending",
+              "bytes", "exported")}
             for entry in entries
         ],
         "bytes": sum(len(payload) for _name, payload in files),
