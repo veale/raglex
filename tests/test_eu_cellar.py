@@ -8,6 +8,7 @@ from raglex.adapters.eu_cellar import (
     classify_celex,
     extract_formex_text,
     parse_national_judgements,
+    resolve_case_celex,
     unzip_formex,
 )
 from raglex.core.models import DocType, Record, RelationshipType, Stub
@@ -168,6 +169,94 @@ def test_default_discovery_is_incremental_all_case_law():
     query = ad._enumerate_query("2026-07-20", 100)
     assert 'FILTER(STR(?date) > "2026-07-20")' in query
     assert "OFFSET 100" in query
+
+
+PENDING_FORMEX = """<?xml version="1.0" encoding="UTF-8"?>
+<CJT><TI.CJT><TITLE><TI>
+ <P>Action brought on 6 December 2024 – International Electrotechnical Commission and ISO v Commission</P>
+ <P>(Case T-631/24)</P>
+</TI></TITLE><NO.DOC.C>C/2025/919</NO.DOC.C><LG.PROC>Language of the case: English</LG.PROC>
+</TI.CJT><CONTENTS><GR.SEQ><TITLE><TI><P>Form of order sought</P></TI></TITLE>
+<P>The applicants claim that the Court should annul the decision.</P></GR.SEQ></CONTENTS></CJT>""".encode()
+
+
+class PendingClient(FakeClient):
+    def __init__(self):
+        self.formex = _zip(PENDING_FORMEX, "C_202500919EN.000101.fmx.xml")
+
+    def request(self, method, url, *, data=None, headers=None):
+        query = data["query"]
+        rows = [] if "OFFSET 100" in query else [{
+            "celex": "62024TN0631",
+            "date": "2024-12-06",
+            "rtype": "INFO_JUDICIAL",
+            "procedure": "ANNU",
+            "dossier": "http://publications.europa.eu/resource/case/T-631%2F24",
+        }]
+        return _JsonResp({"results": {"bindings": [
+            {key: {"value": value} for key, value in row.items()} for row in rows
+        ]}})
+
+
+def test_pending_t_notice_is_retrieved_named_tagged_and_aliased():
+    ad = EUCellarAdapter(pending_cases=True, client=PendingClient())
+    stub = list(ad.discover(None, max_pages=1))[0]
+    rec = ad.fetch(stub)
+
+    assert rec.stable_id == "62024TN0631"
+    assert rec.court == "General Court" and rec.doc_type == DocType.NOTE
+    assert rec.title == "Pending: International Electrotechnical Commission and ISO v Commission"
+    assert rec.topic_tags == ["Pending", "Action brought"]
+    assert rec.extra["pending_procedure"] == "ANNU"
+    assert rec.extra["aliases"] == ["62024TJ0631"]
+
+
+def test_pending_query_uses_dossier_for_c_and_t_resolution():
+    query = EUCellarAdapter(pending_cases=True)._pending_query("2026-07-20", 100)
+    assert "work_part_of_dossier" in query
+    assert "[CT]N" in query and "[CT][JO]" in query
+    assert 'FILTER(STR(?date) > "2026-07-20")' in query
+    # Resolving decisions deliberately have no date cutoff: this is what catches a
+    # late English rendition of an older French-only decision.
+    assert query.count('FILTER(STR(?date) > "2026-07-20")') == 1
+    assert "ORDER BY ?phase DESC(?date)" in query
+
+
+def test_modern_case_resolution_never_crosses_court_family(monkeypatch):
+    class SameNumberClient:
+        def request(self, method, url, *, data=None, headers=None):
+            return _JsonResp({"results": {"bindings": [
+                {"celex": {"value": "62024CC0631"}},
+                {"celex": {"value": "62024TN0631"}},
+            ]}})
+
+    # T-631/24 is not the unrelated C-631/24 merely because the latter already has
+    # an Advocate General's opinion.  Notices are not decisions, so this stays pending.
+    assert resolve_case_celex(
+        "62024TJ0631", client=SameNumberClient()
+    ) is None
+
+
+def test_full_english_decision_retires_but_does_not_delete_pending_notice(catalogue):
+    pending = Record(source="eu-cellar", stable_id="62024TN0631", doc_type=DocType.NOTE,
+                     title="Pending: IEC and ISO v Commission", raw_bytes=b"pending",
+                     text="application", source_language="en", extra={"pending": True})
+    pending.ensure_payload_hash()
+    final = Record(source="eu-cellar", stable_id="ECLI:EU:T:2026:1",
+                   ecli="ECLI:EU:T:2026:1", doc_type=DocType.JUDGMENT,
+                   title="IEC and ISO v Commission", raw_bytes=b"full English judgment",
+                   text="full reasons", source_language="en")
+    final.ensure_payload_hash()
+    catalogue.upsert_document(pending)
+    catalogue.upsert_document(final)
+
+    assert catalogue.retire_pending_eu_notice(pending.stable_id, final.stable_id)
+    assert catalogue.get_document(pending.stable_id) is not None
+    assert catalogue.get_document(pending.stable_id)["search_excluded"] == 1
+    assert catalogue.document_meta(pending.stable_id)["resolved_by"] == final.stable_id
+    assert any(r["relationship_type"] == "supersedes"
+               and r["dst_id"] == pending.stable_id
+               for r in catalogue.relations_for(final.stable_id))
 
 
 def test_fetch_builds_legislation_and_citation_edges():

@@ -59,6 +59,8 @@ TASKS: tuple[TaskSpec, ...] = (
              "rebuild the configured static editions into the export folder (off by default)"),
     TaskSpec("eu-consolidations", True, 10080,
              "walk Cellar sector-0 and import every dated EU consolidation"),
+    TaskSpec("eu-pending-cases", True, 1440,
+             "import pending C/T case notices and retire them when English decisions arrive"),
     TaskSpec("eu-legislation-enrich", False, 1440, "harvest EU act-to-act relationships (repeals/amends/legal-basis) from CELLAR"),
     TaskSpec("eu-case-names", False, 1440, "pull CJEU case names + subject tags from the EUR-Lex webservice (needs credentials)"),
 )

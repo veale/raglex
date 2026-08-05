@@ -407,6 +407,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
         last_static_bundle = time.time()  # nor republish the export folder on every restart
         last_eu_consolidations = time.time()  # explicit first backfill is queued at deploy
+        last_eu_pending_cases = 0.0  # seed/refresh the pending C/T docket at boot
         last_eu_enrich = time.time()
         last_eu_case_names = time.time()  # credentialed webservice — wait a cadence too
         last_backfill = 0.0
@@ -646,6 +647,33 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     )
                     if started.get("error"):
                         print(f"[watch] eu-consolidations: {started['error']}")
+                # Daily pending C/T docket: CN/TN OJ application notices remain visible
+                # (and carry a Pending: title) until the same CELLAR dossier supplies a
+                # full English CJ/CO/TJ/TO decision. The adapter rechecks resolved dossier
+                # members so a late English translation retires the notice automatically.
+                if (_sched_on("eu-pending-cases")
+                        and time.time() - last_eu_pending_cases
+                        >= (_sched_min("eu-pending-cases") or 1440) * 60):
+                    started = jobs.start(
+                        "harvest-source", "EU pending C/T cases (CELLAR)",
+                        {
+                            "source": "eu-cellar",
+                            "backfill": False,
+                            "max_pages": None,
+                            "options": {"pending_cases": True},
+                            "watermark_key": "eu-pending-cases",
+                            "resume_unfinished": True,
+                        },
+                    )
+                    if started.get("error"):
+                        print(f"[watch] eu-pending-cases: {started['error']}")
+                    elif started.get("already_running"):
+                        print("[watch] eu-pending-cases: matching harvest still running; retrying next tick")
+                    elif started.get("paused"):
+                        print("[watch] eu-pending-cases: scheduler paused; retrying next tick")
+                    else:
+                        last_eu_pending_cases = time.time()
+                        print(f"[watch] eu-pending-cases: started {started['job_id']}")
                 # EU legislative-change enrichment — harvest act-to-act CDM relations so old
                 # directives learn they were repealed/recast. Off by default; enable via toggles.
                 if _sched_on("eu-legislation-enrich") and time.time() - last_eu_enrich >= (_sched_min("eu-legislation-enrich") or 1440) * 60:

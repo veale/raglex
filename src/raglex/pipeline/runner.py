@@ -20,7 +20,7 @@ from datetime import date, timedelta
 
 from ..core.adapter import Adapter
 from ..core.errors import FetchError, RateLimitException
-from ..core.models import Record, RelationshipType, Stub, UpstreamStatus
+from ..core.models import DocType, Record, RelationshipType, Stub, UpstreamStatus
 from ..storage.catalogue import Catalogue
 from ..storage.rawstore import RawStore
 from ..storage.textstore import TextStore
@@ -235,40 +235,60 @@ class Pipeline:
                 # held_extracted ride in with the stub); refetch_held skips it entirely.
                 refreshed = False
                 if held_id is not None and held_has_text is not False:
-                    # …unless the feed says the content CHANGED: a differing contenthash
-                    # (FCL's change signal) means the held copy is a superseded revision —
-                    # re-fetch it. No hash on either side → assume unchanged (the old rule).
-                    feed_hash = stub.hints.get("contenthash")
-                    held_hash = (self.catalogue.document_meta(held_id) or {}).get(
-                        "contenthash") if feed_hash else None
-                    if not (feed_hash and held_hash and feed_hash != held_hash):
-                        stats.deduped += 1
-                        # A durable document is not necessarily a completed pipeline
-                        # item. A crash/deploy can occur after bulk storage but before
-                        # harvest's extraction phase. On restart, carry held-but-unscanned
-                        # ids into that phase; otherwise dedup would permanently strand
-                        # them as apparently complete records with no citation graph.
-                        # The prefilter carried the stamp for id-matched stubs; the rare
-                        # URL-matched ones (held_extracted None) resolve it here.
-                        if held_extracted is None:
-                            held_doc = self.catalogue.get_document(held_id)
-                            held_extracted = bool(
-                                held_doc["last_extracted_at"]) if held_doc else True
-                        if not held_extracted:
-                            stats.stored_ids.append(held_id)
-                        # A deduped stub was still *seen and held* — advance the cursor
-                        # past it. Otherwise a run where everything is already held (e.g.
-                        # after a bulk import pre-populated the docs) leaves the watermark
-                        # unmoved, so every later incremental run re-pages the same
-                        # ever-growing feed window from the same stale cursor.
-                        if not wm_frozen:
-                            highest = _max_watermark(
-                                highest,
-                                stub.hints.get("watermark")
-                                or (stub.hint_date and stub.hint_date.isoformat()),
+                    # The pending-CJEU feed deliberately re-enumerates resolving
+                    # decisions.  If the held copy is still French, fetch again because
+                    # the English rendition may have appeared without changing the
+                    # decision date.  If it is already full English, use the cheap sighting
+                    # to retire any linked CN/TN notice even when this decision predates
+                    # the feature and therefore has no stored supersedes edge yet.
+                    english_refresh = bool(stub.hints.get("refetch_if_not_english"))
+                    held_doc = self.catalogue.get_document(held_id) if english_refresh else None
+                    held_is_english = bool(
+                        held_doc is not None and held_doc["has_text"]
+                        and str(held_doc["source_language"] or "").lower() == "en"
+                    )
+                    if held_is_english:
+                        # Reassert the decision's exact CELEX alias.  During an initial
+                        # seed the notice is deliberately seen first and temporarily owns
+                        # the guessed judgment CELEX; an already-held decision is deduped,
+                        # so without this write the temporary mapping would survive.
+                        decision_celex = stub.hints.get("celex")
+                        if decision_celex:
+                            self.catalogue.put_alias(
+                                str(decision_celex).casefold(), held_id,
+                                source="celex-ecli", overwrite=True,
                             )
-                        continue
-                    refreshed = True
+                        for notice_id in stub.hints.get("resolved_notices", []):
+                            self.catalogue.retire_pending_eu_notice(notice_id, held_id)
+                    if english_refresh and not held_is_english:
+                        refreshed = True
+                    else:
+                        # …unless the feed says the content CHANGED: a differing
+                        # contenthash (FCL's change signal) means the held copy is a
+                        # superseded revision — re-fetch it. No hash on either side →
+                        # assume unchanged (the old rule).
+                        feed_hash = stub.hints.get("contenthash")
+                        held_hash = (self.catalogue.document_meta(held_id) or {}).get(
+                            "contenthash") if feed_hash else None
+                        if not (feed_hash and held_hash and feed_hash != held_hash):
+                            stats.deduped += 1
+                            # A durable document is not necessarily a completed pipeline
+                            # item. Carry held-but-unscanned ids into extraction.
+                            if held_extracted is None:
+                                held_doc = self.catalogue.get_document(held_id)
+                                held_extracted = bool(
+                                    held_doc["last_extracted_at"]) if held_doc else True
+                            if not held_extracted:
+                                stats.stored_ids.append(held_id)
+                            # A deduped stub was still seen and held: advance the cursor.
+                            if not wm_frozen:
+                                highest = _max_watermark(
+                                    highest,
+                                    stub.hints.get("watermark")
+                                    or (stub.hint_date and stub.hint_date.isoformat()),
+                                )
+                            continue
+                        refreshed = True
 
                 # Fetch is usually the longest opaque operation (network retries,
                 # download and parsing). Announce the exact item immediately before
@@ -569,6 +589,14 @@ class Pipeline:
             self.textstore.put_segments(record.payload_hash, record.segments)
 
         self.catalogue.upsert_document(record, raw_path=raw_path, text_path=text_path)
+        # A CN/TN notice is useful while the case is pending, but becomes duplicate
+        # search noise once the dossier's full English judgment/order is held.  Keep the
+        # notice append-only and auditable; only remove it from retrieval surfaces.
+        if (record.source == "eu-cellar" and record.source_language == "en"
+                and record.doc_type in (DocType.JUDGMENT, DocType.DECISION)):
+            for rel in record.relations:
+                if rel.relationship_type == RelationshipType.SUPERSEDES and rel.dst_id:
+                    self.catalogue.retire_pending_eu_notice(rel.dst_id, record.stable_id)
         # A newly held consolidation makes a more accurate target available for
         # citations that already point at the base law. Rebuild those derived links
         # immediately; otherwise they would appear only after every citing document
@@ -645,7 +673,13 @@ class Pipeline:
         for alias in (record.extra.get("aliases") if record.extra else None) or ():
             if alias:
                 self.catalogue.put_alias(str(alias).casefold(), record.stable_id,
-                                         source="adapter-alias", overwrite=False)
+                                         source="adapter-alias",
+                                         # A pending CN/TN notice is authoritative for its
+                                         # own C/T family. It must dislodge an old cross-
+                                         # family fallback (C-631/24 and T-631/24 can both
+                                         # exist); the later full decision reclaims the
+                                         # exact CELEX above.
+                                         overwrite=bool(record.extra.get("pending")))
         # Tribunal/court chamber recovery (§5b): a UK Find Case Law id carries the
         # chamber as a path segment (ukut/aac/2012/440), but a citation may omit it
         # ("[2012] UKUT 440" → ukut/2012/440). Mint the chamber-less alias so the

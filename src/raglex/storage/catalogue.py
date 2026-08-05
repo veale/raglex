@@ -1263,6 +1263,45 @@ class Catalogue:
         if commit:
             self.conn.commit()
 
+    def retire_pending_eu_notice(self, notice_id: str, decision_id: str) -> bool:
+        """Hide a CN/TN application notice once its full English decision is held.
+
+        The notice remains stored for audit/dedup and is linked from the resolving
+        decision with ``supersedes``.  Returns False when the notice is not held (or is
+        not a CN/TN identifier), making the operation safe on every scheduled pass.
+        """
+        if not re.fullmatch(r"6\d{4}[CT]N\d{4}", notice_id or "", re.IGNORECASE):
+            return False
+        notice = self.get_document(notice_id)
+        decision = self.get_document(decision_id)
+        if notice is None or decision is None or not decision["has_text"] \
+                or str(decision["source_language"] or "").lower() != "en":
+            return False
+        meta = self.document_meta(notice_id)
+        meta.update({
+            "pending": False,
+            "resolved_by": decision_id,
+            "search_exclusion_reason": "superseded_by_full_english_decision",
+        })
+        with self._atomic():
+            existing = self.conn.execute(
+                "SELECT 1 FROM relations WHERE src_id = ? AND dst_id = ? "
+                "AND relationship_type = 'supersedes' LIMIT 1",
+                (decision_id, notice_id),
+            ).fetchone()
+            if existing is None:
+                self._add_relation(decision_id, TypedRelation(
+                    relationship_type=RelationshipType.SUPERSEDES,
+                    raw_citation_string=notice_id, dst_id=notice_id,
+                    extracted_via=ExtractedVia.STRUCTURED,
+                    resolution_status=ResolutionStatus.RESOLVED,
+                ))
+            self.conn.execute(
+                "UPDATE documents SET search_excluded = 1, meta_json = ? WHERE stable_id = ?",
+                (json.dumps(meta), notice_id),
+            )
+        return True
+
     # -- writes ------------------------------------------------------------
     # One body, two codes → the canonical one, applied at write time so every future
     # import converges (and a re-harvest can't resurrect the old code). IEDPC is

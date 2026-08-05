@@ -797,6 +797,65 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
     return clean_case_display_title(parties)
 
 
+_PENDING_HEAD_RE = re.compile(
+    r"^(?:Action|Appeal|Request|Reference|Application)\b.*\s[–—]\s(?P<name>.+?)"
+    r"(?:\s*\((?:Joined\s+)?Cases?\s+[CT][-‑–]?\d+/\d+.*\))?$",
+    re.IGNORECASE,
+)
+
+
+def pending_formex_title(xml_bytes: bytes) -> str | None:
+    """Party name from a CN/TN OJ application notice's ``TI.CJT`` heading.
+
+    Example: ``Action brought on 6 December 2024 – IEC and ISO v Commission
+    (Case T-631/24)`` becomes ``IEC and ISO v Commission``.  The docket remains in
+    the CELEX and citation formatter, so it is not duplicated in the display name.
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return None
+    heading = next((" ".join(e.itertext()) for e in root.iter()
+                    if _localname(e.tag) == "TI.CJT"), "")
+    heading = re.sub(r"\s+", " ", heading).strip()
+    if not heading:
+        return None
+    # Formex may append the C-series document number and language after the title.
+    heading = re.split(r"\s+C/\d{4}/\d+\b|\s+Language of the case:", heading, 1)[0]
+    match = _PENDING_HEAD_RE.match(heading)
+    if not match:
+        return None
+    return clean_case_display_title(match.group("name").strip(" .,—-"))
+
+
+def pending_formex_proceeding(xml_bytes: bytes) -> str | None:
+    """The notice kind printed in its Formex title (Action brought, Request …)."""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return None
+    heading = next((" ".join(e.itertext()) for e in root.iter()
+                    if _localname(e.tag) == "TI.CJT"), "")
+    return pending_proceeding_label(heading)
+
+
+def celex_case_number(celex: str | None) -> str | None:
+    """``62024TN0631`` -> ``T-631/24`` (also for C notices/decisions)."""
+    match = re.match(r"^6(\d{4})([CT])[A-Z](\d{4})$", celex or "")
+    if not match:
+        return None
+    return f"{match.group(2)}-{int(match.group(3))}/{match.group(1)[2:]}"
+
+
+def pending_proceeding_label(text: str | None) -> str | None:
+    """Short human proceeding label printed at the start of an OJ notice."""
+    head = " ".join((text or "")[:500].split())
+    match = re.match(
+        r"(?i)(Action brought|Appeal brought|Request for a preliminary ruling|"
+        r"Reference for a preliminary ruling|Application for interim measures)", head)
+    return match.group(1) if match else None
+
+
 # An AG Opinion prints its author on its face — "OPINION OF ADVOCATE GENERAL / EMILIOU /
 # delivered on 15 May 2025" — and nowhere else we hold: the SPARQL metadata omits it and
 # these documents' titles are empty, so their OSCOLA citation read "…, Opinion of AG" with
@@ -883,6 +942,7 @@ class EUCellarAdapter(BaseAdapter):
         *,
         legislation_celex: str | None = None,
         cited_by_celex: str | None = None,
+        pending_cases: bool = False,
         per_page: int = 100,
         with_citations: bool = True,
         client: RateLimitedClient | None = None,
@@ -892,6 +952,11 @@ class EUCellarAdapter(BaseAdapter):
         # work_cites_work) — i.e. "what later judgments cite this one" (forward-citation
         # discovery for a *case*, distinct from cases *interpreting legislation*).
         self.cited_by_celex = cited_by_celex
+        # CN/TN are the OJ notices which publish a newly lodged C/T case while it is
+        # pending.  This separate feed also emits the later CJ/CO/TJ/TO member of the
+        # same CELLAR dossier, so the catalogue can retire the notice once a full
+        # English decision is actually available.
+        self.pending_cases = pending_cases
         self.per_page = per_page
         self.with_citations = with_citations
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
@@ -954,6 +1019,52 @@ SELECT DISTINCT ?celex ?ecli ?date ?rtype ?title WHERE {{
              ?exp cdm:expression_title ?title }}
 }}
 ORDER BY DESC(?date) ?celex
+LIMIT {self.per_page} OFFSET {offset}
+"""
+
+    def _pending_query(self, since: str | None, offset: int) -> str:
+        """C/T application notices plus every decision which resolves one.
+
+        The join is the explicit CDM dossier, never a guessed same-number rewrite.
+        Notices are date-cursored after the initial backfill; resolving decisions are
+        deliberately re-enumerated (only a small set) because an English rendition can
+        appear well after the decision date.
+        """
+        notice_date = f'FILTER(STR(?date) > "{since[:10]}")' if since else ""
+        return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?phase ?celex ?ecli ?date ?rtype ?procedure ?dossier ?resolved_notice WHERE {{
+  {{
+    ?notice cdm:resource_legal_id_celex ?nc ;
+            cdm:work_date_document ?date ;
+            cdm:work_part_of_dossier ?dossier .
+    BIND(STR(?nc) AS ?celex)
+    FILTER(REGEX(?celex, "^6[0-9]{{4}}[CT]N[0-9]{{4}}$"))
+    {notice_date}
+    OPTIONAL {{ ?notice cdm:communication_cjeu_has_type_procedure_concept_type_procedure ?p .
+               BIND(REPLACE(STR(?p), "^.*/", "") AS ?procedure) }}
+    BIND("INFO_JUDICIAL" AS ?rtype)
+    BIND(0 AS ?phase)
+  }}
+  UNION
+  {{
+    ?notice cdm:resource_legal_id_celex ?nc ; cdm:work_part_of_dossier ?dossier .
+    FILTER(REGEX(STR(?nc), "^6[0-9]{{4}}[CT]N[0-9]{{4}}$"))
+    ?decision cdm:work_part_of_dossier ?dossier ;
+              cdm:resource_legal_id_celex ?dc .
+    BIND(STR(?dc) AS ?celex)
+    FILTER(REGEX(?celex, "^6[0-9]{{4}}[CT][JO][0-9]{{4}}$"))
+    BIND(STR(?nc) AS ?resolved_notice)
+    BIND(1 AS ?phase)
+    OPTIONAL {{ ?decision cdm:case-law_ecli ?ecli }}
+    OPTIONAL {{ ?decision cdm:work_date_document ?date }}
+    OPTIONAL {{ ?decision cdm:work_has_resource-type ?rt .
+               BIND(REPLACE(STR(?rt), "^.*resource-type/", "") AS ?rtype) }}
+  }}
+}}
+# Notices must precede their decisions.  That makes an initial seed order-independent:
+# store the pending node first, then let even an already-held English decision retire it.
+ORDER BY ?phase DESC(?date) ?celex
 LIMIT {self.per_page} OFFSET {offset}
 """
 
@@ -1062,6 +1173,8 @@ LIMIT {self.per_page}
                 query = self._citing_query(self.cited_by_celex)
             elif self.legislation_celex:
                 query = self._discover_query(since)
+            elif self.pending_cases:
+                query = self._pending_query(since, offset)
             else:
                 query = self._enumerate_query(since, offset)
             rows = self._sparql(query)
@@ -1089,6 +1202,14 @@ LIMIT {self.per_page}
                         "celex": celex,
                         "link": row.get("link", ""),
                         "rtype": row.get("rtype", ""),
+                        **({"pending_case": True,
+                            "procedure": row.get("procedure", ""),
+                            "dossier": row.get("dossier", "")}
+                           if re.match(r"^6\d{4}[CT]N\d{4}$", celex) else {}),
+                        **({"resolved_notices": [row["resolved_notice"]],
+                            "refetch_if_not_english": True,
+                            "dossier": row.get("dossier", "")}
+                           if row.get("resolved_notice") else {}),
                         **({"watermark": row["date"]} if row.get("date") else {}),
                     },
                 )
@@ -1136,14 +1257,31 @@ LIMIT {self.per_page}
         # the judgment's own parties + case number ("ZZ v … (C-300/11)").
         content_title = (formex_case_title(raw) if raw is not None and raw_ext == "xml"
                          else html_case_title(raw) if raw_ext == "html" else None)
+        pending_notice = bool(stub.hints.get("pending_case"))
+        if pending_notice and raw is not None and raw_ext == "xml":
+            content_title = pending_formex_title(raw) or content_title
         generic = bool(stub.title and (
             re.fullmatch(r"(?i)ECLI:[A-Z]{2}:.+", stub.title.strip())
             or stub.title.strip() == celex
             or re.fullmatch(r"(?i)(?:Joined\s+)?Cases?\s+[CTF][-‑–]?\d+/\d+", stub.title.strip())
         ))
         title = content_title or (None if generic else stub.title)
+        if pending_notice:
+            title = title or f"Case {celex_case_number(celex) or celex}"
+            if not title.startswith("Pending:"):
+                title = f"Pending: {title}"
 
         relations: list[TypedRelation] = []
+        # A full decision supersedes its OJ application notice.  Pipeline storage uses
+        # this authoritative dossier-derived edge to hide (not delete) the notice, but
+        # only after this fetched decision proves that an English full text exists.
+        for notice in stub.hints.get("resolved_notices", []):
+            relations.append(TypedRelation(
+                relationship_type=RelationshipType.SUPERSEDES,
+                raw_citation_string=notice, dst_id=notice,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING,
+            ))
         # 0) a consolidated version (sector-0 CELEX ``0…-YYYYMMDD``) → its authoritative base
         # act. Deterministic from the identifier; consolidated text has no legal value, so
         # the edge is what lets a pincite reach the base act the snapshot documents (§EU).
@@ -1219,6 +1357,13 @@ LIMIT {self.per_page}
                 )
             )
 
+        procedure = stub.hints.get("procedure") or None
+        proceeding = ((pending_formex_proceeding(raw)
+                       if raw is not None and raw_ext == "xml" else
+                       pending_proceeding_label(text)) if pending_notice else None)
+        pending_tags = (["Pending"]
+                        + (["Preliminary ruling"] if procedure == "PREJ" else [])
+                        + ([proceeding] if proceeding else []))
         return Record(
             source=self.source,
             stable_id=stub.stable_id,
@@ -1235,9 +1380,18 @@ LIMIT {self.per_page}
             text=text,
             segments=segments,
             relations=relations,
+            topic_tags=list(dict.fromkeys(pending_tags)),
             extracted_via=ExtractedVia.STRUCTURED,
             extra={
                 "celex": celex,
+                **({"pending": True, "pending_procedure": procedure,
+                    "pending_proceeding": proceeding,
+                    "dossier": stub.hints.get("dossier"),
+                    # A normal C/T case-number citation guesses the judgment CELEX.
+                    # Resolve it to this notice while pending; the final ECLI harvest
+                    # later replaces this alias with the authoritative decision.
+                    "aliases": [celex[:5] + celex[5] + "J" + celex[7:]]}
+                   if pending_notice else {}),
                 # Who delivered it. CELLAR models the AG properly, so ask it first; the name
                 # printed on the Opinion's own first page is the fallback for when the
                 # endpoint has no answer (older opinions) or is unreachable — and it carries
@@ -1466,8 +1620,11 @@ def _ranked_descriptors(family: str, guessed_desc: str) -> list[str]:
     case."""
     every = [d for ds in _DECISION_DESCRIPTORS.values() for d in ds]
     if family:
-        ranked = list(_DECISION_DESCRIPTORS.get(family, ()))
-        return ranked + [d for d in every if d not in ranked]
+        # C-631/24 and T-631/24 are different proceedings which legitimately coexist.
+        # Crossing court families on a modern, family-bearing citation can silently
+        # attach the T case to an unrelated C case with the same year/number.  Be
+        # forgiving about judgment/order/opinion, but never about the stated court.
+        return list(_DECISION_DESCRIPTORS.get(family, ()))
     want = _LEGACY_DESCRIPTOR_TYPE.get(guessed_desc, "")
     ranked = [d for d in every if want and d[1] == want]
     return ranked + [d for d in every if d not in ranked]
@@ -1517,18 +1674,19 @@ def resolve_case_celex(celex: str, *, client: RateLimitedClient | None = None) -
         found = {r["celex"].upper() for r in cellar._sparql(q) if r.get("celex")}
     except Exception as exc:  # noqa: BLE001 — transport/CELLAR failure, NOT an absence
         raise CellarUnavailable(f"CELLAR lookup failed for {cu}: {exc}") from exc
-    # ranked preference: this family's decisions (best type first), then the other
-    # families' decisions (a "C-" citation that only exists as a "T-" case = a citation
-    # error we still want to resolve).
+    # Modern CELEXes state the court family, which is an identity component; legacy
+    # one-letter descriptors do not, so only those may search across families.
     ranked = _ranked_descriptors(family, guessed_desc)
     for desc in ranked:
         cand = f"{year}{desc}{num}"
         if cand in found:
             return cand
-    # a decision descriptor we don't rank explicitly, but still a real decision
-    for cand in sorted(found):
-        if cand[5:7] in _ALL_DECISION_DESCRIPTORS:
-            return cand
+    # A legacy one-letter citation has no court family; accept a real decision type
+    # outside the explicit ranking.  A modern C/T/F citation must never cross families.
+    if not family:
+        for cand in sorted(found):
+            if cand[5:7] in _ALL_DECISION_DESCRIPTORS:
+                return cand
     # Joined cases: the decision is published only under the LEAD case number
     # (Joined Cases C-46/93 and C-48/93 → 61993CJ0046; no CELEX exists under 0048
     # at all). The lead work links every joined number via
@@ -1550,6 +1708,8 @@ def _resolve_joined_case(cellar: "EUCellarAdapter", *, year: str, num: str,
     except Exception as exc:  # noqa: BLE001 — a failed lookup is transient, not an absence
         raise CellarUnavailable(f"CELLAR joined-case lookup failed for {year}/{num}: {exc}") from exc
     leads = {c for c in leads if len(c) >= 9 and c[5:7] in _ALL_DECISION_DESCRIPTORS}
+    if family:
+        leads = {c for c in leads if c[5:6] == family}
     if not leads:
         return None
     # The lead has a different case NUMBER, so rank by descriptor alone: the cited
