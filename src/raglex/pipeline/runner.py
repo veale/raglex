@@ -260,7 +260,8 @@ class Pipeline:
                             )
                         for notice_id in stub.hints.get("resolved_notices", []):
                             self.catalogue.retire_pending_eu_notice(notice_id, held_id)
-                    if english_refresh and not held_is_english:
+                    if (english_refresh and not held_is_english
+                            and _english_recheck_due(held_doc)):
                         refreshed = True
                     else:
                         # …unless the feed says the content CHANGED: a differing
@@ -701,6 +702,36 @@ def _chamberless_alias(stable_id: str) -> str | None:
 
 _DEFAULT_OVERLAP_DAYS = 2  # the CanLII re-scan window, generalised
 _ISO_DATE_HEAD = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+#: How long to leave a non-English CJEU decision alone before asking CELLAR again
+#: whether its English rendition has appeared.
+#:
+#: Without a gate this re-fetch had NO backoff: the pending C/T feed re-enumerates its
+#: ~700 resolving decisions every run, a large share are held in French only, and each
+#: run therefore re-downloaded every one of them, got French again, and stored nothing.
+#: Observed on the live corpus: consecutive runs reporting ``stored: 0`` after fetching
+#: 375, 507, 297 and 638 documents, each run taking about an hour, none ever finishing —
+#: so the watermark never advanced and the next run repeated the identical work. Most of
+#: those decisions will never be translated, so "check again next run" is a loop, not a
+#: retry. ``fetched_at`` already records the last attempt, so the backoff needs no new
+#: state: a re-fetch updates it, and a document not fetched for this long is due again.
+_ENGLISH_RECHECK_DAYS = int(os.environ.get("RAGLEX_ENGLISH_RECHECK_DAYS") or 14)
+
+
+def _english_recheck_due(held_doc) -> bool:
+    """Whether a non-English held decision is due another look for its translation."""
+    if held_doc is None:
+        return True
+    fetched = str((held_doc["fetched_at"] if "fetched_at" in held_doc.keys()
+                   else None) or "")
+    m = _ISO_DATE_HEAD.match(fetched)
+    if not m:
+        return True                     # never recorded → treat as due
+    try:
+        last = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return True
+    return (date.today() - last) >= timedelta(days=_ENGLISH_RECHECK_DAYS)
 
 
 def _overlap_days(override: int | None) -> int:

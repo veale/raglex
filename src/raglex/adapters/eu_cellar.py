@@ -1563,10 +1563,13 @@ LIMIT {self.per_page}
             if not rows:
                 return
             # One round trip each for the whole page's cited-works and referring-court
-            # enrichment, instead of two per document in fetch(). Only where the caller
-            # asked for a named set: a general crawl streams pages whose fetches may
-            # never happen, and prefetching those would buy latency for nothing.
-            if self.celexes:
+            # enrichment, instead of two per document in fetch(). Done for the modes
+            # whose pages are actually FETCHED — a named CELEX set, and the pending C/T
+            # docket, which re-enumerates its resolving decisions precisely so they can
+            # be re-read. An open-ended currency crawl is excluded: it streams pages
+            # whose stubs are mostly deduped without a fetch, so prefetching them would
+            # buy latency for nothing.
+            if self.celexes or self.pending_cases:
                 self._prefetch_enrichment(
                     [r.get("celex") for r in rows if r.get("celex")])
             yielded = 0

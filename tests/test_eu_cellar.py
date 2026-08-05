@@ -1100,3 +1100,32 @@ def test_html_fallback_still_breaks_on_block_boundaries():
             b"</div></body></html>")
     lines = [ln for ln in (EUCellarAdapter._html_to_text(html) or "").split("\n") if ln.strip()]
     assert lines == ["First block.", "Second block.", "item one", "item two"]
+
+
+def test_non_english_decision_is_not_re_fetched_every_run():
+    """The pending C/T feed re-enumerates its ~700 resolving decisions each run, and a
+    decision held in French only was re-fetched EVERY time — no backoff. Live corpus:
+    consecutive runs reporting stored:0 after fetching 375, 507, 297 and 638 documents,
+    each taking about an hour and none finishing, so the watermark never advanced and
+    the next run repeated the identical work. Most of those decisions will never be
+    translated, so "check again next run" is a loop, not a retry."""
+    import datetime
+
+    from raglex.pipeline.runner import _english_recheck_due
+
+    class Row(dict):
+        pass
+
+    today = datetime.date.today()
+
+    def at(days_ago):
+        return Row(fetched_at=(today - datetime.timedelta(days=days_ago)).isoformat()
+                   + "T10:00:00+00:00")
+
+    assert _english_recheck_due(at(0)) is False
+    assert _english_recheck_due(at(13)) is False
+    assert _english_recheck_due(at(14)) is True
+    assert _english_recheck_due(at(400)) is True
+    # unknown or missing provenance is always due — never silently skip
+    assert _english_recheck_due(Row(fetched_at="")) is True
+    assert _english_recheck_due(None) is True
