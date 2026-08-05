@@ -2423,6 +2423,12 @@ class Facade:
                                 continue
                             entry["ag_opinion"] = {
                                 "stable_id": opinion_id,
+                                # The descriptor that MATCHED — an urgent reference is
+                                # answered by a View (CV), not an Opinion (CC), so this
+                                # cannot be reconstructed from the notice afterwards. The
+                                # corpus often holds the document under its ECLI, which
+                                # is no use as a EUR-Lex address.
+                                "celex": f"{celex[:5]}{descriptor}{celex[7:]}",
                                 "date": str(op["decision_date"] or "")[:10] or None,
                                 "advocate_general":
                                     _row_meta(op).get("advocate_general"),

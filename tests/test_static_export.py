@@ -564,7 +564,10 @@ def test_a_delivered_ag_opinion_is_a_link_to_the_opinion():
     from raglex.static_export import _SCRIPT
 
     assert "function agOpinionHtml(row)" in _SCRIPT
-    assert "celexUrl(row.ag_id)" in _SCRIPT
+    assert "celexUrl(row.ag_id) || ecliUrl(row.ag_id)" in _SCRIPT
+    # the corpus holds many of the Court's own documents under an ECLI, and EUR-Lex
+    # resolves those too
+    assert '"https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=ecli:"' in _SCRIPT
     assert 'row.ag ? agOpinionHtml(row) : ""' in _SCRIPT
     # …and the notice keeps its own link, at the end of the second line
     assert 'const url = celexUrl(row.id);' in _SCRIPT

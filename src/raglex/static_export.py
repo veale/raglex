@@ -674,10 +674,12 @@ class StaticLawExporter:
                 "date": r.get("date"),
                 "court": r.get("referring_court"),
                 "ag": bool(r.get("ag_opinion")),
-                # The Opinion's own CELEX, so the page can link straight to it. It is
-                # NOT the notice's with a descriptor swapped — an urgent reference gets
-                # a View (CV) rather than an Opinion (CC) — so it is carried, not guessed.
-                "ag_id": (r.get("ag_opinion") or {}).get("stable_id"),
+                # The Opinion's own id, so the page can link straight to it. Its CELEX by
+                # preference — the corpus holds many of these under an ECLI, which EUR-Lex
+                # also resolves, but the CELEX is the descriptor that was actually matched
+                # (an urgent reference gets a View, CV, not an Opinion, CC).
+                "ag_id": ((r.get("ag_opinion") or {}).get("celex")
+                          or (r.get("ag_opinion") or {}).get("stable_id")),
                 "anchors": r.get("anchors") or [],
             } for r in rows],
         }
@@ -2343,6 +2345,15 @@ _SCRIPT = r"""
       ? "https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:" + encodeURIComponent(id)
       : "";
   }
+  // …and EUR-Lex resolves an ECLI just as well, which is how the corpus holds many of the
+  // Court's own documents.
+  const ECLI_ID = /^ECLI:[A-Z]{2}:[A-Z]:\d{4}:\d+$/i;
+  function ecliUrl(value) {
+    const id = String(value || "").trim();
+    return ECLI_ID.test(id)
+      ? "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=ecli:" + encodeURIComponent(id)
+      : "";
+  }
   const externalLink = (url, text) =>
     `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(text)}</a>`;
 
@@ -2354,7 +2365,7 @@ _SCRIPT = r"""
   function agOpinionHtml(row) {
     const text = "AG Opinion delivered";
     const notice = String(row.id || "").split("/").pop().trim();
-    const url = celexUrl(row.ag_id)
+    const url = celexUrl(row.ag_id) || ecliUrl(row.ag_id)
       || (/^6\d{4}CN\d{4}$/i.test(notice)
           ? celexUrl(notice.slice(0, 5) + "CC" + notice.slice(7)) : "");
     return url ? externalLink(url, text) : esc(text);
