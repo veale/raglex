@@ -2131,11 +2131,21 @@ class Catalogue:
         ``BWBR…@date`` series and the assimilated ``european/…@date`` series have none,
         so an edge-only lookup silently reported "already current" for every one of them.
         """
+        from ..core.text import fold
         from ..eu_law import consolidation_base, is_consolidation
 
         given = str(stable_id or "")
         if not given:
             return None
+        # A RETIRED id resolves to whatever it was folded into. Merging the assimilated
+        # duplicates left every stored reference to eur/2016/679 pointing at a document
+        # that no longer exists — including a configured static edition, which then
+        # failed its build with "document not found" rather than following the move. The
+        # merge minted the alias precisely so nothing would break; this is what reads it.
+        if self.get_document(given) is None:
+            survivor = self.get_alias(fold(given))
+            if survivor and survivor != given and self.get_document(survivor) is not None:
+                return self.latest_readable_version(survivor, on_date) or survivor
         # A CELLAR consolidation names its base act in a different SECTOR (02002L0058-…
         # consolidates 32002L0058), so the family is found through the edge, not the id.
         base = consolidation_base(given) if is_consolidation(given) else None

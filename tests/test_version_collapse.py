@@ -219,3 +219,41 @@ def test_the_harvester_no_longer_mints_the_serving_form():
     assert _canonical_leg_id("eur/2016/679") == "european/regulation/2016/0679"
     assert _canonical_leg_id("eudr/2000/60") == "european/directive/2000/0060"
     assert _canonical_leg_id("ukpga/2018/12") == "ukpga/2018/12"   # untouched
+
+
+def test_a_retired_id_follows_its_merge_to_the_survivor():
+    """Merging the assimilated duplicates left every stored reference to eur/2016/679
+    pointing at a document that no longer exists — including a configured static
+    edition, which failed its build with "document not found" instead of following the
+    move the merge had already recorded as an alias."""
+    from raglex.core.text import fold
+
+    f = _facade()
+    _law(f, "european/regulation/2016/0679", "UK GDPR", date(2021, 1, 1))
+    _law(f, "european/regulation/2016/0679@2024-01-01", "UK GDPR", date(2024, 1, 1))
+    with f._open() as (cat, _rs, _ts):
+        cat.put_alias(fold("eur/2016/679"), "european/regulation/2016/0679",
+                      source="assimilated-merge")
+        # the retired id resolves, and lands on the version a reader would open
+        assert cat.latest_readable_version("eur/2016/679") == (
+            "european/regulation/2016/0679@2024-01-01")
+        # an id that was never held and has no alias is still unknown
+        assert cat.latest_readable_version("eur/1999/1") is None
+
+
+def test_a_build_repoints_an_edition_off_a_retired_id():
+    from raglex.core.text import fold
+    from raglex.static_bundle import _repoint_to_current_versions
+
+    f = _facade()
+    _law(f, "european/regulation/2016/0679", "Assimilated Regulation (EU) 2016/679",
+         date(2021, 1, 1))
+    with f._open() as (cat, _rs, _ts):
+        cat.put_alias(fold("eur/2016/679"), "european/regulation/2016/0679",
+                      source="assimilated-merge")
+    items = [{"stable_id": "eur/2016/679", "title": "UK GDPR", "short": "UK GDPR",
+              "note": ""}]
+    moves = _repoint_to_current_versions(f, items)
+    assert moves and moves[0]["to"] == "european/regulation/2016/0679"
+    assert items[0]["stable_id"] == "european/regulation/2016/0679"
+    assert items[0]["short"] == "UK GDPR"     # the operator's own naming is kept
