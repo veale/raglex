@@ -98,12 +98,15 @@ RESUME_POLICIES = {
     "reanchor-citations": "checkpoint",
     # resumes the local Formex package repair from the last completely reparsed/re-mined act
     "repair-eu-annexes": "checkpoint",
+    # re-derives its scope from the edges each time, then skips what the run already
+    # stamped — so a restart re-reads only what it hasn't reached
+    "rescan-contested-shorthands": "checkpoint",
 }
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
 # All three write the citations table; a re-anchor and a rescan of the SAME source must
 # not run at once (they'd race the same offsets), but disjoint sources may.
 _SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations",
-                         "rescan-matching"})
+                         "rescan-matching", "rescan-contested-shorthands"})
 
 
 # Kinds that GROW the corpus (new documents/edges) and therefore stale the derived layers —
@@ -397,6 +400,13 @@ RUNNERS: dict[str, Callable] = {
     "repair-oj-wrapper-notices": lambda f, p, cb, cancel: f.repair_oj_wrapper_notices(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
+    # Re-read the documents that carry an edge from a CONTESTED learned shorthand — a
+    # name the store holds against several candidates, which it used to apply on the
+    # coincidence that the document cited one of them ("PACE" → RIPA). The rule is
+    # fixed; this clears what it already wrote.
+    "rescan-contested-shorthands": lambda f, p, cb, cancel: f.rescan_contested_shorthands(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        run_id=p.get("_resume_run_id"), on_progress=cb, cancel_check=cancel),
     "reparse-pending-notices": lambda f, p, cb, cancel: f.reparse_pending_eu_notices(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),

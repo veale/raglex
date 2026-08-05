@@ -6219,6 +6219,83 @@ class Facade:
         n = refresh_from_feeds(self.config.data_dir / "statutes_extra.lst", years=clean)
         return {"added": n, "years": list(clean) if clean else "current+previous"}
 
+    def rescan_contested_shorthands(self, *, limit: int = 200000, workers: int | None = None,
+                                    run_id: str | None = None,
+                                    on_progress=None, cancel_check=None) -> dict:
+        """Re-extract the documents carrying an edge from a CONTESTED learned shorthand.
+
+        The store applies a shorthand corpus-wide, and it used to apply a contested one
+        — a name it holds against several different candidates — whenever the citing
+        document happened to cite exactly one of them. That is a coincidence test, and
+        the store is contested precisely where it has mislearned: "PACE" was held
+        against six acts, none of them the Police and Criminal Evidence Act 1984, so
+        "s. 8(1) of PACE" in a judgment that never spells PACE out was recorded as a
+        citation of RIPA s.8(1). ``_stored_shorthands_for`` no longer applies those, but
+        the edges they already wrote stay in the graph until the document is read again.
+
+        The scope is computed from the edges themselves rather than from the text,
+        because that is exactly what the defect is recorded in: 590,315 rows over 64,080
+        documents at the time of writing. Everything else is the ordinary pooled rescan,
+        so the run is checkpointed, cancellable and idempotent."""
+        from .citations import extract_documents_parallel
+        from .citations.extractor import shorthand_name_from_use
+
+        with self._open() as (cat, _rs, ts):
+            owners: dict[str, set[str]] = {}
+            for cid, rows in cat.learned_shorthand_map().items():
+                for name, _kind, _abbrev in rows:
+                    owners.setdefault(name, set()).add(cid)
+            contested = {n for n, o in owners.items() if len(o) > 1}
+            _progress(on_progress, stage="finding documents with contested shorthands",
+                      done=0, total=0, item=f"{len(contested)} contested names")
+            ids: dict[str, None] = {}
+            scanned = 0
+            for row in cat.conn.execute(
+                    "SELECT src_id, raw FROM citations WHERE method = ?",
+                    ("shorthand_global",)):
+                scanned += 1
+                if scanned % 250000 == 0:
+                    _progress(on_progress,
+                              stage="finding documents with contested shorthands",
+                              done=len(ids), total=0, item=f"{scanned} edges read")
+                    if cancel_check and cancel_check():
+                        return {"cancelled": True, "documents": len(ids)}
+                if shorthand_name_from_use(row["raw"]) in contested:
+                    ids.setdefault(row["src_id"], None)
+                    if len(ids) >= limit:
+                        break
+            targets = list(ids)
+            # Resume: the scope is re-derived from the edges each run (a document this
+            # run already fixed no longer HAS a contested edge, but only once its rows
+            # are rewritten), so skip anything this root run has already stamped.
+            done_already = 0
+            if run_id:
+                stamped = {
+                    r["stable_id"] for r in cat.conn.execute(
+                        "SELECT stable_id FROM documents WHERE last_extraction_run_id = ?",
+                        (run_id,))}
+                if stamped:
+                    before = len(targets)
+                    targets = [t for t in targets if t not in stamped]
+                    done_already = before - len(targets)
+            if not targets:
+                return {"contested_names": len(contested), "documents": 0,
+                        "already_done": done_already}
+            aliases = cat.named_alias_map()
+            stats = extract_documents_parallel(
+                cat, ts, targets, aliases=aliases, run_id=run_id, workers=workers,
+                on_progress=on_progress, cancel_check=cancel_check,
+                stage="re-extracting documents with contested shorthands")
+            out = {"contested_names": len(contested), "documents": len(targets),
+                   "already_done": done_already,
+                   "extracted": stats.processed, "citations": stats.citations,
+                   "cancelled": stats.cancelled}
+        if not (cancel_check and cancel_check()):
+            with self._open() as (cat, _rs, _ts):
+                Resolver(cat).run()
+        self._invalidate_caches()
+        return out
+
     def rescan_matching(self, *, query: str, exact: bool = True, limit: int = 20000,
                         on_progress=None, cancel_check=None) -> dict:
         """Re-extract every document whose TEXT matches a free-text query.
