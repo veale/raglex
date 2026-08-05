@@ -11108,6 +11108,146 @@ class Facade:
     _LEGACY_GOVUK_PREFIXES = ("uk-cma-guidance", "uk-cma", "uk-ofgem", "uk-ofwat")
     _GOVUK_NAMESPACE = "govuk"
 
+    #: IP completion day. EU material decided on or before this governs the assimilated
+    #: text; what Luxembourg said afterwards does not, and presenting it as authority on
+    #: the UK provision would be a legal error rather than an untidy result.
+    ASSIMILATION_CUTOFF = "2020-12-31"
+
+    _ARTICLE_ANCHOR = re.compile(r"^(Article\s+\d+[A-Z]*)\b", re.IGNORECASE)
+
+    def _article_anchors(self, cat, ts, stable_id: str) -> dict[str, str]:
+        """``{"article 15": "Article 15"}`` for a held instrument, from its own segments.
+
+        Keyed on the folded form so the two sides compare, and valued with the label as
+        the document actually writes it, because that is what a pinpoint has to match.
+        """
+        doc = cat.get_document(stable_id)
+        if doc is None or not doc["payload_hash"]:
+            return {}
+        try:
+            segments = ts.get_segments(doc["payload_hash"]) or []
+        except OSError:
+            return {}
+        out: dict[str, str] = {}
+        for seg in segments:
+            m = self._ARTICLE_ANCHOR.match(str(seg.label or "").strip())
+            if m:
+                label = " ".join(m.group(1).split())
+                out.setdefault(label.lower(), label)
+        return out
+
+    def map_assimilated_provisions(self, *, stable_id: str | None = None,
+                                   apply: bool = False, limit: int | None = None,
+                                   include_predecessors: bool = True,
+                                   on_progress=None, cancel_check=None) -> dict:
+        """Link every assimilated UK regulation's articles to their EU originals.
+
+        An assimilated instrument is the EU text, adopted word for word, so Luxembourg's
+        reading of Article 15 before exit day is a reading of the very words the UK
+        provision contains. Those are the citers a UK lawyer needs and cannot otherwise
+        see: the corpus holds them against the CELEX node, and nothing joins the two.
+
+        Three constraints, all of them load-bearing:
+
+        * **Only where the provision survived.** The article set is INTERSECTED, taken
+          from each document's own segments. An article the UK dropped simply has no
+          counterpart, and a UK insertion (Article 22A, 8ZA) has no EU one — so neither
+          is mapped, without needing a list of them.
+        * **Exit day.** ``inherit_before`` stops at IP completion day.
+        * **Jurisdiction-locked to the EU.** Every member state cites the GDPR; without
+          the lock the UK instrument would be buried under the rest of Europe instead of
+          informed by it. Only EU-source material travels.
+
+        ``include_predecessors`` carries the chain one step further: where the EU
+        instrument itself maps back to a predecessor (the Data Protection Directive
+        behind the GDPR), the same correspondence is written from the UK article, under
+        the same cutoff and lock.
+
+        DRY RUN unless ``apply=True``.
+        """
+        from .resolve.matchers import assimilated_celex
+
+        st = {"instruments": 0, "mappings": 0, "predecessor_mappings": 0,
+              "skipped_no_segments": 0, "applied": apply}
+        plan: list[dict] = []
+        with self._open() as (cat, _rs, ts):
+            if stable_id:
+                targets = [str(stable_id)]
+            else:
+                targets = [r["stable_id"] for r in cat.conn.execute(
+                    "SELECT stable_id FROM documents WHERE stable_id LIKE ? "
+                    "AND stable_id NOT LIKE ? ORDER BY stable_id",
+                    ("european/%", "%@%"))]
+            if limit:
+                targets = targets[:limit]
+            for n, uk_id in enumerate(targets, 1):
+                if cancel_check and cancel_check():
+                    break
+                celex = assimilated_celex(uk_id)
+                if not celex or cat.get_document(celex) is None:
+                    continue
+                uk_anchors = self._article_anchors(cat, ts, uk_id)
+                eu_anchors = self._article_anchors(cat, ts, celex)
+                if not uk_anchors or not eu_anchors:
+                    st["skipped_no_segments"] += 1
+                    continue
+                shared = sorted(set(uk_anchors) & set(eu_anchors),
+                                key=lambda k: (len(k), k))
+                if not shared:
+                    continue
+                st["instruments"] += 1
+                rows = [{"current_anchor": uk_anchors[k],
+                         "previous_anchor": eu_anchors[k],
+                         "mapping_type": "equivalent",
+                         "inherit_before": self.ASSIMILATION_CUTOFF,
+                         "source_jurisdiction": "European Union",
+                         "note": "Assimilated text: the EU original's own words."}
+                        for k in shared]
+                st["mappings"] += len(rows)
+                entry = {"uk": uk_id, "eu": celex, "articles": len(rows),
+                         "dropped_in_uk": len(set(eu_anchors) - set(uk_anchors)),
+                         "uk_only": len(set(uk_anchors) - set(eu_anchors))}
+                # …and the EU instrument's own predecessors, one step back
+                inherited: list[dict] = []
+                if include_predecessors:
+                    for pm in cat.conn.execute(
+                            "SELECT previous_doc_id, previous_anchor, current_anchor "
+                            "FROM provision_mappings WHERE current_doc_id = ?",
+                            (celex,)):
+                        key = str(pm["current_anchor"] or "").lower()
+                        if key in uk_anchors:
+                            inherited.append({
+                                "previous_doc_id": str(pm["previous_doc_id"]),
+                                "current_anchor": uk_anchors[key],
+                                "previous_anchor": str(pm["previous_anchor"]),
+                            })
+                    entry["predecessor_mappings"] = len(inherited)
+                    st["predecessor_mappings"] += len(inherited)
+                plan.append(entry)
+                if apply:
+                    cat.upsert_provision_mappings(uk_id, celex, rows,
+                                                  created_by="structured", replace=False)
+                    by_prev: dict[str, list[dict]] = {}
+                    for row in inherited:
+                        by_prev.setdefault(row["previous_doc_id"], []).append({
+                            "current_anchor": row["current_anchor"],
+                            "previous_anchor": row["previous_anchor"],
+                            "mapping_type": "functional_predecessor",
+                            "inherit_before": self.ASSIMILATION_CUTOFF,
+                            "source_jurisdiction": "European Union",
+                            "note": "Carried through the assimilated text's EU original.",
+                        })
+                    for prev_id, prev_rows in by_prev.items():
+                        cat.upsert_provision_mappings(uk_id, prev_id, prev_rows,
+                                                      created_by="structured",
+                                                      replace=False)
+                _progress(on_progress, stage="mapping assimilated provisions", done=n,
+                          total=len(targets), item=uk_id)
+        if apply:
+            self._invalidate_caches()
+        st["plan"] = plan[:500]
+        return st
+
     def merge_assimilated_duplicates(self, *, apply: bool = False,
                                      limit: int | None = None,
                                      on_progress=None, cancel_check=None) -> dict:

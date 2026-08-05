@@ -561,6 +561,23 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.refix_westlaw_imports(apply=apply, limit=limit)
 
     @admin
+    def map_assimilated_provisions(stable_id: Optional[str] = None,
+                                   apply: bool = False,
+                                   limit: Optional[int] = None,
+                                   include_predecessors: bool = True) -> dict:
+        """Link every assimilated UK regulation's articles to their EU originals, so
+        Luxembourg's reading of the very words the UK provision contains is visible on
+        it. Only articles present in BOTH texts are mapped (an article the UK dropped has
+        no counterpart; a UK insertion like Article 22A has no EU one), citers are cut
+        off at IP completion day, and the link is JURISDICTION-LOCKED to the EU so the
+        UK instrument is informed by Luxembourg rather than buried under every member
+        state. ``include_predecessors`` carries the chain one step further, to the
+        directive behind the regulation. DRY RUN unless ``apply=True``."""
+        return facade.map_assimilated_provisions(
+            stable_id=stable_id, apply=apply, limit=limit,
+            include_predecessors=include_predecessors)
+
+    @admin
     def merge_assimilated_duplicates(apply: bool = False,
                                      limit: Optional[int] = None) -> dict:
         """Fold assimilated EU law held twice onto one node. legislation.gov.uk serves an

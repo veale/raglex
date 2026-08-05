@@ -876,3 +876,167 @@ def test_a_write_names_the_rows_it_did_not_send(tmp_path):
     # and the pair alone can be listed, without paging every mapping on the law
     only = f.provision_mappings(stable_id="ai-act", previous_id="nlf")
     assert only["matched"] == 2 and only["total"] == 2
+
+
+# ── the jurisdiction lock ────────────────────────────────────────────────────
+def test_a_lock_admits_only_that_jurisdictions_work():
+    """Every member state cites the GDPR. Without the lock the UK instrument would be
+    buried under the rest of Europe instead of informed by it."""
+    from raglex.core.jurisdictions import canonical_jurisdiction, prefixes_for
+
+    assert canonical_jurisdiction("EU") == "European Union"
+    assert canonical_jurisdiction("European Union") == "European Union"
+    assert canonical_jurisdiction("gb") == "United Kingdom"
+    assert canonical_jurisdiction("Narnia") is None
+    assert "eu-" in prefixes_for("EU") and "edpb" in prefixes_for("EU")
+
+
+def test_an_unknown_lock_hides_rather_than_admits():
+    """The safe direction: a typo must not open the mapping to the whole corpus."""
+    from raglex.core.jurisdictions import sql_source_match
+
+    sql, params = sql_source_match("s.source", "Narnia")
+    assert sql == "1 = 0" and params == []
+
+
+def test_the_lock_predicate_covers_every_bucket():
+    from raglex.core.jurisdictions import JURISDICTIONS, sql_lock_match
+
+    sql, params = sql_lock_match("s.source", "pm.source_jurisdiction")
+    assert sql.count("pm.source_jurisdiction = ?") == len(JURISDICTIONS)
+    assert "European Union" in params and "United Kingdom" in params
+
+
+def test_inherited_citers_are_filtered_by_the_lock(catalogue):
+    """End to end: a CJEU judgment travels along the mapping, a Dutch one does not."""
+    from datetime import date
+
+    from raglex.core.models import (DocType, ExtractedVia, Record, RelationshipType,
+                                    ResolutionStatus, TypedRelation)
+
+    def _hold(sid, source, when, *, cites=None, anchor=None):
+        rec = Record(
+            source=source, stable_id=sid, doc_type=DocType.JUDGMENT, title=sid,
+            decision_date=when, language="en", raw_bytes=sid.encode(), raw_ext="xml",
+            text="text", extracted_via=ExtractedVia.STRUCTURED,
+            relations=[TypedRelation(
+                relationship_type=RelationshipType.INTERPRETS,
+                raw_citation_string=cites, dst_id=cites, dst_anchor=anchor,
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.RESOLVED)] if cites else [])
+        rec.ensure_payload_hash()
+        catalogue.upsert_document(rec)
+
+    _hold("32016R0679", "eu-legislation", date(2016, 4, 27))
+    _hold("european/regulation/2016/0679", "uk-legislation", date(2021, 1, 1))
+    _hold("ECLI:EU:C:2019:1", "eu-cellar", date(2019, 5, 1),
+          cites="32016R0679", anchor="Article 15")
+    _hold("nl/2019/9", "nl-rechtspraak", date(2019, 5, 1),
+          cites="32016R0679", anchor="Article 15")
+    _hold("ECLI:EU:C:2023:9", "eu-cellar", date(2023, 5, 1),      # after exit day
+          cites="32016R0679", anchor="Article 15")
+
+    catalogue.upsert_provision_mappings(
+        "european/regulation/2016/0679", "32016R0679",
+        [{"current_anchor": "Article 15", "previous_anchor": "Article 15",
+          "mapping_type": "equivalent", "inherit_before": "2020-12-31",
+          "source_jurisdiction": "European Union"}],
+        created_by="structured")
+
+    rows = catalogue.inherited_mentions_for("european/regulation/2016/0679", limit=None)
+    got = {str(r["src_id"]) for r in rows}
+    assert "ECLI:EU:C:2019:1" in got          # EU, before exit day → passes
+    assert "nl/2019/9" not in got             # Dutch → blocked by the lock
+    assert "ECLI:EU:C:2023:9" not in got      # EU, after exit day → blocked by cutoff
+
+
+# ── generating the assimilated mappings ──────────────────────────────────────
+def _facade_with_gdpr_pair():
+    """The UK GDPR and its EU original, each segmented by article — the UK one missing
+    an article the EU has, and carrying one the EU does not."""
+    import os
+    import tempfile
+    from datetime import date
+
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record, Segment
+    from raglex.facade import Facade
+
+    os.environ["RAGLEX_DATA_DIR"] = tempfile.mkdtemp()
+    f = Facade(Config.from_env())
+
+    def _hold(sid, labels, when):
+        text, segs, pos = "", [], 0
+        for label in labels:
+            body = f"{label} body.\n"
+            segs.append(Segment(label=label, kind="section", level=1,
+                                char_start=pos, char_end=pos + len(body)))
+            text += body
+            pos += len(body)
+        rec = Record(source="uk-legislation" if sid.startswith("european/")
+                     else "eu-legislation",
+                     stable_id=sid, doc_type=DocType.LEGISLATION, title=sid,
+                     decision_date=when, language="en", text=text,
+                     raw_bytes=text.encode(), raw_ext="xml", segments=segs,
+                     extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        with f._open() as (cat, _rs, ts):
+            path = str(ts.put(rec.payload_hash, rec.text))
+            ts.put_segments(rec.payload_hash, rec.segments)
+            cat.upsert_document(rec, text_path=path)
+
+    _hold("32016R0679", ["Article 15", "Article 21", "Article 22"], date(2016, 4, 27))
+    _hold("european/regulation/2016/0679",
+          ["Article 15", "Article 21", "Article 22A"], date(2021, 1, 1))
+    return f
+
+
+def test_mapping_covers_only_the_articles_that_survived():
+    """The article sets are INTERSECTED, so an article the UK dropped has no counterpart
+    and a UK insertion (22A) has no EU one — neither is mapped, and no list of them is
+    needed."""
+    f = _facade_with_gdpr_pair()
+    plan = f.map_assimilated_provisions()
+    assert plan["instruments"] == 1 and plan["mappings"] == 2
+    entry = plan["plan"][0]
+    assert entry["uk"] == "european/regulation/2016/0679" and entry["eu"] == "32016R0679"
+    assert entry["dropped_in_uk"] == 1 and entry["uk_only"] == 1
+
+
+def test_applying_writes_locked_and_cut_off_mappings():
+    f = _facade_with_gdpr_pair()
+    f.map_assimilated_provisions(apply=True)
+    got = f.provision_mappings(stable_id="european/regulation/2016/0679")
+    rows = {m["current_anchor"]: m for m in got["mappings"]}
+    assert set(rows) == {"Article 15", "Article 21"}
+    for m in rows.values():
+        assert m["previous_doc_id"] == "32016R0679"
+        assert m["mapping_type"] == "equivalent"
+        assert m["inherit_before"] == "2020-12-31"          # exit day
+        assert m["source_jurisdiction"] == "European Union"  # jurisdiction-locked
+    # and it is idempotent — the pair is the identity, so a second run rewrites
+    f.map_assimilated_provisions(apply=True)
+    assert len(f.provision_mappings(
+        stable_id="european/regulation/2016/0679")["mappings"]) == 2
+
+
+def test_a_predecessor_is_carried_through_to_the_uk_article():
+    """The DPD sits behind the GDPR; where the UK still has that article, the same
+    correspondence is written from the UK text, under the same cutoff and lock."""
+    f = _facade_with_gdpr_pair()
+    with f._open() as (cat, _rs, _ts):
+        cat.upsert_provision_mappings(
+            "32016R0679", "31995L0046",
+            [{"current_anchor": "Article 15", "previous_anchor": "Article 12"},
+             {"current_anchor": "Article 22", "previous_anchor": "Article 15"}],
+            created_by="structured")
+
+    st = f.map_assimilated_provisions(apply=True)
+    # Article 22 is gone from the UK text, so only the Article 15 chain carries
+    assert st["predecessor_mappings"] == 1
+    got = f.provision_mappings(stable_id="european/regulation/2016/0679",
+                               previous_id="31995L0046")
+    assert [(m["current_anchor"], m["previous_anchor"]) for m in got["mappings"]] == [
+        ("Article 15", "Article 12")]
+    assert got["mappings"][0]["source_jurisdiction"] == "European Union"
+    assert got["mappings"][0]["inherit_before"] == "2020-12-31"

@@ -372,6 +372,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
         from .jobs import MAX_CONCURRENT_JOBS, JobManager
 
+        def _last_started_epoch(facade, kind: str, *, label: str | None = None) -> float:
+            """When a recurring job of this kind last STARTED, as an epoch seconds — the
+            durable answer an in-process timestamp cannot give across a restart. 0.0 when
+            it has never run, so a genuinely new task still fires at once."""
+            try:
+                with facade._open() as (cat, _rs, _ts):
+                    rows = list(cat.recent_jobs(kind, limit=40))
+            except Exception:  # noqa: BLE001 — never let this kill the boot
+                return 0.0
+            for row in rows:
+                if label and label.lower() not in str(row["label"] or "").lower():
+                    continue
+                started = str(row["started_at"] or "")
+                try:
+                    from datetime import datetime as _dt
+                    return _dt.fromisoformat(started).timestamp()
+                except ValueError:
+                    return 0.0
+            return 0.0
+
         def _harvest_ran_today(facade) -> bool:
             """Did a full routable drain already start today? Read off the durable jobs
             table so a scheduler restart doesn't re-trigger the night's harvest."""
@@ -407,7 +427,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
         last_maint = time.time()  # don't fire the maintenance pass at boot; wait a cadence
         last_static_bundle = time.time()  # nor republish the export folder on every restart
         last_eu_consolidations = time.time()  # explicit first backfill is queued at deploy
-        last_eu_pending_cases = 0.0  # seed/refresh the pending C/T docket at boot
+        # The pending C/T docket's cadence has to survive a restart. It used to start at
+        # 0.0 ("seed at boot"), and because the timestamp lives only in this loop, every
+        # scheduler start — every deploy — began another hour-long pass over the same
+        # ~700 decisions. Read the last one out of the durable jobs table instead, so a
+        # daily task is daily however often the container is recreated.
+        last_eu_pending_cases = _last_started_epoch(f, "harvest-source",
+                                                    label="EU pending C/T cases")
         last_eu_enrich = time.time()
         last_eu_case_names = time.time()  # credentialed webservice — wait a cadence too
         last_backfill = 0.0
@@ -659,7 +685,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     # judgment harvested by the ordinary CJEU watch never reached its
                     # notice; this local sweep closes that gap in both harvest orders.
                     try:
-                        swept = facade.retire_resolved_pending_notices()
+                        swept = f.retire_resolved_pending_notices()
                         if swept.get("retired"):
                             print(f"[watch] eu-pending-cases: retired "
                                   f"{swept['retired']} resolved notice(s)")
@@ -783,6 +809,25 @@ def cmd_import_westlaw(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_map_assimilated(args: argparse.Namespace) -> int:
+    """Map assimilated UK regulations' articles onto their EU originals."""
+    from .facade import Facade
+
+    st = Facade(Config.from_env()).map_assimilated_provisions(
+        stable_id=args.id, apply=args.apply, limit=args.limit,
+        on_progress=lambda **p: None)
+    verb = "wrote" if args.apply else "would write"
+    print(f"instruments={st['instruments']} {verb}={st['mappings']} mappings "
+          f"(+{st['predecessor_mappings']} predecessor, "
+          f"{st['skipped_no_segments']} skipped for lack of segments)")
+    for e in st["plan"][:25]:
+        print(f"  {e['uk']} \u2190 {e['eu']}: {e['articles']} articles "
+              f"(EU-only {e['dropped_in_uk']}, UK-only {e['uk_only']})")
+    if not args.apply and st["mappings"]:
+        print("\n(dry run \u2014 re-run with --apply)")
+    return 0
+
+
 def cmd_merge_assimilated(args: argparse.Namespace) -> int:
     """Fold assimilated EU law held under both legislation.gov.uk paths onto one node."""
     from .facade import Facade
@@ -790,10 +835,13 @@ def cmd_merge_assimilated(args: argparse.Namespace) -> int:
     st = Facade(Config.from_env()).merge_assimilated_duplicates(
         apply=args.apply, limit=args.limit, on_progress=lambda **p: None)
     verb = "folded" if args.apply else "would fold"
+    # ``changes`` is truncated for the payload; the COUNT is scanned-minus-untouched, or
+    # the run reports "would fold=5000" for an 11,990-row plan.
+    planned = st["scanned"] - st["unchanged"]
     merged = st["merged"] if args.apply else sum(
         1 for c in st["changes"] if c["kind"] == "merge")
-    print(f"scanned={st['scanned']} {verb}={len(st['changes'])} "
-          f"(merged={merged} renamed={len(st['changes']) - merged} "
+    print(f"scanned={st['scanned']} {verb}={planned} "
+          f"(merged={merged}{'' if args.apply else '+ of the first %d shown' % len(st['changes'])} "
           f"unchanged={st['unchanged']})")
     for c in st["changes"][:30]:
         print(f"  {c['kind']:6} {c['old']}  \u2192  {c['new']}")
@@ -1359,6 +1407,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="apply (default: dry run \u2014 just report the plan)")
     mas.add_argument("--limit", type=int, default=None)
     mas.set_defaults(func=cmd_merge_assimilated)
+
+    mapa = sub.add_parser(
+        "map-assimilated",
+        help="map assimilated UK regulations' articles onto their EU originals "
+             "(EU-locked, cut off at exit day)")
+    mapa.add_argument("--apply", action="store_true", help="apply (default: dry run)")
+    mapa.add_argument("--id", default=None, help="one instrument only")
+    mapa.add_argument("--limit", type=int, default=None)
+    mapa.set_defaults(func=cmd_map_assimilated)
 
     ecr = sub.add_parser("repair-ecr",
                          help="re-chain dead European Court Reports aliases to held ECLIs (series-guarded)")

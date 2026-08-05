@@ -130,6 +130,8 @@ CREATE TABLE IF NOT EXISTS provision_mappings (
     -- transposition of an EU directive inherits retained EU case law (pre-IP completion
     -- day) and not what Luxembourg decided afterwards.
     inherit_before      TEXT,
+    -- Only let this jurisdiction's documents travel along the mapping (see _migrate).
+    source_jurisdiction TEXT,
     note                TEXT,
     created_by          TEXT NOT NULL DEFAULT 'manual',
     confidence          REAL,
@@ -252,6 +254,11 @@ CREATE TABLE IF NOT EXISTS citations (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS citations_src_idx ON citations (src_id);
+-- The other direction. Without it every "which citations point at this candidate" was a
+-- sequential scan of the whole table — 41M rows and 11 GB on the live corpus — which is
+-- what made re-keying a document take seconds instead of milliseconds: one scan per
+-- referencing column, per document. A 4,000-document merge projected to 43 hours.
+CREATE INDEX IF NOT EXISTS citations_candidate_idx ON citations (candidate_id);
 
 CREATE TABLE IF NOT EXISTS citation_aliases (
     alias    TEXT PRIMARY KEY,
@@ -985,6 +992,13 @@ class Catalogue:
             # OR BEFORE this date. Set automatically for a UK transposition (retained EU
             # case law ends at IP completion day) and overridable per mapping.
             ("provision_mappings", "inherit_before", "TEXT"),
+            # Which jurisdiction's work may travel along a mapping. An assimilated UK
+            # regulation is word-for-word its EU original, so the EU material on an
+            # article is genuinely about the same provision — but the rest of Europe's
+            # is not: every member state's courts and DPAs cite the GDPR too, and
+            # projecting all of it onto the UK instrument would bury it. NULL keeps the
+            # historical behaviour (anything may pass).
+            ("provision_mappings", "source_jurisdiction", "TEXT"),
         ):
             try:
                 if self.backend == "postgres":
@@ -1791,15 +1805,17 @@ class Catalogue:
                     """
                     INSERT INTO provision_mappings (
                         current_doc_id, current_anchor, previous_doc_id,
-                        previous_anchor, mapping_type, inherit_before, note,
+                        previous_anchor, mapping_type, inherit_before,
+                        source_jurisdiction, note,
                         created_by, confidence, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT (
                         current_doc_id, current_anchor, previous_doc_id,
                         previous_anchor
                     ) DO UPDATE SET
                         mapping_type = excluded.mapping_type,
                         inherit_before = excluded.inherit_before,
+                        source_jurisdiction = excluded.source_jurisdiction,
                         note = excluded.note,
                         created_by = excluded.created_by,
                         confidence = excluded.confidence
@@ -1809,6 +1825,7 @@ class Catalogue:
                         item["previous_anchor"],
                         item.get("mapping_type") or "functional_predecessor",
                         item.get("inherit_before"),
+                        item.get("source_jurisdiction"),
                         item.get("note"), created_by, item.get("confidence"), now,
                     ),
                 )
@@ -1949,9 +1966,13 @@ class Catalogue:
         )
         family_sql = " OR ".join(clauses)
         decided = decided_by_sql("s")
+        from ..core.jurisdictions import sql_lock_match
+
+        jurisdiction_match, lock_params = sql_lock_match("s.source",
+                                                         "pm.source_jurisdiction")
         # ``limit=None`` means every row, for the callers that count rather than page
         # (see :meth:`version_inherited_mentions_for`).
-        params = [*join_params, *mapping_params]
+        params = [*join_params, *mapping_params, *lock_params]
         if limit is not None:
             params.append(max(1, int(limit)))
         return self.conn.execute(
@@ -1965,6 +1986,7 @@ class Catalogue:
                    -- companion instrument's parallel provision (in force alongside)
                    pm.mapping_type AS mapping_type,
                    pm.inherit_before AS inherit_before,
+                   pm.source_jurisdiction AS source_jurisdiction,
                    d.title AS inherited_from_title
             FROM provision_mappings pm
             JOIN relations r
@@ -1980,6 +2002,12 @@ class Catalogue:
               -- untidy result. An undated citer is excluded rather than assumed current.
               AND (pm.inherit_before IS NULL
                    OR ({decided} IS NOT NULL AND {decided} <= pm.inherit_before))
+              -- …and only the jurisdiction the mapping admits. An assimilated UK
+              -- regulation is word-for-word its EU original, so Luxembourg's reading of
+              -- an article is genuinely about the same words — but every member state
+              -- reads the GDPR too, and letting all of it through would bury the UK
+              -- instrument under the rest of Europe rather than inform it.
+              AND (pm.source_jurisdiction IS NULL OR {jurisdiction_match})
               AND r.src_id <> pm.current_doc_id
               AND r.relationship_type IN (
                 'mentions','interprets','applies','considers','follows',
