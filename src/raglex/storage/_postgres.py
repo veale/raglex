@@ -363,6 +363,11 @@ CREATE TABLE IF NOT EXISTS relations (
 );
 CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
+-- The resolved-citation join in inherited_mentions_for matches "dst_id IN (...) OR
+-- candidate_id IN (...)". Only dst_id was indexed, so that OR could not become a bitmap
+-- union and Postgres walked the whole table in relation_id order: 20M rows filtered to
+-- find 4,519, ~9s inside every GDPR page load.
+CREATE INDEX IF NOT EXISTS relations_candidate_idx ON relations (candidate_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
 
 CREATE TABLE IF NOT EXISTS provision_mappings (

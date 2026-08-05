@@ -2410,6 +2410,7 @@ function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?:
   const [data, , reload] = useAsync<any>(() => api.pendingReferences(id), [id]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const { push } = useTray();
   useEffect(() => {
     if (!data?._warming) return;
     const iv = setInterval(() => reload(), 2500);
@@ -2428,23 +2429,33 @@ function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?:
   // says which kind it is.
   const rows: any[] = data.pending || [...prelim, ...other];
   if (!rows.length) return null;
-  const visible = showAll ? rows : rows.slice(0, 10);
+  // Three is what fits above the fold beside everything else a statute page opens with.
+  const visible = showAll ? rows : rows.slice(0, 3);
 
-  // Which provisions a reference is about, split the way the instrument is written.
+  // Which provisions a reference is about, in the order the instrument is written.
   const provisions = (anchors: string[]) => {
     const recitals = anchors.filter((a) => /^recital/i.test(a));
     const rest = anchors.filter((a) => !/^recital/i.test(a));
-    return { recitals, rest };
+    return [...recitals, ...rest];
   };
 
+  // Rows open in the TRAY, not the main view: you are reading a statute and glancing at
+  // what is pending on it — replacing the page you are on loses your place, and the
+  // notice is a paragraph long. ⌘-click still opens a tab (DocLink keeps the href).
   const row = (r: any) => {
-    const { recitals, rest } = provisions(r.anchors || []);
+    const provs = provisions(r.anchors || []);
     const isOpen = expanded === r.stable_id;
+    // Previewed inline, capped to what fits on ONE line: the provisions ARE the reason
+    // to look at this list, so making every row a click to find out defeats it.
+    const PREVIEW = 4;
+    const shown = isOpen ? provs : provs.slice(0, PREVIEW);
     return (
       <div className="pref-row" key={r.stable_id}>
         <div className="pref-head">
-          <DocLink className="pref-case" id={r.stable_id} onOpen={() => open(r.stable_id)}
-            title="Open the pending notice (⌘-click for a new tab)">
+          <DocLink className="pref-case" id={r.stable_id}
+            onOpen={() => push({ kind: "doc", id: r.stable_id,
+              label: <>{r.case_number || r.stable_id}</> })}
+            title="Open the pending notice in a side tray (⌘-click for a new tab)">
             {r.case_number || r.stable_id}</DocLink>
           <span className="pref-title">{String(r.title || "")
             .replace(/^Pending:\s*/, "").replace(/\s*\([CT]-\d+\/\d+\)\s*$/, "")}</span>
@@ -2455,29 +2466,29 @@ function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?:
             {r.procedure_label || (r.preliminary ? "Preliminary reference" : "Pending")}</span>
           {r.ag_opinion && (
             <DocLink className="tag tag-ag" id={r.ag_opinion.stable_id}
-              onOpen={() => open(r.ag_opinion.stable_id)}
+              onOpen={() => push({ kind: "doc", id: r.ag_opinion.stable_id,
+                label: <>AG opinion · {r.case_number || r.ag_opinion.stable_id}</> })}
               title={`Opinion of the Advocate General${r.ag_opinion.advocate_general
                 ? ` ${r.ag_opinion.advocate_general}` : ""}${r.ag_opinion.date
                 ? `, ${r.ag_opinion.date}` : ""} — delivered, but the Court has not yet ruled`}>
-              AG opinion{r.ag_opinion.date ? ` · ${String(r.ag_opinion.date).slice(0, 4)}` : ""} ↗</DocLink>
+              AG opinion{r.ag_opinion.date ? ` · ${String(r.ag_opinion.date).slice(0, 4)}` : ""}</DocLink>
           )}
         </div>
-        <div className="pref-meta muted">
+        <div className={`pref-meta muted${isOpen ? "" : " one-line"}`}>
           {[r.referring_court, r.origin_country, r.date].filter(Boolean).join(" · ")}
-          {(r.anchors || []).length > 0 && (
-            <> · <a className="pref-provs" onClick={() => setExpanded(isOpen ? null : r.stable_id)}
-              title="The articles and recitals this reference turns on">
-              {rest.length + recitals.length} provision{rest.length + recitals.length === 1 ? "" : "s"} {isOpen ? "▾" : "▸"}</a></>
-          )}
-        </div>
-        {isOpen && (
-          <div className="pref-anchors">
-            {[...recitals, ...rest].map((a) => (
-              <a key={a} className="tag tag-btn" title={`Go to ${a} and see everything that cites it`}
+          {provs.length > 0 && <>
+            {" · "}
+            {shown.map((a) => (
+              <a key={a} className="pref-prov" title={`Go to ${a} and see everything that cites it`}
                 onClick={() => open(id, a)}>{a}</a>
             ))}
-          </div>
-        )}
+            {provs.length > PREVIEW && (
+              <a className="pref-provs" onClick={() => setExpanded(isOpen ? null : r.stable_id)}
+                title={isOpen ? "Collapse" : `All ${provs.length} provisions this case turns on`}>
+                {isOpen ? "show fewer" : `see all ${provs.length}`}</a>
+            )}
+          </>}
+        </div>
       </div>
     );
   };
@@ -2493,13 +2504,10 @@ function PendingReferencesBox({ id, open }: { id: string; open: (id: string, a?:
         </span>
       </h3>
       <div className="pref-list">{visible.map(row)}</div>
-      {rows.length > visible.length && (
-        <a className="mini-link show-more" onClick={() => setShowAll(true)}
-          title="Show every pending proceeding on this instrument">
-          ▾ Show all {rows.length}</a>
-      )}
-      {showAll && rows.length > 10 && (
-        <a className="mini-link show-more" onClick={() => setShowAll(false)}>▴ Show fewer</a>
+      {rows.length > 3 && (
+        <a className="mini-link show-more" onClick={() => setShowAll((v) => !v)}
+          title={showAll ? "Collapse the list" : "Show every pending proceeding on this instrument"}>
+          {showAll ? "▴ Show fewer" : `▾ Show all ${rows.length}`}</a>
       )}
       {data.stale_count > 0 && (
         <p className="muted pref-stale">
@@ -2777,6 +2785,7 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
   // the discreet control swaps to recency within the loaded slice
   const [sort, setSort] = useState<"authority" | "newest" | "oldest">("authority");
   const [page, setPage] = useState(0);
+  const [listOpen, setListOpen] = useState(false);
   // which citing documents have their extra passages disclosed
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const PER = 50;
@@ -2902,7 +2911,7 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
         </div>
       )}
       <table><tbody>
-        {shown.slice(page * PER, (page + 1) * PER).map((g) => {
+        {(listOpen ? shown.slice(page * PER, (page + 1) * PER) : shown.slice(0, 10)).map((g) => {
           const r = g.head;
           const opened = expanded.has(g.key);
           return (
@@ -2946,7 +2955,15 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
           );
         })}
       </tbody></table>
-      {shown.length > PER && (
+      {/* Collapsed to ten by default, like the other reference panels: 16,498 citing
+          documents paged fifty at a time still filled the screen before you had decided
+          you wanted them. Expanding restores the pager. */}
+      {shown.length > 10 && (
+        <a className="mini-link show-more" onClick={() => { setListOpen((v) => !v); setPage(0); }}
+          title={listOpen ? "Collapse this list" : "Show every citing document, paged"}>
+          {listOpen ? "▴ Show fewer" : `▾ Show all ${shown.length.toLocaleString()}`}</a>
+      )}
+      {listOpen && shown.length > PER && (
         <div className="row" style={{ justifyContent: "center", alignItems: "baseline", marginTop: 8 }}>
           <button className="mini" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>‹ prev</button>
           <span className="muted" style={{ flex: "0 0 auto", fontSize: 12 }}>

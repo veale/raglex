@@ -2138,14 +2138,11 @@ class Facade:
         own_celex = consolidation_base(own_celex) or own_celex
         if not re.fullmatch(r"[0-9]{5}[A-Z]{1,2}[0-9]{4}", own_celex.upper()):
             return None
-        for row in cat.relations_to(own_celex):
-            if row["relationship_type"] != "assimilated_version_of":
-                continue
-            uk = cat.get_document(row["src_id"])
-            if uk is None:
-                continue
-            path = assimilated_leg_path(row["src_id"]) or row["src_id"]
-            return {"role": "uk_assimilated", "stable_id": row["src_id"],
+        src_id = cat.relation_src_of_type(own_celex, "assimilated_version_of")
+        uk = cat.get_document(src_id) if src_id else None
+        if uk is not None:
+            path = assimilated_leg_path(src_id) or src_id
+            return {"role": "uk_assimilated", "stable_id": src_id,
                     "title": uk["title"],
                     "url": f"https://www.legislation.gov.uk/{path}",
                     "note": "The UK assimilated version of this instrument. It is "

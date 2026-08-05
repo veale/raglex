@@ -622,6 +622,46 @@ class StaticLawExporter:
             })
         return by_key
 
+    def _pending_summary(self, stable_id: str) -> dict:
+        """Live CJEU proceedings on this instrument, grouped for a one-line summary.
+
+        The reader's box lists them; a static edition cannot afford that much of its
+        first screen, and cannot fetch more later. So the page carries counts per kind of
+        proceeding ("21 preliminary references (4 with an AG opinion), 6 actions for
+        annulment…") with the full list behind a dialog that filters to whichever count
+        you click. Empty dict when nothing is pending, so the page omits the line.
+        """
+        try:
+            data = self.facade.pending_references(stable_id, limit=500)
+        except Exception:  # noqa: BLE001 — a static build must not fail on an extra
+            return {}
+        rows = data.get("pending") or []
+        if not rows:
+            return {}
+        groups: dict[str, dict] = {}
+        for row in rows:
+            label = row.get("procedure_label") or "Pending proceeding"
+            group = groups.setdefault(label, {"label": label, "n": 0, "with_ag": 0,
+                                              "preliminary": bool(row.get("preliminary"))})
+            group["n"] += 1
+            group["with_ag"] += 1 if row.get("ag_opinion") else 0
+        return {
+            "total": len(rows),
+            # References first, then the biggest of the rest — the same order as the list.
+            "groups": sorted(groups.values(),
+                             key=lambda g: (not g["preliminary"], -g["n"], g["label"])),
+            "cases": [{
+                "id": r.get("stable_id"),
+                "case": r.get("case_number") or r.get("stable_id"),
+                "title": re.sub(r"^Pending:\s*", "", str(r.get("title") or "")),
+                "label": r.get("procedure_label") or "Pending proceeding",
+                "date": r.get("date"),
+                "court": r.get("referring_court"),
+                "ag": bool(r.get("ag_opinion")),
+                "anchors": r.get("anchors") or [],
+            } for r in rows],
+        }
+
     def build_data(
         self,
         stable_id: str,
@@ -635,6 +675,10 @@ class StaticLawExporter:
         free from a payload built hours ago."""
         max_snippets = max(1, min(int(max_snippets), 12))
         generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        # Computed BEFORE the catalogue is opened below: it opens its own connection,
+        # and taking a second one from inside the first can only ever hurt (a
+        # single-connection pool would deadlock outright).
+        pending_summary = self._pending_summary(stable_id)
 
         with self.facade._open() as (cat, _rawstore, textstore):
             target = cat.get_document(stable_id)
@@ -980,6 +1024,12 @@ class StaticLawExporter:
                     if inherited_recitals else None
                 ),
             },
+            # What is still before the Court, as a SUMMARY plus the list behind it. A
+            # static edition is a snapshot, so this is dated by "generated_at" like
+            # everything else here — but a reader holding the offline text still needs to
+            # know the instrument has live questions on it, and which provisions they are
+            # about. Unlike the EU↔UK counterpart link, this needs no server: it is data.
+            "pending": pending_summary,
             "groups": groups,
             "index": index,
             "counts": counts,
@@ -1197,6 +1247,9 @@ _HTML_TEMPLATE = """<!doctype html>
     <div>
       <h1>__TITLE__</h1>
       __ATTRIBUTION_BLOCK__
+      <!-- One line, filled in by the script when the instrument has live proceedings:
+           counts per kind, each clickable to open the list filtered to it. -->
+      <p class="pending-line" id="pending-line" hidden></p>
     </div>
   </header>
   <div class="page">
@@ -1226,6 +1279,19 @@ _HTML_TEMPLATE = """<!doctype html>
     </div>
     <div id="results"></div>
     <button id="more-results" class="more" type="button">+ show more</button>
+  </dialog>
+  <!-- The pending list, opened from the summary line and filterable to one kind of
+       proceeding by clicking its count. -->
+  <dialog id="pending-dialog" aria-labelledby="pending-title">
+    <div class="dialog-head">
+      <div>
+        <h2 id="pending-title">Before the Court</h2>
+        <p id="pending-sub" class="compare-sub"></p>
+      </div>
+      <button id="pending-close" type="button">[ close ]</button>
+    </div>
+    <div id="pending-filters" class="facet-tokens" aria-label="Filter by kind of proceeding"></div>
+    <div id="pending-body"></div>
   </dialog>
   <!-- Second level, over the mentions list: the two provisions a mapping claims are
        similar, side by side, so the reader judges the claim rather than trusting it. -->
@@ -1520,6 +1586,25 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
 #compare-dialog { width: min(72rem, calc(100vw - 2rem)); }
 #compare-dialog::backdrop { background: rgba(24, 23, 20, .58); }
 .compare-sub { margin: .25rem 0 0; color: var(--quiet); font-size: 1rem; }
+
+/* What is still before the Court. A snapshot page states it as one line — counts per
+   kind of proceeding, each a filter into the list — because it cannot spend the first
+   screen on a list it also cannot refresh. */
+.pending-line { margin: .5rem 0 0; font-size: 1rem; }
+.pending-count, .pending-all {
+  background: none; border: 0; padding: 0; font: inherit; color: var(--link);
+  cursor: pointer; text-decoration: underline dotted;
+}
+.pending-all { margin-left: .35rem; font-weight: 600; }
+.pending-row { padding: .6rem 0; border-bottom: 1px solid var(--rule); }
+.pending-row:last-child { border-bottom: 0; }
+.pending-case { margin: 0; }
+.pending-title { margin: .1rem 0 0; font-style: italic; }
+.pending-label {
+  display: inline-block; margin-left: .35rem; padding: 0 .3rem;
+  border: 1px solid var(--rule); border-radius: 3px; font-size: .8rem; color: var(--quiet);
+}
+.pending-anchors { margin: .2rem 0 0; font-size: .9rem; color: var(--quiet); }
 .compare-body {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2048,6 +2133,70 @@ _SCRIPT = r"""
   $("compare-dialog").addEventListener("click", (event) => {
     if (event.target === $("compare-dialog")) $("compare-dialog").close();
   });
+
+  // --- what is still before the Court -------------------------------------
+  // A snapshot page cannot spend its first screen on a list, and cannot fetch one
+  // later, so the summary IS the affordance: counts per kind of proceeding, each one
+  // a filter into the same dialog.
+  const pending = DATA.pending || null;
+  let pendingFilter = "";
+
+  function renderPendingLine() {
+    if (!pending || !pending.groups || !pending.groups.length) return;
+    const parts = pending.groups.map((g) => {
+      const label = g.n === 1 ? g.label.toLowerCase() : g.label.toLowerCase() + "s";
+      const ag = g.with_ag ? ` (${g.with_ag} with an AG opinion)` : "";
+      return `<button class="pending-count" data-kind="${esc(g.label)}"`
+        + ` title="Show only these">${g.n} ${esc(label)}${esc(ag)}</button>`;
+    });
+    const line = $("pending-line");
+    line.innerHTML = "<strong>Before the Court:</strong> " + parts.join(", ")
+      + ` <button class="pending-all" data-kind="">See all ${pending.total}</button>`;
+    line.hidden = false;
+    for (const button of line.querySelectorAll("[data-kind]")) {
+      button.addEventListener("click", () => openPending(button.dataset.kind || ""));
+    }
+  }
+
+  function pendingRowHtml(row) {
+    const anchors = (row.anchors || []).length
+      ? `<p class="pending-anchors">${(row.anchors || []).map((a) => esc(a)).join(" · ")}</p>`
+      : "";
+    const meta = [row.court, row.date].filter(Boolean).map(esc).join(" · ");
+    return `<div class="pending-row"><p class="pending-case"><strong>${esc(row.case)}</strong>`
+      + ` <span class="pending-label">${esc(row.label)}</span>`
+      + (row.ag ? ' <span class="pending-label">AG opinion delivered</span>' : "")
+      + `</p><p class="pending-title">${esc(row.title)}</p>`
+      + (meta ? `<p class="where">${meta}</p>` : "") + anchors + "</div>";
+  }
+
+  function openPending(kind) {
+    if (!pending) return;
+    pendingFilter = kind || "";
+    const rows = pendingFilter
+      ? (pending.cases || []).filter((r) => r.label === pendingFilter)
+      : (pending.cases || []);
+    $("pending-sub").textContent = pendingFilter
+      ? `${rows.length} ${pendingFilter.toLowerCase()}${rows.length === 1 ? "" : "s"} pending, as at ${DATA.generated_at.slice(0, 10)}`
+      : `${rows.length} proceeding${rows.length === 1 ? "" : "s"} pending, as at ${DATA.generated_at.slice(0, 10)}`;
+    $("pending-filters").innerHTML = [{ label: "", n: pending.total }]
+      .concat(pending.groups || [])
+      .map((g) => `<button class="facet-token${(g.label || "") === pendingFilter ? " on" : ""}"`
+        + ` data-filter="${esc(g.label || "")}">${g.label ? esc(g.label) : "All"} ${g.n}</button>`)
+      .join(" ");
+    for (const button of $("pending-filters").querySelectorAll("[data-filter]")) {
+      button.addEventListener("click", () => openPending(button.dataset.filter));
+    }
+    $("pending-body").innerHTML = rows.map(pendingRowHtml).join("")
+      || '<p class="where">Nothing pending in this category.</p>';
+    if (!$("pending-dialog").open) $("pending-dialog").showModal();
+  }
+
+  $("pending-close").addEventListener("click", () => $("pending-dialog").close());
+  $("pending-dialog").addEventListener("click", (event) => {
+    if (event.target === $("pending-dialog")) $("pending-dialog").close();
+  });
+  renderPendingLine();
 
   function snippetHtml(snippet) {
     const text = String(snippet.text || "");

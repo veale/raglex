@@ -944,3 +944,33 @@ def test_a_judgment_reparsed_through_the_format_registry_is_not_read_as_an_act()
       <ALINEA>This Regulation applies.</ALINEA></PARAG></ARTICLE></ENACTING.TERMS></ACT>""")
     assert any(s.kind == "article" for s in act.segments)
     assert "This Regulation applies." in (act.text or "")
+
+
+def test_unzip_picks_the_document_not_the_oj_masthead():
+    """CELLAR ships the OJ issue's contents wrapper alongside the notice itself, and it
+    sorts first as often as not. Taking member[0] stored the masthead as 993 notices'
+    text — they had no parties to read a case name from, so they were titled
+    "Pending: Case T-8/24" and their questions were an OJ front page."""
+    import io as _io
+    import zipfile as _zip
+
+    wrapper = (b'<?xml version="1.0" encoding="UTF-8"?>\n<PUBLICATION><OJ><BIB.OJ>'
+               b"<COLL>C</COLL></BIB.OJ>"
+               b'<ITEM.PUB DOC.INSTANCE="C_202401706EN.doc.fmx.xml"/></OJ></PUBLICATION>')
+    document = (b'<?xml version="1.0" encoding="UTF-8"?>\n<CJT><TI.CJT><TITLE><TI>'
+                b"<P>Action brought on 8 January 2024 - Alpha v Commission</P>"
+                b"<P>(Case T-8/24)</P></TI></TITLE></TI.CJT></CJT>")
+    buf = _io.BytesIO()
+    with _zip.ZipFile(buf, "w") as zf:
+        zf.writestr("C_202401706EN.xml", wrapper)          # sorts first
+        zf.writestr("C_202401706EN.doc.fmx.xml", document)
+    picked = unzip_formex(buf.getvalue())
+    assert picked is not None and b"<CJT>" in picked
+    assert pending_formex_title(picked) == "Alpha v Commission (T-8/24)"
+
+    # …and an archive that names no instance still yields the document beside the wrapper
+    buf2 = _io.BytesIO()
+    with _zip.ZipFile(buf2, "w") as zf:
+        zf.writestr("aaa_index.xml", b'<?xml version="1.0"?>\n<PUBLICATION></PUBLICATION>')
+        zf.writestr("zzz_item.xml", document)
+    assert b"<CJT>" in (unzip_formex(buf2.getvalue()) or b"")

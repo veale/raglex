@@ -400,17 +400,47 @@ def national_transposition_edges(celex: str, sparql) -> list[TypedRelation]:
 
 
 # -- pure Formex helpers ----------------------------------------------------
+#: The OJ issue's own masthead file. It is a table of CONTENTS — "Official Journal of
+#: the European Union … Announcements … COURT PROCEEDINGS … General Court" — and it
+#: names the real document in ``<ITEM.PUB DOC.INSTANCE="C_202401706EN.doc.fmx.xml"/>``.
+#: Taking the archive's first member stored this wrapper as 993 notices' text, so they
+#: had no parties to read a case name from and fell back to "Pending: Case T-8/24".
+_PUBLICATION_ROOT = re.compile(rb"<\s*PUBLICATION[\s>]", re.IGNORECASE)
+_DOC_INSTANCE = re.compile(rb'DOC\.INSTANCE\s*=\s*"([^"]+)"', re.IGNORECASE)
+
+
 def unzip_formex(raw: bytes) -> bytes | None:
-    """CELLAR returns Formex as a zip; unpack the first XML member (pure). Returns
-    the raw XML bytes, or None if the payload isn't a usable Formex archive."""
+    """CELLAR returns Formex as a zip; unpack the DOCUMENT member (pure). Returns
+    the raw XML bytes, or None if the payload isn't a usable Formex archive.
+
+    Which member is the document is not "the first one": an OJ issue ships its
+    masthead/contents wrapper alongside the item itself, and the wrapper sorts first as
+    often as not. Prefer the document instance the wrapper itself points at.
+    """
     if raw[:2] == b"PK":
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                 names = [n for n in zf.namelist() if n.lower().endswith((".xml", ".fmx", ".fmx4"))]
                 if not names:
                     names = zf.namelist()
-                if names:
-                    return zf.read(names[0])
+                if not names:
+                    return None
+                # The ".doc.fmx.xml" instance is the item; anything else in the archive
+                # is apparatus. Fall back to following the wrapper's own pointer, then
+                # to the first member (an archive holding only the document).
+                doc_names = [n for n in names if ".doc." in n.lower()]
+                first = zf.read(doc_names[0] if doc_names else names[0])
+                if doc_names or not _PUBLICATION_ROOT.search(first[:400]):
+                    return first
+                pointer = _DOC_INSTANCE.search(first)
+                if pointer:
+                    wanted = pointer.group(1).decode(errors="ignore").rsplit("/", 1)[-1]
+                    for name in names:
+                        if name.rsplit("/", 1)[-1] == wanted:
+                            return zf.read(name)
+                # No pointer we can follow: the next member is likelier the document
+                # than the masthead we just rejected.
+                return zf.read(names[1]) if len(names) > 1 else first
         except zipfile.BadZipFile:
             return None
         return None

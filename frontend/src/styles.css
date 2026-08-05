@@ -1555,7 +1555,16 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .tag-ag { background: color-mix(in srgb, var(--note) 22%, transparent);
   border-color: color-mix(in srgb, var(--note) 45%, var(--line-faint)); cursor: pointer; }
 .pref-meta { font-size: .75rem; margin-top: 2px; }
-.pref-provs { cursor: pointer; }
+/* One line per row unless it is expanded: the box is a glance, and a case turning on
+   nine provisions must not push the next case off the screen. */
+.pref-meta.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pref-head { min-width: 0; }
+.pref-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the provisions themselves, previewed inline — the reason to look at the list at all */
+.pref-prov { cursor: pointer; margin-right: var(--sp-2); font-weight: 600;
+  color: var(--info); white-space: nowrap; }
+.pref-prov:hover { text-decoration: underline; }
+.pref-provs { cursor: pointer; text-decoration: underline dotted; }
 .pref-anchors { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin: var(--sp-2) 0 0; }
 .pref-stale { font-size: .75rem; margin: var(--sp-3) 0 0; }
 

@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS relations (
 );
 CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
+-- The resolved-citation join in inherited_mentions_for matches "dst_id IN (...) OR
+-- candidate_id IN (...)". Only dst_id was indexed, so that OR could not become a bitmap
+-- union and Postgres walked the whole table in relation_id order: 20M rows filtered to
+-- find 4,519, ~9s inside every GDPR page load.
+CREATE INDEX IF NOT EXISTS relations_candidate_idx ON relations (candidate_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
 
 -- Editorial, article-to-article functional lineage. This is deliberately separate
@@ -3027,6 +3032,22 @@ class Catalogue:
         self._refresh_topic_tags_cache(doc_id)
         self.conn.commit()
         return cur.rowcount > 0
+
+    def relation_src_of_type(self, dst_id: str, relationship_type: str) -> str | None:
+        """The src of ONE incoming edge of a given type — for the structural links
+        (``assimilated_version_of``) where the question is "does anything claim this
+        relationship to this document?", not "what cites it?".
+
+        ``relations_to`` answers that too, but by materialising every incoming edge:
+        asking it whether the GDPR has a UK assimilated version pulled 169,841 rows
+        across the wire to find one, ~1s added to every legislation page load.
+        """
+        row = self.conn.execute(
+            "SELECT src_id FROM relations WHERE dst_id = ? AND relationship_type = ? "
+            "AND resolution_status = 'resolved' LIMIT 1",
+            (dst_id, relationship_type),
+        ).fetchone()
+        return row["src_id"] if row else None
 
     def relations_to(
         self, dst_id: str, *, anchor_exact: str | None = None,
