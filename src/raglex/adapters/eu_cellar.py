@@ -636,9 +636,11 @@ def _formex_judgment_blocks(root) -> list[tuple[str, str, str, int]]:
 #: The OJ notice section headings whose numbered list items ARE the substance, and what
 #: one of those items should be called. "Questions referred" is the reason the document
 #: exists; the direct-action headings are its equivalents for an annulment or an appeal.
+#: Matched on a stem, because the OJ writes both "Form of order sought" and "Forms of
+#: order sought" for the same section.
 _NOTICE_ITEM_LABEL = (
     ("question", "Question"),          # Questions referred / Question referred
-    ("form of order", "Order sought"),
+    ("order sought", "Order sought"),  # Form(s) of order sought
     ("plea", "Plea"),                  # Pleas in law and main arguments
     ("ground", "Ground"),
 )
