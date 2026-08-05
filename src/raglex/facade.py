@@ -7918,7 +7918,19 @@ class Facade:
 
         damaged: list[str] = []
         with self._open() as (cat, _rs, _ts):
+            # The scan reads a file per note over ~64k rows and used to emit nothing
+            # until the first re-fetch, so a run that was working looked identical to a
+            # run that was hung — and a job whose heartbeat is quiet for long enough is
+            # reaped as stalled. Report while scanning.
+            seen = 0
             for row in cat.list_documents(source="eu-cellar", limit=200000):
+                seen += 1
+                if seen % 5000 == 0:
+                    _progress(on_progress, stage="scanning stored notices for wrappers",
+                              done=len(damaged), total=0,
+                              item=f"{seen} documents read")
+                    if cancel_check and cancel_check():
+                        return {"cancelled": True, "damaged": len(damaged)}
                 if str(row["doc_type"]) != "note" or len(damaged) >= limit:
                     continue
                 doc = cat.get_document(row["stable_id"])
@@ -7934,22 +7946,37 @@ class Facade:
                 if _is_wrapper(head):
                     celex = str((_row_meta(doc) or {}).get("celex") or row["stable_id"])
                     damaged.append(celex)
-        out = {"damaged": len(damaged), "refetched": 0}
+        out: dict = {"damaged": len(damaged), "refetched": 0, "failed_batches": 0,
+                     "failed": []}
         for start in range(0, len(damaged), batch):
             if cancel_check and cancel_check():
+                out["cancelled"] = True
                 break
             chunk = damaged[start:start + batch]
             _progress(on_progress, stage="re-fetching OJ-wrapper notices",
                       done=start, total=len(damaged), item=chunk[0])
-            with self._open() as (cat, rs, ts):
-                adapter = get_adapter("eu-cellar", celexes=",".join(chunk))
-                # backfill ignores the watermark, refetch_held re-pulls what we hold —
-                # the point is precisely to replace the stored bytes.
-                Pipeline(cat, rs, textstore=ts).run(
-                    adapter, backfill=True, refetch_held=True)
-                for celex in chunk:
-                    extract_corpus(cat, ts, stable_id=celex)
-                Resolver(cat).run()
+            # One batch is ~40 CELEXes behind a SPARQL query and 40 archive fetches
+            # against a service that times out routinely. Letting that propagate ended
+            # the whole 1,161-notice repair on its FIRST batch, having fixed nothing.
+            # A failed batch is skipped and named; the pass is re-runnable, and the next
+            # run re-derives its scope from the stored bytes, so anything still damaged
+            # is simply picked up again.
+            try:
+                with self._open() as (cat, rs, ts):
+                    adapter = get_adapter("eu-cellar", celexes=",".join(chunk))
+                    # backfill ignores the watermark, refetch_held re-pulls what we hold
+                    # — the point is precisely to replace the stored bytes.
+                    Pipeline(cat, rs, textstore=ts).run(
+                        adapter, backfill=True, refetch_held=True)
+                    for celex in chunk:
+                        extract_corpus(cat, ts, stable_id=celex)
+                    Resolver(cat).run()
+            except Exception as exc:  # noqa: BLE001 — a flaky source must not end the pass
+                out["failed_batches"] += 1
+                out["failed"].extend(chunk)
+                log.warning("[oj-repair] batch %d-%d failed, continuing: %s",
+                            start, start + len(chunk), exc)
+                continue
             out["refetched"] += len(chunk)
         self._invalidate_caches()
         return out
