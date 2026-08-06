@@ -80,6 +80,8 @@ from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nl_acm_guidance import ACMGuidanceAdapter
 from .be_gba_decisions import GBADecisionsAdapter
+from .uk_parl_committees import UKCommitteePublicationsAdapter
+from .uk_parl_written_questions import UKWrittenQuestionsAdapter
 from .nl_ap import APDocumentsAdapter
 from .it_agcm import AGCMBulletinAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
@@ -327,6 +329,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "be-gba": GBAGuidanceAdapter,
     # the Dispute Chamber's own rulings — enforcement, not guidance
     "be-gba-decisions": GBADecisionsAdapter,
+    # UK Parliament — committee output and the written Q&A record
+    "uk-parl-committees": UKCommitteePublicationsAdapter,
+    "uk-parl-written-questions": UKWrittenQuestionsAdapter,
     "it-garante": GaranteGuidanceAdapter,
     "ie-tax-appeals": IrishTaxAppealsAdapter,
     "ie-revenue-tdm": IrishRevenueTDMAdapter,
@@ -671,6 +676,31 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "cite it (102/2026), not on the PDF filename, which the register has spelt more "
         "than one way for the same ruling.",
         (), ("decision number", "102/2026"),
+    ),
+    "uk-parl-committees": SourceInfo(
+        "uk-parl-committees", "UK parliamentary committee publications",
+        "preparatory", "UK", False,
+        "Select-committee reports, government responses, special reports, correspondence "
+        "and scrutiny evidence from the committees API. Keyed on the paper number a "
+        "report is actually cited by (HC 69 (2026-27), HL Paper 45 (2026-27)) rather "
+        "than the API's internal id, with the session as part of the identity because "
+        "paper numbers repeat every session. Attendance and gender-balance statistics "
+        "are excluded by default: they are tables of numbers that cite nothing.",
+        (SourceOption("publication_types",
+                      "Publication type ids to sweep (comma-separated; default is the "
+                      "argumentative types)", "1,2,3,8,12,16"),),
+        ("paper number", "HC 69"),
+    ),
+    "uk-parl-written-questions": SourceInfo(
+        "uk-parl-written-questions", "UK parliamentary written questions and answers",
+        "preparatory", "UK", False,
+        "A written question and the Government's answer stored as one document, keyed on "
+        "the UIN. Incremental runs ask what has been ANSWERED since the cursor, so an "
+        "answer to a question tabled months earlier arrives without anything being "
+        "polled in between. A holding answer is not treated as an answer.",
+        (SourceOption("include_unanswered",
+                      "Also hold questions with no answer yet (provisional)", "false"),),
+        ("UIN", "HL2522"),
     ),
     "it-garante": SourceInfo(
         "it-garante", "Garante per la protezione dei dati personali (Italy)",
@@ -1607,6 +1637,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     # newest-first search view with its own result total, so an incremental
     # run stops at the cursor within a page or two
     "be-gba-decisions": "early-stop",
+    # both filter server-side on a date and sort newest-first
+    "uk-parl-committees": "server", "uk-parl-written-questions": "server",
     "it-agcm": "early-stop",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
     "eu-ombudsman": "full-walk",
