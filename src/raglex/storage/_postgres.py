@@ -543,6 +543,17 @@ CREATE TABLE IF NOT EXISTS citations (
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS citations_src_idx ON citations (src_id);
+-- The paragraph carry-forward probes and their repairs all select the same tiny slice:
+-- carry-forward edges whose raw text begins "para". There is no index on either column,
+-- so finding those ~21k rows meant a parallel sequential scan of all 41M citations — over
+-- the pool's 180s statement timeout, which is why probe_case_paragraph_carry_forward
+-- reported "probe failed" rather than a count, and why the maintenance pass that runs
+-- those repairs could never get through its first step. Partial, so it costs 34 MB rather
+-- than an index over the whole table, and it carries src_id + char_start because that is
+-- exactly what the self-join and the sample queries then need.
+CREATE INDEX IF NOT EXISTS citations_carry_forward_para_idx
+    ON citations (src_id, char_start)
+    WHERE method = 'carry_forward' AND lower(raw) LIKE 'para%';
 
 CREATE TABLE IF NOT EXISTS document_versions (
     stable_id     TEXT NOT NULL,
