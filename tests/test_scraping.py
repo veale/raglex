@@ -181,3 +181,24 @@ def test_a_missing_browser_is_a_miss_not_a_crash():
     fetcher = BrowserBytesFetcher()
     assert fetcher._run("boom", "https://x.example/c.pdf",
                         lambda: (_ for _ in ()).throw(RuntimeError("no browser"))) is None
+
+
+def test_a_recheck_that_finds_nothing_still_counts_as_a_check():
+    """Every completed re-check must re-arm the backoff, including the empty ones.
+
+    fetched_at is written only on a store, so a document that never changes is
+    permanently overdue and re-downloaded on every run. note_refetch fixes that for the
+    unchanged-bytes case; a re-check whose fetch returns None took the not_found branch
+    and skipped it, so a decision whose rendition cannot be read at all kept the very
+    loop the stamp exists to break.
+    """
+    import inspect
+
+    from raglex.pipeline.runner import Pipeline
+
+    src = inspect.getsource(Pipeline.run)
+    not_found = src.index("stats.not_found += 1")
+    following = src[not_found:not_found + 700]
+    assert "note_refetch" in following, "an empty re-check leaves the backoff un-armed"
+    # and it is scoped to a deliberate re-check, not every miss
+    assert "if refreshed and held_id:" in following

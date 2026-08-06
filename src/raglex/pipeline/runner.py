@@ -374,6 +374,15 @@ class Pipeline:
                     # The adapter reached the source and found nothing there — an absence,
                     # not a failure (no bytes, no metadata). Distinct from a FetchError.
                     stats.not_found += 1
+                    # A deliberate re-check that came back empty is still a COMPLETED
+                    # check, and the last path where one could go unrecorded. note_refetch
+                    # below re-arms the backoff when the bytes are unchanged; without the
+                    # same stamp here, a decision whose rendition cannot be read at all
+                    # stays permanently overdue and is re-requested on every single run —
+                    # the exact loop that stamp exists to break, surviving in the one
+                    # branch that never reaches it.
+                    if refreshed and held_id:
+                        self.catalogue.note_refetch(held_id)
                     continue
                 stats.fetched += 1
                 if on_progress:
