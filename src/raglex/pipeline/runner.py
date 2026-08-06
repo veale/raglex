@@ -166,7 +166,29 @@ class Pipeline:
         # while — without this the job looks frozen until the first batch completes.
         if on_progress:
             on_progress(stage=f"discovering {adapter.source}", done=0)
-        stubs = adapter.discover(discover_since, max_pages=max_pages)
+        def _pulsed(source_stubs):
+            """Keep the heartbeat moving WHILE discovering, not only once it yields.
+
+            Discovery can run for many minutes before the loop below sees its first item:
+            the prefilter buffers ~200 stubs, and an adapter that builds each stub from
+            its own HTTP calls (eu-cellar's pending-case walk makes dozens) fills that
+            slowly. Nothing reported progress in that window, so a job doing real work was
+            indistinguishable from one that had stopped — and now that a wedged job is
+            reaped after 30 minutes of silence, that ambiguity would get a healthy harvest
+            killed and restarted forever, because its next attempt would be just as quiet.
+            """
+            found = 0
+            pulse = _time.monotonic()
+            for item in source_stubs:
+                found += 1
+                now = _time.monotonic()
+                if on_progress and now - pulse >= 10.0:
+                    pulse = now
+                    on_progress(stage=f"discovering {adapter.source}",
+                                done=0, discovered=found)
+                yield item
+
+        stubs = _pulsed(adapter.discover(discover_since, max_pages=max_pages))
         # Batched held-lookup: a backfill's resume pass re-walks the source's whole
         # catalogue mostly re-seeing held documents, and one point SELECT per stub
         # made that walk crawl at ~20 stubs/s against Postgres (hours of no-op over
