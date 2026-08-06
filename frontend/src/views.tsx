@@ -3,6 +3,7 @@ import { api, CanliiBudget, Hit, ImportBatchResult, ImportItem, ImportOptions, L
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
+import { ACTIONS, CADENCE_META, GROUP_ORDER, type Action as MaintAction } from "./maintenance";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -4523,9 +4524,6 @@ function SourceCaps({ info }: { info: any }) {
 // "Keep current" — surfaces what the background scheduler already does on its own, and gives
 // each a Run-now that fires a visible Job. So upkeep is legible, not folklore.
 function KeepCurrentPanel() {
-  const [msg, setMsg] = useState("");
-  const [ppSource, setPpSource] = useState("");
-  const runNow = (kind: any, label: string) => fireJob(kind, {}, (m) => setMsg(`${label}: ${m}`));
   const auto = [
     ["Pull EU case names / subjects (EUR-Lex)", "daily (off by default)", "Fills missing CJEU case names so their OSCOLA citations read properly. Needs EUR-Lex credentials; enable the 'eu-case-names' task to run it daily."],
     ["Re-check outstanding legislation amendments", "hourly", "Re-pulls acts whose legislation.gov.uk effects re-check is due (bounded)."],
@@ -4540,8 +4538,8 @@ function KeepCurrentPanel() {
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>Keep current <span className="muted">— automatic upkeep the scheduler already runs</span></h3>
       <p className="muted" style={{ fontSize: 13 }}>
-        You don't have to trigger any of this by hand — the background scheduler runs it on a cadence, and its work now
-        shows in the <b>Jobs</b> panel. The buttons just let you force one immediately.
+        You don't have to trigger any of this by hand — the background scheduler runs it on a cadence, and its
+        work shows in the <b>Jobs</b> panel. To force one now, find it under <b>Maintenance actions</b> below.
       </p>
       <table className="grid"><thead><tr><th>task</th><th>runs</th></tr></thead>
         <tbody>
@@ -4551,35 +4549,125 @@ function KeepCurrentPanel() {
           ))}
         </tbody>
       </table>
-      <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
-        <button onClick={() => runNow("rebuild-citation-counts", "rebuild counts")}>↻ Rebuild citation counts</button>
-        <button onClick={() => runNow("rebuild-authority", "rebuild authority")}
-          title="Recompute the PageRank authority roll-up over the citation graph — feeds 'most authoritative' sort, search ranking, the citator strip, related documents, and graph node sizing. Run after large imports or resolution sweeps.">◆ Rebuild authority (PageRank)</button>
-        <button onClick={() => runNow("backfill-metadata", "backfill metadata")}>✎ Repair metadata</button>
-        <button onClick={() => runNow("backfill-eu-case-names", "EU case names")}
-          title="Pull CJEU case names + subjects from the EUR-Lex webservice (needs credentials in Settings). Runs as a Job — one call per 50 cases — and the scheduler runs the same job daily when the 'eu-case-names' task is enabled.">⇊ EU case names</button>
-        <button onClick={() => runNow("backfill-eu-consolidations", "EU consolidations")}
-          title="Walk Cellar sector-0 directly and import every dated Regulation, Directive and Decision consolidation, including future-effective snapshots. Resumable and deduplicated.">⇊ EU consolidations</button>
-        <button onClick={() => runNow("repair-eu-annexes", "EU annex repair")}
-          title="Inspect held EU Formex ZIPs and reparse acts whose annexes were split into separate XML members; re-extracts citations after text changes.">✎ Repair EU annexes</button>
-        <button onClick={() => runNow("rescan-citations", "re-scan citations")}>↻ Re-scan all citations</button>
-        <button onClick={() => fireJob("rescan", { doc_types: ["judgment"], only_unextracted: true }, (m) => setMsg(`scan unscanned judgments: ${m}`))} title="Extract ONLY judgments that have no citation edges yet — the never-scanned backlog. Never re-touches an already-scanned document, so it's the cheap way to finish an interrupted run.">⟳ Scan unscanned (judgments)</button>
-        <button onClick={() => fireJob("rescan", { only_unextracted: true }, (m) => setMsg(`resume extraction (whole corpus): ${m}`))} title="Resume citation extraction for EVERYTHING unextracted across the whole corpus — every text document with no citation edges yet, any source. This is what to run after a bulk/backfill import's Extract-Citations phase was cancelled: it's checkpointed and idempotent, so it processes only what never finished, no matter which source it belonged to.">⟳ Resume extraction (whole corpus)</button>
-        <button onClick={() => fireJob("rescan", { doc_types: ["judgment"] }, (m) => setMsg(`full relink — judgments: ${m}`))} title="Re-extract every JUDGMENT (skips the 122k legislation docs, ~2× faster), then run the whole resolution chain. Never-scanned documents go FIRST, and anything already scanned in the last 7 days is skipped (pass stale_days:0 to force a full redo).">⟳ Full relink (judgments)</button>
-        <button onClick={() => fireJob("rescan", {}, (m) => setMsg(`full relink — all: ${m}`))} title="Re-extract EVERY document (incl. legislation), then run the whole resolution chain. Never-scanned first; skips anything scanned in the last 7 days.">⟳ Full relink (all)</button>
-        <button onClick={() => fireJob("rescan", { stale_days: 7 }, (m) => setMsg(`rescan stale (>1 week): ${m}`))} title="Re-extract only documents NOT scanned in the last 7 days, then run the resolution chain. Reads the last-extracted stamp (and, retroactively, the newest citation timestamp) so it skips whatever a current/recent rescan already covered — cheap to run after a restart.">⟳ Rescan stale (&gt;1 week)</button>
+    </div>
+  );
+}
+
+// --- Maintenance actions ----------------------------------------------------
+// This was one row of fourteen equal-looking buttons, several of them migrations for
+// defects fixed for good. Nothing distinguished "the nightly essential" from "run once in
+// March and never again", so all fourteen read as standing obligations. Now each action
+// declares its cadence and explains itself (see maintenance.ts), the page groups by
+// cadence, and the spent migrations are folded away behind a disclosure.
+function relRunTime(iso?: string | null): string {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (isNaN(s)) return "";
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  if (s < 2592000) return `${Math.round(s / 86400)}d ago`;
+  return `${Math.round(s / 2592000)}mo ago`;
+}
+
+function ActionRow({ a, last, onRun, busy }: {
+  a: MaintAction; last?: { status: string; at: string | null; found: number | null };
+  onRun: (a: MaintAction) => void; busy: boolean;
+}) {
+  // "Ran, found nothing" is the sentence that retires a migration. Say it plainly —
+  // it is the only evidence an operator has that a one-off is genuinely done.
+  const spent = last && last.status === "done" && last.found === 0;
+  return (
+    <div className="maint-action">
+      <div className="maint-action-text">
+        <div className="maint-action-head">
+          <b>{a.label}</b>
+          {a.heavy && <span className="tag warn" title="Walks the whole corpus — hours, not minutes. Not something to start casually on a busy box.">heavy</span>}
+          {spent && <span className="tag" title="Its last run reported nothing left to do.">found nothing</span>}
+          {last?.status === "error" && <span className="tag err" title="Its last run failed — see the Jobs panel.">last run failed</span>}
+        </div>
+        <p className="muted maint-what">{a.what}</p>
+        <p className="muted maint-when"><b>When:</b> {a.when}</p>
       </div>
-      <div className="row" style={{ marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button onClick={() => fireJob("finish-bulk-postprocess", ppSource.trim() ? { source: ppSource.trim() } : {}, (m) => setMsg(`finish bulk post-processing: ${m}`))}
-          title="Finish an interrupted bulk import's resolve + tag phases WITHOUT re-running discovery or citation extraction. Resolution runs in bounded, checkpointed relation-id batches (safe to cancel and restart — it continues from its saved cursor); tagging is one idempotent pass. Use after cancelling a huge harvest (DILA, RII/GII, Rechtspraak) whose extraction already finished.">⛭ Finish bulk post-processing</button>
-        <label style={{ flex: "0 0 auto", fontSize: 12 }} className="muted">source for the tag pass (blank = resolve only, whole graph)
-          <input value={ppSource} onChange={(e) => setPpSource(e.target.value)} placeholder="e.g. fr-dila" style={{ width: 160, marginLeft: 6 }} list="pp-bulk-sources" />
-          <datalist id="pp-bulk-sources">
-            {["fr-dila", "de-rii", "de-gii", "nl-rechtspraak", "nl-legislation", "uk-caselaw", "in-caselaw"].map((s) => <option key={s} value={s} />)}
-          </datalist>
-        </label>
+      <div className="maint-action-run">
+        {last?.at && <span className="muted maint-last" title={`last finished ${last.at}`}>{relRunTime(last.at)}</span>}
+        <button disabled={busy} onClick={() => onRun(a)}>{busy ? "…" : "Run"}</button>
       </div>
-      {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 6 }}>{msg}</p>}
+    </div>
+  );
+}
+
+function MaintenanceActionsPanel() {
+  const [lastRun, , reloadLast] = useAsync(() => api.jobsLastRun(), []);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [showSpent, setShowSpent] = useState(false);
+  const [ppSource, setPpSource] = useState("");
+  const kinds = lastRun?.kinds ?? {};
+
+  const run = async (a: MaintAction) => {
+    const key = a.label;
+    setBusy(key); setMsg("");
+    // the one action that takes a free-text scope, kept beside it rather than in a
+    // separate row that gave no clue which button it belonged to
+    const params = a.kind === "finish-bulk-postprocess" && ppSource.trim()
+      ? { ...(a.params || {}), source: ppSource.trim() } : (a.params || {});
+    try {
+      const r = await api.startAction(a.kind, params, a.endpoint);
+      if (r.error) setMsg(`✗ ${a.label}: ${r.error}`);
+      else if (r.already_running) setMsg(`• ${a.label} is already in flight`);
+      else setMsg(`✓ ${a.label} — ${r.queued ? "queued" : "started"}; follow it in the Jobs panel`);
+      reloadLast();
+    } catch (e: any) { setMsg(`✗ ${a.label}: ${e}`); } finally { setBusy(null); }
+  };
+
+  const groups = GROUP_ORDER
+    .map((g) => [g, ACTIONS.filter((a) => a.group === g)] as const)
+    .filter(([, rows]) => rows.length > 0);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Maintenance actions <span className="muted">— what you can ask the corpus to do</span></h3>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Everything here runs as a background job, so you can start it and leave the page. Most of it
+        you will never need: the scheduler already runs the upkeep, and the migrations at the bottom
+        were for defects that have since been fixed at the source.
+      </p>
+      {groups.map(([group, rows]) => {
+        const spentGroup = group === "One-off migrations";
+        const open = !spentGroup || showSpent;
+        return (
+          <section key={group} className="maint-group">
+            <h4 className="maint-group-head">
+              {spentGroup ? (
+                <button className="mini disclosure" aria-expanded={open}
+                  onClick={() => setShowSpent((v) => !v)}>
+                  {open ? "▾" : "▸"} {group} <span className="muted">({rows.length})</span>
+                </button>
+              ) : group}
+              {!spentGroup && <span className="muted maint-group-hint">
+                {CADENCE_META[rows[0].cadence].hint}
+              </span>}
+            </h4>
+            {spentGroup && !open && <p className="muted" style={{ fontSize: 12, margin: "2px 0 0" }}>
+              {CADENCE_META["one-off"].hint}
+            </p>}
+            {open && rows.map((a) => (
+              <ActionRow key={a.label} a={a} last={kinds[a.kind]} busy={busy === a.label} onRun={run} />
+            ))}
+            {open && group === "Citation extraction" && (
+              <label className="muted maint-scope">
+                scope the tag pass of “finish an interrupted import” to one source
+                <input value={ppSource} onChange={(e) => setPpSource(e.target.value)}
+                  placeholder="blank = resolve only, whole graph" list="pp-bulk-sources" />
+                <datalist id="pp-bulk-sources">
+                  {["fr-dila", "de-rii", "de-gii", "nl-rechtspraak", "nl-legislation", "uk-caselaw", "in-caselaw"].map((s) => <option key={s} value={s} />)}
+                </datalist>
+              </label>
+            )}
+          </section>
+        );
+      })}
+      {msg && <p className={msg.includes("✗") ? "err" : "ok"} style={{ fontSize: 12, marginTop: 8 }}>{msg}</p>}
     </div>
   );
 }
@@ -5066,6 +5154,7 @@ export function MaintainView({ open, navigate }:
       <JobsQueuePanel />
       <KeepCurrentDashboard navigate={navigate} />
       <KeepCurrentPanel />
+      <MaintenanceActionsPanel />
       <BackfillPanel />
       <GapFillPanel />
       <ExpandCoveragePanel />

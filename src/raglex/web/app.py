@@ -80,6 +80,40 @@ def create_app(config: Config | None = None) -> FastAPI:
         jobs.maybe_promote()
         return jobs.queue_state()
 
+    @app.get("/jobs/last-run")
+    def jobs_last_run_ep() -> dict:
+        """When each job kind last finished, and what it found — one query for the whole
+        maintenance surface.
+
+        This is what lets the Maintain page tell the truth about its own actions instead of
+        presenting thirty equal buttons: a repair whose last run reported nothing to fix is
+        shown as spent, and one that has never run at all says so. Without it the operator
+        has no way to tell a nightly essential from a migration that was finished months
+        ago."""
+        import json as _json
+
+        def _found(raw) -> int | None:
+            """The 'did it do anything' number, if the result carries a countable one."""
+            try:
+                res = _json.loads(raw) if raw else None
+            except (ValueError, TypeError):
+                return None
+            if not isinstance(res, dict):
+                return None
+            seen = [v for k, v in res.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and k in ("repaired", "fixed", "stored", "imported", "new", "added",
+                              "documents", "fetched", "harvested", "resolved", "updated",
+                              "enriched", "reparsed", "merged", "deleted", "count")]
+            return int(max(seen)) if seen else None
+
+        with facade._open() as (cat, _rs, _ts):
+            rows = [dict(r) for r in cat.last_run_per_kind()]
+        return {"kinds": {
+            r["kind"]: {"status": r["status"], "at": r["finished_at"] or r["started_at"],
+                        "found": _found(r.get("result_json"))}
+            for r in rows}}
+
     @app.post("/jobs/scheduler-pause")
     def jobs_scheduler_pause_ep(payload: dict = Body(default={})) -> dict:
         """Toggle "pause all scheduled jobs" (the scheduler's recurring work + due watches).
@@ -958,6 +992,26 @@ def create_app(config: Config | None = None) -> FastAPI:
         empty-rectangle glyphs). 1:1, so no citation offset moves; scope with ``source``."""
         params = {k: v for k, v in (payload or {}).items() if k in ("source", "limit")}
         return _start_job("repair-mojibake", "repair mis-decoded text", params)
+
+    @app.post("/jobs/repair-oj-wrapper-notices")
+    def job_repair_oj_wrapper_notices_ep(payload: dict = Body(default={})) -> dict:
+        """Re-fetch EU notices stored as the Official Journal issue's masthead instead of
+        the notice itself. Their stored raw IS the wrapper, so no local reparse can recover
+        them — the text has to come from the OJ archive again. Reachable from the Maintain
+        page, not only from MCP: it is a one-off migration like the repairs beside it, and
+        an operator should be able to see and run it in the same place."""
+        params = {k: v for k, v in (payload or {}).items() if k in ("limit", "source")}
+        return _start_job("repair-oj-wrapper-notices", "re-fetch OJ wrapper notices", params)
+
+    @app.post("/jobs/rescan-contested-shorthands")
+    def job_rescan_contested_shorthands_ep(payload: dict = Body(default={})) -> dict:
+        """Re-read the documents carrying an edge from a CONTESTED learned shorthand — a
+        name the store holds against several candidates, which used to be applied on the
+        coincidence that the document cited one of them. The rule is fixed; this clears
+        what it already wrote."""
+        params = {k: v for k, v in (payload or {}).items() if k in ("limit",)}
+        return _start_job("rescan-contested-shorthands",
+                          "clear contested shorthand edges", params)
 
     @app.post("/jobs/repair-de-citations")
     def job_repair_de_citations_ep(payload: dict = Body(default={})) -> dict:

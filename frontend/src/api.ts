@@ -469,6 +469,14 @@ export const api = {
   startJob: (kind: "harvest-all" | "rescan-citations" | "backfill-metadata" | "expand-citing" | "refresh-category" | "pull-ag-opinions" | "rescan" | "match-legislation" | "match-echr" | "mine-parallel" | "harvest-echr" | "suggest-matches" | "finish-bulk-postprocess" | "canlii-enrich" | "backfill-eu-case-names", body: Record<string, unknown>) =>
     req<{ job_id: string; error?: string; already_running?: boolean }>(`/jobs/${kind}`, { method: "POST", body: JSON.stringify(body) }),
   systemStorage: () => req<{ database_bytes: number; tables: { name: string; bytes: number }[] }>("/system/storage"),
+  // When each job kind last finished and what it found — one query behind the whole
+  // Maintain surface, so a repair that reported nothing to fix can be shown as spent
+  // rather than sitting there looking like an outstanding obligation.
+  jobsLastRun: () => req<{ kinds: Record<string, { status: string; at: string | null; found: number | null }> }>("/jobs/last-run"),
+  // Start any maintenance action. Most live at /jobs/<kind>; a couple predate that.
+  startAction: (kind: string, body: Record<string, unknown>, endpoint?: string) =>
+    req<{ job_id?: string; error?: string; already_running?: boolean; queued?: boolean }>(
+      endpoint || `/jobs/${kind}`, { method: "POST", body: JSON.stringify(body) }),
   jobStatus: (id: string) => req<any>(`/jobs/${id}`),
   jobsList: () => req<any[]>("/jobs"),
   cancelJob: (id: string) => req<any>(`/jobs/${id}/cancel`, { method: "POST", body: "{}" }),

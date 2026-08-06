@@ -7127,6 +7127,25 @@ class Catalogue:
             (kind, limit),
         ).fetchall()
 
+    def last_run_per_kind(self) -> list[sqlite3.Row]:
+        """The most recent terminal outcome for EVERY job kind, in one query.
+
+        The maintenance surface needs "when did this last run, and did it find anything?"
+        for ~30 actions at once. Asking per kind was 30 round trips to render one panel;
+        DISTINCT ON walks the same index once."""
+        if self.backend == "postgres":
+            sql = ("SELECT DISTINCT ON (kind) kind, job_id, status, started_at, finished_at, "
+                   "result_json FROM jobs WHERE status IN "
+                   "('done','error','cancelled','interrupted') "
+                   "ORDER BY kind, started_at DESC")
+        else:
+            sql = ("SELECT kind, job_id, status, started_at, finished_at, result_json "
+                   "FROM jobs j WHERE status IN ('done','error','cancelled','interrupted') "
+                   "AND started_at = (SELECT MAX(started_at) FROM jobs x "
+                   "WHERE x.kind = j.kind AND x.status IN "
+                   "('done','error','cancelled','interrupted')) GROUP BY kind")
+        return self.conn.execute(sql).fetchall()
+
     def all_sources(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM sources ORDER BY key").fetchall()
 

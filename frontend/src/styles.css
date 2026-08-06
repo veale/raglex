@@ -1794,3 +1794,43 @@ table.two-col td:first-child { width: 55%; padding-right: var(--sp-4); }
 .ft-passage:hover { border-left-color: var(--accent); }
 .ft-passage-anchor { display: inline-block; font-size: 10.5px; color: var(--muted);
   margin-right: 5px; }
+
+/* --- Maintenance actions ----------------------------------------------------
+   A described list, not a wall of buttons. Each row carries its own explanation,
+   so the layout has to give prose room to breathe and still put the control
+   somewhere predictable. Two columns on a wide screen; stacked on a narrow one,
+   where a 44px-tall control at the end of the text is far easier to hit than a
+   button squeezed into a side rail. */
+.maint-group { margin-top: var(--sp-4); }
+.maint-group-head { margin: 0 0 var(--sp-2); font-size: .95rem; display: flex;
+  flex-wrap: wrap; align-items: baseline; gap: var(--sp-2) var(--sp-3); }
+.maint-group-hint { font-size: 11.5px; font-weight: 400; flex: 1 1 240px; }
+.maint-group-head .disclosure { font: inherit; font-size: .95rem; font-weight: 600;
+  background: none; border: none; padding: 0; cursor: pointer; color: inherit; }
+.maint-group-head .disclosure:hover { color: var(--accent); }
+
+.maint-action { display: flex; gap: var(--sp-3); align-items: flex-start;
+  padding: var(--sp-3) 0; border-top: 1px solid var(--line-faint); }
+.maint-group > .maint-action:first-of-type { border-top: none; }
+.maint-action-text { flex: 1 1 auto; min-width: 0; }
+.maint-action-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2); }
+.maint-action-head .tag { margin: 0; }
+.maint-action-head .tag.warn { color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.maint-action-head .tag.err { color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+.maint-what { font-size: 12.5px; margin: 3px 0 0; }
+.maint-when { font-size: 12px; margin: 3px 0 0; }
+.maint-action-run { flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-2); }
+.maint-last { font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.maint-scope { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2);
+  font-size: 12px; padding: var(--sp-2) 0 0; }
+.maint-scope input { min-width: 180px; flex: 1 1 180px; }
+
+@media (max-width: 700px) {
+  /* Stack, and let the control span the row: a thumb aims at a wide target far
+     more reliably than at a button parked in a narrow right-hand column. */
+  .maint-action { flex-direction: column; gap: var(--sp-2); }
+  .maint-action-run { width: 100%; justify-content: space-between; }
+  .maint-action-run button { min-height: 40px; padding-inline: var(--sp-4); }
+}
