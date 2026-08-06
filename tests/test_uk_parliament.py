@@ -207,3 +207,24 @@ def test_only_the_commons_joint_report_convention_is_rewritten():
     lords = f"{base}/ld5902/ldselect/ldenvcl/45/4502.htm"
     assert A.report_url(lords) == lords
     assert A.report_url("https://example.org/report.htm") == "https://example.org/report.htm"
+
+
+def test_a_backfill_walks_bounded_windows_because_a_wide_range_is_a_500():
+    """Measured against the live API:
+
+        answeredWhenFrom=2014-01-01 -> HTTP 500
+        answeredWhenFrom=2026-01-01 -> HTTP 500
+        answeredWhenFrom=2026-07-01 -> HTTP 200, 8,083 results
+
+    So a backfill cannot be one open-ended query. Worse, the adapter swallowed that 500
+    and broke out of its loop, which is how the first backfill "discovered 0" and reported
+    success — an error dressed up as the end of the data."""
+    from raglex.adapters.uk_parl_written_questions import WINDOW_DAYS, _date_windows
+    windows = list(_date_windows(date(2026, 5, 1), date(2026, 8, 6), WINDOW_DAYS))
+    assert len(windows) > 1, "a three-month backfill must be more than one request"
+    assert windows[0][0] == date(2026, 5, 1)
+    assert windows[-1][1] == date(2026, 8, 6)
+    # contiguous and non-overlapping, so nothing is skipped or fetched twice
+    for (_, prev_hi), (next_lo, _) in zip(windows, windows[1:]):
+        assert next_lo == prev_hi + __import__("datetime").timedelta(days=1)
+    assert all((hi - lo).days < WINDOW_DAYS for lo, hi in windows)

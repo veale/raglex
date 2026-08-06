@@ -699,7 +699,10 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "answer to a question tabled months earlier arrives without anything being "
         "polled in between. A holding answer is not treated as an answer.",
         (SourceOption("include_unanswered",
-                      "Also hold questions with no answer yet (provisional)", "false"),),
+                      "Also hold questions with no answer yet (provisional)", "false"),
+         SourceOption("since_floor",
+                      "Earliest answer date a backfill walks from — the API returns "
+                      "nothing at all for a query with no date bound", "2014-01-01")),
         ("UIN", "HL2522"),
     ),
     "it-garante": SourceInfo(

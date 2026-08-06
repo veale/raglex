@@ -23,6 +23,7 @@ answered stops costing anything.
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta
 from typing import Iterator
 
@@ -41,6 +42,32 @@ PAGE_SIZE = 100
 # withdrawn member, a department that has simply let it lapse) and should not be polled
 # forever. Days since the date the answer was due.
 COOLDOWN_STEPS = (3, 7, 14, 30, 90)
+
+BACKFILL_FROM = "2014-01-01"
+
+# The API answers a WIDE date range with HTTP 500 and a narrow one with data — measured:
+#
+#   answeredWhenFrom=2014-01-01 -> 500
+#   answeredWhenFrom=2026-01-01 -> 500
+#   answeredWhenFrom=2026-07-01 -> 200, 8,083 results
+#
+# So a backfill cannot be one open-ended query; it has to walk bounded windows. And the
+# 500 must not be mistaken for "no more results": swallowing it and breaking is exactly
+# how the first backfill discovered 0 questions and reported success. A window that fails
+# is halved and retried before being given up on, so one bad stretch does not end the walk.
+WINDOW_DAYS = 30
+MIN_WINDOW_DAYS = 7
+EMPTY_PAGE_RETRIES = 2
+RETRY_PAUSE_S = 2.0
+
+
+def _date_windows(start: date, end: date, days: int):
+    """Bounded windows, oldest first. A single open-ended range is an HTTP 500."""
+    lo = start
+    while lo <= end:
+        hi = min(lo + timedelta(days=days - 1), end)
+        yield lo, hi
+        lo = hi + timedelta(days=1)
 
 
 def _as_date(value: str | None) -> date | None:
@@ -140,11 +167,13 @@ class UKWrittenQuestionsAdapter(BaseAdapter):
     min_interval = 0.4
 
     def __init__(self, *, client: RateLimitedClient | None = None,
-                 include_unanswered: str | None = None, start_offset: int = 0) -> None:
+                 include_unanswered: str | None = None, start_offset: int = 0,
+                 since_floor: str | None = None) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
         # see be_gba_decisions: emitting resume_offset obliges us to accept it back
         self.start_offset = max(0, int(start_offset or 0))
+        self._since_floor = str(since_floor or BACKFILL_FROM)[:10]
         # Unanswered questions are still legal material — the question itself cites the
         # statute it is about — but they are provisional, so holding them is opt-in.
         self._include_unanswered = str(include_unanswered or "").strip().lower() in (
@@ -162,28 +191,38 @@ class UKWrittenQuestionsAdapter(BaseAdapter):
         question tabled in June and answered in August arrives in August's run without
         anyone tracking it in between, and nothing is re-fetched merely to discover it is
         still unanswered."""
+        start = _as_date(str(since)[:10]) if since else _as_date(self._since_floor)
+        today = date.today()
         windows: list[dict] = []
-        if since:
-            windows.append({"answeredWhenFrom": str(since)[:10]})
+        for lo, hi in _date_windows(start or today, today, WINDOW_DAYS):
+            windows.append({"answeredWhenFrom": lo.isoformat(),
+                            "answeredWhenTo": hi.isoformat()})
             if self._include_unanswered:
-                windows.append({"tabledWhenFrom": str(since)[:10],
+                windows.append({"tabledWhenFrom": lo.isoformat(),
+                                "tabledWhenTo": hi.isoformat(),
                                 "answered": "Unanswered"})
-        else:
-            windows.append({"answered": "Answered"})
-            if self._include_unanswered:
-                windows.append({"answered": "Unanswered"})
         for window in windows:
             params = {**window, "take": PAGE_SIZE, "expandMember": "false"}
             skip, total, pages = self.start_offset, None, 0
             while True:
                 params["skip"] = skip
-                try:
-                    payload = self._page(params)
-                except (FetchError, ValueError):
+                payload, rows = None, []
+                for attempt in range(EMPTY_PAGE_RETRIES):
+                    try:
+                        payload = self._page(params)
+                    except (FetchError, ValueError):
+                        payload = None
+                    if payload is not None:
+                        rows = question_stubs(payload)
+                        break
+                    if attempt < EMPTY_PAGE_RETRIES - 1:
+                        time.sleep(RETRY_PAUSE_S)
+                if payload is None:
+                    # The window itself is too wide for the API. Move on rather than
+                    # treat a 500 as the end of the data.
                     break
-                if total is None:
+                if total is None and payload.get("totalResults") is not None:
                     total = int(payload.get("totalResults") or 0)
-                rows = question_stubs(payload)
                 if not rows:
                     break
                 for stub in rows:
