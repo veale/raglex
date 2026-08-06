@@ -78,10 +78,20 @@ class StealthyFetcher:
 
     name = "stealth"
 
-    def __init__(self, *, proxy: str | None = None, headless: bool = True, network_idle: bool = True) -> None:
+    def __init__(self, *, proxy: str | None = None, headless: bool = True,
+                 network_idle: bool = True, timeout_ms: float | None = None) -> None:
+        import os
+
         self.proxy = proxy if proxy is not None else get_proxy()
         self.headless = headless
         self.network_idle = network_idle
+        # A browser fetch inside a harvest loop MUST be bounded. Left to its own devices
+        # this waited on network-idle, and a Cloudflare interstitial that keeps re-polling
+        # its own challenge never goes idle — so the call simply did not return, and the
+        # worker thread could not be killed (see jobs.STALL_SECONDS: we can flag a frozen
+        # job, we cannot free it).
+        self.timeout_ms = float(timeout_ms if timeout_ms is not None
+                                else os.environ.get("RAGLEX_STEALTH_TIMEOUT_MS") or 90000)
 
     def fetch(self, url: str, *, headers: dict | None = None) -> FetchedPage:
         try:
@@ -91,9 +101,18 @@ class StealthyFetcher:
                 "stealth scraping needs Scrapling + Camoufox: "
                 "pip install 'raglex[scrape]' && scrapling install"
             ) from exc
-        page = _SF.fetch(
-            url, headless=self.headless, network_idle=self.network_idle, proxy=self.proxy
-        )
+        try:
+            page = _SF.fetch(
+                url, headless=self.headless, network_idle=self.network_idle,
+                proxy=self.proxy, timeout=self.timeout_ms,
+            )
+        except TypeError:
+            # older scrapling: no timeout kwarg. Better an unbounded call than none at
+            # all, but say so — this is the shape that froze a backfill.
+            page = _SF.fetch(
+                url, headless=self.headless, network_idle=self.network_idle,
+                proxy=self.proxy,
+            )
         html = _page_html(page)
         return FetchedPage(
             url=url, status=getattr(page, "status", 200), html=html,
@@ -161,29 +180,56 @@ class ScraplingMcpFetcher:
         self.url = url or os.environ.get("RAGLEX_SCRAPLING_MCP_URL")
         self.api_key = api_key or os.environ.get("RAGLEX_SCRAPLING_MCP_KEY")
         self.proxy = proxy
+        # Ceiling for ONE page, across every attempt. A harvest is a long loop of these,
+        # so a page that cannot be fetched has to fail in bounded time or it stops the run.
+        self.deadline = float(os.environ.get("RAGLEX_STEALTH_DEADLINE") or 240)
+        self._client = None       # reused across pages: one MCP handshake, not one per try
+        self._tool: str | None = None      # the fetch tool this service actually exposes
         self._fallback: "StealthyFetcher | None" = None
 
     def _mcp_fetch(self, url: str) -> str | None:
+        """Fetch one URL through the scrapling MCP service, under a WHOLE-CALL deadline.
+
+        The per-request timeout alone did not bound this. The loop tries four tool names,
+        each twice (full args, then url-only), so one page could spend 8 × 180s = 24
+        minutes before returning — and every attempt built a fresh ``MCPToolClient``, so
+        each also paid a fresh MCP handshake. A committee backfill parked on exactly this:
+        the worker kept heartbeating (so it was never reaped as stalled) while no item
+        completed for over half an hour.
+
+        The tool-name fan-out exists because the service's fetch tool has been named
+        differently across versions; it is discovery, not retry, so once one name works we
+        remember it and stop probing the rest.
+        """
+        import time
+
         from ..embeddings.remote import MCPToolClient
 
-        client = MCPToolClient(self.url, token=self.api_key, timeout=180)
+        deadline = time.monotonic() + self.deadline
+        if self._client is None:
+            self._client = MCPToolClient(self.url, token=self.api_key,
+                                         timeout=min(self.deadline, 180))
         # Scrapling's stealthy_fetch solves Cloudflare and returns raw HTML; extraction_type
         # html keeps it as markup (not markdown), which the HoL parser needs.
         args = {"url": url, "extraction_type": "html", "solve_cloudflare": True, "timeout": 120000}
+        tools = ((self._tool,) if self._tool
+                 else ("stealthy_fetch", "fetch", "get", "scrape"))
         last_exc: Exception | None = None
-        for tool in ("stealthy_fetch", "fetch", "get", "scrape"):
-            try:
-                res = client.call_tool(tool, args)
-            except Exception as exc:  # noqa: BLE001 — tool may not exist / bad arg; try the next
-                last_exc = exc
-                # a tool that rejects the extra args might still work with just the url
+        for tool in tools:
+            for arguments in (args, {"url": url}):
+                if time.monotonic() >= deadline:
+                    if last_exc:
+                        raise last_exc
+                    return None
                 try:
-                    res = client.call_tool(tool, {"url": url})
-                except Exception:  # noqa: BLE001
+                    res = self._client.call_tool(tool, arguments)
+                except Exception as exc:  # noqa: BLE001 — wrong tool/arg shape; try the next
+                    last_exc = exc
                     continue
-            html = _extract_html(res)
-            if html:
-                return html
+                html = _extract_html(res)
+                if html:
+                    self._tool = tool      # this service's name for it; stop probing
+                    return html
         if last_exc:
             raise last_exc
         return None
