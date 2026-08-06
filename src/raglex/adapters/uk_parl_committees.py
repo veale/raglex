@@ -226,31 +226,31 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
             return None
         return html.encode("utf-8") if isinstance(html, str) else html
 
-    def _report_pdf(self, stub: Stub, referer: str | None) -> bytes | None:
-        """The paper's whole-report PDF (``additionalContentUrl2``), through the browser.
+    def _whole_report(self, stub: Stub, referer: str | None) -> bytes | None:
+        """The paper's WHOLE report (``additionalContentUrl2``), through the browser.
 
         This is how a LORDS report is read at all. Their ``additionalContentUrl`` is one
-        numbered chapter page, so the HTML route yields a fragment at best; the report is
-        the PDF. It is Cloudflare-walled and cannot be had by any plain request, so it
-        needs the bytes-capable navigation (see BrowserBytesFetcher), cleared via the
-        paper's own page.
+        numbered chapter page, so the HTML route yields a fragment at best. It is
+        Cloudflare-walled and cannot be had by any plain request, so it needs the
+        bytes-capable navigation (see BrowserBytesFetcher), cleared via the paper's own
+        page.
+
+        Usually a PDF, but not always: the older Lords papers point this at a ``.htm``
+        whole-report page instead. Take whatever it serves and let the caller sniff the
+        type off the bytes — insisting on ``%PDF`` here threw away the papers that are
+        published as HTML, which is the opposite of the point.
         """
-        pdf_url = (stub.hints.get("pdf_url") or "").strip()
-        if not pdf_url or "publications.parliament.uk" not in pdf_url:
+        target = (stub.hints.get("pdf_url") or "").strip()
+        if not target or "publications.parliament.uk" not in target:
             return None
         from ..scraping.fetcher import get_bytes_fetcher
 
         fetcher = get_bytes_fetcher()
         if not fetcher.available():
             log.warning("%s: no browser in this image; cannot read %s",
-                        self.source, pdf_url)
+                        self.source, target)
             return None
-        blob = fetcher.fetch_bytes(pdf_url, referer_url=referer)
-        if blob and not blob.startswith(b"%PDF"):
-            log.warning("%s: %s did not return a PDF (got %r)",
-                        self.source, pdf_url, blob[:16])
-            return None
-        return blob
+        return fetcher.fetch_bytes(target, referer_url=referer)
 
     def fetch(self, stub: Stub) -> Record | None:
         url = self.report_url(stub.raw_url or "")
@@ -266,7 +266,7 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
         # so prefer the PDF outright rather than storing a fragment as the report.
         is_lords = str(stub.hints.get("house") or "").strip().lower() == "lords"
         if blob is None and is_lords:
-            blob = self._report_pdf(stub, referer=url)
+            blob = self._whole_report(stub, referer=url)
         # Cloudflare-walled host: go straight to the browser rather than spend a request
         # earning a 403 first.
         if blob is None:
@@ -274,7 +274,7 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
         # Commons/Joint papers published only as a PDF (or whose HTML is the consent
         # shell) still have a whole report to read — fall back to it rather than skip.
         if not blob:
-            blob = self._report_pdf(stub, referer=url)
+            blob = self._whole_report(stub, referer=url)
         if not blob:
             return None
         from ..extraction import extract_bytes

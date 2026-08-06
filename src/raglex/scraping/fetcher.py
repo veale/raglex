@@ -142,13 +142,19 @@ class BrowserBytesFetcher:
             captured: dict = {}
 
             def _on_response(resp):
-                # the navigation's own response, not a sub-resource of the viewer
-                if resp.url.rstrip("/") == url.rstrip("/"):
-                    try:
-                        captured["status"] = resp.status
-                        captured["body"] = resp.body()
-                    except Exception:  # noqa: BLE001 — body already streamed away
-                        pass
+                # The navigation's FINAL response, not a hop on the way to it and not a
+                # sub-resource of the PDF viewer. Matching the requested URL looked right
+                # and was wrong: the older Lords papers are linked as http://www.… and
+                # redirect, so the only response whose URL matched was the 301 — captured
+                # with an empty body, reported as a miss, and the report never read.
+                try:
+                    if not resp.request.is_navigation_request() or resp.status >= 300:
+                        return
+                    captured["status"] = resp.status
+                    captured["body"] = resp.body()
+                    captured["url"] = resp.url
+                except Exception:  # noqa: BLE001 — body already streamed away
+                    pass
 
             try:
                 if referer_url:
