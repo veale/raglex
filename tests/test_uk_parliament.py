@@ -179,3 +179,16 @@ def test_committee_records_are_gated_too():
     import raglex.adapters.uk_parl_committees as mod
     src = __import__("inspect").getsource(mod.UKCommitteePublicationsAdapter.fetch)
     assert '"require_recognized_legal_citation": True' in src
+
+
+def test_adapters_that_report_resume_offset_accept_it_back():
+    """An interrupted harvest is resumed with options["start_offset"] taken from the
+    checkpoint. An adapter that reports resume_offset but ignores it on the way back in
+    restarts its walk from the top — and, because discovery then re-finds what is already
+    held and dedupes it all, reports SUCCESS having done nothing. That is what happened to
+    the first Belgian backfill after a deploy interrupted it: 185 of 294 held, resumed
+    attempt marked done, 0 new documents."""
+    from raglex.adapters.registry import ADAPTERS
+    for key in ("be-gba-decisions", "uk-parl-committees", "uk-parl-written-questions"):
+        adapter = ADAPTERS[key](start_offset=150)
+        assert adapter.start_offset == 150, key

@@ -128,10 +128,13 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
     min_interval = 0.4
 
     def __init__(self, *, client: RateLimitedClient | None = None,
-                 publication_types: str | None = None, stealth_fetcher=None) -> None:
+                 publication_types: str | None = None, stealth_fetcher=None,
+                 start_offset: int = 0) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
         self._stealth = stealth_fetcher
+        # see be_gba_decisions: emitting resume_offset obliges us to accept it back
+        self.start_offset = max(0, int(start_offset or 0))
         self._types = tuple(
             int(x) for x in str(publication_types).replace(" ", "").split(",") if x
         ) if publication_types else DEFAULT_TYPES
@@ -149,7 +152,7 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
                             "SortOrder": SORT_NEWEST_FIRST}
             if since:
                 params["StartDate"] = str(since)[:10]
-            skip, total = 0, None
+            skip, total = self.start_offset, None
             pages = 0
             while True:
                 params["Skip"] = skip
@@ -175,11 +178,24 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
 
     # ---- fetch -----------------------------------------------------------------
 
+    @staticmethod
+    def report_url(url: str) -> str:
+        """``.../325/report.htm`` → ``.../325/report.html``.
+
+        The API's ``additionalContentUrl`` ends ``.htm``; the page that actually holds the
+        report is ``.html``. The ``.htm`` form answers 200 with a 9.5 KB cookie-consent
+        shell and no report in it, which is worse than an error — it looks like a fetch
+        that worked and yields a document with no text."""
+        if "publications.parliament.uk" in url and url.endswith(".htm"):
+            return url + "l"
+        return url
+
     def _stealth_html(self, url: str) -> bytes | None:
-        """publications.parliament.uk answers a plain client with HTTP 403, and the API's
-        own /Document/{id}/{format} endpoint currently returns 500 for the same
-        publication — so neither obvious route reaches the text. The shared Camoufox
-        service does, which is what it is there for."""
+        """publications.parliament.uk sits behind a Cloudflare JS challenge ("Just a
+        moment... Enable JavaScript and cookies to continue"), so a plain client gets 403
+        however it is dressed, and the API's own /Document/{id}/{format} endpoint returns
+        500 for the same publication. A real browser passes the challenge, which is what
+        the shared Camoufox service is for."""
         if self._stealth is None:
             from ..scraping.fetcher import get_fetcher
             self._stealth = get_fetcher(
@@ -195,14 +211,17 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
         return html.encode("utf-8") if isinstance(html, str) else html
 
     def fetch(self, stub: Stub) -> Record | None:
-        url = stub.raw_url
+        url = self.report_url(stub.raw_url or "")
         if not url or "/api/Publications/" in url:
             return None          # metadata-only row with no published text to read
         blob: bytes | None = None
-        try:
-            blob = self._client.get(url).content
-        except FetchError:
-            blob = None
+        if "publications.parliament.uk" not in url:
+            try:
+                blob = self._client.get(url).content
+            except FetchError:
+                blob = None
+        # Cloudflare-walled host: go straight to the browser rather than spend a request
+        # earning a 403 first.
         if blob is None:
             blob = self._stealth_html(url)
         if not blob:

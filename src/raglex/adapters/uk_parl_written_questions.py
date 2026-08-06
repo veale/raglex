@@ -140,9 +140,11 @@ class UKWrittenQuestionsAdapter(BaseAdapter):
     min_interval = 0.4
 
     def __init__(self, *, client: RateLimitedClient | None = None,
-                 include_unanswered: str | None = None) -> None:
+                 include_unanswered: str | None = None, start_offset: int = 0) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
+        # see be_gba_decisions: emitting resume_offset obliges us to accept it back
+        self.start_offset = max(0, int(start_offset or 0))
         # Unanswered questions are still legal material — the question itself cites the
         # statute it is about — but they are provisional, so holding them is opt-in.
         self._include_unanswered = str(include_unanswered or "").strip().lower() in (
@@ -172,7 +174,7 @@ class UKWrittenQuestionsAdapter(BaseAdapter):
                 windows.append({"answered": "Unanswered"})
         for window in windows:
             params = {**window, "take": PAGE_SIZE, "expandMember": "false"}
-            skip, total, pages = 0, None, 0
+            skip, total, pages = self.start_offset, None, 0
             while True:
                 params["skip"] = skip
                 try:

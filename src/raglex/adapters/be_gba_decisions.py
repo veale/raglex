@@ -173,9 +173,16 @@ class GBADecisionsAdapter(BaseAdapter):
     source = "be-gba-decisions"
     min_interval = 1.5
 
-    def __init__(self, *, client: RateLimitedClient | None = None) -> None:
+    def __init__(self, *, client: RateLimitedClient | None = None,
+                 start_offset: int = 0) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=120)
+        # An adapter that reports resume_offset must also ACCEPT it back: an interrupted
+        # harvest is resumed with options["start_offset"] set from the checkpoint, and an
+        # adapter that ignores it restarts the walk from the top (or, worse, reports
+        # success having re-walked what it already held). Same contract as eu-legislation
+        # and nl-rechtspraak.
+        self.start_offset = max(0, int(start_offset or 0))
 
     # ---- discovery -------------------------------------------------------------
 
@@ -186,13 +193,14 @@ class GBADecisionsAdapter(BaseAdapter):
         """Newest-first, so an incremental run stops at the cursor rather than walking
         the whole register. The view is sorted ``s=recent`` and the ids carry the year,
         so "already held" is reached within a page or two of a daily poll."""
-        first = self._page(0)
+        start_page = self.start_offset // PAGE_SIZE
+        first = self._page(start_page)
         total = result_total(first.content)
         end = None if total is None else max(0, (total - 1) // PAGE_SIZE)
         if max_pages is not None:
             end = max_pages - 1 if end is None else min(end, max_pages - 1)
         seen: set[str] = set()
-        page, html = 0, first.content
+        page, html = start_page, first.content
         while True:
             rows = [s for s in decision_stubs(html) if s.stable_id not in seen]
             if not rows and page:
