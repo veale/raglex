@@ -107,3 +107,31 @@ def test_the_localise_scan_is_ordered(facade):
     body = body[:body.index("def ", 40)]
     assert re.search(r"ORDER BY payload_hash", body), \
         "the scan is unordered, so a restart re-walks an arbitrary permutation"
+
+
+def test_a_slow_discovery_keeps_reporting_while_it_blocks():
+    """The silent gap is INSIDE the generator, so the pulse has to be on a timer.
+
+    eu-cellar spends minutes in a single SPARQL round trip building the next stub. A
+    heartbeat that only fires between yielded items reports nothing for the whole of
+    that — and a job silent for 30 minutes is now reaped as wedged, resumed, and is just
+    as silent next time. A healthy harvest would loop for ever.
+    """
+    import time
+
+    from raglex.core.models import Stub
+    from raglex.pipeline.runner import Pipeline
+
+    beats: list[dict] = []
+
+    def slow_discover():
+        yield Stub(stable_id="a", raw_url="u", title="t", court="c", hints={})
+        time.sleep(0.75)          # blocked inside the generator, yielding nothing
+        yield Stub(stable_id="b", raw_url="u", title="t", court="c", hints={})
+
+    pulsed = Pipeline._pulsed_stubs(
+        slow_discover(), source="eu-cellar",
+        on_progress=lambda **p: beats.append(p), interval=0.15)
+    assert [s.stable_id for s in pulsed] == ["a", "b"]
+    assert beats, "a discovery that blocks reported nothing at all"
+    assert all(b["stage"] == "discovering eu-cellar" for b in beats)

@@ -166,29 +166,9 @@ class Pipeline:
         # while — without this the job looks frozen until the first batch completes.
         if on_progress:
             on_progress(stage=f"discovering {adapter.source}", done=0)
-        def _pulsed(source_stubs):
-            """Keep the heartbeat moving WHILE discovering, not only once it yields.
-
-            Discovery can run for many minutes before the loop below sees its first item:
-            the prefilter buffers ~200 stubs, and an adapter that builds each stub from
-            its own HTTP calls (eu-cellar's pending-case walk makes dozens) fills that
-            slowly. Nothing reported progress in that window, so a job doing real work was
-            indistinguishable from one that had stopped — and now that a wedged job is
-            reaped after 30 minutes of silence, that ambiguity would get a healthy harvest
-            killed and restarted forever, because its next attempt would be just as quiet.
-            """
-            found = 0
-            pulse = _time.monotonic()
-            for item in source_stubs:
-                found += 1
-                now = _time.monotonic()
-                if on_progress and now - pulse >= 10.0:
-                    pulse = now
-                    on_progress(stage=f"discovering {adapter.source}",
-                                done=0, discovered=found)
-                yield item
-
-        stubs = _pulsed(adapter.discover(discover_since, max_pages=max_pages))
+        stubs = self._pulsed_stubs(
+            adapter.discover(discover_since, max_pages=max_pages),
+            source=adapter.source, on_progress=on_progress)
         # Batched held-lookup: a backfill's resume pass re-walks the source's whole
         # catalogue mostly re-seeing held documents, and one point SELECT per stub
         # made that walk crawl at ~20 stubs/s against Postgres (hours of no-op over
@@ -498,6 +478,45 @@ class Pipeline:
     # first fetch by at most this many discovery steps — irrelevant for the bulk
     # walks it exists for, and a short feed just flushes at end-of-stream.
     _HELD_BATCH = 200
+
+    @staticmethod
+    def _pulsed_stubs(source_stubs, *, source: str, on_progress, interval: float = 10.0):
+        """Yield discovery's stubs, reporting that it is still going ON A TIMER.
+
+        The silent gap that matters is INSIDE the generator, not between its items:
+        eu-cellar spends minutes in a single SPARQL round trip building the next stub, and
+        the prefilter buffers ~200 of them before the caller sees the first. A heartbeat
+        that fires only between yields reports nothing for the whole of that.
+
+        That was merely confusing until a job silent for 30 minutes began to be reaped as
+        wedged — at which point a healthy but slow discovery is interrupted, resumed, and
+        is exactly as silent next time round. So the pulse runs on its own thread and says
+        what is true: still discovering, this many found. The thread only reads the count;
+        the generator below is its only writer.
+        """
+        if not on_progress:
+            yield from source_stubs
+            return
+        import threading
+
+        state = {"found": 0}
+        stop = threading.Event()
+
+        def _beat():
+            while not stop.wait(interval):
+                try:
+                    on_progress(stage=f"discovering {source}", done=0,
+                                discovered=state["found"])
+                except Exception:  # noqa: BLE001 — a heartbeat must never break the walk
+                    return
+
+        threading.Thread(target=_beat, name="discovery-pulse", daemon=True).start()
+        try:
+            for item in source_stubs:
+                state["found"] += 1
+                yield item
+        finally:
+            stop.set()
 
     def _batched_held(self, stubs):
         """Annotate each stub with ``(held_id, has_extraction_stamp)`` via batched
