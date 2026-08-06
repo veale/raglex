@@ -1874,3 +1874,19 @@ table.two-col td:first-child { width: 55%; padding-right: var(--sp-4); }
   .maint-action-run { width: 100%; justify-content: space-between; }
   .maint-action-run button { min-height: 40px; padding-inline: var(--sp-4); }
 }
+
+/* "show all N" under a truncated list. Deliberately quiet: it is a way out of a long
+   list, not a call to action. Full width on a phone so it is an easy thumb target at the
+   end of a scroll. */
+.reveal-more { display: inline-block; margin-top: var(--sp-2); }
+@media (max-width: 640px) { .reveal-more { width: 100%; min-height: 38px; } }
+
+/* Nothing on the admin surface may push the page wider than the phone. Long ids, URLs and
+   CELEX slugs are the usual culprits; the panels themselves must not establish a width
+   either. Measured with a headless phone viewport, which is how the 482px-wide 390px page
+   was found in the first place. */
+@media (max-width: 760px) {
+  .admin, .admin-body, .admin-body > *, .admin-body .panel { min-width: 0; max-width: 100%; }
+  .admin-body .panel { overflow-wrap: anywhere; }
+  .admin-body pre, .admin-body code { white-space: pre-wrap; overflow-wrap: anywhere; }
+}

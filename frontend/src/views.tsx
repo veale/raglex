@@ -2130,8 +2130,16 @@ function GuidanceChips({ id }: { id: string }) {
 }
 
 // --- Type-ahead that finds a case / act by name as you type ----------------
-export function DocAutocomplete({ initial, onPick, placeholder }:
-  { initial?: string; onPick: (id: string, title: string) => void; placeholder?: string }) {
+// ``autoFocus`` is OPT-IN, and must stay that way. It used to be hard-coded on, which is
+// right when the field appears because someone clicked "add" or "something else…" — and
+// badly wrong when the field is simply part of a form that is already on the page. The
+// Maintain page ends with the Add-rule form, so opening Admin → Maintain focused an input
+// near the bottom of a very long page and the browser scrolled the caret into view: you
+// arrived most of the way down a page you had not scrolled. Pass it only where the field's
+// appearance IS the user's action.
+export function DocAutocomplete({ initial, onPick, placeholder, autoFocus }:
+  { initial?: string; onPick: (id: string, title: string) => void; placeholder?: string;
+    autoFocus?: boolean }) {
   const [q, setQ] = useState(initial || "");
   const [opts, setOpts] = useState<any[]>([]);
   const [hi, setHi] = useState(0);
@@ -2149,7 +2157,7 @@ export function DocAutocomplete({ initial, onPick, placeholder }:
   const pick = (o: any) => o && onPick(o.stable_id, o.title || o.stable_id);
   return (
     <div className="ac">
-      <input autoFocus value={q} placeholder={placeholder || "find a case or act by name…"}
+      <input autoFocus={!!autoFocus} value={q} placeholder={placeholder || "find a case or act by name…"}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, opts.length - 1)); }
@@ -4269,7 +4277,7 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
         {adding ? (
           <div className="row" style={{ alignItems: "center", gap: 6 }}>
             <div style={{ flex: 1 }}>
-              <DocAutocomplete placeholder="find a statute by name — GDPR, Online Safety Act…"
+              <DocAutocomplete autoFocus placeholder="find a statute by name — GDPR, Online Safety Act…"
                 onPick={(id, title) => {
                   setAdding(false);
                   if (items.some((it) => it.stable_id === id)) { setMsg("error: already in the set"); return; }
@@ -4954,6 +4962,9 @@ function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, stri
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
+  // 110 source rows across every jurisdiction made this a 9,616px block. Reveal by
+  // jurisdiction — the unit someone actually looks for — rather than by row.
+  const revealJuris = useRevealer(4);
   const reloadAll = () => { reload(); reloadWatches(); };
   const catByKey: Record<string, any> = {};
   for (const c of cat ?? []) catByKey[c.key] = c;
@@ -4983,6 +4994,7 @@ function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, stri
   const groups: Record<string, any[]> = {};
   for (const s of data.sources) (groups[s.group_label || "Other"] ||= []).push(s);
   const order = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+  const jurisReveal = revealJuris(order);
   const capable = data.sources.filter((s: any) => s.can_incremental);
   const watched = capable.filter((s: any) => (s.watches || []).some((w: any) => w.enabled));
   const gaps = data.sources.filter((s: any) => s.incremental_mode === "targeted");
@@ -5002,7 +5014,7 @@ function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, stri
         future-dated item skip the queue.{gaps.length > 0 && <> {gaps.length} source(s) can only be fetched by
         naming an item — no feed to poll.</>} Expand a source to add or manage its watches.
       </p>
-      {order.map((j) => (
+      {jurisReveal.shown.map((j: any) => (
         <div key={j} style={{ marginBottom: 16 }}>
           <div className="kc-juris">{j} <span className="muted">({groups[j].length})</span></div>
           <table className="grid kc-table">
@@ -5076,6 +5088,7 @@ function KeepCurrentDashboard({ navigate }: { navigate?: (f: Record<string, stri
           </table>
         </div>
       ))}
+      {jurisReveal.more}
 
       <div className="kc-juris" style={{ marginTop: 8 }}>Following citations
         <span className="muted"> — watches that pull NEW cases citing a target, as they appear</span></div>
@@ -5241,6 +5254,8 @@ function DbSizeStat() {
 // the passage, what it links to now, and what the user says it should do.
 function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void }) {
   const [flags, , reload] = useAsync(() => api.refinementFlags("open"), []);
+  const reveal = useRevealer(10);
+  const { shown, more } = reveal<any>(flags || []);
   if (!flags || flags.length === 0) return null;
   return (
     <div className="panel">
@@ -5257,7 +5272,7 @@ function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void
           <th style={{ width: "20%" }}>links now</th><th style={{ width: "20%" }}>should</th>
           <th style={{ width: "8%" }} />
         </tr></thead>
-        <tbody>{flags.map((f: any) => {
+        <tbody>{shown.map((f: any) => {
           let links: any[] = [];
           try { links = JSON.parse(f.current_links || "[]"); } catch { /* legacy */ }
           return (
@@ -5278,8 +5293,40 @@ function RefinementFlagsPanel({ open }: { open: (id: string, a?: string) => void
           );
         })}</tbody>
       </table>
+      {more}
     </div>
   );
+}
+
+// --- Long lists reveal rather than run on ------------------------------------
+// A panel that renders every row it has is fine at twenty rows and unusable at a hundred:
+// the Maintain page measured 109,683px tall on a phone, of which the feedback list alone
+// was 104,433px. Everything below it — the shorthand rules, the linking rules — was
+// effectively unreachable, and scrolling past it on a touch screen takes real seconds.
+//
+// So a list shows its first ``limit`` and offers the rest. Deliberately NOT applied to a
+// document's own body: a statute or judgment is the thing you came to read, and hiding
+// half of it behind a button would break both reading and in-page search.
+// Two parts on purpose. The hook holds only the expanded/collapsed flag and is called
+// unconditionally at the top of a component; the function it returns is pure and may be
+// applied to a list derived AFTER an early return. Taking the list as a hook argument
+// instead put a useState below `if (!data) return …` in three of these panels, which is a
+// Rules-of-Hooks violation — the panel rendered blank the moment its data arrived.
+function useRevealer(limit = 12) {
+  const [all, setAll] = useState(false);
+  return function reveal<T>(rows: T[]) {
+    const hidden = Math.max(0, rows.length - limit);
+    return {
+      shown: all || hidden === 0 ? rows : rows.slice(0, limit),
+      hidden,
+      // rendered under the list; null when there is nothing to reveal
+      more: hidden === 0 ? null : (
+        <button className="mini reveal-more" onClick={() => setAll((v) => !v)}>
+          {all ? "▴ show fewer" : `▾ show all ${rows.length} (${hidden} more)`}
+        </button>
+      ),
+    };
+  };
 }
 
 // Bug reports and feature requests submitted from the app's feedback box. They landed in a
@@ -5290,8 +5337,12 @@ function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
   const [status, setStatus] = useState("open");
   const [items, err, reload] = useAsync(() => api.feedback(status), [status]);
   const [busy, setBusy] = useState<number | null>(null);
+  // 98 open items rendered a 104,433px-tall panel, which is most of why the Maintain page
+  // was 109,683px on a phone and everything under it unreachable.
+  const reveal = useRevealer(10);
   if (err) return null;
   const rows: any[] = items || [];
+  const { shown, more } = reveal(rows);
   const docOf = (page: string) => (page || "").startsWith("document:") ? page.slice(9) : null;
   return (
     <div className="panel">
@@ -5311,7 +5362,7 @@ function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
             <th style={{ width: "9%" }}>kind</th><th style={{ width: "52%" }}>message</th>
             <th style={{ width: "23%" }}>where</th><th style={{ width: "16%" }} />
           </tr></thead>
-          <tbody>{rows.map((f: any) => {
+          <tbody>{shown.map((f: any) => {
             const doc = docOf(f.page);
             return (
               <tr key={f.feedback_id}>
@@ -5336,6 +5387,7 @@ function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
           })}</tbody>
         </table>
       )}
+      {more}
     </div>
   );
 }
@@ -6229,7 +6281,7 @@ function SuggestionRow({ s }: { s: any; onDone?: () => void }) {
       {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}> {msg}</span>}
       {linkOther && !decided && (
         <div style={{ marginTop: 4 }}>
-          <DocAutocomplete placeholder="find the right case or act by name — any jurisdiction…"
+          <DocAutocomplete autoFocus placeholder="find the right case or act by name — any jurisdiction…"
             onPick={(id, title) => linkTo(id, title)} />
         </div>
       )}
@@ -6264,6 +6316,10 @@ function AllSuggestionsPanel() {
   const [kindFilter, setKindFilter] = useState("");
   const [hideFlagged, setHideFlagged] = useState(false);
   const [ctxFor, setCtxFor] = useState<string | null>(null);   // row whose context is expanded
+  // 500 groups rendered a 60,722px panel on a phone. The bulk "accept all safe" / "reject
+  // all red-flagged" buttons still act on EVERY match, not just the shown ones — this is a
+  // rendering limit, not a change of scope.
+  const revealGroups = useRevealer(20);
   const rows: any[] = data?.suggestions || [];
   const key = (s: any) => `${s.ref} ${s.suggested_id}`;
   const isRed = (s: any) => (s.flags || []).some((f: any) => f.level === "red");
@@ -6337,6 +6393,7 @@ function AllSuggestionsPanel() {
   const safePending = visible.filter((s) => isPending(s) && !isRed(s));
   const redPending = rows.filter((s) => isPending(s) && isRed(s));
   const kinds = [...new Set(rows.map((s) => s.kind).filter(Boolean))] as string[];
+  const groupReveal = revealGroups(groups);
   return (
     <div className="panel">
       <div className="row" style={{ alignItems: "baseline", flexWrap: "wrap" }}>
@@ -6360,7 +6417,7 @@ function AllSuggestionsPanel() {
           title="reject every red-flagged suggestion (cross-jurisdiction evidence) — never suggested again"
           onClick={() => decideMany(redPending, false)}>✗ reject all red-flagged ({redPending.length})</button>
       </div>
-      {groups.map((g) => {
+      {groupReveal.shown.map((g) => {
         const pend = g.members.filter(isPending);
         const t = g.target;
         const occ = g.members.reduce((a, s) => a + (s.occurrences || 0), 0);
@@ -6435,6 +6492,7 @@ function AllSuggestionsPanel() {
           </div>
         );
       })}
+      {groupReveal.more}
     </div>
   );
 }
@@ -6679,7 +6737,7 @@ function ResolveRow({ r, open, active, toggle, onDone }:
               ? <span className="tag" style={{ flex: 1 }}>{existing}{" "}
                   <a style={{ cursor: "pointer" }} onClick={() => setExisting("")}>change</a></span>
               : <div style={{ flex: 1, minWidth: 240 }}>
-                  <DocAutocomplete placeholder="find the case or act by name…"
+                  <DocAutocomplete autoFocus placeholder="find the case or act by name…"
                     onPick={(id) => setExisting(id)} /></div>)}
             {mode === "url" && <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…  (fetched via the scraping engine)" />}
             {mode === "file" && <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />}
@@ -6733,6 +6791,7 @@ function ResolveRow({ r, open, active, toggle, onDone }:
 // --- Shorthand rules: list / create / delete (propagate across the corpus) --
 export function RulesView({ open }: { open: (id: string) => void }) {
   const [rules, _e, reload] = useAsync(() => api.aliases(), []);
+  const revealRules = useRevealer(15);
   const [phrase, setPhrase] = useState("");
   const [target, setTarget] = useState<{ id: string; title: string } | null>(null);
   const [msg, setMsg] = useState("");
@@ -6778,7 +6837,7 @@ export function RulesView({ open }: { open: (id: string) => void }) {
           <button onClick={apply} style={{ flex: "0 0 auto" }} title="Re-extract the corpus so rules link everywhere">↻ apply to corpus</button></div>
         {(rules || []).length === 0 && <p className="muted">No rules yet.</p>}
         <table><tbody>
-          {(rules || []).map((r: any) => (
+          {revealRules<any>(rules || []).shown.map((r: any) => (
             <tr key={r.phrase}>
               <td><b>{r.phrase}</b></td>
               <td>→ <DocLink id={r.target_id} onOpen={() => open(r.target_id)}>{r.target_id}</DocLink>
@@ -6787,6 +6846,7 @@ export function RulesView({ open }: { open: (id: string) => void }) {
             </tr>
           ))}
         </tbody></table>
+        {revealRules<any>(rules || []).more}
       </div>
     </div>
   );
