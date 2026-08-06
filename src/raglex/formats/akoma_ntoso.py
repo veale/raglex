@@ -133,6 +133,33 @@ def _frbr_work_id(data: bytes) -> str | None:
     return None
 
 
+def expression_valid_from(data: bytes) -> str | None:
+    """The date the EXPRESSION in ``data`` is the law as at, or None.
+
+    legislation.gov.uk stamps every rendition it serves with
+    ``<FRBRdate date="2026-06-19" name="validFrom"/>`` in its FRBRExpression, and names
+    the same date in the manifestation URI (``/ukpga/2018/12/2026-06-19/data.akn``).
+    That is precisely the "as at" a reader needs: the revised text is continuously
+    maintained, so "the current text" is only meaningful with the date it was current on.
+
+    Read the EXPRESSION, not the Work (which carries enactment) or the Manifestation
+    (whose ``transform`` date is merely when the XML was rendered, and moves whenever the
+    publisher re-renders an unchanged act).
+    """
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return None
+    for e in root.iter():
+        if localname(e.tag) != "FRBRExpression":
+            continue
+        for child in e:
+            if localname(child.tag) == "FRBRdate" and child.get("name") == "validFrom":
+                d = (child.get("date") or "")[:10]
+                return d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) else None
+    return None
+
+
 def _title(root: ET.Element) -> str | None:
     # Prefer a human title (UK AKN's FRBRname is the citation "2000 c. 36").
     for name in ("shortTitle", "docTitle", "FRBRalias", "longTitle"):
@@ -204,6 +231,22 @@ def _unit_kind(name: str, ctx: dict) -> str:
     return _UNIT_KINDS.get(name, "section")
 
 
+#: Amending text quotes the instrument it changes. Everything under these carries the
+#: OTHER document's structure and must never be read as this document's own.
+_QUOTED_TAGS = {"quotedstructure", "embeddedstructure"}
+
+
+def _contains_unquoted(elem: ET.Element, tag: str) -> bool:
+    """Is ``tag`` present under ``elem``, ignoring quoted/embedded structure subtrees?"""
+    for child in elem:
+        name = localname(child.tag).lower()
+        if name in _QUOTED_TAGS:
+            continue
+        if name == tag or _contains_unquoted(child, tag):
+            return True
+    return False
+
+
 def _article_led(root: ET.Element) -> bool:
     """Does this instrument's body cite by ARTICLE rather than by section?
 
@@ -216,6 +259,14 @@ def _article_led(root: ET.Element) -> bool:
 
     The instrument itself says which it is. Where articles are present, a section is a
     grouping heading; where they are not, nothing changes.
+
+    QUOTED articles don't count. An amending schedule reproduces the text it inserts
+    inside ``<quotedStructure>`` — "in Article 4 substitute—" — and that quoted matter
+    is the OTHER instrument's structure, not this one's. The Data Protection Act 2018
+    has 271 sections and three articles, all three quoted inside one schedule
+    paragraph; on the un-scoped test it read as article-led, so every one of its
+    sections was demoted to a grouping heading and emitted as its own title with no
+    body. The whole Act rendered as a table of contents.
     """
     body = None
     for elem in root.iter():
@@ -223,7 +274,7 @@ def _article_led(root: ET.Element) -> bool:
             body = elem
             break
     scope = body if body is not None else root
-    return any(localname(e.tag).lower() == "article" for e in scope.iter())
+    return _contains_unquoted(scope, "article")
 
 
 def _walk(elem: ET.Element, level: int, blocks: list[tuple[str, str, str, int]],

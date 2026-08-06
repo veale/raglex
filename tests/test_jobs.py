@@ -13,7 +13,7 @@ import tempfile
 
 from raglex.config import Config
 from raglex.facade import Facade
-from raglex.jobs import JobManager
+from raglex.jobs import JobManager, _scan_conflict
 from raglex.ops import AlertThresholds, check_alerts
 
 
@@ -208,6 +208,23 @@ def test_startup_auto_resumes_only_declared_safe_kinds(monkeypatch):
     monkeypatch.setattr(mgr, "_resume_row", lambda row: resumed.append(row["job_id"]))
     assert mgr.reap_orphans(auto_resume=True) == 2
     assert resumed == ["scan"]
+
+
+def test_reparse_of_one_source_never_runs_beside_itself():
+    """Two reparse-source jobs over the same source must not overlap.
+
+    They did: one was auto-resumed by reap_orphans at API startup while the other was
+    promoted off the queue two seconds later, and both rewrote the text of all 100,027
+    uk-legislation documents while re-anchoring the same citations against it — 1.79M
+    offsets on one run against 123k on the other, for the same document set. The kind
+    was in none of the three guards.
+    """
+    running = {"kind": "reparse-source", "params_json": '{"source": "uk-legislation"}'}
+    assert _scan_conflict("reparse-source", {"source": "uk-legislation"}, running)
+    # it writes citation offsets, so it conflicts with the other passes over that source
+    assert _scan_conflict("reanchor-citations", {"source": "uk-legislation"}, running)
+    # …but disjoint sources are independent work and still run in parallel
+    assert not _scan_conflict("reparse-source", {"source": "fr-dila"}, running)
 
 
 def test_rollup_chain_is_off_unless_asked_for():

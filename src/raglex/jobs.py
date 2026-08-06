@@ -111,10 +111,18 @@ RESUME_POLICIES = {
     "rescan-contested-shorthands": "checkpoint",
 }
 AUTO_RESUME_KINDS = frozenset(RESUME_POLICIES)
-# All three write the citations table; a re-anchor and a rescan of the SAME source must
+# These all write the citations table; a re-anchor and a rescan of the SAME source must
 # not run at once (they'd race the same offsets), but disjoint sources may.
+#
+# ``reparse-source`` belongs here for a stronger reason than the rest: it rewrites the
+# document TEXT the offsets are measured against. Two of them ran concurrently over all
+# 100,027 uk-legislation documents — one auto-resumed by reap_orphans at API startup, the
+# other promoted off the queue two seconds later — and re-anchored the same citations
+# against text the other was replacing (1.79M offsets vs 123k for the same document set).
+# It was in none of the three guards, so nothing stopped it.
 _SCAN_KINDS = frozenset({"rescan-citations", "rescan", "reanchor-citations",
-                         "rescan-matching", "rescan-contested-shorthands"})
+                         "rescan-matching", "rescan-contested-shorthands",
+                         "reparse-source"})
 
 
 # Kinds that GROW the corpus (new documents/edges) and therefore stale the derived layers —

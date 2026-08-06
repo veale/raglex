@@ -449,6 +449,74 @@ def test_act_body_parts_do_not_qualify_section_labels():
     assert not any(lab.startswith("Pt ") or " Pt " in lab for lab in labels)
 
 
+# An amending Act quotes the instrument it changes. Here a schedule paragraph inserts
+# an Article into an EU-derived regulation, so the Act's XML contains <article> — but
+# inside <quotedStructure>, where it describes the OTHER instrument's structure.
+AKN_QUOTED_ARTICLE = b"""<?xml version="1.0"?>
+<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0">
+ <act>
+  <body>
+   <part><num>PART 1</num><heading>Preliminary</heading>
+    <section><num>1</num><heading>Overview</heading>
+     <subsection><content><p>This Act makes provision about personal data.</p></content></subsection>
+     <subsection><content><p>Most processing is subject to the UK GDPR.</p></content></subsection></section>
+    <section><num>2</num><heading>Protection of personal data</heading>
+     <subsection><content><p>This Act protects individuals with regard to processing.</p></content></subsection></section>
+   </part>
+  </body>
+  <hcontainer name="schedules">
+   <hcontainer name="schedule" eId="schedule-1">
+    <num>SCHEDULE 1</num><heading>Amendments</heading>
+    <paragraph><num>1</num><content><p>In the Regulation, after Article 4 insert&#8212;
+     <mod><quotedStructure>
+      <article><num>4A</num><heading>Inserted article</heading>
+       <content><p>Quoted text of the inserted article.</p></content></article>
+     </quotedStructure></mod></p></content></paragraph>
+   </hcontainer>
+  </hcontainer>
+ </act>
+</akomaNtoso>
+"""
+
+
+def test_quoted_article_does_not_demote_an_acts_sections():
+    """A quoted <article> must not flip a section-led Act into article-led parsing.
+
+    The Data Protection Act 2018 has 271 sections and three articles, all three quoted
+    inside one schedule paragraph. Reading them as this Act's own structure demoted
+    every section to a grouping heading, so each was emitted as its own title with no
+    body: 477k chars of text against 817k of real content, and the whole Act rendered
+    in the reader as a table of contents.
+    """
+    pd = parse("akoma-ntoso", AKN_QUOTED_ARTICLE)
+    body = {s.label: pd.text[s.char_start:s.char_end] for s in pd.segments}
+    assert "This Act makes provision about personal data." in body["s. 1 Overview"]
+    assert "Most processing is subject to the UK GDPR." in body["s. 1 Overview"]
+    assert "This Act protects individuals" in body["s. 2 Protection of personal data"]
+    # the section must span its subsections, not just repeat its own heading
+    assert body["s. 1 Overview"].strip() != "1 Overview"
+    kinds = {s.label: s.kind for s in pd.segments}
+    assert kinds["s. 1 Overview"] == "section"
+
+
+def test_genuine_article_led_instrument_is_still_article_led():
+    # the regression the quoting rule must not undo: an assimilated EU regulation
+    # divides its chapters into <section>s whose children are the real citable units
+    akn = AKN_QUOTED_ARTICLE.replace(
+        b"<part><num>PART 1</num><heading>Preliminary</heading>",
+        b"<part><num>CHAPTER I</num><heading>General</heading>"
+        b"<article><num>1</num><heading>Subject-matter</heading>"
+        b"<content><p>This Regulation lays down rules.</p></content></article>")
+    pd = parse("akoma-ntoso", akn)
+    seg = next(s for s in pd.segments if "Subject-matter" in s.label)
+    # the article is the citable unit: typed as one, and emitted with its body
+    assert seg.kind == "article"
+    assert pd.text[seg.char_start:seg.char_end] == "This Regulation lays down rules."
+    # …and here the <section>s ARE grouping headings, so they stay heading-only
+    secs = [s for s in pd.segments if s.kind == "section"]
+    assert [s.label for s in secs] == ["1 Overview", "2 Protection of personal data"]
+
+
 # -- EUR-Lex titles ---------------------------------------------------------
 # The page <title> is routinely a placeholder — the CELEX banner, or the OJ's own
 # XML filename — and the adapter then fell back to a CELEX-derived stand-in
