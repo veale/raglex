@@ -1137,6 +1137,7 @@ def cached_export_page_title(
 def render_cached_export(
     status: dict, *, note: str | None = None, index_link: dict | None = None,
     page_title: str | None = None, short_title: str | None = None,
+    canonical: str | None = None,
 ) -> bytes:
     """Render the page for a cached edition, applying the CURRENT attribution, this
     edition's own note, and (for a bundle item) the way back to its index page.
@@ -1149,7 +1150,23 @@ def render_cached_export(
         index_link=index_link,
         page_title=page_title or cached_export_page_title(status),
         short_title=short_title or status.get("short_title") or None,
+        canonical=canonical,
     ).encode("utf-8")
+
+
+def public_base_url() -> str | None:
+    """The site's own address, when it has been configured.
+
+    A canonical link and a sitemap both need ABSOLUTE urls, and there is no honest way to
+    guess one from a folder of files. Unset means the SEO block omits them rather than
+    inventing a hostname — a wrong canonical is worse than none, because it tells a search
+    engine the real page is somewhere it isn't.
+    """
+    for key in ("RAGLEX_STATIC_BASE_URL", "RAGLEX_PUBLIC_URL"):
+        value = (os.environ.get(key) or "").strip()
+        if value.startswith(("http://", "https://")):
+            return value.rstrip("/")
+    return None
 
 
 def build_static_export_cache(
@@ -1318,10 +1335,186 @@ def _json_dump(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+#: Jurisdiction code → the name a search actually uses. "uk" is not a word anybody types
+#: into a search box; "United Kingdom" is, and it is what schema.org wants for
+#: legislationJurisdiction.
+_JURISDICTION_NAMES = {
+    "uk": "United Kingdom", "eu": "European Union", "ie": "Ireland",
+    "fr": "France", "de": "Germany", "nl": "Netherlands", "be": "Belgium",
+    "us": "United States", "ca": "Canada", "au": "Australia", "nz": "New Zealand",
+    "hk": "Hong Kong", "sg": "Singapore", "in": "India", "za": "South Africa",
+}
+
+
+def _meta_description(data: dict) -> str:
+    """One sentence that says what this page IS, for the search result snippet.
+
+    Written from the instrument's own opening words rather than a template, because a
+    result that reads "Data Protection Act 2018 — Part 1 Preliminary. This Act makes
+    provision about the processing of personal data…" earns a click and
+    "Citations for ukpga/2018/12" does not. Falls back to naming the document when it has
+    no readable opening.
+    """
+    law = data.get("law") or {}
+    title = _display_title(law.get("title")) or law.get("stable_id") or "Document"
+    opening = ""
+    for section in (law.get("sections") or []):
+        body = " ".join(str(section.get("text") or "").split())
+        if len(body) > 40:
+            opening = body
+            break
+    if not opening:
+        counts = (data.get("counts") or {}).get("all") or 0
+        return (f"{title} — full text with the documents that cite it"
+                + (f" ({counts:,} citing documents)." if counts else "."))
+    room = 300 - len(title) - 3
+    if len(opening) > room:
+        opening = opening[:room].rsplit(" ", 1)[0] + "…"
+    return f"{title} — {opening}"
+
+
+def _meta_keywords(data: dict) -> str:
+    """Terms this page is genuinely about: the instrument, its jurisdiction, and the
+    provisions it contains. Not a keyword stuff — search engines discount that — but the
+    citable labels ("s. 45", "Article 15") are what people actually search for."""
+    law = data.get("law") or {}
+    terms: list[str] = []
+    for value in (law.get("short_title"), law.get("cite"), law.get("stable_id")):
+        if value and str(value) not in terms:
+            terms.append(str(value))
+    juris = _JURISDICTION_NAMES.get(str(law.get("jurisdiction") or "").lower())
+    if juris:
+        terms.append(juris)
+    short = law.get("short_title") or ""
+    for section in (law.get("sections") or [])[:24]:
+        label = str(section.get("label") or "").strip()
+        if label and label.lower() not in ("opening text", "document"):
+            terms.append(f"{short} {label}".strip())
+    return ", ".join(dict.fromkeys(t for t in terms if t))[:900]
+
+
+def _structured_data(data: dict, canonical: str | None) -> str:
+    """schema.org JSON-LD, so a search engine knows this is legislation and not a blog.
+
+    ``Legislation`` is the type for an instrument and carries exactly the fields the
+    corpus already holds — identifier, jurisdiction, the official source. A judgment or
+    a report has no equivalent schema.org type, so those get ``Article`` with the same
+    provenance. The breadcrumb makes the set → instrument path explicit rather than
+    leaving it to be guessed from a URL.
+    """
+    law = data.get("law") or {}
+    title = _display_title(law.get("title")) or law.get("stable_id") or "Document"
+    kinds = {str(s.get("kind") or "") for s in (law.get("sections") or [])}
+    is_legislation = bool(kinds & {"section", "article", "regulation", "paragraph",
+                                   "schedule", "part", "chapter"})
+    node: dict = {
+        "@context": "https://schema.org",
+        "@type": "Legislation" if is_legislation else "Article",
+        "name": title,
+        "headline": title[:110],
+        "description": _meta_description(data),
+        "inLanguage": law.get("language") or "en",
+        "isAccessibleForFree": True,
+    }
+    if canonical:
+        node["url"] = canonical
+        node["mainEntityOfPage"] = canonical
+    if law.get("stable_id"):
+        node["identifier"] = law["stable_id"]
+    if law.get("cite"):
+        node["alternateName"] = law["cite"]
+    if is_legislation:
+        node["legislationIdentifier"] = law.get("cite") or law.get("stable_id")
+        juris = _JURISDICTION_NAMES.get(str(law.get("jurisdiction") or "").lower())
+        if juris:
+            node["legislationJurisdiction"] = juris
+    # The official copy this text was taken from: provenance a reader (and a crawler
+    # judging authoritativeness) should be able to follow.
+    links = [l for l in (law.get("links") or []) if l.get("url")]
+    if links:
+        node["sameAs"] = [l["url"] for l in links[:5]]
+        node["publisher"] = {"@type": "Organization", "name": links[0].get("label") or "Source"}
+    nodes = [node]
+    crumbs = [{"@type": "ListItem", "position": 1, "name": title}]
+    if canonical:
+        crumbs[0]["item"] = canonical
+    nodes.append({"@context": "https://schema.org", "@type": "BreadcrumbList",
+                  "itemListElement": crumbs})
+    return "\n".join(
+        f'  <script type="application/ld+json">{_escape_for_script(json.dumps(n, ensure_ascii=False))}</script>'
+        for n in nodes)
+
+
+def _seo_head(data: dict, *, page_title: str, canonical: str | None) -> str:
+    """The <head> block: what this page is, for machines. Nothing here is visible."""
+    law = data.get("law") or {}
+    desc = _meta_description(data)
+    esc = lambda v: html.escape(str(v or ""), quote=True)  # noqa: E731
+    out = [
+        f'  <meta name="description" content="{esc(desc)}">',
+        f'  <meta name="keywords" content="{esc(_meta_keywords(data))}">',
+        '  <meta name="robots" content="index, follow, max-snippet:-1, '
+        'max-image-preview:large">',
+    ]
+    if canonical:
+        out.append(f'  <link rel="canonical" href="{esc(canonical)}">')
+        out.append(f'  <meta property="og:url" content="{esc(canonical)}">')
+    out += [
+        f'  <meta property="og:title" content="{esc(page_title)}">',
+        f'  <meta property="og:description" content="{esc(desc)}">',
+        '  <meta property="og:type" content="article">',
+        '  <meta property="og:site_name" content="RagLex">',
+        '  <meta name="twitter:card" content="summary">',
+        f'  <meta name="twitter:title" content="{esc(page_title)}">',
+        f'  <meta name="twitter:description" content="{esc(desc)}">',
+    ]
+    # The instrument's own citation, for the citation-aware crawlers that read it.
+    if law.get("cite"):
+        out.append(f'  <meta name="citation_title" content="{esc(law.get("title"))}">')
+    out.append(_structured_data(data, canonical))
+    return "\n".join(out)
+
+
+def _prerendered_law(data: dict) -> tuple[str, str]:
+    """The contents nav and the law's text as REAL HTML, mirroring what the script builds.
+
+    The page is otherwise a JSON payload plus a renderer, so with JavaScript switched off
+    — or to a crawler that does not run it — the whole instrument is a blank <main>. The
+    text is already in the file; this is the same text as markup, so it can be read,
+    indexed and linked to.
+
+    The script clears both containers before it renders, so a browser never sees this: it
+    is replaced within a frame by the identical interactive version. Nothing is served to
+    a crawler that is not served to a reader — it is the same content, rendered twice, and
+    the duplicate costs almost nothing over the wire because it gzips against the copy in
+    the payload.
+    """
+    law = data.get("law") or {}
+    sections = law.get("sections") or []
+    nav: list[str] = []
+    body: list[str] = []
+    for section in sections:
+        sid = html.escape(str(section.get("id") or ""), quote=True)
+        label = html.escape(str(section.get("label") or ""))
+        level = min(2, int(section.get("level") or 0))
+        nav.append(f'<a href="#{sid}"><span>{label}</span></a>')
+        paras = section.get("paragraphs") or [{"text": section.get("text") or "",
+                                               "indent": 0}]
+        lines = "".join(
+            '<p class="law-paragraph indent-{i}">{t}</p>'.format(
+                i=min(3, int(p.get("indent") or 0)),
+                t=html.escape(str(p.get("text") or "")))
+            for p in paras if str(p.get("text") or "").strip())
+        body.append(
+            f'<section id="{sid}" class="law-section level-{level}">'
+            f"<h2>{label}</h2>{lines}</section>")
+    return "\n".join(nav), "\n".join(body)
+
+
 def render_static_page(
     *, title: str, data_json: str, note: str | None = None,
     index_link: dict | None = None, page_title: str | None = None,
-    short_title: str | None = None,
+    short_title: str | None = None, canonical: str | None = None,
 ) -> str:
     """Render the page around an already-serialised payload.
 
@@ -1331,8 +1524,23 @@ def render_static_page(
     law and the name of the set it belongs to.
     """
     page = _HTML_TEMPLATE
+    resolved_title = page_title or f"{title} — citations"
+    # The head metadata and the crawlable copy are built from the payload, so they can
+    # never drift from what the page actually shows.
+    try:
+        parsed = json.loads(data_json)
+    except (ValueError, TypeError):
+        parsed = {}
+    nav_html, law_html = _prerendered_law(parsed) if parsed else ("", "")
+    lang = html.escape(
+        str(((parsed.get("law") or {}).get("language")) or "en"), quote=True)
     replacements = {
-        "__PAGE_TITLE__": html.escape(page_title or f"{title} — citations", quote=True),
+        "__PAGE_TITLE__": html.escape(resolved_title, quote=True),
+        "__HTML_LANG__": lang,
+        "__SEO_HEAD__": _seo_head(parsed, page_title=resolved_title,
+                                  canonical=canonical) if parsed else "",
+        "__PRERENDER_NAV__": nav_html,
+        "__PRERENDER_LAW__": law_html,
         "__TITLE__": html.escape(_display_title(title)),
         "__SIDEBAR_HEAD__": _sidebar_head(short_title or title, index_link),
         "__ATTRIBUTION_BLOCK__": _attribution_block(note),
@@ -1358,12 +1566,13 @@ def render_static_html(
 
 
 _HTML_TEMPLATE = """<!doctype html>
-<html lang="en">
+<html lang="__HTML_LANG__">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>__PAGE_TITLE__</title>
+__SEO_HEAD__
   <style>__STYLE__</style>
 </head>
 <body>
@@ -1383,9 +1592,11 @@ _HTML_TEMPLATE = """<!doctype html>
       <div class="contents-head">
         __SIDEBAR_HEAD__
       </div>
-      <nav id="contents-nav" aria-label="Law contents"></nav>
+      <!-- Rendered server-side and replaced by the script on load, so the instrument is
+           readable, indexable and linkable without JavaScript. Identical content. -->
+      <nav id="contents-nav" aria-label="Law contents">__PRERENDER_NAV__</nav>
     </aside>
-    <main id="law"></main>
+    <main id="law">__PRERENDER_LAW__</main>
   </div>
   <dialog id="mentions-dialog" aria-labelledby="mentions-title">
     <div class="dialog-head">
@@ -1864,6 +2075,12 @@ _SCRIPT = r"""
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
   const number = (n) => Number(n || 0).toLocaleString();
+
+  // The law and its contents list are ALSO rendered into the HTML server-side, so the
+  // page is readable and indexable without JavaScript. Clear them before building the
+  // interactive version, or the reader gets the whole instrument twice.
+  $("law").textContent = "";
+  $("contents-nav").textContent = "";
 
   const sourceNote = document.createElement("p");
   sourceNote.className = "source-note";

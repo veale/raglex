@@ -399,6 +399,93 @@ def test_provision_headings_name_their_citers_and_subsections_do_not():
     assert ".cite-link { color: var(--ink); text-decoration: none; }" in _STYLE
 
 
+# -- what the page tells a machine about itself -----------------------------
+_SEO_DATA = {
+    "law": {
+        "stable_id": "ukpga/2018/12", "title": "Data Protection Act 2018",
+        "short_title": "DPA 2018", "jurisdiction": "uk", "cite": "2018 c. 12",
+        "language": "en",
+        "links": [{"url": "https://www.legislation.gov.uk/ukpga/2018/12",
+                   "label": "legislation.gov.uk"}],
+        "sections": [
+            {"id": "s-1", "label": "s. 1 Overview", "kind": "section", "level": 1,
+             "key": "s1", "text": "This Act makes provision about the processing of "
+                                  "personal data and about the Commissioner.",
+             "paragraphs": [{"text": "This Act makes provision about the processing of "
+                                     "personal data and about the Commissioner.",
+                             "indent": 0}]},
+        ],
+    },
+    "counts": {"all": 1234},
+}
+
+
+def test_the_page_is_readable_without_running_its_script():
+    """The instrument is in the HTML, not only in the JSON the script renders.
+
+    An edition is a payload plus a renderer, so with JavaScript off — or to anything that
+    does not run it — <main> was empty and the whole law invisible. The same text is now
+    also markup, and the script clears it before drawing the interactive version, so a
+    reader sees exactly one copy.
+    """
+    from raglex.static_export import _SCRIPT, render_static_page
+
+    page = render_static_page(title=_SEO_DATA["law"]["title"],
+                              data_json=json.dumps(_SEO_DATA))
+    assert '<section id="s-1" class="law-section level-1">' in page
+    assert "<h2>s. 1 Overview</h2>" in page
+    assert "This Act makes provision about the processing" in page
+    assert '<a href="#s-1"><span>s. 1 Overview</span></a>' in page
+    # …and the script empties both containers, or the reader gets the law twice
+    assert '$("law").textContent = "";' in _SCRIPT
+    assert '$("contents-nav").textContent = "";' in _SCRIPT
+
+
+def test_the_head_says_what_the_page_is():
+    from raglex.static_export import render_static_page
+
+    page = render_static_page(title=_SEO_DATA["law"]["title"],
+                              data_json=json.dumps(_SEO_DATA),
+                              canonical="https://example.org/dpa.html")
+    head = page.split("</head>")[0]
+    # a description written from the law's own opening words, not a template
+    assert "This Act makes provision about the processing" in head
+    assert '<link rel="canonical" href="https://example.org/dpa.html">' in head
+    assert 'property="og:title"' in head and 'name="twitter:card"' in head
+    assert 'name="robots"' in head
+    assert '<html lang="en">' in page
+    # the citable labels people actually search for
+    assert "DPA 2018 s. 1 Overview" in head
+
+
+def test_structured_data_calls_legislation_legislation():
+    from raglex.static_export import render_static_page
+
+    page = render_static_page(title=_SEO_DATA["law"]["title"],
+                              data_json=json.dumps(_SEO_DATA),
+                              canonical="https://example.org/dpa.html")
+    blocks = re.findall(r'application/ld\+json">(.*?)</script>', page, re.S)
+    assert len(blocks) == 2
+    node = json.loads(blocks[0].replace("\\u003c", "<").replace("\\u003e", ">"))
+    assert node["@type"] == "Legislation"
+    assert node["legislationIdentifier"] == "2018 c. 12"
+    assert node["legislationJurisdiction"] == "United Kingdom"
+    assert node["identifier"] == "ukpga/2018/12"
+    assert "https://www.legislation.gov.uk/ukpga/2018/12" in node["sameAs"]
+    assert json.loads(blocks[1].replace("\\u003c", "<"))["@type"] == "BreadcrumbList"
+
+
+def test_no_canonical_is_better_than_a_guessed_one():
+    # a wrong canonical tells a search engine the real page is somewhere it is not
+    from raglex.static_export import render_static_page
+
+    page = render_static_page(title=_SEO_DATA["law"]["title"],
+                              data_json=json.dumps(_SEO_DATA))
+    assert "rel=\"canonical\"" not in page
+    assert 'property="og:url"' not in page
+    assert 'name="description"' in page      # everything else still there
+
+
 # -- the page's own script, checked without a browser -----------------------
 def test_page_script_only_touches_ids_and_names_that_exist():
     """The whole interactive half of an edition is one IIFE, so a single undefined name

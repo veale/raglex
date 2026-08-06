@@ -35,9 +35,17 @@ from .static_export import (
     build_static_export_cache,
     cached_export_page_title,
     editorial_paragraphs,
+    public_base_url,
     render_cached_export,
     static_export_status,
 )
+
+
+def _xml(value: str) -> str:
+    """Escape for an XML text node — a sitemap is XML, and an ampersand in a filename
+    would otherwise make the whole document unparseable and the sitemap ignored."""
+    return (str(value or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
 # One JSON settings row holds the whole plan (see SettingsStore._SYSTEM_KEYS).
 CONFIG_KEY = "RAGLEX_STATIC_BUNDLE"
@@ -593,6 +601,7 @@ def build_bundle(
     if not items:
         return {"error": "no documents are configured for the static bundle"}
     refresh = params.get("refresh", True)
+    base_url = public_base_url()
     want_zip = bool(params.get("zip"))
     max_snippets = config["max_snippets"]
     out_dir = resolve_output_dir(facade.config, config["output_dir"])
@@ -653,6 +662,7 @@ def build_bundle(
         # not a scatter of files, however a reader arrived at this one.
         html_bytes = render_cached_export(
             status, note=item.get("note"),
+            canonical=(f"{base_url}/{item['slug']}.html" if base_url else None),
             index_link={"href": "index.html", "title": config["index_title"]},
             # "Crossreferenced AI Act - UCL Digital Laws": a tab, a bookmark and a
             # browser history entry all get the short name plus the set it belongs to,
@@ -686,6 +696,30 @@ def build_bundle(
         generated_at=started, wordart=config["index_wordart"],
     ).encode("utf-8")
     files.append(("index.html", index_html))
+
+    # A crawler finds pages by being told where they are. Without a sitemap it has to
+    # discover each edition through the index, and without robots.txt it has no pointer to
+    # the sitemap at all. Both need absolute urls, so both are written only when the site's
+    # address is configured (RAGLEX_STATIC_BASE_URL / RAGLEX_PUBLIC_URL) rather than
+    # guessing a hostname that would send crawlers somewhere wrong.
+    if base_url:
+        today = started[:10] if started else ""
+        urls = [("index.html", "1.0")] + [(e["filename"], "0.8") for e in entries]
+        sitemap = ['<?xml version="1.0" encoding="UTF-8"?>',
+                   '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+        for filename, priority in urls:
+            sitemap.append(
+                f"  <url><loc>{_xml(base_url)}/{_xml(filename)}</loc>"
+                + (f"<lastmod>{_xml(today)}</lastmod>" if today else "")
+                + f"<changefreq>weekly</changefreq><priority>{priority}</priority></url>")
+        sitemap.append("</urlset>")
+        files.append(("sitemap.xml", "\n".join(sitemap).encode("utf-8")))
+        files.append(("robots.txt", (
+            "User-agent: *\n"
+            "Allow: /\n"
+            f"Sitemap: {base_url}/sitemap.xml\n"
+        ).encode("utf-8")))
+        emit(len(items), f"writing sitemap.xml for {len(urls)} pages")
 
     # The folder is written every run — scheduled or manual — and same-named files are
     # replaced outright. It is a mirror of the current corpus, not an archive.
