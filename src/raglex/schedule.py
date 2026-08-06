@@ -38,7 +38,10 @@ TASKS: tuple[TaskSpec, ...] = (
     TaskSpec("nightly-harvest", True, None, "02:00 full drain of the routable worklist"),
     TaskSpec("auto-embed", True, None, "index newly-texted documents into the embedding family each tick"),
     TaskSpec("canlii-enrich", True, None, "drain the rate-limited CanLII enrichment queue"),
-    TaskSpec("effects", True, 720, "re-check legislation.gov.uk unapplied-effects queue"),
+    # 60, not 720: the loop has always run this hourly with the interval hardcoded, so the
+    # declared 12h cadence was never what happened. Now that the cadence is read from here,
+    # it has to say what the scheduler actually does.
+    TaskSpec("effects", True, 60, "re-check legislation.gov.uk unapplied-effects queue"),
     # Both are corpus-wide walks over a 17M-edge graph, and both feed RANKING, not
     # correctness: a document harvested since the last run is still found, still read,
     # still cited — it just carries a stale authority score until the next pass. So they

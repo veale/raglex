@@ -1233,6 +1233,16 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.refresh_effects(limit=limit)
 
     @admin
+    def check_uk_currency(limit: int = 200) -> dict:
+        """Ask legislation.gov.uk whether the UK text we hold is still the text it serves.
+
+        A HEAD per act (no download), comparing the publisher's Last-Modified against the
+        one recorded at harvest; anything that moved is flagged for re-pull. Catches the
+        act revised in place that the effects queue cannot see, because that queue only
+        holds acts with a known-unapplied backlog."""
+        return facade.check_uk_currency(limit=limit)
+
+    @admin
     def import_echr_convention() -> dict:
         """Import the official current European Convention on Human Rights (ETS No. 5)
         as ``echr/convention``, segmented through ``Article 5(1)(a)``-style anchors."""

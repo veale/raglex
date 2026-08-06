@@ -170,6 +170,41 @@ def test_uk_repealed_title_sets_canonical_currency():
     assert rec.extra["currency"]["status"] == "repealed"
 
 
+# legislation.gov.uk stamps the date the served expression is the law as at — the same
+# date it names in the manifestation URI (/ukpga/2018/12/2026-06-19/data.akn).
+AKN_DATED = AKN.replace(
+    b"<FRBRWork><FRBRname value=\"2000 c. 36\"/></FRBRWork>",
+    b"<FRBRWork><FRBRname value=\"2000 c. 36\"/>"
+    b"<FRBRdate date=\"2000-11-30\" name=\"enacted\"/></FRBRWork>"
+    b"<FRBRExpression><FRBRdate date=\"2026-07-16\" name=\"validFrom\"/></FRBRExpression>"
+    b"<FRBRManifestation><FRBRdate date=\"2026-08-06\" name=\"transform\"/></FRBRManifestation>",
+)
+
+
+def test_revised_text_records_the_date_it_is_current_as_at():
+    """A base UK act must carry the publisher's own as-at date.
+
+    The revised text is maintained in place, so "the current text" means nothing without
+    the date it was current on — and we were dropping it. Every base UK act stored
+    as_at=null, so the reader was shown an "undated legislation record" over text the
+    source had dated precisely, and legislative_status could only report that which
+    commencement dates the text reflects "cannot be determined from the corpus".
+    """
+    ad = UKLegislationAdapter(ids="ukpga/2000/36", client=_FakeClient(AKN_DATED))
+    rec = ad.fetch(list(ad.discover(None))[0])
+    assert rec.extra["currency"]["as_at"] == "2026-07-16"
+    # NOT the enactment date, and NOT the manifestation's transform date (which moves
+    # whenever the publisher re-renders an unchanged act)
+    assert rec.extra["currency"]["as_at"] not in ("2000-11-30", "2026-08-06")
+
+
+def test_currency_as_at_is_absent_rather_than_guessed():
+    # the CLML fallback rendition carries no FRBRExpression; silence beats invention
+    ad = UKLegislationAdapter(ids="ukpga/2000/36", client=_FakeClient(AKN))
+    rec = ad.fetch(list(ad.discover(None))[0])
+    assert rec.extra["currency"].get("as_at") is None
+
+
 AKN_WITH_EFFECTS = b"""<?xml version="1.0"?>
 <akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0"
             xmlns:ukm="http://www.legislation.gov.uk/namespaces/metadata">

@@ -38,9 +38,19 @@ from ..core.models import (
     TypedRelation,
 )
 from ..formats import parse
+from ..formats.akoma_ntoso import expression_valid_from
 from .leg_effects import parse_changes_feed, parse_unapplied_effects, summarise_effects
 
 BASE_URL = "https://www.legislation.gov.uk"
+
+
+def _last_modified(resp) -> str | None:
+    """The ``Last-Modified`` header of a fetched rendition, if the response carries one."""
+    try:
+        value = (resp.headers or {}).get("Last-Modified")
+    except AttributeError:
+        return None
+    return str(value).strip() or None
 
 
 def _canonical_leg_id(path: str) -> str:
@@ -339,11 +349,18 @@ class UKLegislationAdapter(BaseAdapter):
                         clml_body = r.content
                 except Exception:  # noqa: BLE001 — fall back to AKN-only on any CLML hiccup
                     clml_body = None
-        return self.record_from_akn(
+        record = self.record_from_akn(
             stub.stable_id, raw, clml_body=clml_body,
             landing_url=stub.landing_url,
             base_id=stub.hints.get("base_id"),
             version_date=stub.hints.get("version_date"))
+        # The publisher's validator for "has this rendition changed since we read it".
+        # Kept so staleness can be checked with a HEAD instead of re-downloading a
+        # multi-megabyte Act (see Facade.check_uk_currency).
+        stamp = _last_modified(resp)
+        if stamp:
+            record.extra["source_last_modified"] = stamp
+        return record
 
     def _domestic_clml_fallback(self, stub: Stub, akn_url: str) -> Record | None:
         """Read the publisher's other authoritative XML rendition when AKN is slow.
@@ -439,6 +456,15 @@ class UKLegislationAdapter(BaseAdapter):
             cur.as_at = stub.hints.get("version_date")
             cur.status = str(CanonStatus.CONSOLIDATED)   # a dated point-in-time snapshot
         else:
+            # The revised text is CONTINUOUSLY maintained, so "the current text" means
+            # nothing without the date it was current on — and the publisher stamps that
+            # date on every rendition it serves (FRBRExpression/@validFrom, and the
+            # manifestation URI). We were dropping it, so every base UK act was stored
+            # with as_at = null: the reader saw "undated legislation record" over text
+            # the source had dated precisely, and legislative_status could only say that
+            # "which commencement dates it reflects cannot be determined from the corpus".
+            # It can; this is where it comes from.
+            cur.as_at = expression_valid_from(raw)
             # legislation.gov.uk occasionally communicates whole-instrument currency
             # only in the canonical title (for example "Race Relations Act 1976
             # (Repealed)") while the AKN exposes no separate document-status field.

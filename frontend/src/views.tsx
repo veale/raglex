@@ -6982,6 +6982,15 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   } else if (s.version_state === "base_with_consolidation") {
     versionNotice = <><b>This is the base act, not a dated consolidated snapshot.</b>
       {" "}Latest applicable consolidation held by RagLex: {links([s.latest_applicable_consolidation.stable_id])}.</>;
+  } else if (s.version_state === "revised_in_place") {
+    // legislation.gov.uk revises the text in place, so this IS the consolidated text —
+    // the question a reader has is not "which snapshot is this" but "how current is it".
+    const pit = (s.point_in_time_versions || []) as any[];
+    versionNotice = <><b>Revised text{s.as_at ? `, as it stood on ${s.as_at}` : ""}.</b>
+      {" "}The publisher maintains this text in place, applying amendments as they are made;
+      it is the current consolidated version, not the act as originally enacted.
+      {!s.as_at && <> RagLex has not recorded the date this copy is current as at.</>}
+      {pit.length > 0 && <> RagLex also holds {pit.length} point-in-time snapshot{pit.length > 1 ? "s" : ""}: {links(pit.map((v) => v.stable_id))}.</>}</>;
   } else if (s.source === "eu-legislation") {
     versionNotice = <><b>This is the undated/base EU act, not a dated consolidated snapshot.</b>
       {" "}RagLex has not yet imported a dated consolidation for this act; that does not mean none exists in EUR-Lex.
@@ -6999,7 +7008,9 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   const dates = [
     s.in_force_from && `in force from ${s.in_force_from}`,
     s.in_force_to && `${s.status === "prospective" ? "until" : "ceased"} ${s.in_force_to}`,
-    s.as_at && !s.is_consolidation && `text as at ${s.as_at}`,
+    // the revised-text notice above already gives the as-at date in words
+    s.as_at && !s.is_consolidation && s.version_state !== "revised_in_place"
+      && `text as at ${s.as_at}`,
   ].filter(Boolean).join(" · ");
   const unapplied = s.up_to_date === false && (s.unapplied_count || 0) > 0;
 

@@ -359,6 +359,19 @@ _INSERTED_UNIT = re.compile(
     r"paragraphs?|paras?\.?)\s*(\d+[A-Za-z]{1,3})\b", re.IGNORECASE)
 
 
+#: Sources whose base identifier serves a CONTINUOUSLY REVISED text rather than the
+#: instrument as originally enacted. For these there is no separate consolidation to
+#: import and none is missing: the editors amend the published text in place, and date
+#: it. Dated expressions exist too, but as point-in-time *snapshots of* the revised text
+#: — the reverse of the EU model, where the base act stays frozen and each consolidation
+#: is its own document.
+_REVISED_IN_PLACE_SOURCES = frozenset({"uk-legislation"})
+
+
+def _revised_in_place(source: str | None) -> bool:
+    return (source or "") in _REVISED_IN_PLACE_SOURCES
+
+
 def _inserted_provisions(labels) -> list[str]:
     """The letter-suffixed provision numbers among a document's segment labels."""
     found: list[str] = []
@@ -1702,6 +1715,16 @@ class Facade:
             {"stable_id": sid, "as_at": version_date}
             for sid, version_date in held_versions if is_consolidation(sid)
         ]
+        # ``is_consolidation`` is a CELEX test (sector 0 + date), so it answers "is this an
+        # EU consolidation", not "is this a dated version". Held UK point-in-time copies
+        # (``ukpga/2018/12@2020-01-01``, linked by point_in_time_of) were fetched into
+        # ``held_versions`` and then dropped by that filter — so an act could show its
+        # dated versions in the versions panel while the banner above it said none were
+        # held. Keep them, under their own name; they are not consolidations.
+        point_in_time_versions = [
+            {"stable_id": sid, "as_at": version_date}
+            for sid, version_date in held_versions if not is_consolidation(sid)
+        ]
         consolidations = sorted(set(consolidations) | {
             row["stable_id"] for row in consolidation_versions
         })
@@ -1724,6 +1747,15 @@ class Facade:
             version_state = "unverified_consolidation"
         elif latest_applicable:
             version_state = "base_with_consolidation"
+        elif _revised_in_place(source):
+            # A source that REVISES ITS TEXT IN PLACE has no separate consolidation to
+            # import: legislation.gov.uk's base URI *is* the consolidated text, kept
+            # current by its editors and stamped with the date it is current as at. The
+            # EU-shaped fallback below told every UK reader they were looking at an
+            # "undated legislation record" for which "RagLex has not imported a dated
+            # consolidation" — describing a gap that cannot exist in this model, over
+            # text the publisher had dated precisely.
+            version_state = "revised_in_place"
         else:
             version_state = "base_without_consolidation"
         # Native currency the adapter/format parser stowed (FR états, DE force, NL WTI, UK
@@ -1823,6 +1855,7 @@ class Facade:
             "latest_held_consolidation": latest_held,
             "latest_applicable_consolidation": latest_applicable,
             "consolidation_versions": consolidation_versions,
+            "point_in_time_versions": point_in_time_versions,
             "consolidations_checked_at": meta.get("consolidations_checked_at"),
             # A property of the SOURCE, not of this stored record. legislation.gov.uk
             # serves a dated version of everything it publishes, assimilated EU law
@@ -9098,6 +9131,68 @@ class Facade:
             Resolver(cat).run()
             return {"due": len(due), "checked": len(ids), "cleared": cleared,
                     "still_outstanding": still, "ids": ids, "before": before}
+
+    def check_uk_currency(self, *, limit: int = 200, max_age_days: float = 30) -> dict:
+        """Ask legislation.gov.uk whether the text we hold is still the text it serves.
+
+        The effects queue answers a narrower question — "have the amendments this act
+        already knows about been applied yet?" — and an act drops out of it the moment
+        its backlog reaches zero. Nothing then re-checks that act unless some *other*
+        act's changes feed names it, so an act quietly revised in place can stay stale
+        indefinitely while every field on the page says it is current.
+
+        This is the direct check, and it is cheap because it never downloads the act: a
+        HEAD against the rendition we stored, comparing the publisher's ``Last-Modified``
+        with the one recorded at harvest. Only when they differ is the act flagged for a
+        real re-pull, through the same queue the effects machinery drains. Acts stored
+        before that header was recorded have nothing to compare against and are skipped
+        rather than guessed at — they acquire a marker on their next harvest.
+        """
+        from .adapters.uk_legislation import BASE_URL, _last_modified
+        from .adapters.registry import get_adapter
+
+        with self._open() as (cat, _rs, _ts):
+            done = cat.enrichment_misses("currency-head", max_age_days=max_age_days)
+            rows = cat.list_documents(source="uk-legislation", doc_type="legislation",
+                                      limit=max(limit * 5, 1000))
+            todo = []
+            for r in rows:
+                sid = r["stable_id"]
+                if "@" in sid or sid in done:
+                    continue          # dated snapshots are immutable; skip recent checks
+                stamp = (_row_meta(r) or {}).get("source_last_modified")
+                if stamp:
+                    todo.append((sid, str(stamp)))
+                if len(todo) >= limit:
+                    break
+        if not todo:
+            return {"checked": 0, "stale": 0, "unchanged": 0, "errors": 0, "ids": []}
+        adapter = get_adapter("uk-legislation")
+        stale, unchanged, errors, ids = 0, 0, 0, []
+        for sid, held in todo:
+            try:
+                resp = adapter._client.request(
+                    "HEAD", f"{BASE_URL}/{sid}/data.akn", raise_for_4xx=False)
+                current = _last_modified(resp)
+            except Exception:  # noqa: BLE001 — one unreachable act mustn't stop the sweep
+                errors += 1
+                continue
+            if not current:
+                errors += 1
+            elif current == held:
+                unchanged += 1
+            else:
+                stale += 1
+                ids.append(sid)
+        if ids:
+            with self._open() as (cat, _rs, _ts):
+                for sid in ids:
+                    # due NOW, through the queue refresh_effects already drains
+                    cat.mark_effects_due(sid, [])
+        with self._open() as (cat, _rs, _ts):
+            cat.record_enrichment_misses("currency-head", [sid for sid, _ in todo])
+        return {"checked": len(todo), "stale": stale, "unchanged": unchanged,
+                "errors": errors, "ids": ids[:50]}
 
     def propagate_changes_from(self, *, stable_id: str, max_pages: int = 20) -> dict:
         """Push an amending act's changes OUT to the instruments it affects (§0). Reads

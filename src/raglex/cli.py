@@ -597,7 +597,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 # Hourly: re-pull legislation whose outstanding-effects re-check is due
                 # (§0). Bounded; usually a no-op (backoff is weeks). Only touches items
                 # already flagged stale — never the whole corpus.
-                if time.time() - last_effects >= 3600:
+                #
+                # This was the one recurring task in this loop that consulted neither its
+                # enable toggle nor its cadence: the settings UI offered a switch for
+                # "effects" that did nothing, because the interval was hardcoded here.
+                if (_sched_on("effects")
+                        and time.time() - last_effects >= (_sched_min("effects") or 60) * 60):
                     last_effects = time.time()
                     ef = f.refresh_effects(limit=int(os.environ.get("RAGLEX_EFFECTS_BATCH") or 10))
                     if ef.get("checked"):
@@ -610,6 +615,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     if pc.get("flagged") or pc.get("edges"):
                         print(f"[watch] changes propagate: scanned {pc['scanned']}, "
                               f"flagged {pc['flagged']} for re-pull, {pc['edges']} amends edge(s)")
+                    # Direct staleness check: HEAD what we hold against what the publisher
+                    # now serves. Catches the act revised in place that no changes feed
+                    # names and whose effects backlog is already zero — invisible to both
+                    # passes above. Header-only, so a few hundred cost almost nothing.
+                    cu = f.check_uk_currency(
+                        limit=int(os.environ.get("RAGLEX_CURRENCY_BATCH") or 200))
+                    if cu.get("stale"):
+                        print(f"[watch] uk currency: checked {cu['checked']}, "
+                              f"{cu['stale']} stale → flagged for re-pull")
                 # Weekly: refresh the roll-ups the front page + worklist + Unresolved
                 # worklist read (citation frequencies, source/shape/leg-type stats, and the
                 # ~96s pending-reference worklist). These are corpus-wide aggregates that
