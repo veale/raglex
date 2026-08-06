@@ -458,7 +458,7 @@ class JobManager:
         # otherwise hold the GIL and starve the web server until it's unreachable.
         # Sleeping RELEASES the GIL, so the event loop keeps serving requests.
         self.yield_s = float(os.environ.get("RAGLEX_JOB_YIELD_S") or 0.003)
-        # Throttle state for maybe_promote (the UI polls the queue about once a second).
+        # Throttle state for poll() (the UI polls the queue every few seconds).
         self._promote_lock = threading.Lock()
         self._last_promote = 0.0
 
@@ -594,28 +594,34 @@ class JobManager:
         would conflict with a running job. Called when a slot frees (a job finishes) and on
         every scheduler tick, so promotion survives a crash and works across processes — the
         atomic claim (:meth:`Catalogue.claim_queued_job`) ensures each job starts once."""
+        with self.facade._open() as (cat, _rs, _ts):
+            return self._promote_with(cat)
+
+    def _promote_with(self, cat) -> list[str]:
+        """The promotion loop against an ALREADY-OPEN catalogue, so a caller that has one
+        does not take a second connection from the pool to do this."""
         started: list[str] = []
         blocked: list[str] = []
         cap = self._max_concurrent()
-        with self.facade._open() as (cat, _rs, _ts):
-            while True:
-                running = cat.running_jobs()
-                if self._slots_used(running) >= cap:
+        running: list = []
+        while True:
+            running = list(cat.running_jobs())
+            if self._slots_used(running) >= cap:
+                break
+            picked = None
+            for q in cat.queued_jobs():
+                p = json.loads(q["params_json"] or "{}")
+                if self._blocked_by_running(q["kind"], p, running):
+                    blocked.append(f"{q['job_id']}({q['kind']})")
+                    continue
+                if cat.claim_queued_job(q["job_id"]):
+                    picked = (q["job_id"], q["kind"], p)
                     break
-                picked = None
-                for q in cat.queued_jobs():
-                    p = json.loads(q["params_json"] or "{}")
-                    if self._blocked_by_running(q["kind"], p, running):
-                        blocked.append(f"{q['job_id']}({q['kind']})")
-                        continue
-                    if cat.claim_queued_job(q["job_id"]):
-                        picked = (q["job_id"], q["kind"], p)
-                        break
-                if picked is None:
-                    break
-                jid, k, p = picked
-                threading.Thread(target=self._worker, args=(jid, k, p), daemon=True).start()
-                started.append(jid)
+            if picked is None:
+                break
+            jid, k, p = picked
+            threading.Thread(target=self._worker, args=(jid, k, p), daemon=True).start()
+            started.append(jid)
         if started:
             log.info("promoted %d queued job(s) into free slots: %s",
                      len(started), ", ".join(started))
@@ -628,31 +634,41 @@ class JobManager:
                      len(blocked), ", ".join(sorted(set(blocked))[:5]))
         return started
 
-    def maybe_promote(self, *, min_interval: float = 5.0) -> None:
-        """Promote from a hot read path (the UI's queue poll), throttled and never raising.
+    def poll(self, *, min_interval: float = 5.0) -> dict:
+        """Read the queue's state and, at most every ``min_interval``, advance it — on ONE
+        connection.
 
-        Promotion used to happen only when a job finished *in this process* or on the
-        scheduler's tick — which is 900s in the deployed compose. So a slot freed by a
-        reaped, interrupted or other-container job stayed empty for up to a quarter of an
-        hour, and any failure of the one promoting call left it empty indefinitely. The
-        Jobs panel polls every second; two cheap queries at most every ``min_interval``
-        makes the queue advance as soon as a slot exists."""
+        This is what the Jobs panel polls. Promotion otherwise happens only when a job
+        finishes in this process or on the scheduler's tick, which is 900s in the deployed
+        compose, so a slot freed anywhere else sat empty for up to a quarter of an hour.
+        Doing it here is right; doing it in its own ``_open()`` was not. The endpoint then
+        took TWO pool connections in sequence on a path polled every few seconds, and under
+        load the second one waited out the pool's 30s timeout and raised — which is exactly
+        what it did in production (PoolTimeout in maybe_promote, 07:21). One connection
+        does both, and a pool that is momentarily busy costs a beat of promotion rather
+        than an exception."""
         now = time.monotonic()
+        due = False
         with self._promote_lock:
-            if now - self._last_promote < min_interval:
-                return
-            self._last_promote = now
-        try:
-            self.promote_queued()
-        except Exception:  # noqa: BLE001 — a poll must never 500 on queue upkeep
-            log.exception("throttled promote_queued failed")
+            if now - self._last_promote >= min_interval:
+                self._last_promote = now
+                due = True
+        return self._queue_state(promote=due)
 
     def queue_state(self) -> dict:
+        return self._queue_state(promote=False)
+
+    def _queue_state(self, *, promote: bool) -> dict:
         """What the queue is doing and, when it is not moving, why — the read behind the
         UI's slot counter. ``blocked`` names the queued jobs a running job conflicts with,
         so "3 queued, a slot free, nothing starting" is explained rather than mysterious."""
         cap = self._max_concurrent()
         with self.facade._open() as (cat, _rs, _ts):
+            if promote:
+                try:
+                    self._promote_with(cat)
+                except Exception:  # noqa: BLE001 — a poll must never 500 on queue upkeep
+                    log.warning("promotion during queue poll failed", exc_info=True)
             running = list(cat.running_jobs())
             queued = list(cat.queued_jobs())
             blocked = [q["job_id"] for q in queued

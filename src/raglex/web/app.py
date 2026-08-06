@@ -77,8 +77,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         process or on the scheduler's 900s tick, so a slot freed anywhere else stayed empty
         for up to a quarter of an hour; the panel polling this endpoint now advances the
         queue itself (throttled, best-effort)."""
-        jobs.maybe_promote()
-        return jobs.queue_state()
+        return jobs.poll()
 
     @app.get("/jobs/last-run")
     def jobs_last_run_ep() -> dict:
