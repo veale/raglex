@@ -703,7 +703,9 @@ def build_bundle(
     # address is configured (RAGLEX_STATIC_BASE_URL / RAGLEX_PUBLIC_URL) rather than
     # guessing a hostname that would send crawlers somewhere wrong.
     if base_url:
-        today = started[:10] if started else ""
+        # ``started`` is a datetime (_now()), not the ISO string this once assumed —
+        # slicing it raised at the very end of a build, after every page was written.
+        today = started.date().isoformat() if started else ""
         urls = [("index.html", "1.0")] + [(e["filename"], "0.8") for e in entries]
         sitemap = ['<?xml version="1.0" encoding="UTF-8"?>',
                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']

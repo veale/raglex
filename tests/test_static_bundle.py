@@ -269,3 +269,47 @@ def test_wordart_choice_round_trips_through_the_stored_plan(tmp_path):
     saved = save_config(settings, {"items": [], "index_wordart": True}, config)
     assert saved["index_wordart"] is True
     assert load_config(config)["index_wordart"] is True
+
+
+def test_a_configured_site_address_produces_a_sitemap_and_canonicals(tmp_path, monkeypatch):
+    """The whole sitemap branch only runs when a base url is set, so nothing exercised it
+    — and it carried `started[:10]` over a datetime, which raised at the very END of a
+    build, after every page had been written and with no output to show for it."""
+    config = _config(tmp_path)
+    monkeypatch.setenv("RAGLEX_STATIC_BASE_URL", "https://law.example.org/")
+    _hold(config, "ukpga/2018/12", "Data Protection Act 2018", "Section 1\nA provision.")
+    settings = SettingsStore(config.settings_path)
+    save_config(settings, {
+        "items": [{"stable_id": "ukpga/2018/12", "slug": "dpa",
+                   "title": "Data Protection Act 2018"}],
+        "index_title": "Statutes", "index_text": "Exported <dateexported>.",
+    }, config)
+
+    result = build_bundle(Facade(config), {}, lambda **p: None)
+    assert "error" not in result
+
+    out = tmp_path / "exports" / "site"
+    sitemap = (out / "sitemap.xml").read_text(encoding="utf-8")
+    assert "<loc>https://law.example.org/dpa.html</loc>" in sitemap
+    assert "<loc>https://law.example.org/index.html</loc>" in sitemap
+    assert "<lastmod>" in sitemap and "<urlset" in sitemap
+    robots = (out / "robots.txt").read_text(encoding="utf-8")
+    assert "Sitemap: https://law.example.org/sitemap.xml" in robots
+    # and the page it points at claims that address as its canonical
+    page = (out / "dpa.html").read_text(encoding="utf-8")
+    assert '<link rel="canonical" href="https://law.example.org/dpa.html">' in page
+
+
+def test_without_a_configured_address_no_sitemap_is_invented(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.delenv("RAGLEX_STATIC_BASE_URL", raising=False)
+    monkeypatch.delenv("RAGLEX_PUBLIC_URL", raising=False)
+    _hold(config, "ukpga/2018/12", "Data Protection Act 2018", "Section 1\nA provision.")
+    save_config(SettingsStore(config.settings_path), {
+        "items": [{"stable_id": "ukpga/2018/12", "slug": "dpa", "title": "DPA"}],
+        "index_title": "Statutes", "index_text": "x",
+    }, config)
+    build_bundle(Facade(config), {}, lambda **p: None)
+    out = tmp_path / "exports" / "site"
+    assert not (out / "sitemap.xml").exists()
+    assert not (out / "robots.txt").exists()
