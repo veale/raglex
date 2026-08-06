@@ -105,11 +105,27 @@ class MCPToolClient:
         if "error" in payload:
             raise RuntimeError(f"{name}: {payload['error']}")
         result = payload.get("result", {})
+        # A tool that FAILED still returns HTTP 200 with a normal result envelope; the
+        # failure is in isError, and the message is the text block. Read it, or the
+        # server's own diagnosis is lost and the caller invents a worse one: the scrapling
+        # service spent four days answering every fetch with "[Errno 11] Resource
+        # temporarily unavailable" (its container had hit the pid ceiling on 9,437 zombie
+        # browser processes) and we reported that as a JSON parse error, then as a plain
+        # miss — indistinguishable from a page that is simply walled.
+        if result.get("isError"):
+            detail = " ".join(
+                b.get("text", "") for b in result.get("content", []) if b.get("text"))
+            raise RuntimeError(f"{name}: {detail.strip() or 'tool reported an error'}")
         if result.get("structuredContent"):
             return result["structuredContent"]
         for block in result.get("content", []):
             if block.get("type") == "text":
-                return json.loads(block["text"])
+                # Not every tool returns JSON — a fetch tool returns the page itself.
+                # Hand back the raw text rather than failing to parse markup as JSON.
+                try:
+                    return json.loads(block["text"])
+                except (ValueError, TypeError):
+                    return {"text": block["text"]}
         raise RuntimeError(f"{name}: unreadable MCP result")
 
 

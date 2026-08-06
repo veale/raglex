@@ -19,6 +19,7 @@ tables, which are numbers with no legal content at all. ``publication_types`` ov
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Iterator
 
@@ -26,6 +27,8 @@ from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
+
+log = logging.getLogger("raglex.adapters.uk_parl_committees")
 
 BASE = "https://committees-api.parliament.uk"
 PUBLICATIONS = f"{BASE}/api/Publications"
@@ -210,7 +213,13 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
                 requires_js=False)
         try:
             page = self._stealth.fetch(url)
-        except Exception:  # noqa: BLE001 — a walled page is a miss, not a crash
+        except Exception as exc:  # noqa: BLE001 — a walled page is a miss, not a crash
+            # …but say WHY. A page Cloudflare won't give up and a fetch service that is
+            # refusing every request both come back as None, and the second one is an
+            # outage: 2,386 committee reports harvested, then four days of silent misses
+            # while the scrapling container sat at its pid ceiling. One log line is the
+            # difference between noticing that and not.
+            log.warning("%s: stealth fetch failed for %s: %s", self.source, url, exc)
             return None
         html = getattr(page, "html", None)
         if not html or getattr(page, "status", 200) >= 400:
