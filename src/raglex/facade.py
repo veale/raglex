@@ -372,6 +372,26 @@ def _revised_in_place(source: str | None) -> bool:
     return (source or "") in _REVISED_IN_PLACE_SOURCES
 
 
+def _currency_from_raw(source: str | None, stable_id: str, raw: bytes) -> dict | None:
+    """Currency facts re-derivable from a document's stored raw, or None.
+
+    Only what the raw literally states — never an inference. For UK legislation that is
+    the date the publisher says the served expression is the law as at
+    (FRBRExpression/@validFrom), which older harvests dropped, leaving as_at null on all
+    100,027 acts and the reader looking at an "undated legislation record" over text the
+    source had dated precisely.
+
+    Dated expressions (``id@date``) are skipped: their as_at is their identity, set when
+    they were fetched, and must not be overwritten by whatever the file happens to say.
+    """
+    if source != "uk-legislation" or "@" in stable_id:
+        return None
+    from .formats.akoma_ntoso import expression_valid_from
+
+    as_at = expression_valid_from(raw)
+    return {"as_at": as_at} if as_at else None
+
+
 def _inserted_provisions(labels) -> list[str]:
     """The letter-suffixed provision numbers among a document's segment labels."""
     found: list[str] = []
@@ -7861,8 +7881,23 @@ class Facade:
                         "reason": "would flatten held structure", "segments": len(segments)}
             ts.put(doc["payload_hash"], text)            # overwrite (same hash → same path)
             ts.put_segments(doc["payload_hash"], segments)
+            # Currency facts the raw carries but an earlier harvest did not read. The raw
+            # is canonical (§1.2), so these are re-derivable exactly like text and
+            # segments — and re-deriving them here is the difference between one local
+            # pass and re-downloading 100,027 acts to learn something already on disk.
+            currency = _currency_from_raw(doc["source"], stable_id, raw)
+            updated = []
+            if currency:
+                meta = dict(cat.document_meta(stable_id) or {})
+                block = dict(meta.get("currency") or {})
+                changed = {k: v for k, v in currency.items() if block.get(k) != v}
+                if changed:
+                    block.update(changed)
+                    meta["currency"] = block
+                    cat.set_document_meta(stable_id, meta)
+                    updated = sorted(changed)
             return {"stable_id": stable_id, "reparsed": True, "format": fmt,
-                    "segments": len(segments)}
+                    "segments": len(segments), "currency_updated": updated}
 
     def backfill_document_metadata(self, *, on_progress=None) -> dict:
         """Repair already-stored docs from their immutable raw (no re-fetch): derive the
@@ -8310,6 +8345,11 @@ class Facade:
             # with no way to act on it: no id, no reason, nowhere to look.
             failures: list[dict] = []
 
+            # Currency the raw states but an earlier harvest never read, collected by the
+            # worker threads and written by the main thread with the rest of the batch —
+            # only the textstore is safe to write from here.
+            pending_currency: dict[str, dict] = {}
+
             def _work(r: dict) -> str:
                 try:
                     with open(r["raw_path"], "rb") as fh:
@@ -8328,6 +8368,15 @@ class Facade:
                         return "skip"
                     ts.put(r["payload_hash"], pd.text)
                     ts.put_segments(r["payload_hash"], pd.segments)
+                    # Re-derivable from the same bytes, so take it while the file is open:
+                    # the alternative is re-downloading the whole source to learn something
+                    # already on disk.
+                    fresh = _currency_from_raw(source, r["stable_id"], raw)
+                    if fresh:
+                        block = dict(meta.get("currency") or {})
+                        if any(block.get(k) != v for k, v in fresh.items()):
+                            block.update(fresh)
+                            pending_currency[r["stable_id"]] = {**meta, "currency": block}
                     return "ok"
                 except Exception as exc:  # noqa: BLE001 — reported, never raised
                     log.warning("[reparse] %s (%s): %s: %s", r["stable_id"],
@@ -8339,6 +8388,7 @@ class Facade:
 
             done = 0
             reanchored = 0
+            currency_updated = 0
             cursor = after_stable_id or ""
             batch = 2000
             with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
@@ -8367,6 +8417,10 @@ class Facade:
                                  for c, res in zip(chunk, results) if res == "ok"}
                     fixed, _dc, _miss = self._reanchor_chunk(cat, ts, ok_hashes)
                     reanchored += fixed
+                    for sid, meta in pending_currency.items():
+                        cat.set_document_meta(sid, meta, commit=False)
+                    currency_updated += len(pending_currency)
+                    pending_currency.clear()
                     cat.commit()
                     cursor = chunk[-1]["stable_id"]
                     _progress(on_progress, stage=f"reparsing {source}", done=done, total=total,
@@ -8374,6 +8428,7 @@ class Facade:
                                                         "after_stable_id": cursor})
         return {"source": source, "total": total, "reparsed": ok, "skipped": skip,
                 "failed": fail, "offsets_reanchored": reanchored,
+                "currency_updated": currency_updated,
                 # the ids and reasons, so a failure count is something to act on
                 **({"failures": failures[:50]} if failures else {})}
 

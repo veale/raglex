@@ -184,6 +184,36 @@ class BrowserBytesFetcher:
                 return None
             return body
 
+    def fetch_html(self, url: str) -> str | None:
+        """The rendered HTML at ``url`` after any challenge, or None.
+
+        The local fallback for the shared scraping service, and the first one that has
+        ever actually run. Scrapling's own StealthyFetcher cannot be it: it imports
+        ``patchright`` (a patched Playwright fork) which this image does not ship, so for
+        four days — while the shared service answered every request with EAGAIN — nine
+        adapters fell back to an ImportError. Camoufox is what that fetcher drives
+        underneath anyway, so drive it directly and drop the broken indirection.
+        """
+        with self._lock:
+            try:
+                browser = self._ensure()
+                page = browser.new_page()
+            except Exception:  # noqa: BLE001
+                log.warning("browser-bytes: cannot start Camoufox for %s", url)
+                self.close()
+                return None
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                return page.content()
+            except Exception:  # noqa: BLE001
+                log.warning("browser-bytes: html navigation failed for %s", url)
+                return None
+            finally:
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
     def close(self) -> None:
         try:
             if self._ctx is not None:
@@ -360,8 +390,19 @@ class ScraplingMcpFetcher:
                 html = self._mcp_fetch(url)
                 if html:
                     return FetchedPage(url=url, status=200, html=html, engine=self.name)
-            except Exception:  # noqa: BLE001 — fall back to the in-process browser
-                pass
+                log.warning("scrapling-mcp: no html for %s; trying the local browser", url)
+            except Exception as exc:  # noqa: BLE001 — fall back to the local browser
+                log.warning("scrapling-mcp: %s failed (%s); trying the local browser",
+                            url, str(exc)[:160])
+        # The shared service can be down or wedged — it spent four days answering every
+        # request "[Errno 11] Resource temporarily unavailable" — so this fallback has to
+        # be real. Camoufox directly, not Scrapling's StealthyFetcher, which needs a
+        # patchright this image does not ship and so could only ever raise.
+        local = get_bytes_fetcher()
+        if local.available():
+            html = local.fetch_html(url)
+            if html:
+                return FetchedPage(url=url, status=200, html=html, engine="browser-local")
         if self._fallback is None:
             self._fallback = StealthyFetcher(proxy=self.proxy)
         return self._fallback.fetch(url, headers=headers)
