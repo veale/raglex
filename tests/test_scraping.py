@@ -147,3 +147,37 @@ def test_scrape_adapter_registered():
 
     ad = get_adapter("uk-ico")
     assert ad.source == "uk-ico" and ad.requires_js is False
+
+
+# -- the browser fetcher, which must never be able to hang a harvest ---------
+def test_a_wedged_browser_page_gives_up_and_is_thrown_away():
+    """One stuck page must not become a stuck corpus.
+
+    Bounding goto was not enough: launching the browser, opening a page, reading a body
+    and closing a page all block too, and the lock that serialises them turns any one of
+    those into a stall of every later fetch. A committee harvest sat 15 minutes on one
+    paper at 0.4% CPU exactly that way, reporting a live worker throughout.
+    """
+    import time
+
+    from raglex.scraping.fetcher import BrowserBytesFetcher
+
+    fetcher = BrowserBytesFetcher()
+    fetcher.hard_deadline = 1.0
+    started = time.time()
+    # a job that would never return, i.e. a wedged Playwright call
+    assert fetcher._run("wedge", "https://x.example/a.pdf",
+                        lambda: time.sleep(30)) is None
+    assert time.time() - started < 10, "the deadline did not fire"
+    # the browser it was using is discarded, not handed to the next caller
+    assert fetcher._browser is None and fetcher._pool is None
+    # …and the fetcher still works afterwards
+    assert fetcher._run("ok", "https://x.example/b.pdf", lambda: b"%PDF-") == b"%PDF-"
+
+
+def test_a_missing_browser_is_a_miss_not_a_crash():
+    from raglex.scraping.fetcher import BrowserBytesFetcher
+
+    fetcher = BrowserBytesFetcher()
+    assert fetcher._run("boom", "https://x.example/c.pdf",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no browser"))) is None

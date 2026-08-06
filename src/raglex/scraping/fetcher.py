@@ -98,6 +98,15 @@ class BrowserBytesFetcher:
     The browser is expensive to start (a second or two) and is therefore kept alive
     between calls, behind a lock: the Camoufox sync API is not thread-safe and a harvest
     may be running several adapters at once.
+
+    EVERY WAY OUT OF HERE IS TIMED, because the lock makes one hang everybody's hang.
+    Bounding ``goto`` was not enough: starting the browser, opening a page, reading a
+    response body and closing a page are all calls that can block indefinitely, and while
+    one thread is stuck inside the lock every other fetch queues behind it forever. A
+    committee harvest sat 15 minutes on one paper at 0.4% CPU that way — a wedged browser
+    reported as a live worker, which is the same failure that started this whole day. So
+    the work runs on a single owned thread under a hard deadline, and a deadline that
+    expires discards the browser rather than trusting it again.
     """
 
     name = "browser-bytes"
@@ -109,9 +118,15 @@ class BrowserBytesFetcher:
         self.headless = headless
         self.timeout_ms = float(timeout_ms if timeout_ms is not None
                                 else os.environ.get("RAGLEX_BROWSER_TIMEOUT_MS") or 90000)
+        # The ceiling for one page across everything: launch, navigate, read, close.
+        # Comfortably above timeout_ms so a normal slow page fails on its own timeout with
+        # a useful message, and this only catches a genuine wedge.
+        self.hard_deadline = float(
+            os.environ.get("RAGLEX_BROWSER_HARD_DEADLINE") or (self.timeout_ms / 1000) * 3)
         self._browser = None
         self._ctx = None
         self._lock = threading.Lock()
+        self._pool = None
 
     def available(self) -> bool:
         """Whether this image actually ships the browser (the app runs without it)."""
@@ -129,60 +144,110 @@ class BrowserBytesFetcher:
             self._browser = self._ctx.__enter__()
         return self._browser
 
+    def _run(self, what: str, url: str, job):
+        """Run one browser job under a hard deadline, serialised, never blocking forever.
+
+        Playwright's sync API is thread-affine, so the browser is owned by one worker
+        thread and every job is handed to it. If that thread wedges, the deadline expires
+        here and the browser is abandoned — the next call builds a fresh one rather than
+        queueing behind a process that is never coming back.
+        """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
+
+        # If another page is mid-flight, wait only as long as it is allowed to take.
+        if not self._lock.acquire(timeout=self.hard_deadline):
+            log.warning("browser-bytes: gave up waiting for the browser to free up (%s)", url)
+            return None
+        try:
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix="browser-bytes")
+            future = self._pool.submit(job)
+            try:
+                return future.result(timeout=self.hard_deadline)
+            except _Timeout:
+                # The worker thread is stuck inside Playwright and cannot be cancelled.
+                # Drop the browser AND the thread that owns it; both are unusable now.
+                log.warning("browser-bytes: %s exceeded %ss on %s — discarding the browser",
+                            what, int(self.hard_deadline), url)
+                self._discard()
+                return None
+            except Exception:  # noqa: BLE001 — a page that will not load is a miss
+                log.warning("browser-bytes: %s failed for %s", what, url, exc_info=True)
+                return None
+        finally:
+            self._lock.release()
+
+    def _discard(self) -> None:
+        """Abandon a wedged browser and its owner thread; the next call starts clean."""
+        pool, ctx = self._pool, self._ctx
+        self._pool = self._browser = self._ctx = None
+        for closer in (lambda: ctx.__exit__(None, None, None) if ctx else None,
+                       lambda: pool.shutdown(wait=False, cancel_futures=True) if pool else None):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 — best effort; it is already broken
+                pass
+
     def fetch_bytes(self, url: str, *, referer_url: str | None = None) -> bytes | None:
-        """The bytes at ``url``, or None. Never raises for an unreachable page."""
-        with self._lock:
-            try:
-                browser = self._ensure()
-                page = browser.new_page()
-            except Exception:  # noqa: BLE001 — no browser in this image, or launch failed
-                log.warning("browser-bytes: cannot start Camoufox for %s", url, exc_info=True)
-                self.close()
-                return None
-            captured: dict = {}
+        """The bytes at ``url``, or None. Never raises, and never blocks indefinitely."""
+        return self._run("fetch_bytes", url, lambda: self._fetch_bytes(url, referer_url))
 
-            def _on_response(resp):
-                # The navigation's FINAL response, not a hop on the way to it and not a
-                # sub-resource of the PDF viewer. Matching the requested URL looked right
-                # and was wrong: the older Lords papers are linked as http://www.… and
-                # redirect, so the only response whose URL matched was the 301 — captured
-                # with an empty body, reported as a miss, and the report never read.
-                try:
-                    if not resp.request.is_navigation_request() or resp.status >= 300:
-                        return
-                    captured["status"] = resp.status
-                    captured["body"] = resp.body()
-                    captured["url"] = resp.url
-                except Exception:  # noqa: BLE001 — body already streamed away
-                    pass
+    def _fetch_bytes(self, url: str, referer_url: str | None) -> bytes | None:
+        try:
+            browser = self._ensure()
+            page = browser.new_page()
+            # every Playwright call on this page is bounded, not just goto
+            page.set_default_timeout(self.timeout_ms)
+            page.set_default_navigation_timeout(self.timeout_ms)
+        except Exception:  # noqa: BLE001 — no browser in this image, or launch failed
+            log.warning("browser-bytes: cannot start Camoufox for %s", url, exc_info=True)
+            self._discard()
+            return None
+        captured: dict = {}
 
+        def _on_response(resp):
+            # The navigation's FINAL response, not a hop on the way to it and not a
+            # sub-resource of the PDF viewer. Matching the requested URL looked right
+            # and was wrong: the older Lords papers are linked as http://www.… and
+            # redirect, so the only response whose URL matched was the 301 — captured
+            # with an empty body, reported as a miss, and the report never read.
             try:
-                if referer_url:
-                    # clear the challenge on an ordinary page first; a direct hit on the
-                    # file is what gets refused
-                    page.goto(referer_url, wait_until="domcontentloaded",
-                              timeout=self.timeout_ms)
-                page.on("response", _on_response)
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                except Exception:  # noqa: BLE001 — a download aborts the navigation
-                    pass
-                page.wait_for_timeout(2000)
+                if not resp.request.is_navigation_request() or resp.status >= 300:
+                    return
+                captured["status"] = resp.status
+                captured["body"] = resp.body()
+                captured["url"] = resp.url
+            except Exception:  # noqa: BLE001 — body already streamed away
+                pass
+
+        try:
+            if referer_url:
+                # clear the challenge on an ordinary page first; a direct hit on the
+                # file is what gets refused
+                page.goto(referer_url, wait_until="domcontentloaded",
+                          timeout=self.timeout_ms)
+            page.on("response", _on_response)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            except Exception:  # noqa: BLE001 — a download aborts the navigation
+                pass
+            page.wait_for_timeout(2000)
+        except Exception:  # noqa: BLE001
+            log.warning("browser-bytes: navigation failed for %s", url)
+            return None
+        finally:
+            try:
+                page.close()
             except Exception:  # noqa: BLE001
-                log.warning("browser-bytes: navigation failed for %s", url)
-                return None
-            finally:
-                try:
-                    page.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            body = captured.get("body")
-            status = captured.get("status")
-            if not body or (status and status >= 400):
-                log.warning("browser-bytes: %s returned status=%s bytes=%s",
-                            url, status, len(body) if body else 0)
-                return None
-            return body
+                pass
+        body = captured.get("body")
+        status = captured.get("status")
+        if not body or (status and status >= 400):
+            log.warning("browser-bytes: %s returned status=%s bytes=%s",
+                        url, status, len(body) if body else 0)
+            return None
+        return body
 
     def fetch_html(self, url: str) -> str | None:
         """The rendered HTML at ``url`` after any challenge, or None.
@@ -194,33 +259,32 @@ class BrowserBytesFetcher:
         adapters fell back to an ImportError. Camoufox is what that fetcher drives
         underneath anyway, so drive it directly and drop the broken indirection.
         """
-        with self._lock:
+        return self._run("fetch_html", url, lambda: self._fetch_html(url))
+
+    def _fetch_html(self, url: str) -> str | None:
+        try:
+            browser = self._ensure()
+            page = browser.new_page()
+            page.set_default_timeout(self.timeout_ms)
+            page.set_default_navigation_timeout(self.timeout_ms)
+        except Exception:  # noqa: BLE001
+            log.warning("browser-bytes: cannot start Camoufox for %s", url)
+            self._discard()
+            return None
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            return page.content()
+        except Exception:  # noqa: BLE001
+            log.warning("browser-bytes: html navigation failed for %s", url)
+            return None
+        finally:
             try:
-                browser = self._ensure()
-                page = browser.new_page()
+                page.close()
             except Exception:  # noqa: BLE001
-                log.warning("browser-bytes: cannot start Camoufox for %s", url)
-                self.close()
-                return None
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                return page.content()
-            except Exception:  # noqa: BLE001
-                log.warning("browser-bytes: html navigation failed for %s", url)
-                return None
-            finally:
-                try:
-                    page.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                pass
 
     def close(self) -> None:
-        try:
-            if self._ctx is not None:
-                self._ctx.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            pass
-        self._browser = self._ctx = None
+        self._discard()
 
 
 class StealthyFetcher:
