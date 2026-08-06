@@ -79,6 +79,7 @@ from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nl_acm_guidance import ACMGuidanceAdapter
+from .be_gba_decisions import GBADecisionsAdapter
 from .nl_ap import APDocumentsAdapter
 from .it_agcm import AGCMBulletinAdapter
 from .nz_caselaw import NZSupremeCourtAdapter
@@ -324,6 +325,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "dk-datatilsynet": DatatilsynetGuidanceAdapter,
     "de-dsk": DSKGuidanceAdapter,
     "be-gba": GBAGuidanceAdapter,
+    # the Dispute Chamber's own rulings — enforcement, not guidance
+    "be-gba-decisions": GBADecisionsAdapter,
     "it-garante": GaranteGuidanceAdapter,
     "ie-tax-appeals": IrishTaxAppealsAdapter,
     "ie-revenue-tdm": IrishRevenueTDMAdapter,
@@ -654,6 +657,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "prints a year rather than a date, which is recorded as such rather than "
         "presented as a precise one.",
         (), ("autoriteprotectiondonnees.be publication URL",),
+    ),
+    "be-gba-decisions": SourceInfo(
+        "be-gba-decisions",
+        "Belgian DPA Dispute Chamber decisions (Geschillenkamer)",
+        "administrative", "BE", False,
+        "The Geschillenkamer's own rulings: substantive decisions (Beslissing ten "
+        "gronde) and settlement decisions, with the reprimands, orders and "
+        "administrative fines they impose. Kept apart from be-gba, which is the "
+        "authority's guidance register — a Dispute Chamber ruling is a regulator "
+        "determination, and burying the enforcement record inside explanatory material "
+        "makes it unfindable. Keyed on the decision number as Belgian practitioners "
+        "cite it (102/2026), not on the PDF filename, which the register has spelt more "
+        "than one way for the same ruling.",
+        (), ("decision number", "102/2026"),
     ),
     "it-garante": SourceInfo(
         "it-garante", "Garante per la protezione dei dati personali (Italy)",
@@ -1587,6 +1604,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "fr-cnil-guidance": "full-walk", "es-aepd-guias": "full-walk",
     "dk-datatilsynet": "full-walk", "de-dsk": "full-walk",
     "be-gba": "full-walk", "it-garante": "full-walk",
+    # newest-first search view with its own result total, so an incremental
+    # run stops at the cursor within a page or two
+    "be-gba-decisions": "early-stop",
     "it-agcm": "early-stop",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
     "eu-ombudsman": "full-walk",

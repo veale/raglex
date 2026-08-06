@@ -274,9 +274,81 @@ def _fr_eu_kind(value: str) -> str:
     }.get(value.casefold(), "directive")
 
 
+# --- Belgian French: the APD's Chambre Contentieuse ---------------------------------
+# The Belgian authority publishes each decision in the language of the procedure, so a
+# Dutch-titled listing entry is frequently a French PDF. Belgian French cites a GDPR
+# provision with dots — "Article 5.1.f du RGPD", "article 4.12) du RGPD" — which is the
+# EU institutional style rather than France's "article 5, paragraphe 1, point f". On a
+# 311k-character decision the generic French grammar found two citations and missed every
+# one of these, so the decisions that turn on Article 5(1)(f) did not link to it at all.
+_BE_RGPD_RE = re.compile(
+    r"\b[Aa]rt(?:icle)?\.?\s+(?P<article>\d{1,3}[a-z]?)"
+    r"(?:\.(?P<para>\d{1,2}))?"
+    r"(?:\.(?P<point>\d{1,2}|[a-z])\)?)?"
+    r"\s*(?:,?\s*(?:du|de\s+la)\s+)?RGPD\b",
+)
+
+# The two Belgian framework acts, cited by initialism throughout: the LCA created the
+# authority and confers the Chamber's corrective and fining powers; the LTD carries
+# Belgium's national derogations. Both subdivide with "§ 1er" and "9°", which no French
+# pattern expected because France does not draft that way.
+_BE_LAWS = {
+    "LCA": "Loi du 3 décembre 2017 portant création de l'Autorité de protection des données",
+    "LTD": ("Loi du 30 juillet 2018 relative à la protection des personnes physiques "
+            "à l'égard des traitements de données à caractère personnel"),
+    "LVP": "Loi du 8 décembre 1992 relative à la protection de la vie privée",
+    # The same widening on the French side: direct-marketing and cookie decisions run on
+    # the CDE, police-data ones on the LFP.
+    "CDE": "Code de droit économique",
+    "LFP": "Loi du 5 août 1992 sur la fonction de police",
+}
+_BE_LAW_RE = re.compile(
+    # Same shapes on the French side: "article VI.110 du CDE", "article 44/1 de la LFP".
+    r"\b[Aa]rt(?:icle)?\.?\s+(?P<article>(?:[IVXL]{1,5}\.)?\d{1,4}(?:/\d{1,2})?[a-z]?)"
+    r"(?:\s*,?\s*§\s*(?P<para>\d+)(?:er)?)?"
+    r"(?:\s*,?\s*(?P<item>\d+)\s*°)?"
+    r"\s*(?:,?\s*(?:de\s+la|du)\s+)?(?P<law>LCA|LTD|LVP|CDE|LFP)\b",
+)
+
+
+def _be_pin(article: str, para: str | None = None, point: str | None = None) -> str:
+    out = f"Article {article}"
+    if para:
+        out += f"({para})"
+    if point:
+        out += f"({point})"
+    return out
+
+
+def belgian_french_citations(text: str) -> list[Citation]:
+    """Belgian French GDPR and framework-act references."""
+    out: list[Citation] = []
+    for m in _BE_RGPD_RE.finditer(text):
+        out.append(Citation(
+            raw=m.group(0), entity_kind="regulation", candidate_id="32016R0679",
+            pinpoint=_be_pin(m.group("article"), m.group("para"), m.group("point")),
+            char_start=m.start(), char_end=m.end(),
+            method="be_fr_rgpd_article", confidence=1.0,
+        ))
+    for m in _BE_LAW_RE.finditer(text):
+        title = _BE_LAWS[m.group("law").upper()]
+        pin = f"Article {m.group('article')}"
+        if m.group("para"):
+            pin += f", § {m.group('para')}"
+        if m.group("item"):
+            pin += f", {m.group('item')}°"
+        out.append(Citation(
+            raw=m.group(0), entity_kind="act",
+            candidate_id="be:law:" + re.sub(r"[^a-z0-9]+", " ", title.lower()).strip(),
+            pinpoint=pin, char_start=m.start(), char_end=m.end(),
+            method="be_fr_law_reference", confidence=.97,
+        ))
+    return out
+
+
 def french_citations(text: str) -> list[Citation]:
     """Expand compact French article lists to canonical, pinpointed graph edges."""
-    out: list[Citation] = []
+    out: list[Citation] = list(belgian_french_citations(text))
     for rx, host_kind in ((_FR_CODE_LIST, "code"), (_FR_ECHR_LIST, "echr")):
         for m in rx.finditer(text):
             code = code_key(m.group("host")) if host_kind == "code" else None
