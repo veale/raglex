@@ -13,7 +13,7 @@ import tempfile
 
 from raglex.config import Config
 from raglex.facade import Facade
-from raglex.jobs import JobManager, _scan_conflict
+from raglex.jobs import JobManager, _scan_conflict, _source_conflict
 from raglex.ops import AlertThresholds, check_alerts
 
 
@@ -225,6 +225,26 @@ def test_reparse_of_one_source_never_runs_beside_itself():
     assert _scan_conflict("reanchor-citations", {"source": "uk-legislation"}, running)
     # …but disjoint sources are independent work and still run in parallel
     assert not _scan_conflict("reparse-source", {"source": "fr-dila"}, running)
+
+
+def test_two_harvests_of_one_source_never_run_together():
+    """A resumed harvest and a fresh one of the same source are the same work.
+
+    Dedup keys on the exact params, and a resumed harvest carries resume_unfinished plus a
+    discovery cursor — so the two look like different jobs and both start. That happened
+    three times in one day on uk-parl-committees, twice because a deploy interrupted a
+    backfill which then auto-resumed alongside its replacement: both walked the same
+    catalogue, asked the same API for the same pages, and competed for the one browser.
+    """
+    running = {"kind": "harvest-source",
+               "params_json": '{"source": "uk-parl-committees", "backfill": true, '
+                              '"resume_unfinished": true, "options": {"start_offset": 7300}}'}
+    fresh = {"source": "uk-parl-committees", "backfill": True}
+    assert _source_conflict("harvest-source", fresh, running)
+    # a different source is unrelated work and still runs in parallel
+    assert not _source_conflict("harvest-source", {"source": "uk-legislation"}, running)
+    # and this guard is only about harvests — it must not block anything else
+    assert not _source_conflict("reparse-source", fresh, running)
 
 
 def test_rollup_chain_is_off_unless_asked_for():

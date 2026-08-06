@@ -236,6 +236,29 @@ def _scan_conflict(kind: str, params: dict, running_row) -> bool:
         other = {}
     a, b = _scan_scope(kind, params), _scan_scope(running_row["kind"], other)
     return a == "*" or b == "*" or a == b
+
+
+# One harvest per SOURCE. Dedup alone does not achieve this: it keys on the exact params,
+# so a resumed harvest (which carries resume_unfinished + a discovery cursor) and a fresh
+# one of the same source look like different jobs and both run. That happened three times
+# in one day on uk-parl-committees — twice from a deploy interrupting a backfill that
+# auto-resumed beside its replacement — with both walking the same catalogue, competing
+# for the same browser and asking the same API for the same pages.
+_SOURCE_EXCLUSIVE_KINDS = frozenset({"harvest-source"})
+
+
+def _source_conflict(kind: str, params: dict, running_row) -> bool:
+    """Whether a harvest would overlap a running harvest of the same source."""
+    if kind not in _SOURCE_EXCLUSIVE_KINDS or running_row["kind"] not in _SOURCE_EXCLUSIVE_KINDS:
+        return False
+    import json as _json
+    try:
+        other = _json.loads(running_row["params_json"] or "{}")
+    except (ValueError, TypeError):
+        other = {}
+    a = str(params.get("source") or "*")
+    b = str(other.get("source") or "*")
+    return a == "*" or b == "*" or a == b
 # A "running" job whose heartbeat hasn't ticked in this long is almost certainly frozen —
 # its worker thread is parked on a network socket that died when the host slept/woke. We
 # can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
@@ -555,6 +578,8 @@ class JobManager:
         conflict with it (scan-scope overlap, singleton, or same-params dedup)."""
         if any(_scan_conflict(kind, params, j) for j in running):
             return True
+        if any(_source_conflict(kind, params, j) for j in running):
+            return True
         return self._dedup_hit(kind, params, running) is not None
 
     def start(self, kind: str, label: str, params: dict | None = None, *,
@@ -576,6 +601,9 @@ class JobManager:
                 if _scan_conflict(kind, params, j):
                     return {"job_id": j["job_id"], "already_running": True,
                             "conflict": "citation extraction scope overlaps"}
+                if _source_conflict(kind, params, j):
+                    return {"job_id": j["job_id"], "already_running": True,
+                            "conflict": "a harvest of this source is already running"}
             # Dedup against running AND already-queued, so a repeat click doesn't stack.
             hit = self._dedup_hit(kind, params, list(running) + list(cat.queued_jobs()))
             if hit is not None:

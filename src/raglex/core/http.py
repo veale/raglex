@@ -9,6 +9,7 @@ fingerprint for "bot"), and a typed ``RateLimitException`` on a hard wall.
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import threading
@@ -17,6 +18,8 @@ import time
 import httpx
 
 from .errors import FetchError, RateLimitException
+
+log = logging.getLogger("raglex.core.http")
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -158,11 +161,13 @@ class RateLimitedClient:
                 continue
 
             if resp.status_code >= 400 and raise_for_4xx:
+                _warn_if_walled(self.source, url, resp)
                 # 404/410 etc. are fatal for this stub — caller decides upstream_status.
                 raise FetchError(
                     f"{self.source}: HTTP {resp.status_code} for {url}",
                     transient=False,
                 )
+            _warn_if_walled(self.source, url, resp)
             return resp
 
     def _backoff(self, attempt: int, *, retry_after: float | None = None) -> None:
@@ -172,6 +177,69 @@ class RateLimitedClient:
         # exponential backoff with full jitter, capped
         delay = min(2.0**attempt, 60.0)
         self._sleep(delay * random.random())
+
+
+#: Markers that a response IS the anti-bot wall rather than the document — the
+#: interstitial's own words, plus the Cloudflare/WAF response headers.
+_WALL_MARKERS = (
+    b"just a moment", b"enable javascript and cookies", b"cf-browser-verification",
+    b"challenge-platform", b"attention required! | cloudflare", b"__cf_chl",
+    b"ddos protection by", b"access denied", b"request unsuccessful. incapsula",
+)
+_WALL_STATUSES = frozenset({403, 503})
+#: One review row per (source, host) per process — the fingerprinting in ops.errorlog
+#: already collapses occurrences, and this stops a 5,000-document harvest doing 5,000
+#: string builds to say the same thing.
+_WALLED_SEEN: set[tuple[str, str]] = set()
+
+
+def _looks_walled(resp: httpx.Response) -> bool:
+    if resp.status_code in _WALL_STATUSES:
+        return True
+    if resp.headers.get("cf-mitigated"):
+        return True
+    # a document request answered with an interstitial: 200, but HTML where the caller
+    # asked for a file — the shape that reads as success and stores nothing
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    if "html" not in ctype:
+        return False
+    try:
+        head = (resp.content or b"")[:4000].lower()
+    except Exception:  # noqa: BLE001 — streamed/!read response
+        return False
+    return any(m in head for m in _WALL_MARKERS)
+
+
+def _warn_if_walled(source: str, url: str, resp: httpx.Response) -> None:
+    """Flag an anti-bot wall as a REVIEW ITEM, with the fix, the first time it appears.
+
+    A wall is not an outage and not a missing document: the source is up, the item exists,
+    and a plain client simply cannot have it. That failure is invisible by default — it
+    arrives as a 403 the adapter turns into "skipped", which is exactly how committee PDFs
+    went unfetched behind a Cloudflare challenge without anybody noticing.
+
+    This is a WARNING on a raglex logger, so ops.errorlog fingerprints it into the same
+    ``kind='error'`` queue as everything else and counts the repeats. It names the fix,
+    because by the time somebody reads the row the context is gone.
+    """
+    try:
+        if not _looks_walled(resp):
+            return
+        host = str(getattr(resp, "url", url)).split("/")[2] if "//" in str(url) else url
+        key = (source, host)
+        if key in _WALLED_SEEN:
+            return
+        _WALLED_SEEN.add(key)
+        log.warning(
+            "%s: %s is behind an anti-bot wall (HTTP %s) — a plain client cannot fetch "
+            "it. FIX: route this adapter's fetch through the browser. For a file, "
+            "scraping.fetcher.get_bytes_fetcher().fetch_bytes(url, referer_url=<a page "
+            "on the same host>); for a page, .fetch_html(url). Both clear the challenge "
+            "and are already installed. First seen at %s",
+            source, host, resp.status_code, url,
+        )
+    except Exception:  # noqa: BLE001 — a detector must never break the fetch it watches
+        pass
 
 
 def _parse_retry_after(resp: httpx.Response) -> float | None:
