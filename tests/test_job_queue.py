@@ -252,3 +252,42 @@ def test_a_dedup_hit_says_whether_it_is_running_or_merely_queued(tmp_path, monke
     assert jm.start("run-watch", "watch 79", {"watch_id": 79})["state"] == "queued"
     assert first["job_id"] != second["job_id"]
     gate.set()
+
+
+def test_the_jobs_dock_poll_advances_the_queue(tmp_path, monkeypatch):
+    """The dock is the panel you actually watch while work runs, and it polls list().
+    Promotion was hooked only onto the queue-status endpoint, which just the Maintain
+    page polls — so on every other screen a freed slot sat empty until the scheduler's
+    900s tick, showing "Waiting for a slot" with slots free and nothing blocking."""
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "2")
+    gate = threading.Event()
+    started: list[int] = []
+
+    def runner(f, p, cb, cancel):
+        started.append(p.get("n", 0))
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "test-job", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    a = jm.start("test-job", "a", {"n": 1}, queue=True)
+    b = jm.start("test-job", "b", {"n": 2}, queue=True)
+    assert a.get("queued") and b.get("queued")
+    with jm.facade._open() as (cat, _rs, _ts):
+        assert len(cat.running_jobs()) == 0
+
+    jm.list()                                     # the dock's read
+    assert _wait(lambda: sorted(started) == [1, 2])
+    gate.set()
+
+
+def test_reading_the_jobs_list_can_be_asked_not_to_promote(tmp_path, monkeypatch):
+    """A caller that only wants to look — a test, an export — should be able to."""
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "2")
+    monkeypatch.setitem(jobs_mod.RUNNERS, "test-job", lambda f, p, cb, cancel: {})
+    jm = JobManager(Facade(_config(tmp_path)))
+    jm.start("test-job", "a", {"n": 1}, queue=True)
+    jm.list(promote=False)
+    with jm.facade._open() as (cat, _rs, _ts):
+        assert len(cat.queued_jobs()) == 1 and len(cat.running_jobs()) == 0

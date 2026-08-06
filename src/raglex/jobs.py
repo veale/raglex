@@ -647,13 +647,7 @@ class JobManager:
         what it did in production (PoolTimeout in maybe_promote, 07:21). One connection
         does both, and a pool that is momentarily busy costs a beat of promotion rather
         than an exception."""
-        now = time.monotonic()
-        due = False
-        with self._promote_lock:
-            if now - self._last_promote >= min_interval:
-                self._last_promote = now
-                due = True
-        return self._queue_state(promote=due)
+        return self._queue_state(promote=self._promotion_due(min_interval))
 
     def queue_state(self) -> dict:
         return self._queue_state(promote=False)
@@ -918,8 +912,30 @@ class JobManager:
             out["log"] = logs[-tail:]
         return out
 
-    def list(self, *, limit: int = 60) -> list[dict]:
+    def _promotion_due(self, min_interval: float) -> bool:
+        now = time.monotonic()
+        with self._promote_lock:
+            if now - self._last_promote < min_interval:
+                return False
+            self._last_promote = now
+            return True
+
+    def list(self, *, limit: int = 60, promote: bool = True,
+             min_interval: float = 5.0) -> list[dict]:
+        """The Jobs panel's read — and, throttled, the thing that keeps the queue moving.
+
+        Promotion was hooked onto the queue-status endpoint only, which just the Maintain
+        page polls. The jobs DOCK — the panel actually watched while work runs — polls
+        this one, so on every other screen a freed slot sat empty until the scheduler's
+        900s tick: "Waiting for a slot — 2 queued" with two slots free and nothing
+        blocking. Same connection, same throttle as the other poll."""
+        due = promote and self._promotion_due(min_interval)
         with self.facade._open() as (cat, _rs, _ts):
+            if due:
+                try:
+                    self._promote_with(cat)
+                except Exception:  # noqa: BLE001 — a poll must never 500 on queue upkeep
+                    log.warning("promotion during jobs poll failed", exc_info=True)
             return [self._row_to_dict(j) for j in cat.list_jobs(limit=limit)]
 
     def get(self, job_id: str, *, tail: int = 40) -> dict:

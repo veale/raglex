@@ -192,3 +192,18 @@ def test_adapters_that_report_resume_offset_accept_it_back():
     for key in ("be-gba-decisions", "uk-parl-committees", "uk-parl-written-questions"):
         adapter = ADAPTERS[key](start_offset=150)
         assert adapter.start_offset == 150, key
+
+
+def test_only_the_commons_joint_report_convention_is_rewritten():
+    """Commons/Joint reports live at report.html; the .htm form is a cookie-consent shell
+    with no report in it. Lords papers are numbered chapter pages whose .html sibling is
+    the bare banner — appending an "l" there turns a page with content into one without."""
+    from raglex.adapters.uk_parl_committees import UKCommitteePublicationsAdapter as A
+    base = "https://publications.parliament.uk/pa"
+    assert A.report_url(f"{base}/jt5902/jtselect/jtrights/325/report.htm") == \
+        f"{base}/jt5902/jtselect/jtrights/325/report.html"
+    assert A.report_url(f"{base}/cm5902/cmselect/cmdfence/69/report.htm").endswith("report.html")
+    # Lords: left exactly as the API gave it
+    lords = f"{base}/ld5902/ldselect/ldenvcl/45/4502.htm"
+    assert A.report_url(lords) == lords
+    assert A.report_url("https://example.org/report.htm") == "https://example.org/report.htm"

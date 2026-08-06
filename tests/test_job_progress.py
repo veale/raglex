@@ -21,13 +21,31 @@ from raglex.core.models import DocType, ExtractedVia, Record
 from raglex.facade import Facade
 
 
+def _facade(root) -> Facade:
+    return Facade(Config(
+        data_dir=root, catalogue_path=str(root / "c.sqlite"),
+        raw_dir=root / "raw", text_dir=root / "text",
+        settings_path=root / "s.json",
+        embed_provider="local-hashing", embed_model=None))
+
+
 @pytest.fixture()
 def facade(tmp_path):
-    return Facade(Config(
-        data_dir=tmp_path, catalogue_path=str(tmp_path / "c.sqlite"),
-        raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
-        settings_path=tmp_path / "s.json",
-        embed_provider="local-hashing", embed_model=None))
+    return _facade(tmp_path)
+
+
+# The three all-skip passes below each seeded 2,500 documents of their own — ~76s of
+# SQLite inserts to prove a progress callback fires. The VOLUME is load-bearing (the bug
+# is "a long pass looks frozen", and the assertions want a realistic batch count), but
+# re-seeding it three times is not: every one of them asserts it changed NOTHING
+# (repaired/improved/derived/named all zero), so they cannot disturb each other and can
+# read one corpus. Seeded once per session instead.
+@pytest.fixture(scope="session")
+def seeded_facade(tmp_path_factory):
+    root = tmp_path_factory.mktemp("progress-corpus")
+    facade = _facade(root)
+    _seed(facade, n=2500)
+    return facade
 
 
 def _seed(facade, n=1200, text="Clean text with nothing to repair.\n\n1. A paragraph."):
@@ -49,8 +67,8 @@ class Recorder:
         self.calls.append(kw)
 
 
-def test_mojibake_repair_reports_even_when_nothing_needs_repairing(facade):
-    _seed(facade, n=2500)
+def test_mojibake_repair_reports_even_when_nothing_needs_repairing(seeded_facade):
+    facade = seeded_facade
     rec = Recorder()
     st = facade.repair_mojibake(on_progress=rec)
     assert st["repaired"] == 0, "fixture text needs no repair"
@@ -58,16 +76,16 @@ def test_mojibake_repair_reports_even_when_nothing_needs_repairing(facade):
     assert rec.calls[-1]["done"] >= 2000
 
 
-def test_resegment_reports_even_when_every_document_is_unchanged(facade):
-    _seed(facade, n=2500)
+def test_resegment_reports_even_when_every_document_is_unchanged(seeded_facade):
+    facade = seeded_facade
     rec = Recorder()
     st = facade.resegment_judgments(on_progress=rec)
     assert st["improved"] == 0 and st["derived"] == 0
     assert rec.calls, "an all-skip pass reported no progress"
 
 
-def test_intituling_reports_even_when_no_bench_is_found(facade):
-    _seed(facade, n=1200)
+def test_intituling_reports_even_when_no_bench_is_found(seeded_facade):
+    facade = seeded_facade
     rec = Recorder()
     st = facade.backfill_intituling(on_progress=rec)
     assert st["named"] == 0, "the fixture has no intituling block"

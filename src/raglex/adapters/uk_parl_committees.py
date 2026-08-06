@@ -182,13 +182,20 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
     def report_url(url: str) -> str:
         """``.../325/report.htm`` → ``.../325/report.html``.
 
-        The API's ``additionalContentUrl`` ends ``.htm``; the page that actually holds the
-        report is ``.html``. The ``.htm`` form answers 200 with a 9.5 KB cookie-consent
-        shell and no report in it, which is worse than an error — it looks like a fetch
-        that worked and yields a document with no text."""
-        if "publications.parliament.uk" in url and url.endswith(".htm"):
-            return url + "l"
-        return url
+        Commons and Joint reports are one page named ``report.htm``, and the page that
+        actually holds the text is ``report.html`` — the ``.htm`` form answers 200 with a
+        9.5 KB cookie-consent shell and no report in it, which is worse than an error
+        because it looks like a fetch that worked and yields a document with no text.
+
+        LORDS papers do NOT follow that convention and must not be rewritten. Their
+        ``additionalContentUrl`` is a numbered chapter page (``.../45/4502.htm``) whose
+        ``.html`` sibling is the bare banner, so appending an ``l`` turns a page with
+        content into one without. Their whole report is the PDF in
+        ``additionalContentUrl2`` (``.../45/45.pdf``), which needs a bytes-capable fetch
+        past Cloudflare — the HTML-only stealth path returns nothing for it."""
+        if not url.endswith("report.htm") or "publications.parliament.uk" not in url:
+            return url
+        return url + "l"
 
     def _stealth_html(self, url: str) -> bytes | None:
         """publications.parliament.uk sits behind a Cloudflare JS challenge ("Just a
