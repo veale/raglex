@@ -1890,3 +1890,11 @@ table.two-col td:first-child { width: 55%; padding-right: var(--sp-4); }
   .admin-body .panel { overflow-wrap: anywhere; }
   .admin-body pre, .admin-body code { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
+
+/* The provision a mapped citer actually cited — bold and linked, because it is the point
+   of the line. "…cited by A, B and 104 more — via Data Protection Act 1998 s. 7." The
+   instrument name is what a reader scans for; leaving it as muted running text (and, for
+   every provision after the first, as an unlinked "and others") is what made the DPA link
+   under assimilated GDPR Article 15 impossible to find. */
+.mb-via { font-weight: 600; }
+.mb-inherited + .mb-inherited { margin-top: 2px; }

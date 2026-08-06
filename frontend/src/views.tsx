@@ -510,6 +510,41 @@ function DocDate({ d, prefix = " · " }: { d: any; prefix?: string }) {
 }
 
 
+// "Data Protection Act 1998 (as at 2018-05-24)" + "s. 7" → "Data Protection Act 1998 s. 7";
+// the GDPR's forty-word title → "Regulation (EU) 2016/679".
+//
+// A full instrument title inside a running sentence is not a citation, it is an
+// obstruction, and the point-in-time suffix — which is how the corpus keys a dated version
+// and belongs on that version's own page — simply breaks the prose here. This is the same
+// progression the static export already applies (``_short_instrument_title``), kept in step
+// deliberately: the reader and the published page should name a provision identically. The
+// full title stays in the link's tooltip.
+const EU_INSTRUMENT_RE =
+  /\b(Council|Commission|European Parliament and Council)?\s*(Framework|Implementing|Delegated)?\s*(Directive|Regulation|Decision|Recommendation)\s+(\((?:EU|EC|EEC|ECSC|Euratom)(?:\s*,\s*Euratom)?\)\s*)?(?:No\s*)?(\d{1,4}\/\d{1,4}(?:\/(?:EU|EC|EEC|JHA|CFSP|Euratom|ECSC))?)\b/i;
+// Common-law drafting names its instruments the other way round, and the name IS short.
+const ACT_RE = /^(.{0,90}?\b(?:Act|Regulations|Order|Rules|Measure|Ordinance)\s+\d{4})\b/;
+
+export function shortInstrumentTitle(title: string, fallback = ""): string {
+  const text = String(title || "").replace(/\s+/g, " ").trim();
+  if (!text) return fallback;
+  const eu = EU_INSTRUMENT_RE.exec(text);
+  if (eu) return [eu[1], eu[2], eu[3], (eu[4] || "").trim(), eu[5]]
+    .filter((p) => p && p.trim()).map((p) => p.trim()).join(" ");
+  const act = ACT_RE.exec(text);
+  if (act) return act[1];
+  let t = text;
+  if (t.length > 64) {
+    const clause = t.split(/,| of the | of \d| on the | establishing /)[0].trim();
+    if (clause.length > 8 && clause.length < t.length) t = clause;
+  }
+  return t.length <= 90 ? t : t.slice(0, 87).trimEnd() + "…";
+}
+
+function provisionLabel(title: string, provAnchor: string, fallbackId = ""): string {
+  const t = shortInstrumentTitle(title, fallbackId);
+  return provAnchor ? `${t} ${provAnchor}` : t;
+}
+
 // The inline "Mentioned by A, B, C and n more. See all mentions." line under a paragraph.
 //
 // Direct citers lead. Documents that cited a MAPPED provision of another instrument
@@ -519,10 +554,28 @@ function DocDate({ d, prefix = " · " }: { d: any; prefix?: string }) {
 // be untrue.
 function MentionedBy({ list, target, anchor }: { list: any[]; target: string; anchor: string }) {
   const { push } = useTray();
+  const { push: peek } = usePeek();
   const direct = list.filter((m: any) => !m.inherited);
   const inherited = list.filter((m: any) => m.inherited);
   const top = direct.slice(0, 3);
   const more = direct.length - top.length;
+  // Gathered by the provision actually cited, biggest first, so the instrument a reader
+  // is most likely to be looking for leads rather than being hidden behind "and others".
+  const inheritedGroups = useMemo(() => {
+    const by = new Map<string, any>();
+    for (const m of inherited) {
+      const key = `${m.mapping_type}|${m.from_id}|${m.from_anchor}`;
+      let g = by.get(key);
+      if (!g) {
+        by.set(key, g = { key, from_id: m.from_id, from_anchor: m.from_anchor,
+                          from_title: m.from_title, mapping_type: m.mapping_type,
+                          label: provisionLabel(m.from_title || m.from_id, m.from_anchor, m.from_id),
+                          items: [] });
+      }
+      g.items.push(m);
+    }
+    return [...by.values()].sort((a, b) => b.items.length - a.items.length);
+  }, [inherited]);
   const openDoc = (m: any) => push({ kind: "doc", id: m.src_id, highlightTarget: target,
     // carry the provision anchor so the reader scrolls to the mention of THIS
     // section, not merely the first mention of the instrument (a general "the
@@ -542,24 +595,36 @@ function MentionedBy({ list, target, anchor }: { list: any[]; target: string; an
         {more > 0 && <span> and {more} more</span>}.{" "}
         <a className="mb-all" onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>See all mentions</a>
       </>}
-      {inherited.length > 0 && <div className="mb-inherited">
-        <span className="mb-label">
-          {mappingKind(inherited[0].mapping_type).row === "parallel provision"
-            ? "Parallel provision cited by " : "Earlier iteration cited by "}</span>
-        {inherited.slice(0, 3).map((m: any, i: number) => (
-          <Fragment key={i}>{i > 0 && ", "}
-            <a title={`This document cites ${m.from_title || m.from_id} ${m.from_anchor}, mapped to this provision`}
-              onClick={() => openDoc(m)}>
-              <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
-          </Fragment>
-        ))}
-        {inherited.length > 3 && <span> and <a title="See every mapped-provision citer"
-          onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>
-          {inherited.length - 3} more</a></span>}
-        <span className="muted"> — via {inherited[0].from_title || inherited[0].from_id}{" "}
-          {inherited[0].from_anchor}{
-            new Set(inherited.map((m: any) => m.from_id)).size > 1 ? " and others" : ""}</span>.
-      </div>}
+      {/* ONE LINE PER SOURCE PROVISION. A provision may correspond to several others at
+          once — assimilated GDPR Article 15 maps to the EU Regulation's own Article 15
+          (parallel), to Directive 95/46 Article 12, AND to DPA 1998 s. 7 — and all three
+          used to collapse into "via <the first one> and others". So the DPA link, which is
+          the one a UK reader wants, was invisible unless it happened to sort first; the
+          "and others" that hid it was not even a link; and the whole line took its label
+          from the first mapping, which called citers of the parallel EU provision an
+          "earlier iteration". Grouping fixes all three: each line names its own provision,
+          in bold, linked to it, and carries the label its OWN mapping type asserts. */}
+      {inheritedGroups.map((g) => (
+        <div className="mb-inherited" key={g.key}>
+          <span className="mb-label">
+            {mappingKind(g.mapping_type).row === "parallel provision"
+              ? "Parallel provision cited by " : "Earlier iteration cited by "}</span>
+          {g.items.slice(0, 3).map((m: any, i: number) => (
+            <Fragment key={i}>{i > 0 && ", "}
+              <a title={`This document cites ${g.label}, mapped to this provision`}
+                onClick={() => openDoc(m)}>
+                <Oscola c={m.src_oscola} fallback={m.src_id} /></a>
+            </Fragment>
+          ))}
+          {g.items.length > 3 && <span> and <a title={`See every document citing ${g.label}`}
+            onClick={() => push({ kind: "mentions", target, anchor, label: <>Mentions of {anchor}</> })}>
+            {g.items.length - 3} more</a></span>}
+          <span className="muted"> — via </span>
+          <a className="mb-via" title={`Open ${g.from_title || g.from_id} ${g.from_anchor}`}
+            onClick={() => peek({ kind: "doc", id: g.from_id, anchor: g.from_anchor })}>
+            {g.label}</a>.
+        </div>
+      ))}
     </div>
   );
 }
