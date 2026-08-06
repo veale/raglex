@@ -498,3 +498,34 @@ def test_eta_is_stage_relative():
     row = JobManager(f).get("eta1")
     # 1 item in ~10s → ~0.1/s → ~2,990s for the remaining 299 — not days
     assert row["eta_s"] is not None and row["eta_s"] < 3600 * 2
+
+
+def test_a_wedged_worker_is_reaped_even_though_its_process_is_alive():
+    """The lease says "alive" while the worker is stuck; only progress says otherwise.
+
+    reap_stalled_jobs catches a dead process by its lease going cold, and cannot catch
+    this: the lease is refreshed by a pulse thread that keeps pulsing perfectly while the
+    worker thread sits in a call that never returns. A committee harvest stopped on one
+    document for fifteen minutes that way, twice, and every signal read "worker alive".
+    """
+    from raglex.jobs import _now_iso_offset
+
+    f = _facade()
+    with f._open() as (cat, _r, _t):
+        cat.create_job("wedged", "harvest-source", "stuck", {}, origin="api")
+        cat.create_job("busy", "harvest-source", "working", {}, origin="api")
+        stale, fresh = _now_iso_offset(-3600), _now_iso_offset(0)
+        # both processes alive; only "wedged" has stopped making progress
+        cat.conn.execute(
+            "UPDATE jobs SET status='running', heartbeat_at=?, lease_heartbeat_at=? "
+            "WHERE job_id='wedged'", (stale, fresh))
+        cat.conn.execute(
+            "UPDATE jobs SET status='running', heartbeat_at=?, lease_heartbeat_at=? "
+            "WHERE job_id='busy'", (fresh, fresh))
+        cat.conn.commit()
+        reaped = [r["job_id"] for r in cat.reap_wedged_jobs(_now_iso_offset(-1800))]
+        assert reaped == ["wedged"]
+        rows = {r["job_id"]: r["status"] for r in cat.conn.execute(
+            "SELECT job_id, status FROM jobs").fetchall()}
+    assert rows["wedged"] == "interrupted"   # frees the slot, and can be resumed
+    assert rows["busy"] == "running"         # a job doing work is left alone

@@ -7108,6 +7108,36 @@ class Catalogue:
             self.conn.commit()
         return rows
 
+    def reap_wedged_jobs(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        """Mark jobs whose WORK has stopped, in a process that is still alive.
+
+        :meth:`reap_stalled_jobs` catches a dead process by its lease going cold. It
+        cannot catch this: the lease is refreshed by a pulse thread that keeps pulsing
+        perfectly while the worker thread is stuck in a call that never returns. A
+        committee harvest sat on one document for fifteen minutes that way — twice — and
+        every signal said "worker alive", because by the lease's measure it was.
+
+        The distinguishing state is a FRESH lease with a STALE progress heartbeat:
+        somebody is home and nothing is being done. That job is interrupted so it stops
+        holding a concurrency slot and can be resumed past whatever it choked on. The
+        cutoff is deliberately generous — a single legitimately slow item (a scanned PDF
+        going through OCR) must not be mistaken for a wedge.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM jobs WHERE status = 'running' "
+            "AND heartbeat_at IS NOT NULL AND heartbeat_at < ? "
+            "AND lease_heartbeat_at IS NOT NULL AND lease_heartbeat_at >= ?",
+            (cutoff_iso, cutoff_iso),
+        ).fetchall()
+        if rows:
+            self.conn.execute(
+                "UPDATE jobs SET status = 'interrupted', finished_at = ? "
+                "WHERE job_id IN (%s)" % ",".join("?" * len(rows)),
+                (_now(), *[r["job_id"] for r in rows]),
+            )
+            self.conn.commit()
+        return rows
+
     def recent_jobs(self, kind: str, *, limit: int = 20) -> list[sqlite3.Row]:
         """The last N jobs of one kind whatever their status — the durable answer to
         "has this already run today?", which an in-process variable cannot give across a

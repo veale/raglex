@@ -263,6 +263,11 @@ def _source_conflict(kind: str, params: dict, running_row) -> bool:
 # its worker thread is parked on a network socket that died when the host slept/woke. We
 # can't kill the dead thread (Python can't), but we flag it so the UI offers a restart.
 STALL_SECONDS = 150.0
+# How long a job may report NO progress, in a process that is otherwise alive, before it
+# is treated as wedged rather than slow. Generous on purpose: the slowest legitimate
+# single item in the corpus is a scanned PDF going through OCR, which is minutes, not
+# half an hour. Tunable because "slow" is a property of the source, not of this code.
+WEDGED_SECONDS = float(os.environ.get("RAGLEX_JOB_WEDGED_SECONDS") or 1800.0)
 # How often a worker asks the DB whether it's been cancelled. Cancellation crosses process
 # boundaries via the row, so it can't be a local flag; but reading it on every progress
 # tick would be a query per document.
@@ -519,6 +524,19 @@ class JobManager:
         cutoff = _now_iso_offset(-max(STALL_SECONDS * 5, 600.0))
         with self.facade._open() as (cat, _rs, _ts):
             rows = [dict(r) for r in cat.reap_stalled_jobs(cutoff)]
+            # …and the job that is not progressing inside a process that IS alive. Its
+            # lease is refreshed by a pulse thread that keeps pulsing while the worker
+            # hangs, so the check above can never see it. Far more generous a cutoff: a
+            # scanned PDF going through OCR is slow, not wedged.
+            wedged = [dict(r) for r in cat.reap_wedged_jobs(_now_iso_offset(-WEDGED_SECONDS))]
+            if wedged:
+                log.warning(
+                    "reaped %d job(s) whose worker stopped progressing while their process "
+                    "stayed alive: %s. A call that cannot return and cannot be cancelled is "
+                    "a bug in whatever it is calling — check the log for the item it "
+                    "stopped on.",
+                    len(wedged), ", ".join(f"{r['job_id']}({r['kind']})" for r in wedged))
+            rows += wedged
             cat.prune_jobs()
         if rows:
             log.info("reaped %d stalled job(s): %s", len(rows),
