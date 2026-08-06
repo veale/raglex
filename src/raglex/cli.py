@@ -463,8 +463,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 Config.from_env()
                 try:
                     jobs.promote_queued()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    # Never silent. A swallowed failure here is indistinguishable from
+                    # "nothing to promote", and that is exactly how a stalled queue hid.
+                    print(f"[watch] promote error: {exc}")
                 # Job-table hygiene every ~15 min: reap jobs whose process stopped pulsing
                 # (slept/woke or crashed container) and prune the finished-job backlog, so
                 # ghosts don't linger and the jobs table (scanned by the panel + worklist)
@@ -475,18 +477,30 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         reaped = jobs.reap_stalled()
                         if reaped:
                             print(f"[watch] hygiene: reaped {reaped} stalled job(s)")
+                            # A reap frees the slot its ghost was holding — fill it now
+                            # rather than a tick later.
+                            jobs.promote_queued()
                     except Exception as exc:  # noqa: BLE001
                         print(f"[watch] hygiene error: {exc}")
                 # Start a background job per due watch (so each shows in the Jobs panel
                 # with progress) instead of running them inline where nothing can see them.
                 due = f.due_watch_ids() if _sched_on("watches") else []
+                launched = 0
                 for wid in due:
                     w = f.get_watch(wid)
                     started = jobs.start("run-watch", f"watch: {w.get('name', wid)}", {"watch_id": wid})
                     if started.get("already_running"):
-                        print(f"[watch] watch {wid} still running; skipping")
-                if due:
-                    print(f"[watch] started {len(due)} due watch job(s)")
+                        # Dedup covers running AND queued, so this is often a watch still
+                        # WAITING from an earlier tick. Saying "still running" of a job
+                        # that has not started sent me looking in the wrong place.
+                        print(f"[watch] watch {wid} already {started.get('state', 'in flight')}"
+                              f"; skipping")
+                    elif not started.get("paused"):
+                        launched += 1
+                if launched:
+                    print(f"[watch] started {launched} due watch job(s)"
+                          + (f" ({len(due) - launched} already in flight)"
+                             if len(due) > launched else ""))
                 # Overnight harvest: once per night, from 02:00 local, drain the WHOLE
                 # routable hanging-reference queue. This is now the ONLY scheduled harvest —
                 # the every-tick auto-drain is gone, because a drain that runs four times an

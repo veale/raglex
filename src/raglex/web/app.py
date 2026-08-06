@@ -70,15 +70,15 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.get("/jobs/queue-status")
     def jobs_queue_status_ep() -> dict:
         """The queue's live state for the Jobs/Maintain UI: how many are running vs the
-        cap, how many are waiting, and whether the scheduler is paused."""
-        import os as _os
-        from ..jobs import scheduler_paused
-        with facade._open() as (cat, _rs, _ts):
-            running = len(cat.running_jobs())
-            queued = len(cat.queued_jobs())
-        return {"running": running, "queued": queued,
-                "max_concurrent": jobs._max_concurrent(),
-                "scheduler_paused": scheduler_paused()}
+        cap, how many are waiting, whether anything is blocked, and whether the scheduler
+        is paused.
+
+        Also the queue's heartbeat. Promotion otherwise depends on a job finishing in this
+        process or on the scheduler's 900s tick, so a slot freed anywhere else stayed empty
+        for up to a quarter of an hour; the panel polling this endpoint now advances the
+        queue itself (throttled, best-effort)."""
+        jobs.maybe_promote()
+        return jobs.queue_state()
 
     @app.post("/jobs/scheduler-pause")
     def jobs_scheduler_pause_ep(payload: dict = Body(default={})) -> dict:

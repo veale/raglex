@@ -178,3 +178,77 @@ def test_two_imports_of_the_same_act_still_dedup(tmp_path, monkeypatch):
     other = jm.start("sync-eu-consolidations", "b", {"stable_id": "32016R0679"})
     assert other["job_id"] != first["job_id"]
     gate.set()
+
+
+def test_an_exempt_job_does_not_eat_a_queue_slot(tmp_path, monkeypatch):
+    """Queue-exempt kinds run BESIDE the queue, not in it. Counting them against the cap
+    inverted the exemption: reader-triggered consolidation imports pinned the box at
+    capacity and every queued harvest waited behind work that was never meant to take a
+    slot."""
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "2")
+    gate = threading.Event()
+
+    def runner(f, p, cb, cancel):
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "test-job", runner)
+    monkeypatch.setitem(jobs_mod.RUNNERS, "sync-eu-consolidations", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    # two readers open two different EU acts — both exempt, both running, cap untouched
+    jm.start("sync-eu-consolidations", "a", {"stable_id": "32002L0021"})
+    jm.start("sync-eu-consolidations", "b", {"stable_id": "32016R0679"})
+    # …so BOTH real slots are still free
+    assert "queued" not in jm.start("test-job", "one", {"n": 1})
+    assert "queued" not in jm.start("test-job", "two", {"n": 2})
+    assert jm.start("test-job", "three", {"n": 3}).get("queued")   # now genuinely full
+
+    state = jm.queue_state()
+    assert state["slots_used"] == 2 and state["over_cap"] == 2 and state["queued"] == 1
+    gate.set()
+
+
+def test_a_queued_job_promotes_into_a_slot_an_exempt_job_is_not_holding(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "1")
+    gate = threading.Event()
+    started: list[int] = []
+
+    def runner(f, p, cb, cancel):
+        started.append(p.get("n", 0))
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "test-job", runner)
+    monkeypatch.setitem(jobs_mod.RUNNERS, "sync-eu-consolidations", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    jm.start("sync-eu-consolidations", "reader-triggered", {"stable_id": "32016R0679"})
+    queued = jm.start("test-job", "waiting", {"n": 7}, queue=True)
+    assert queued.get("queued")
+    assert jm.promote_queued() == [queued["job_id"]]   # the exempt job blocks nothing
+    assert _wait(lambda: 7 in started)
+    gate.set()
+
+
+def test_a_dedup_hit_says_whether_it_is_running_or_merely_queued(tmp_path, monkeypatch):
+    """The scheduler reported every hit as "still running", which described a job that had
+    not started as one that would not finish — and sent me looking in the wrong place."""
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "1")
+    gate = threading.Event()
+
+    def runner(f, p, cb, cancel):
+        gate.wait(5)
+        return {}
+
+    monkeypatch.setitem(jobs_mod.RUNNERS, "run-watch", runner)
+    jm = JobManager(Facade(_config(tmp_path)))
+
+    first = jm.start("run-watch", "watch 84", {"watch_id": 84})
+    assert jm.start("run-watch", "watch 84", {"watch_id": 84})["state"] == "running"
+    # a DIFFERENT watch has to queue behind it, and a repeat of that one says so
+    second = jm.start("run-watch", "watch 79", {"watch_id": 79})
+    assert second.get("queued")
+    assert jm.start("run-watch", "watch 79", {"watch_id": 79})["state"] == "queued"
+    assert first["job_id"] != second["job_id"]
+    gate.set()

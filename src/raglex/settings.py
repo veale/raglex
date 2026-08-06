@@ -19,6 +19,28 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+# What THIS process has copied out of the settings file into its own environment, and the
+# value it wrote. That is the difference between "the deployment set this" and "a previous
+# apply_to_env copied it here" — indistinguishable afterwards by inspection, because both
+# are just entries in os.environ.
+#
+# Without the distinction, ``apply_to_env`` could only ever FILL an unset key, never update
+# one: a value it promoted at boot looked exactly like an env override forever after. So a
+# setting changed in the UI reached the API process (which writes os.environ directly) and
+# never reached the scheduler container until it was restarted. That is how a queue stalls
+# with a free slot — the scheduler went on promoting against the max-concurrent it read at
+# boot while the UI reported the new one, and neither was wrong about what it could see.
+#
+# Recording the VALUE, not just the key, keeps env precedence intact: if the entry no
+# longer holds what we wrote, something else owns it now and we leave it alone.
+_PROMOTED: dict[str, str] = {}
+
+
+def _ours(key: str) -> bool:
+    """Whether this process's environment entry for ``key`` is the file's to rewrite: we
+    put it there, and nothing has changed it since."""
+    return key in _PROMOTED and os.environ.get(key) == _PROMOTED[key]
+
 
 @dataclass(frozen=True, slots=True)
 class SettingSpec:
@@ -302,15 +324,18 @@ class SettingsStore:
                 continue  # ignore unknown keys
             if value is None or value == "":
                 data.pop(key, None)
-                # also clear any value apply_to_env had promoted, so the change
-                # takes effect live (and the UI doesn't keep showing the old value)
+                # also clear any value apply_to_env had promoted, so the change takes
+                # effect live (and the UI doesn't keep showing the old value)
                 if os.environ.get(key) == self._read_file().get(key):
                     os.environ.pop(key, None)
+                _PROMOTED.pop(key, None)
             else:
                 data[key] = value
                 # apply immediately so adapters pick it up without a restart, and so
-                # source detection sees it as file-sourced (editable), not env-locked
-                os.environ[key] = str(value)
+                # source detection sees it as file-sourced (editable), not env-locked.
+                # Recorded as ours, so the next apply_to_env in this process refreshes
+                # rather than mistaking our own write for a deployment override.
+                os.environ[key] = _PROMOTED[key] = str(value)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2), "utf-8")
         try:
@@ -340,8 +365,26 @@ class SettingsStore:
         return {"settings": out, "path": str(self.path)}
 
     def apply_to_env(self) -> None:
-        """Load file values into the environment WITHOUT overriding real env vars
-        (env > file), so all existing env-reading code transparently picks them up."""
-        for key, value in self._read_file().items():
-            if key and os.environ.get(key) in (None, "") and value not in (None, ""):
-                os.environ[key] = str(value)
+        """Load file values into the environment so all existing env-reading code picks
+        them up, WITHOUT overriding a real env var (env > file, ``_ENV_LOCKED``).
+
+        This is also the cross-process refresh: the API writes a UI change into the file
+        (and into its own environment), and every other process — the scheduler above all —
+        catches up by calling this on its next tick. So it must overwrite a value it
+        promoted before, not merely fill a blank, and must withdraw one the file no longer
+        carries. It used to do neither, which froze max-concurrent and the scheduler pause
+        at whatever they were when the container started."""
+        values = self._read_file()
+        for key, value in values.items():
+            if not key or value in (None, ""):
+                continue
+            # Fill a blank, or refresh a value we ourselves promoted. A real env var —
+            # or one another part of the process has set — is left exactly as it is.
+            if os.environ.get(key) in (None, "") or _ours(key):
+                os.environ[key] = _PROMOTED[key] = str(value)
+        # Cleared in the UI → cleared here, or "unset this" would never cross a process
+        # boundary (the scheduler would stay paused after the pause had been lifted).
+        for key in [k for k in _PROMOTED if k not in values]:
+            if _ours(key):
+                os.environ.pop(key, None)
+            _PROMOTED.pop(key, None)

@@ -5101,11 +5101,19 @@ function JobsQueuePanel() {
     <div className="panel">
       <h3 style={{ marginTop: 0 }}>Jobs &amp; queue</h3>
       <div className="row" style={{ flexWrap: "wrap", alignItems: "center", gap: 16 }}>
-        <span title="Jobs running now vs the concurrency cap">
+        <span title="Jobs running now vs the concurrency cap. Queue-exempt work (a static export, a consolidation import a reader is waiting on) runs beside the queue and is not counted against the cap.">
           <b style={{ color: "var(--ok)" }}>{st.running}</b> running
           {st.queued > 0 && <> · <b>{st.queued}</b> queued</>}
           <span className="muted"> / max {st.max_concurrent}</span>
+          {st.over_cap > 0 && <span className="muted" title="Reader-triggered work that skips the queue by design">
+            {" "}(+{st.over_cap} beside the queue)</span>}
         </span>
+        {/* A queue that is not moving should say why. Silence here is what turned a stale
+            setting into an afternoon of wondering why a free slot stayed empty. */}
+        {st.queued > 0 && st.slots_used < st.max_concurrent && st.blocked.length > 0 &&
+          <span className="muted" title="These queued jobs conflict with something already running — a whole-corpus singleton, an overlapping citation-extraction scope, or an identical job. They start as soon as it finishes.">
+            {st.blocked.length} waiting on a conflicting job, not on a slot
+          </span>}
         <label style={{ flex: "0 0 auto" }} title="How many jobs run at once; extras queue and start as slots free. Lower it on a busy box.">
           max concurrent{" "}
           <input type="number" min={1} max={32} value={max}

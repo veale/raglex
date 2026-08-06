@@ -458,6 +458,9 @@ class JobManager:
         # otherwise hold the GIL and starve the web server until it's unreachable.
         # Sleeping RELEASES the GIL, so the event loop keeps serving requests.
         self.yield_s = float(os.environ.get("RAGLEX_JOB_YIELD_S") or 0.003)
+        # Throttle state for maybe_promote (the UI polls the queue about once a second).
+        self._promote_lock = threading.Lock()
+        self._last_promote = 0.0
 
     # -- lifecycle ---------------------------------------------------------
     def reap_orphans(self, *, auto_resume: bool = False) -> int:
@@ -507,20 +510,36 @@ class JobManager:
         except (TypeError, ValueError):
             return MAX_CONCURRENT_JOBS
 
+    @staticmethod
+    def _slots_used(running) -> int:
+        """How many of the concurrency slots the running jobs actually occupy.
+
+        Queue-exempt kinds are *deliberately* allowed to run over the cap (a reader is
+        waiting on them), so counting them against it inverts the exemption: four
+        reader-triggered consolidation imports would pin the box at capacity and every
+        queued harvest, watch and reparse would wait behind work that was never supposed
+        to take a slot. They run beside the queue, not in it."""
+        return sum(1 for j in running if j["kind"] not in QUEUE_EXEMPT_KINDS)
+
     def _dedup_hit(self, kind: str, params: dict, pool) -> dict | None:
         """If an identical job (singleton kind, or a DEDUP kind with the same params) is
         already in ``pool`` (running and/or queued), the 'already there' response — so a
         second identical request neither double-runs nor stacks in the queue."""
+        # ``state`` distinguishes a job that is RUNNING from one merely QUEUED — the pool
+        # holds both, and callers were reporting every hit as "still running", which
+        # described a job that had not started as one that would not finish.
         if kind in SINGLETON_KINDS and kind not in _SCAN_KINDS:
             for j in pool:
                 if j["kind"] == kind:
-                    return {"job_id": j["job_id"], "already_running": True}
+                    return {"job_id": j["job_id"], "already_running": True,
+                            "state": j["status"]}
         elif kind in DEDUP_KINDS:
             want = json.dumps(params, sort_keys=True)
             for j in pool:
                 if j["kind"] == kind and json.dumps(
                         json.loads(j["params_json"] or "{}"), sort_keys=True) == want:
-                    return {"job_id": j["job_id"], "already_running": True}
+                    return {"job_id": j["job_id"], "already_running": True,
+                            "state": j["status"]}
         return None
 
     def _blocked_by_running(self, kind: str, params: dict, running) -> bool:
@@ -558,7 +577,7 @@ class JobManager:
             root = root_job_id or job_id
             if policy == "checkpoint":
                 params["_resume_run_id"] = root
-            at_capacity = (len(running) >= self._max_concurrent()
+            at_capacity = (self._slots_used(running) >= self._max_concurrent()
                            and kind not in QUEUE_EXEMPT_KINDS)
             status = "queued" if (queue or at_capacity) else "running"
             cat.create_job(job_id, kind, label, params, origin=self.origin,
@@ -576,15 +595,18 @@ class JobManager:
         every scheduler tick, so promotion survives a crash and works across processes — the
         atomic claim (:meth:`Catalogue.claim_queued_job`) ensures each job starts once."""
         started: list[str] = []
+        blocked: list[str] = []
+        cap = self._max_concurrent()
         with self.facade._open() as (cat, _rs, _ts):
             while True:
                 running = cat.running_jobs()
-                if len(running) >= self._max_concurrent():
+                if self._slots_used(running) >= cap:
                     break
                 picked = None
                 for q in cat.queued_jobs():
                     p = json.loads(q["params_json"] or "{}")
                     if self._blocked_by_running(q["kind"], p, running):
+                        blocked.append(f"{q['job_id']}({q['kind']})")
                         continue
                     if cat.claim_queued_job(q["job_id"]):
                         picked = (q["job_id"], q["kind"], p)
@@ -594,7 +616,56 @@ class JobManager:
                 jid, k, p = picked
                 threading.Thread(target=self._worker, args=(jid, k, p), daemon=True).start()
                 started.append(jid)
+        if started:
+            log.info("promoted %d queued job(s) into free slots: %s",
+                     len(started), ", ".join(started))
+        elif blocked:
+            # A queue that cannot move is worth a line. It was silent before, which is why
+            # a scheduler stuck on a stale max-concurrent sat on a free slot for hours with
+            # nothing anywhere saying so.
+            log.info("queue not advancing: %d/%d slots used, %d queued job(s) blocked by a "
+                     "running conflict (%s)", self._slots_used(running), cap,
+                     len(blocked), ", ".join(sorted(set(blocked))[:5]))
         return started
+
+    def maybe_promote(self, *, min_interval: float = 5.0) -> None:
+        """Promote from a hot read path (the UI's queue poll), throttled and never raising.
+
+        Promotion used to happen only when a job finished *in this process* or on the
+        scheduler's tick — which is 900s in the deployed compose. So a slot freed by a
+        reaped, interrupted or other-container job stayed empty for up to a quarter of an
+        hour, and any failure of the one promoting call left it empty indefinitely. The
+        Jobs panel polls every second; two cheap queries at most every ``min_interval``
+        makes the queue advance as soon as a slot exists."""
+        now = time.monotonic()
+        with self._promote_lock:
+            if now - self._last_promote < min_interval:
+                return
+            self._last_promote = now
+        try:
+            self.promote_queued()
+        except Exception:  # noqa: BLE001 — a poll must never 500 on queue upkeep
+            log.exception("throttled promote_queued failed")
+
+    def queue_state(self) -> dict:
+        """What the queue is doing and, when it is not moving, why — the read behind the
+        UI's slot counter. ``blocked`` names the queued jobs a running job conflicts with,
+        so "3 queued, a slot free, nothing starting" is explained rather than mysterious."""
+        cap = self._max_concurrent()
+        with self.facade._open() as (cat, _rs, _ts):
+            running = list(cat.running_jobs())
+            queued = list(cat.queued_jobs())
+            blocked = [q["job_id"] for q in queued
+                       if self._blocked_by_running(
+                           q["kind"], json.loads(q["params_json"] or "{}"), running)]
+        used = self._slots_used(running)
+        return {
+            "running": len(running), "queued": len(queued),
+            "slots_used": used, "max_concurrent": cap,
+            "over_cap": len(running) - used,  # queue-exempt jobs running beside the queue
+            "blocked": blocked,
+            "scheduler_paused": scheduler_paused(),
+        }
 
     def _worker(self, job_id: str, kind: str, params: dict) -> None:
         state = {"progress": {}, "checkpoint": None, "log": [], "cancel": False,

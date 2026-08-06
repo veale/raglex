@@ -509,7 +509,12 @@ export const api = {
     Object.entries(fields).forEach(([k, v]) => v && fd.append(k, v));
     return postForm("/unresolved/resolve-file", fd);
   },
-  queueStatus: () => req<{ running: number; queued: number; max_concurrent: number; scheduler_paused: boolean }>("/jobs/queue-status"),
+  // slots_used counts only jobs that occupy a slot: queue-exempt kinds (a reader waiting on
+  // a static export or a consolidation import) run BESIDE the queue, and are reported as
+  // over_cap. blocked names queued jobs a running job conflicts with — so "queued, with a
+  // slot free, and nothing starting" has a visible reason.
+  queueStatus: () => req<{ running: number; queued: number; slots_used: number; over_cap: number;
+                          blocked: string[]; max_concurrent: number; scheduler_paused: boolean }>("/jobs/queue-status"),
   schedulerPause: (paused: boolean) =>
     req<{ scheduler_paused: boolean }>("/jobs/scheduler-pause", { method: "POST", body: JSON.stringify({ paused }) }),
   setMaxConcurrent: (max_concurrent: number) =>

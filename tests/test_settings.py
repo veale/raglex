@@ -77,3 +77,48 @@ def test_facade_settings_roundtrip(tmp_path, monkeypatch):
     # zotero import now uses stored creds (fails only on the network call, not on creds)
     rows = {r["key"]: r for r in f.get_settings()["settings"]}
     assert rows["ZOTERO_LIBRARY_ID"]["display"] == "42"
+
+
+def test_apply_to_env_refreshes_a_value_it_promoted_itself(tmp_path, monkeypatch):
+    """The cross-process refresh. The API writes a UI change into the file; every OTHER
+    process catches up by calling apply_to_env on its next tick. It used to only fill a
+    blank, so a value promoted at boot was frozen for the life of the process — which is
+    how the scheduler kept promoting jobs against a max-concurrent of 1 while the UI, the
+    file and every fresh process said 2, and a queue sat still with a slot free."""
+    import os
+
+    monkeypatch.delenv("RAGLEX_MAX_CONCURRENT_JOBS", raising=False)
+    path = tmp_path / "settings.json"
+
+    def written_elsewhere(value):
+        """The API container writing the file — this process's environment is untouched."""
+        path.write_text(json.dumps({"RAGLEX_MAX_CONCURRENT_JOBS": value} if value else {}))
+
+    written_elsewhere("1")
+    store = SettingsStore(path)          # the scheduler, booting
+    store.apply_to_env()
+    assert os.environ["RAGLEX_MAX_CONCURRENT_JOBS"] == "1"
+
+    written_elsewhere("2")               # the operator raises it in the UI
+    store.apply_to_env()
+    assert os.environ["RAGLEX_MAX_CONCURRENT_JOBS"] == "2"
+
+    written_elsewhere(None)              # …and clearing it withdraws it, so an
+    store.apply_to_env()                 # "unpause" also crosses the process boundary
+    assert os.environ.get("RAGLEX_MAX_CONCURRENT_JOBS") in (None, "")
+
+
+def test_apply_to_env_never_overwrites_a_value_it_did_not_promote(tmp_path, monkeypatch):
+    """Refreshing our own promotion must not become a licence to clobber the deployment's
+    environment: `env > file` still holds."""
+    import os
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"RAGLEX_MAX_CONCURRENT_JOBS": "1"}))
+    store = SettingsStore(path)
+    store.apply_to_env()
+
+    monkeypatch.setenv("RAGLEX_MAX_CONCURRENT_JOBS", "9")   # the deployment owns it now
+    path.write_text(json.dumps({"RAGLEX_MAX_CONCURRENT_JOBS": "4"}))
+    store.apply_to_env()
+    assert os.environ["RAGLEX_MAX_CONCURRENT_JOBS"] == "9"
