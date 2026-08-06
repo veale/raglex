@@ -202,7 +202,11 @@ export function App() {
   // Browser Back/Forward and the edge chevrons therefore use the same source of truth.
   const [trail, setTrail] = useState<TrailEntry[]>([]);
   const [trailIndex, setTrailIndex] = useState(0);
-  const [restoreTo, setRestoreTo] = useState<number | null>(null);
+  // A fresh object every time, so re-navigating to the same offset still re-runs the
+  // restore effect (setting the identical number silently did nothing before).
+  // `hold` = keep re-asserting the position while the page is still growing; false when
+  // the view has a pinpoint, whose own scrollIntoView is the authority on where to land.
+  const [restoreTo, setRestoreTo] = useState<{ y: number; hold: boolean } | null>(null);
   const currentRef = useRef<ViewState>({ tab, docId, graphId, pinpoint, scrollY: 0 });
   currentRef.current = { tab, docId, graphId, pinpoint, scrollY: window.scrollY };
   const trailRef = useRef<TrailEntry[]>(trail); trailRef.current = trail;
@@ -210,12 +214,21 @@ export function App() {
 
   const adopt = (v: ViewState, restore = v.scrollY) => {
     setTab(v.tab); setDocId(v.docId); setGraphId(v.graphId); setPinpoint(v.pinpoint);
-    setRestoreTo(restore);
+    setRestoreTo({ y: restore, hold: !v.pinpoint });
   };
+  // True while the restore loop below is driving the page itself. Its scrollTo calls fire
+  // scroll events like any other, and letting those write back would save the position the
+  // restore is passing THROUGH — on a page still loading, that is whatever the browser
+  // clamped to, which then becomes the position Back restores to next time.
+  const restoringRef = useRef(false);
   const saveCurrentPosition = () => {
     const state = history.state?.raglex as RaglexHistory | undefined;
-    if (!state) return;
-    const view = { ...currentRef.current, scrollY: window.scrollY };
+    if (!state || restoringRef.current) return;
+    // Update ONLY the scroll offset. It used to write `currentRef.current` as the whole
+    // view, but that ref lags a navigation by a render: a scroll event landing between
+    // pushState and React re-rendering wrote the PREVIOUS view — id and all — into the
+    // freshly pushed entry, so going Back later restored the wrong page entirely.
+    const view = { ...state.view, scrollY: window.scrollY };
     history.replaceState({ ...history.state, raglex: { ...state, view } }, "", location.href);
   };
   const visit = (next: ViewState, replace = false) => {
@@ -237,24 +250,53 @@ export function App() {
   // Restore after the target view has painted *and*, for async readers, after enough
   // body has arrived for that Y position to exist. Two animation frames was not enough:
   // a judgment briefly renders its header, clamps scrollTo(42000) near the top, then the
-  // body arrives and leaves the reader at that arbitrary clamp point. Retry for up to
-  // five seconds, stopping immediately once the exact position is attainable.
+  // body arrives and leaves the reader at that arbitrary clamp point. So it retries — but
+  // retrying is exactly what made the page snatch itself away from under you:
+  //
+  //  - it kept firing for five seconds whatever the reader did, so a Back onto a page that
+  //    had since got shorter spent five seconds dragging them down as content streamed in,
+  //    while they were already reading at the top;
+  //  - a FRESH view restores to 0, and a page that grows after that first scrollTo could
+  //    keep whatever offset the browser was holding from the previous, longer page.
+  //
+  // Both are fixed by treating a real user gesture as the end of the restore, and by
+  // holding a fresh view at the top until its content has actually settled.
   useEffect(() => {
     if (restoreTo === null) return;
-    const y = restoreTo;
-    let frame = 0, attempts = 0, cancelled = false;
-    const finish = () => { if (!cancelled) setRestoreTo(null); };
+    const { y, hold } = restoreTo;
+    let frame = 0, attempts = 0, done = false, settled = 0, lastHeight = -1;
+    restoringRef.current = true;
+    const stop = () => {
+      if (done) return;
+      done = true;
+      restoringRef.current = false;
+      setRestoreTo(null);
+    };
+    // Any deliberate scroll gesture ends the restore at once. The reader has just said
+    // where they want to be, and nothing we saved outranks that.
+    const gestures = ["wheel", "touchstart", "keydown"] as const;
+    gestures.forEach((g) => window.addEventListener(g, stop, { passive: true }));
+
     const tick = () => {
-      if (cancelled) return;
+      if (done) return;
       window.scrollTo(0, y);
-      if (Math.abs(window.scrollY - y) <= 2 || y === 0 || attempts++ >= 300) {
-        finish();
-        return;
-      }
+      const height = document.documentElement.scrollHeight;
+      const there = Math.abs(window.scrollY - y) <= 2;
+      // "Attainable AND stable", not merely attainable: a page mid-load passes through the
+      // target by accident, so require the height to hold still for a few frames before
+      // believing we have arrived. `hold` is false when the view carries a pinpoint —
+      // there the deep-link's own scrollIntoView owns the position and we must not fight it.
+      settled = height === lastHeight ? settled + 1 : 0;
+      lastHeight = height;
+      if ((there && (!hold || settled >= 3)) || attempts++ >= 180) { stop(); return; }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(() => { frame = requestAnimationFrame(tick); });
-    return () => { cancelled = true; cancelAnimationFrame(frame); };
+    return () => {
+      done = true; restoringRef.current = false;
+      cancelAnimationFrame(frame);
+      gestures.forEach((g) => window.removeEventListener(g, stop));
+    };
   }, [restoreTo]);
 
   // open a document, optionally deep-linking to a pinpointed section (JADE-style)
@@ -301,6 +343,23 @@ export function App() {
     }
     visit({ tab: t, docId: null, graphId: null, pinpoint: null, scrollY: 0 });
   };
+
+  // The sticky header's real height, published as --header-h for anything that has to
+  // sit directly under it. The admin section rail assumed a flat 54px; on a phone the
+  // header wraps onto two lines, so the rail stuck itself underneath the header and its
+  // section pills were half-hidden behind it. Measured, so it stays right whatever the
+  // header wraps to.
+  const headerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const publish = () => document.documentElement.style.setProperty(
+      "--header-h", `${Math.round(el.getBoundingClientRect().height)}px`);
+    publish();
+    const ro = new ResizeObserver(publish);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // which browse surfaces have been opened at least once (see the render below)
   const visited = useRef<Set<Tab>>(new Set(["explore"]));
@@ -382,7 +441,7 @@ export function App() {
       onClick={() => { saveCurrentPosition(); history.forward(); }}
       title={`Forward to ${forwardDestination.label}`} aria-label={`Forward to ${forwardDestination.label}`}>›</button>}
     <div className="app">
-      <header>
+      <header ref={headerRef}>
         <h1 onClick={() => goTab("explore")} style={{ cursor: "pointer" }} title="Explore">RagLex</h1>
         <ApiStatus />
         <nav>
