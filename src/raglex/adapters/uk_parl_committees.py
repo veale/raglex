@@ -181,6 +181,20 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
 
     # ---- fetch -----------------------------------------------------------------
 
+    #: Extensions that are not a document to read. An audio recording of an evidence
+    #: session is a legitimate publication and has no text in it — but handing one to a
+    #: browser is worse than useless: navigating to media starts a stream, so
+    #: ``domcontentloaded`` never fires and the fetch hangs until something kills it.
+    #: HC 1880 (International Development) is such a row, and it wedged the same harvest
+    #: twice for fifteen minutes each time.
+    _NOT_A_DOCUMENT = (".mp3", ".mp4", ".m4a", ".wav", ".avi", ".mov", ".wmv", ".zip",
+                       ".xlsx", ".xls", ".csv", ".pptx", ".ics")
+
+    @classmethod
+    def _readable(cls, url: str) -> bool:
+        path = url.split("?", 1)[0].split("#", 1)[0].lower()
+        return not path.endswith(cls._NOT_A_DOCUMENT)
+
     @staticmethod
     def report_url(url: str) -> str:
         """``.../325/report.htm`` → ``.../325/report.html``.
@@ -196,6 +210,9 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
         content into one without. Their whole report is the PDF in
         ``additionalContentUrl2`` (``.../45/45.pdf``), which needs a bytes-capable fetch
         past Cloudflare — the HTML-only stealth path returns nothing for it."""
+        # The API hands out a few Windows paths ("…uk\\pa\\cm201719\\…"). A browser will
+        # not follow one, and it is the same document as its slash-separated form.
+        url = url.replace("\\", "/")
         if not url.endswith("report.htm") or "publications.parliament.uk" not in url:
             return url
         return url + "l"
@@ -240,8 +257,10 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
         type off the bytes — insisting on ``%PDF`` here threw away the papers that are
         published as HTML, which is the opposite of the point.
         """
-        target = (stub.hints.get("pdf_url") or "").strip()
+        target = (stub.hints.get("pdf_url") or "").strip().replace("\\", "/")
         if not target or "publications.parliament.uk" not in target:
+            return None
+        if not self._readable(target):
             return None
         from ..scraping.fetcher import get_bytes_fetcher
 
@@ -256,6 +275,8 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
         url = self.report_url(stub.raw_url or "")
         if not url or "/api/Publications/" in url:
             return None          # metadata-only row with no published text to read
+        if not self._readable(url):
+            return None          # an audio/spreadsheet publication: nothing to read here
         blob: bytes | None = None
         if "publications.parliament.uk" not in url:
             try:

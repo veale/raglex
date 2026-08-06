@@ -12,6 +12,7 @@ from datetime import date
 import pytest
 
 from raglex.adapters.registry import ADAPTERS, INCREMENTAL_MODE, SOURCE_INFO
+from raglex.core.models import Stub
 from raglex.adapters.uk_parl_committees import (
     DEFAULT_TYPES, SORT_NEWEST_FIRST, paper_number, publication_stubs,
     stable_id as pub_id,
@@ -281,3 +282,22 @@ def test_a_backfill_walks_bounded_windows_because_a_wide_range_is_a_500():
     for (_, prev_hi), (next_lo, _) in zip(windows, windows[1:]):
         assert next_lo == prev_hi + __import__("datetime").timedelta(days=1)
     assert all((hi - lo).days < WINDOW_DAYS for lo, hi in windows)
+
+
+def test_an_audio_publication_is_never_handed_to_a_browser():
+    """Navigating to media starts a stream, so domcontentloaded never fires and the fetch
+    hangs. HC 1880 is such a row — an .mp3 of an evidence session, with backslashes for
+    slashes — and it wedged the same harvest twice, fifteen minutes each time."""
+    import raglex.adapters.uk_parl_committees as mod
+
+    ad = mod.UKCommitteePublicationsAdapter()
+    audio = "https://publications.parliament.uk\\pa\\cm201719\\cmselect\\audio\\audio1.mp3"
+    assert ad.report_url(audio).startswith("https://publications.parliament.uk/pa/")
+    assert not ad._readable(ad.report_url(audio))
+    # a real report is still readable
+    assert ad._readable("https://publications.parliament.uk/pa/cm201719/x/1880/1880.pdf")
+    assert ad._readable("https://publications.parliament.uk/pa/cm5902/x/69/report.html")
+    # and the fetch skips it without touching the network
+    stub = Stub(stable_id="uk/parl/committee/hc-1880-2017-19", landing_url=audio,
+                raw_url=audio, title="Audio", court="uk-parliament", hints={})
+    assert ad.fetch(stub) is None
