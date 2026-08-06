@@ -226,6 +226,32 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
             return None
         return html.encode("utf-8") if isinstance(html, str) else html
 
+    def _report_pdf(self, stub: Stub, referer: str | None) -> bytes | None:
+        """The paper's whole-report PDF (``additionalContentUrl2``), through the browser.
+
+        This is how a LORDS report is read at all. Their ``additionalContentUrl`` is one
+        numbered chapter page, so the HTML route yields a fragment at best; the report is
+        the PDF. It is Cloudflare-walled and cannot be had by any plain request, so it
+        needs the bytes-capable navigation (see BrowserBytesFetcher), cleared via the
+        paper's own page.
+        """
+        pdf_url = (stub.hints.get("pdf_url") or "").strip()
+        if not pdf_url or "publications.parliament.uk" not in pdf_url:
+            return None
+        from ..scraping.fetcher import get_bytes_fetcher
+
+        fetcher = get_bytes_fetcher()
+        if not fetcher.available():
+            log.warning("%s: no browser in this image; cannot read %s",
+                        self.source, pdf_url)
+            return None
+        blob = fetcher.fetch_bytes(pdf_url, referer_url=referer)
+        if blob and not blob.startswith(b"%PDF"):
+            log.warning("%s: %s did not return a PDF (got %r)",
+                        self.source, pdf_url, blob[:16])
+            return None
+        return blob
+
     def fetch(self, stub: Stub) -> Record | None:
         url = self.report_url(stub.raw_url or "")
         if not url or "/api/Publications/" in url:
@@ -236,10 +262,19 @@ class UKCommitteePublicationsAdapter(BaseAdapter):
                 blob = self._client.get(url).content
             except FetchError:
                 blob = None
+        # A Lords paper's HTML is one chapter of the report; its PDF is the whole thing,
+        # so prefer the PDF outright rather than storing a fragment as the report.
+        is_lords = str(stub.hints.get("house") or "").strip().lower() == "lords"
+        if blob is None and is_lords:
+            blob = self._report_pdf(stub, referer=url)
         # Cloudflare-walled host: go straight to the browser rather than spend a request
         # earning a 403 first.
         if blob is None:
             blob = self._stealth_html(url)
+        # Commons/Joint papers published only as a PDF (or whose HTML is the consent
+        # shell) still have a whole report to read — fall back to it rather than skip.
+        if not blob:
+            blob = self._report_pdf(stub, referer=url)
         if not blob:
             return None
         from ..extraction import extract_bytes

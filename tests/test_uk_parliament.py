@@ -91,6 +91,59 @@ def test_identity_is_the_paper_number_with_its_session():
     assert paper_number(_PUB_PAYLOAD["items"][0]) == ("HC 69", "2026-27")
 
 
+def test_a_lords_report_is_read_from_its_pdf_not_one_chapter(monkeypatch):
+    """A Lords paper's whole report is the PDF; its HTML is a single numbered chapter.
+
+    So the Lords side of the corpus was either empty or a fragment stored as if it were
+    the report. The PDF is Cloudflare-walled and no plain request can have it — a direct
+    GET is 403, and so is an XHR from a browser that has already cleared the challenge.
+    Only a real navigation returns the file, which is what BrowserBytesFetcher does.
+    """
+    import raglex.adapters.uk_parl_committees as mod
+
+    stub = {s.stable_id: s for s in publication_stubs(_PUB_PAYLOAD)}["uk/parl/committee/hl-45-2026-27"]
+    stub.hints["pdf_url"] = "https://publications.parliament.uk/y/45.pdf"
+    asked: dict = {}
+
+    class _Fetcher:
+        def available(self): return True
+
+        def fetch_bytes(self, url, *, referer_url=None):
+            asked["url"], asked["referer"] = url, referer_url
+            return b"%PDF-1.4\n" + b"The Committee recommends. " * 40
+
+    monkeypatch.setattr("raglex.scraping.fetcher.get_bytes_fetcher", lambda: _Fetcher())
+    # the routing is what is under test, not pypdf
+    from raglex.extraction import Extracted
+    monkeypatch.setattr(
+        "raglex.extraction.extract_bytes",
+        lambda blob, **kw: Extracted(text="The Committee recommends. " * 40,
+                                     engine="stub", engine_version="0"))
+    ad = mod.UKCommitteePublicationsAdapter()
+    rec = ad.fetch(stub)
+    assert rec is not None and rec.raw_ext == "pdf"
+    assert asked["url"].endswith("45.pdf")
+    # cleared via the paper's own page — a cold hit on the file is what gets refused
+    assert asked["referer"] == "https://publications.parliament.uk/y/4502.htm"
+
+
+def test_a_missing_browser_skips_the_paper_rather_than_crashing(monkeypatch):
+    # the browser is a 1.3 GB optional layer; an image without it must degrade, not die
+    import raglex.adapters.uk_parl_committees as mod
+
+    stub = {s.stable_id: s for s in publication_stubs(_PUB_PAYLOAD)}["uk/parl/committee/hl-45-2026-27"]
+    stub.hints["pdf_url"] = "https://publications.parliament.uk/y/45.pdf"
+
+    class _Absent:
+        def available(self): return False
+        def fetch_bytes(self, url, **kw): raise AssertionError("must not be called")
+
+    monkeypatch.setattr("raglex.scraping.fetcher.get_bytes_fetcher", lambda: _Absent())
+    ad = mod.UKCommitteePublicationsAdapter()
+    monkeypatch.setattr(ad, "_stealth_html", lambda url: None)
+    assert ad.fetch(stub) is None
+
+
 def test_a_publication_with_no_paper_number_falls_back_honestly():
     """Much correspondence genuinely has no citable number; inventing one would be worse
     than using the API's internal handle."""

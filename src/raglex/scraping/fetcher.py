@@ -21,11 +21,14 @@ boundary is the §5a quarantine rule: messy, fragile fetching in; a clean
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..core.errors import RateLimitException
 from ..core.http import RateLimitedClient, get_proxy
+
+log = logging.getLogger("raglex.scraping.fetcher")
 
 # Statuses that usually mean an anti-bot/WAF wall rather than a missing page.
 _BLOCK_STATUSES = frozenset({403, 429, 503})
@@ -71,6 +74,117 @@ class HttpxFetcher:
 
     def close(self) -> None:
         self._client.close()
+
+
+class BrowserBytesFetcher:
+    """Camoufox fetch that returns the response BYTES, for files behind a JS challenge.
+
+    The HTML-only stealth path cannot carry a PDF, and neither can the obvious
+    workaround. Measured against publications.parliament.uk, whose committee reports are
+    the case that forced this:
+
+    * a plain client gets HTTP 403 (a Cloudflare interstitial, 5,860 bytes of markup);
+    * ``context.request.get()`` from a browser that has ALREADY cleared the challenge on
+      an HTML page in the same context still gets 403 — it is an XHR-class request, and
+      the rule refuses it whatever cookie it carries;
+    * a top-level NAVIGATION to the same URL returns 200 and 965,499 bytes beginning
+      ``%PDF-``.
+
+    So the working shape is: clear the challenge on an ordinary page, then navigate to
+    the file and take the body off the response event. ``referer_url`` is the page to
+    clear on — for a committee paper, its own HTML report — and going through it is what
+    makes the navigation look like a reader clicking the download link.
+
+    The browser is expensive to start (a second or two) and is therefore kept alive
+    between calls, behind a lock: the Camoufox sync API is not thread-safe and a harvest
+    may be running several adapters at once.
+    """
+
+    name = "browser-bytes"
+
+    def __init__(self, *, headless: bool = True, timeout_ms: float | None = None) -> None:
+        import os
+        import threading
+
+        self.headless = headless
+        self.timeout_ms = float(timeout_ms if timeout_ms is not None
+                                else os.environ.get("RAGLEX_BROWSER_TIMEOUT_MS") or 90000)
+        self._browser = None
+        self._ctx = None
+        self._lock = threading.Lock()
+
+    def available(self) -> bool:
+        """Whether this image actually ships the browser (the app runs without it)."""
+        try:
+            import camoufox.sync_api  # noqa: F401
+        except Exception:  # noqa: BLE001 — any import failure means "not installed"
+            return False
+        return True
+
+    def _ensure(self):
+        if self._browser is None:
+            from camoufox.sync_api import Camoufox
+
+            self._ctx = Camoufox(headless=self.headless, geoip=True)
+            self._browser = self._ctx.__enter__()
+        return self._browser
+
+    def fetch_bytes(self, url: str, *, referer_url: str | None = None) -> bytes | None:
+        """The bytes at ``url``, or None. Never raises for an unreachable page."""
+        with self._lock:
+            try:
+                browser = self._ensure()
+                page = browser.new_page()
+            except Exception:  # noqa: BLE001 — no browser in this image, or launch failed
+                log.warning("browser-bytes: cannot start Camoufox for %s", url, exc_info=True)
+                self.close()
+                return None
+            captured: dict = {}
+
+            def _on_response(resp):
+                # the navigation's own response, not a sub-resource of the viewer
+                if resp.url.rstrip("/") == url.rstrip("/"):
+                    try:
+                        captured["status"] = resp.status
+                        captured["body"] = resp.body()
+                    except Exception:  # noqa: BLE001 — body already streamed away
+                        pass
+
+            try:
+                if referer_url:
+                    # clear the challenge on an ordinary page first; a direct hit on the
+                    # file is what gets refused
+                    page.goto(referer_url, wait_until="domcontentloaded",
+                              timeout=self.timeout_ms)
+                page.on("response", _on_response)
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+                except Exception:  # noqa: BLE001 — a download aborts the navigation
+                    pass
+                page.wait_for_timeout(2000)
+            except Exception:  # noqa: BLE001
+                log.warning("browser-bytes: navigation failed for %s", url)
+                return None
+            finally:
+                try:
+                    page.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            body = captured.get("body")
+            status = captured.get("status")
+            if not body or (status and status >= 400):
+                log.warning("browser-bytes: %s returned status=%s bytes=%s",
+                            url, status, len(body) if body else 0)
+                return None
+            return body
+
+    def close(self) -> None:
+        try:
+            if self._ctx is not None:
+                self._ctx.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        self._browser = self._ctx = None
 
 
 class StealthyFetcher:
@@ -279,6 +393,18 @@ _FETCHERS = {
     "httpx": HttpxFetcher, "stealth": StealthyFetcher,
     "playwright": PlaywrightFetcher, "scrapling-mcp": ScraplingMcpFetcher,
 }
+
+#: One browser for the whole process. Starting Camoufox costs seconds and a few hundred
+#: MB; adapters that need bytes share this rather than each launching their own.
+_BYTES_FETCHER: "BrowserBytesFetcher | None" = None
+
+
+def get_bytes_fetcher() -> "BrowserBytesFetcher":
+    """The shared bytes-capable browser fetcher (started on first real use)."""
+    global _BYTES_FETCHER
+    if _BYTES_FETCHER is None:
+        _BYTES_FETCHER = BrowserBytesFetcher()
+    return _BYTES_FETCHER
 
 
 def get_fetcher(

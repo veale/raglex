@@ -34,9 +34,28 @@ COPY schema ./schema
 # uv.lock, deliberately, in a commit.
 RUN uv export --frozen --no-emit-project \
         --extra web --extra import --extra postgres --extra scrape --extra ocr --extra bulk \
+        --extra browser \
         -o /tmp/requirements.txt \
     && uv pip install --system -r /tmp/requirements.txt \
     && uv pip install --system --no-deps .
+
+# The browser itself (~1.3 GB), in its own layer so it is fetched once and cached across
+# app-only rebuilds. It is what makes a Cloudflare-walled committee PDF readable at all:
+# every plain request for one answers 403, and so does an XHR from a browser that has
+# already cleared the challenge — only a real navigation returns the file.
+#
+# Its ANTI-FINGERPRINT PATCHES ARE IN THE BINARY, not the Python package, so this layer
+# is where "current anti-bot technology" actually lives. The weekly dependency workflow
+# (.github/workflows/update-antibot.yml) bumps the pins and rebuilds, which re-fetches
+# this — that, and not an unpinned install, is how it stays current.
+#
+# `|| true` on the deps step only: a missing optional font package must not fail the
+# build, but a missing BROWSER must, or the image silently ships unable to read Lords
+# reports and says so one skipped document at a time.
+RUN python -m playwright install-deps firefox || true
+RUN python -m camoufox fetch \
+    && python -c "import camoufox.sync_api" \
+    && du -sh /root/.cache/camoufox
 
 # Bundle the built UI; the API serves it when RAGLEX_FRONTEND_DIST points here.
 COPY --from=ui /ui/dist /app/frontend/dist

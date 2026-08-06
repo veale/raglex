@@ -1,0 +1,96 @@
+name: update-antibot
+
+# Keep the anti-bot stack current — deliberately, and only when it still works.
+#
+# Anti-bot evasion is an arms race: Cloudflare changes its checks, Camoufox ships new
+# fingerprint patches, and a stack that is six months old stops getting through. So this
+# has to track upstream closely. What it must NOT do is install "whatever released this
+# morning" at image-build time. That is how an unrelated mcp 2.0 release once produced an
+# image whose API crash-looped on import, which is why the Dockerfile builds from the
+# lockfile (see its comment).
+#
+# So: bump the pins HERE, run the suite, and only commit if it is green. The commit then
+# triggers the normal image build, which re-fetches the Camoufox binary — where the actual
+# fingerprint patches live. Latest anti-bot technology, arriving through a tested,
+# revertible commit rather than a surprise in production.
+#
+# The pairing is the thing to watch. camoufox declares `playwright<1.61`, and pip will
+# install camoufox 0.4.11 next to playwright 1.61.0 without complaint — a combination that
+# imports cleanly and then fails on first use with a Juggler protocol error. `uv lock
+# --upgrade-package` resolves them together, so that pair cannot be minted here.
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"       # Mondays 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Record current pins
+        id: before
+        run: |
+          echo "camoufox=$(uv export --frozen --no-emit-project --extra browser 2>/dev/null | grep -i '^camoufox==' || true)" >> "$GITHUB_OUTPUT"
+          echo "playwright=$(uv export --frozen --no-emit-project --extra browser 2>/dev/null | grep -i '^playwright==' || true)" >> "$GITHUB_OUTPUT"
+
+      - name: Upgrade the anti-bot packages together
+        run: |
+          uv lock --upgrade-package camoufox \
+                  --upgrade-package playwright \
+                  --upgrade-package scrapling
+
+      - name: Stop if nothing moved
+        id: changed
+        run: |
+          if git diff --quiet -- uv.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            uv export --frozen --no-emit-project --extra browser | grep -iE '^(camoufox|playwright|scrapling)==' || true
+          fi
+
+      - name: Install and prove the browser still drives
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          uv sync --all-extras
+          uv run python -m playwright install-deps firefox || true
+          uv run python -m camoufox fetch
+          # imports are not enough: the version mismatch this guards against imports fine
+          # and only fails when a page is actually opened.
+          uv run python - <<'PY'
+          from camoufox.sync_api import Camoufox
+          with Camoufox(headless=True) as b:
+              p = b.new_page()
+              p.goto("https://example.com", wait_until="domcontentloaded", timeout=60000)
+              assert "Example" in (p.title() or ""), p.title()
+              print("browser drives:", p.title())
+          PY
+
+      - name: Run the suite
+        if: steps.changed.outputs.changed == 'true'
+        run: uv run pytest tests/ -q --tb=short
+
+      - name: Commit the bump
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "Track the current anti-bot stack
+
+          Weekly upgrade of camoufox/playwright/scrapling, resolved together so the
+          camoufox<->playwright pairing stays valid. The suite passed and a real browser
+          opened a real page before this landed; the image rebuild that follows re-fetches
+          the Camoufox binary, which is where the fingerprint patches actually are.
+
+          was: ${{ steps.before.outputs.camoufox }} ${{ steps.before.outputs.playwright }}"
+          git push
