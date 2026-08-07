@@ -51,6 +51,8 @@ from .de_rii import DeRiiAdapter
 from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
+from .eu_ep_followups import EPFollowUpsAdapter
+from .eu_ep_resolutions import EPResolutionsAdapter
 from .eu_preparatory import EUPreparatoryAdapter
 from .eu_ombudsman import EUOmbudsmanAdapter
 from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
@@ -231,6 +233,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-legislation": UKLegislationAdapter,
     "eu-legislation": EULegislationAdapter,
     "eu-preparatory": EUPreparatoryAdapter,
+    "eu-ep-resolutions": EPResolutionsAdapter,
+    "eu-ep-followups": EPFollowUpsAdapter,
     "eu-ombudsman": EUOmbudsmanAdapter,
     "eu-edps-opinions": EDPSOpinionsAdapter,
     "eu-edps-investigations": EDPSInvestigationsAdapter,
@@ -920,6 +924,37 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("types", "Document families", "PC,DC,JC,SC,XC (default)"),
          SourceOption("years", "Year range", "2020-2026")),
         ("CELEX (52021PC0554)", "COM/SWD/SEC/JOIN document number"),
+    ),
+    "eu-ep-resolutions": SourceInfo(
+        "eu-ep-resolutions", "European Parliament resolutions and adopted texts",
+        "preparatory", "EU", False,
+        "Adopted texts of the European Parliament, discovered over CELLAR sector 5 and "
+        "read from the Parliament\u2019s own Open Data API where it holds them \u2014 which "
+        "is the only way to get a resolution before the Official Journal publishes it, "
+        "often a year after the vote. The default is the non-legislative (IP) family: "
+        "own-initiative and implementation resolutions, which comment on law already in "
+        "force. Coverage runs to 1979; text degrades with age (Formex from ~2007, HTML "
+        "1995\u20132006, PDF for parts of 1997\u20132004, metadata-only before ~1994). "
+        "Recitals and numbered operative paragraphs are citable segments, and each text "
+        "is aliased by CELEX, P8_TA(2017)0051 and T8-0051/2017 alike.",
+        (SourceOption("celex", "CELEX ids", "52017IP0051,52024AP0138"),
+         SourceOption("types", "Document families", "IP (default), AP, DP, BP, XP"),
+         SourceOption("years", "Year range", "1979-2026"),
+         SourceOption("use_ep_portal", "Prefer the Parliament\u2019s own XML",
+                      "true (default) \u2014 false to read CELLAR only")),
+        ("CELEX (52017IP0051)", "P8_TA(2017)0051", "T8-0051/2017"),
+    ),
+    "eu-ep-followups": SourceInfo(
+        "eu-ep-followups", "Commission follow-up to Parliament resolutions",
+        "preparatory", "EU", False,
+        "The Parliament\u2019s external-documents register \u2014 which holds one work type, "
+        "the Commission\u2019s formal reply to an adopted text, answering its numbered "
+        "paragraphs. Each is linked back to the resolution it answers. This register does "
+        "NOT carry EPRS studies or briefings; no endpoint of the Open Data API does. "
+        "Items are retained for the pairing but enter retrieval only when the grammars "
+        "recognise a legal citation in them.",
+        (),
+        ("EP external-document id (SP-2026-04-14-TA-10-2025-0343)",),
     ),
     "eu-ombudsman": SourceInfo(
         "eu-ombudsman", "European Ombudsman decisions", "guidance", "EU", False,
@@ -1654,6 +1689,10 @@ INCREMENTAL_MODE: dict[str, str] = {
     "sg-legislation": "full-walk", "sg-sl": "full-walk", "ca-federal": "full-walk",
     "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
+    # CELLAR enumeration is newest-first on work_date_document, so an incremental
+    # run stops at its cursor; the Parliament’s external-documents register offers
+    # neither a date filter nor a sort, so that one is honestly a full walk.
+    "eu-ep-resolutions": "early-stop", "eu-ep-followups": "full-walk",
     "au-tas": "full-walk", "au-vic": "full-walk", "au-sa": "server",
     "au-wa": "full-walk", "au-esafety-osa": "full-walk",
     "ie-legislation": "full-walk",

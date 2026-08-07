@@ -10,6 +10,7 @@ from . import (  # noqa: F401  (register on import)
     clml_xml,
     eisb_html,
     eisb_xml,
+    ep_resolution,
     eurlex_html,
     dila_xml,
     formex,

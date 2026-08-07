@@ -32,7 +32,14 @@ licence allows, cases and statutes exported from Westlaw or Lexis can be importe
 their neutral citation, their ECLI, or the report series they were printed in.
 
 For the European Union, RagLex takes Court of Justice case law and legislation through the
-CELLAR and EUR-Lex services, along with Commission preparatory and policy documents. Data
+CELLAR and EUR-Lex services, along with Commission preparatory and policy documents. The
+European Parliament's adopted texts are held back to the first directly elected Parliament
+in 1979 — chiefly the non-legislative resolutions, which read an instrument already in force
+and say at length how it is working. Recent ones come from the Parliament's own open-data
+service within days of the vote rather than waiting for the Official Journal, which can
+publish them a year late; each is held under its CELEX, its `P8_TA(2017)0051` reference and
+its `T8-0051/2017` form alike, with recitals and numbered paragraphs as citable units. The
+Commission's formal reply to each resolution is held beside it. Data
 protection and platform regulation are covered in some depth: the European Data Protection
 Board's guidelines and opinions, the one-stop-shop register of final decisions taken under
 Article 60, the Article 29 Working Party archive, the Digital Markets Act case register, and

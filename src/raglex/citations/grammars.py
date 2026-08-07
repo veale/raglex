@@ -631,6 +631,32 @@ register(Grammar(
     lambda m: (m.group(0).upper(), None, _celex_kind(m.group(0).upper())),
 ))
 
+
+# European Parliament adopted texts. Parliament cites its own resolutions as
+# "P9_TA(2024)0138"; the Official Journal and the Legislative Observatory print the same
+# document as "T9-0138/2024"; a Commission follow-up uses either. None of the three is a
+# CELEX, and the CELEX cannot be derived from them — its descriptor is AP for a
+# legislative resolution and IP for every other, which the Parliament's own reference
+# does not record. So the candidate is the P-form, which ``eu-ep-resolutions`` mints as
+# an alias on every text it stores; both spellings therefore reach the same node.
+def _ep_adopted_text(term: str, year: str, number: str) -> Normalised:
+    return f"P{int(term)}_TA({year}){int(number):04d}", None, "eu_instrument"
+
+
+register(Grammar(
+    "ep_adopted_text", "eu_instrument",
+    re.compile(r"\bP(\d{1,2})[_ ]TA(?:-PROV)?\s*\(\s*(\d{4})\s*\)\s*(\d{3,4})\b"),
+    lambda m: _ep_adopted_text(m.group(1), m.group(2), m.group(3)),
+))
+register(Grammar(
+    "ep_adopted_text_oj", "eu_instrument",
+    # Anchored on the "T" series letter and a 4-digit year so it cannot swallow a CJEU
+    # case number ("T-1/24" is a General Court case: two digits after the slash, and no
+    # four-digit item number before it).
+    re.compile(r"\bT(\d{1,2})-(\d{4})/(\d{4})\b"),
+    lambda m: _ep_adopted_text(m.group(1), m.group(3), m.group(2)),
+))
+
 # The pinpoint an EU short-name citation carries in FRONT of the instrument. Three things
 # it must reach, all of which were silently lost before — and lost badly, because a prefix
 # the pattern can't parse doesn't merely drop the pinpoint: the match degrades to a bare

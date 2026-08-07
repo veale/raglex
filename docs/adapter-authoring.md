@@ -118,6 +118,25 @@ at read/export time, preferring the latest applicable member that actually carri
 citation. Version discovery must not inflate user-facing mention counts merely by
 reproducing unchanged text.
 
+## One source, one structure — not one source, one parser
+
+A publisher's markup family is not a document type. CELLAR serves EU acts, Court
+judgments *and* Parliament resolutions as Formex, and the three have nothing structural
+in common: a resolution has no `ENACTING.TERMS` and no `ARTICLE`, so the act parser kept
+only its `ANNEX` and dropped the preamble, thirty-five recitals and sixty-eight operative
+paragraphs. Register a new format when the *structure* differs, and have the adapter pick
+it; do not widen an existing parser until it recognises two kinds of document.
+
+Where the same text is published in two markups by two services, classify on the feature
+that is stable across both. Parliament resolutions arrive as SDOCTA from the Parliament
+and as Formex `<GENERAL>` from the Official Journal, and neither distinguishes a recital
+from an operative paragraph by element — the 2017 drafting put lettered recitals in
+`<ACTION>` under `<DISPOSITIF>`, the 2025 drafting puts them in `<CONS>` under `<GRCONS>`.
+The **marker** (`–` / `A.` / `1.`) has meant the same thing in every year sampled, so both
+parsers read that and produce identical segments from unrelated XML. Test the two against
+one another: agreeing on 68 paragraphs and 35 recitals from independent sources is a
+stronger check than either fixture alone.
+
 Formex amendment quotations require the same structural care as annexes. Replacement
 text for another instrument may contain genuine nested `<ARTICLE>` elements under
 `<QUOT.S>`; retain that prose inside the outer amending Article, but never promote those
