@@ -108,14 +108,21 @@ class EPFollowUpsAdapter(BaseAdapter):
     # ---- discovery ---------------------------------------------------------------
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        """A full walk, and honestly declared as one.
+        """A full walk, and ``since`` is deliberately ignored.
 
         ``/external-documents`` takes neither a date filter nor a sort parameter — only
-        ``work-type``, ``offset`` and ``limit`` — so there is no newest-first cursor to
-        stop at and no server-side ``since``. The register is small (4,301 records at
-        the time of writing) and the response carries ``meta.total``, so the whole walk
-        is nine cheap requests with a determinate total; ``since`` is applied here
-        rather than pretended at the API."""
+        ``work-type``, ``offset`` and ``limit``. The register therefore has **no order**,
+        and every cursor mechanism in the pipeline assumes one: applying ``since`` here
+        drops rows from the middle of an offset-paged walk, and the backfill frontier
+        (which resumes a later backfill from the point a clean one reached, sound only
+        when the feed is newest-first) then cut the walk off entirely — a resumed
+        backfill discovered 4 records out of 4,301 and reported itself done.
+
+        So the walk is whole, every time, which is what ``full-walk`` in
+        ``INCREMENTAL_MODE`` promises. It costs nine cheap metadata requests and the
+        pipeline's held-check skips everything already stored; ``meta.total`` makes the
+        progress determinate.
+        """
         offset, pages, total = self.start_offset, 0, None
         while True:
             try:
@@ -133,8 +140,6 @@ class EPFollowUpsAdapter(BaseAdapter):
             if total is None:
                 total = int((payload.get("meta") or {}).get("total") or 0) or None
             for stub in rows:
-                if since and (stub.hints.get("watermark") or "") <= str(since)[:10]:
-                    continue
                 stub.hints["feed_total"] = total
                 stub.hints["resume_offset"] = offset
                 yield stub

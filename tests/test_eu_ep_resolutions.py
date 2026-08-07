@@ -415,9 +415,14 @@ def test_followup_discovery_stops_at_the_reported_total(monkeypatch):
     assert len(stubs) == 1 and stubs[0].hints["feed_total"] == 1
 
 
-def test_followup_discovery_applies_since_itself(monkeypatch):
-    """The register offers neither a date filter nor a sort, so ``since`` is honoured
-    here rather than pretended at the API."""
+def test_followup_discovery_ignores_since_because_the_register_has_no_order(monkeypatch):
+    """The register offers neither a date filter nor a sort, so nothing about a record's
+    position implies its date — and every cursor in the pipeline assumes otherwise.
+
+    Filtering on ``since`` here dropped rows from the middle of an offset-paged walk,
+    and the backfill frontier (sound only for a newest-first feed) then truncated it
+    outright: a resumed backfill discovered 4 of 4,301 records and called itself done.
+    The walk is whole every time, which is what ``full-walk`` promises."""
     ad = EPFollowUpsAdapter()
     payload = {"data": [
         {"id": "eli/dl/doc/SP-2020-01-01-TA-9-2019-0001", "document_date": "2020-01-01"},
@@ -425,7 +430,7 @@ def test_followup_discovery_applies_since_itself(monkeypatch):
         "meta": {"total": 2}}
     monkeypatch.setattr(ad._client, "get", lambda url, **kw: _Resp(b"{}", payload=payload))
     assert [s.hints["doc_id"] for s in ad.discover("2025-01-01")] == [
-        "SP-2026-04-14-TA-10-2025-0343"]
+        "SP-2020-01-01-TA-9-2019-0001", "SP-2026-04-14-TA-10-2025-0343"]
 
 
 # ---------------------------------------------------------------- registry
