@@ -9,6 +9,7 @@ from .extractors import (
     PlainTextExtractor,
     extract_bytes,
 )
+from .ocr import looks_unocrd, ocr_available, ocr_pdf, text_or_ocr
 
 __all__ = [
     "DEFAULT_PROVIDERS",
@@ -18,4 +19,8 @@ __all__ = [
     "PdfExtractor",
     "PlainTextExtractor",
     "extract_bytes",
+    "looks_unocrd",
+    "ocr_available",
+    "ocr_pdf",
+    "text_or_ocr",
 ]

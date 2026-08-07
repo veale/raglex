@@ -101,6 +101,10 @@ from .uk_ftt_ir import InformationRightsAdapter
 from .eu_digital_strategy import DigitalStrategyLibraryAdapter
 from .uk_judiciary import JudiciaryGuidanceAdapter
 from .uk_lawcom import LawCommissionReportsAdapter
+from .uk_parl_library import ParliamentLibraryAdapter
+from .scot_spice import SPICeBriefingsAdapter
+from .uk_ipco import IPCOPublicationsAdapter
+from .uk_isc import ISCReportsAdapter
 
 
 def _scrape_factory(recipe):
@@ -338,6 +342,14 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # UK Parliament — committee output and the written Q&A record
     "uk-parl-committees": UKCommitteePublicationsAdapter,
     "uk-parl-written-questions": UKWrittenQuestionsAdapter,
+    # …and the two Libraries' research, whose RSS carries the whole briefing
+    "uk-commons-library": lambda **kw: ParliamentLibraryAdapter(house="commons", **kw),
+    "uk-lords-library": lambda **kw: ParliamentLibraryAdapter(house="lords", **kw),
+    # The Scottish Parliament's research service
+    "scot-spice": SPICeBriefingsAdapter,
+    # UK investigatory-powers oversight: the Commissioner's office and the ISC
+    "uk-ipco": IPCOPublicationsAdapter,
+    "uk-isc": ISCReportsAdapter,
     "it-garante": GaranteGuidanceAdapter,
     "ie-tax-appeals": IrishTaxAppealsAdapter,
     "ie-revenue-tdm": IrishRevenueTDMAdapter,
@@ -685,7 +697,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     ),
     "uk-parl-committees": SourceInfo(
         "uk-parl-committees", "UK parliamentary committee publications",
-        "preparatory", "UK", False,
+        "preparatory", "GB", False,
         "Select-committee reports, government responses, special reports, correspondence "
         "and scrutiny evidence from the committees API. Keyed on the paper number a "
         "report is actually cited by (HC 69 (2026-27), HL Paper 45 (2026-27)) rather "
@@ -699,7 +711,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     ),
     "uk-parl-written-questions": SourceInfo(
         "uk-parl-written-questions", "UK parliamentary written questions and answers",
-        "preparatory", "UK", False,
+        "preparatory", "GB", False,
         "A written question and the Government's answer stored as one document, keyed on "
         "the UIN. Incremental runs ask what has been ANSWERED since the cursor, so an "
         "answer to a question tabled months earlier arrives without anything being "
@@ -710,6 +722,103 @@ SOURCE_INFO: dict[str, SourceInfo] = {
                       "Earliest answer date a backfill walks from — the API returns "
                       "nothing at all for a query with no date bound", "2014-01-01")),
         ("UIN", "HL2522"),
+    ),
+    "uk-commons-library": SourceInfo(
+        "uk-commons-library", "House of Commons Library research briefings",
+        "preparatory", "GB", False,
+        "Every briefing the Commons Library has published, back to a 1993 research "
+        "paper. The Library's RSS carries the COMPLETE briefing in content:encoded — "
+        "same headings, same text as the web page — so one request yields ten finished "
+        "documents, and ?paged=N walks the feed to the beginning of the archive "
+        "(~1,200 pages). Everything on parliament.uk sits behind a Cloudflare "
+        "challenge, so the feed is read through the browser tier as bytes rather than "
+        "as rendered HTML, which would parse RSS as HTML and mangle every item. A "
+        "briefing published before the Library typeset in HTML arrives as an abstract "
+        "only; those fall back to the researchbriefings PDF, and the oldest of those "
+        "are scans and are OCR'd. Published under the Open Parliament Licence.",
+        (SourceOption("start_page", "First feed page to walk", "1"),
+         SourceOption("max_feed_pages", "How many feed pages a backfill may walk",
+                      "2000 (the Commons feed ends at 1,200)"),
+         SourceOption("slugs", "Fetch exactly these briefings",
+                      "cbp-10974,sn02811,rp94-22"),
+         SourceOption("include_pdf",
+                      "Fall back to the PDF when the feed carries only an abstract",
+                      "true"),
+         SourceOption("ocr", "OCR a PDF with no text layer", "true")),
+        ("briefing number", "CBP-10974", "SN02811", "RP94-22"),
+    ),
+    "uk-lords-library": SourceInfo(
+        "uk-lords-library", "House of Lords Library research briefings",
+        "preparatory", "GB", False,
+        "The Lords Library's in-focus briefings and debate packs, read the same way as "
+        "the Commons Library's: the whole briefing is in the RSS, and ?paged=N walks "
+        "back to 1998 over ~281 pages. The Lords feed also carries the author. Older "
+        "LLN and LIF notes are PDF-only and fall back to the researchbriefings file "
+        "host. Published under the Open Parliament Licence.",
+        (SourceOption("start_page", "First feed page to walk", "1"),
+         SourceOption("max_feed_pages", "How many feed pages a backfill may walk",
+                      "2000 (the Lords feed ends at 281)"),
+         SourceOption("slugs", "Fetch exactly these briefings", "lln-2019-0042"),
+         SourceOption("include_pdf",
+                      "Fall back to the PDF when the feed carries only an abstract",
+                      "true"),
+         SourceOption("ocr", "OCR a PDF with no text layer", "true")),
+        ("briefing number", "LLN-2019-0042", "LIF-2024-0001"),
+    ),
+    "scot-spice": SourceInfo(
+        "scot-spice", "SPICe briefings (Scottish Parliament research)",
+        "preparatory", "GB", False,
+        "The Scottish Parliament Information Centre's research briefings — 750 of them, "
+        "back to April 2017, which is where the Parliament's own index starts. The "
+        "search DEFAULTS to a few-week window and silently ignores dtDateFrom/dtDateTo, "
+        "so the adapter reads the date presets off the form on every run and picks the "
+        "widest; the preset's value changes daily because its label ends at today, and "
+        "a hard-coded one stops working overnight. Text comes from each briefing's own "
+        "PDF ({page}/pdf), which is the complete document — the HTML view splits it "
+        "across several paginated pages. Documents are held with jurisdiction gb-sct.",
+        (SourceOption("date_select",
+                      "Override the dateSelect preset (blank = widest on the form)",
+                      "{guid}|Wednesday, May 12, 1999|Friday, August 7, 2026"),
+         SourceOption("subject", "Subject facet filter", "Justice, Health, Transport…"),
+         SourceOption("slugs", "Fetch exactly these briefings", "sb-2650,sb-2649"),
+         SourceOption("page_size", "Results per listing page (max 50)", "50"),
+         SourceOption("ocr", "OCR a PDF with no text layer", "true")),
+        ("briefing slug", "sb-2650", "SB 26-50"),
+    ),
+    "uk-ipco": SourceInfo(
+        "uk-ipco", "IPCO publications (Investigatory Powers Commissioner)",
+        "guidance", "GB", False,
+        "Annual reports, inspection reports, consultations and correspondence from the "
+        "Investigatory Powers Commissioner's Office, including the IOCCO and OSC "
+        "material IPCO inherited. Enumerated from post-sitemap.xml, whose lastmod is "
+        "the only place on the site that records a REVISION — a reissued annual report "
+        "keeps its URL and its published date, so a listing crawl cannot see it. The "
+        "sitemap is one request for the whole archive (222 URLs), so an incremental "
+        "run is that request filtered on lastmod. The text is in the attached PDFs; "
+        "scanned legacy reports are OCR'd. No default instrument is declared: the "
+        "register spans the IPA 2016, RIPA 2000 and Part III of the Police Act 1997.",
+        (SourceOption("include_news", "Also hold /news/ posts", "true"),
+         SourceOption("sections",
+                      "Only these sitemap sections",
+                      "annual-report,iocco-publication,osc-publication,correspondence"),
+         SourceOption("ocr", "OCR a PDF with no text layer", "true")),
+        ("publication slug", "annual-report-2024"),
+    ),
+    "uk-isc": SourceInfo(
+        "uk-isc", "ISC reports (Intelligence and Security Committee)",
+        "guidance", "GB", False,
+        "Everything the ISC has published — 215 PDFs from the 1995 Annual Report "
+        "onwards — all of which live on one /reports/ page. That page must be read as "
+        "MARKUP, not through a browser: rendered, the collapsed per-Parliament "
+        "accordions are dropped and only four PDFs survive. The publications post type "
+        "is not addressable (every sitemap entry 302s to a 404), so the PDF is the "
+        "document; each is titled by its own link text, which is what separates a "
+        "report from its press notice. Pre-2000 Command Papers are scans with no text "
+        "layer and are OCR'd — slow, and the right trade at this size.",
+        (SourceOption("include_press", "Also hold press notices as documents", "true"),
+         SourceOption("ocr", "OCR a PDF with no text layer", "true"),
+         SourceOption("max_ocr_pages", "Page ceiling for one OCR pass", "200")),
+        ("report PDF slug", "1995-isc-ar"),
     ),
     "it-garante": SourceInfo(
         "it-garante", "Garante per la protezione dei dati personali (Italy)",
@@ -1698,6 +1807,15 @@ INCREMENTAL_MODE: dict[str, str] = {
     "be-gba-decisions": "early-stop",
     # both filter server-side on a date and sort newest-first
     "uk-parl-committees": "server", "uk-parl-written-questions": "server",
+    # Both Library feeds are ordered newest-first by post date, so an incremental run
+    # stops within a page or two. It is early-stop rather than server-side: the feed
+    # takes no date parameter, only ?paged=N.
+    "uk-commons-library": "early-stop", "uk-lords-library": "early-stop",
+    # The SPICe listing sorts newest-first and reports an authoritative result count.
+    "scot-spice": "early-stop",
+    # One sitemap / one page for the whole archive, then filtered — cheap, and there is
+    # no newest-first order to stop at.
+    "uk-ipco": "full-walk", "uk-isc": "full-walk",
     "it-agcm": "early-stop",
     "dma-cases": "full-walk", "ofcom-osa": "full-walk", "ofcom-enforcement": "full-walk",
     "eu-ombudsman": "full-walk",

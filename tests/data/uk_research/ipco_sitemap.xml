@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?><?xml-stylesheet type="text/xsl" href="//www.ipco.org.uk/wp-content/plugins/wordpress-seo/css/main-sitemap.xsl"?>
+<urlset xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1" xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd http://www.google.com/schemas/sitemap-image/1.1 http://www.google.com/schemas/sitemap-image/1.1/sitemap-image.xsd" xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+	<url>
+		<loc>https://www.ipco.org.uk/news/update-on-the-review-of-the-consolidated-guidance/</loc>
+		<lastmod>2020-11-20T09:15:21+00:00</lastmod>
+	</url><url>
+		<loc>https://www.ipco.org.uk/publication/annual-report/ipco-annual-report-2018/</loc>
+		<lastmod>2021-03-11T13:35:13+00:00</lastmod>
+	</url><url>
+		<loc>https://www.ipco.org.uk/publication/annual-report/ipco-annual-report-2017/</loc>
+		<lastmod>2021-03-11T13:35:41+00:00</lastmod>
+	</url><url>
+		<loc>https://www.ipco.org.uk/publication/consultation/investigatory-powers-commissioners-invitation-for-submissions-on-the-proportionality-of-bulk-powers-to-wider-organisations-may-2018/</loc>
+		<lastmod>2021-03-11T16:48:46+00:00</lastmod>
+	</url></urlset>

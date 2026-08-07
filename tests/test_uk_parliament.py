@@ -30,7 +30,10 @@ from raglex.adapters.uk_parl_written_questions import (
 def test_registered(key, kind):
     assert key in ADAPTERS and key in SOURCE_INFO
     assert SOURCE_INFO[key].kind == kind
-    assert SOURCE_INFO[key].jurisdiction == "UK"
+    # "GB", not "UK": only codes declared in JURISDICTION_LABELS group correctly, and an
+    # undeclared one becomes its own top-level heading — these two sat under a second
+    # "UK" group of their own, apart from every other United Kingdom source.
+    assert SOURCE_INFO[key].jurisdiction == "GB"
     # both filter server-side on a date, which is what makes keep-current one request
     assert INCREMENTAL_MODE[key] == "server"
     assert ADAPTERS[key]().source == key

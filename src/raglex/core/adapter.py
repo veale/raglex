@@ -48,3 +48,27 @@ class BaseAdapter:
 
     def fetch(self, stub: Stub) -> Record | None:
         raise NotImplementedError
+
+
+def option_flag(value, default: bool) -> bool:
+    """A ``SourceOption`` boolean as the user may actually have sent it.
+
+    Every option reaches a constructor as whatever the REST/MCP caller put in the form,
+    so a checkbox arrives as ``True``, ``"true"``, ``"on"``, ``"0"`` — or as ``None``
+    when it was left alone. ``bool(None)`` is False, which silently turns a default-on
+    option off for anyone who did not touch it; ``None`` must mean "the default"."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def option_int(value, default: int) -> int:
+    """A ``SourceOption`` integer, with ``None``/blank/unparseable meaning the default."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default

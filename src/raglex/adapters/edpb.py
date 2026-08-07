@@ -278,39 +278,11 @@ def parse_oss_register(html: str) -> tuple[list[OSSDecision], int]:
 
 
 # ── OCR fallback for scanned register PDFs ───────────────────────────────────
-def looks_unocrd(text: str | None, page_count: int) -> bool:
-    """A PDF with essentially no extractable text across its pages is an image-only
-    scan. The threshold is deliberately low — a stamped cover page can carry a few
-    dozen chars of metadata text while the decision body is still all image."""
-    if page_count <= 0:
-        return False
-    return len((text or "").strip()) < max(120, 40 * page_count)
-
-
-def ocr_pdf(data: bytes, *, dpi: int = 200, max_pages: int = 80) -> str | None:
-    """Tesseract the PDF's pages (rasterised via PyMuPDF). Returns None when the OCR
-    stack (pytesseract + the tesseract binary + Pillow) isn't available — the caller
-    records ``needs_ocr`` instead of failing the harvest."""
-    try:
-        import io
-
-        import fitz  # PyMuPDF
-        import pytesseract
-        from PIL import Image
-
-        pytesseract.get_tesseract_version()
-    except Exception:  # noqa: BLE001 — any missing piece → no OCR available
-        return None
-    try:
-        doc = fitz.open(stream=data, filetype="pdf")
-        pages = []
-        for page in doc[:max_pages]:
-            pix = page.get_pixmap(dpi=dpi)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            pages.append(pytesseract.image_to_string(img))
-        return "\n\n".join(pages).strip() or None
-    except Exception:  # noqa: BLE001 — a corrupt scan must not kill the batch
-        return None
+# A scanned PDF is not an EDPB problem — it turned up here first, which is why three
+# unrelated adapters were importing OCR from a Belgian data-protection module. The
+# implementation now lives in ``raglex.extraction.ocr``; these names stay so existing
+# importers (uk_lawcom, uk_ftt_ir, …) keep working.
+from ..extraction.ocr import looks_unocrd, ocr_pdf  # noqa: E402
 
 
 class EDPBAdapter(BaseAdapter):

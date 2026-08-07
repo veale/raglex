@@ -53,6 +53,55 @@ silently paging for minutes without yielding an item. The shared pipeline report
 fetch/store progress for each yielded `Stub`; accurate `Stub.hints.feed_total` and
 `resume_offset` make that progress determinate and resumable.
 
+## Getting the page, and getting all of it
+
+Reach for the browser tier only when a plain request actually fails, and check what the
+browser gives back. Two sources here fail in opposite directions:
+
+- The ISC's `/reports/` page **loses 211 of its 215 PDFs when rendered**, because its
+  per-Parliament accordions are collapsed and dropped from the rendered body. As markup
+  it is complete. It refuses a bare client on headers alone, so a browser `User-Agent`
+  *with* `Accept`/`Accept-Language` is the whole fix — the browser tier would be a
+  downgrade.
+- The Library RSS feeds are behind Cloudflare and need the browser, but a browser handed
+  an RSS URL **parses it as HTML**, where `<link>` is a void element: every item's link
+  swallows the rest of the item. Take the navigation response's *bytes*
+  (`BrowserBytesFetcher.fetch_bytes`) and parse real XML.
+
+Blocks of repeated, identically-nested markup must be found by **splitting on their
+opening marker**, never by matching a closing one. Every terminator that works for the
+blocks in the middle has nothing to stop on for the last, which silently costs the page
+its final record — 106 of 107 on the ISC page, and the same bug once cost every Think
+Tank document its geographical areas.
+
+Classify a heading by **which element it was**, not by what its text looks like. The
+ISC's Transcripts accordions are single years ("2015"); read as section headings rather
+than as periods, the previous Parliament stayed in force beneath them and sixty
+transcripts were filed under a Parliament that ended in 1997.
+
+A `SourceOption` arrives as whatever the form sent, including `None` for anything the
+user never touched. `bool(None)` is `False`, which turns a default-on option off for
+everybody who left it alone; use `core.adapter.option_flag` / `option_int`, which treat
+blank as "the default".
+
+A search whose date filter is a fixed set of presets may bind the range **server-side**
+to an opaque key. The Scottish Parliament's does: the same key carrying different dates
+returns zero, `dtDateFrom`/`dtDateTo` alone are accepted and ignored (returning an
+unfiltered set that looks filtered), and the archive-wide preset's value changes daily
+because its label ends at today. Read the option list off the form on every run.
+
+## Scanned PDFs
+
+`raglex.extraction.ocr` is the OCR tier: `text_or_ocr` returns
+`(text, needs_ocr, page_spans, engine)` and is what a PDF adapter should call instead of
+`extract_bytes` directly. It escalates only when the born-digital parse came back empty,
+and it **drops the page spans when it does** — they described the parse that was just
+replaced, so keeping them anchors citations at offsets that no longer exist.
+
+`needs_ocr` must mean "this could not be read", never "this was a scan". A successful OCR
+pass is not a review item; a missing OCR stack is. The ISC's 1995 annual report extracts
+zero characters born-digital and OCRs to real prose, and must enter the corpus as text.
+
 ## Provision lineage
 
 Do not use citation aliases to say that two statutory provisions perform a similar
