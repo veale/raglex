@@ -1,15 +1,39 @@
 name: build-image
 
 # Build the RagLex app image (API + MCP + scheduler share one image, differing only
-# by command) and publish it to the GitHub Container Registry. Built for BOTH
-# linux/amd64 and linux/arm64 so it runs on x86 servers AND on Apple-Silicon /
-# Asahi (aarch64) hosts.
+# by command) and publish it to the GitHub Container Registry.
+#
+# **linux/amd64 only by default**, because that is what the deployment is: the live
+# instance runs on an Intel iMac, and every ordinary push was paying for a second
+# architecture nothing pulled.
+#
+# It was not free. The runner is x86, so the arm64 half was built under QEMU, and the
+# emulation tax is not subtle — measured on the same job (build 5c4dbb8, step totals):
+#
+#   playwright install-deps firefox   16.7s native   142.2s emulated   (8.5x)
+#   camoufox fetch                    17.3s native   108.9s emulated   (6.3x)
+#   uv export + install                7.6s native    31.2s emulated   (4.1x)
+#   ------------------------------------------------------------------
+#   attributed total                    59s            302s
+#
+# So ~5 of every 9 minutes went on an image for a machine that does not exist here.
+#
+# The capability is kept, not deleted: run the workflow manually with `platforms` set
+# to `linux/amd64,linux/arm64` to publish a multi-arch manifest for an Apple-Silicon or
+# Asahi (aarch64) host. Native arm64 runners (`ubuntu-24.04-arm`, free for public repos)
+# only became available in January 2025 — when this was written, QEMU was the only way
+# to get arm64 at all, which is why it was built this way.
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build (e.g. linux/amd64,linux/arm64)"
+        required: false
+        default: linux/amd64
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/raglex
@@ -23,7 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU (for cross-arch arm64 build)
+      # Only needed for the manual multi-arch run; 7s, and skipped on an ordinary push.
+      - name: Set up QEMU (only when a cross-arch build was asked for)
+        if: contains(inputs.platforms, 'arm')
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
@@ -51,7 +77,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # `inputs.platforms` is empty on a push event, so that falls through to amd64.
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
