@@ -323,6 +323,31 @@ def test_the_pre_2007_route_recovers_the_title_and_reference_from_the_page_itsel
     assert "T6-0005/2005" in rec.extra["aliases"]
 
 
+def test_a_resolution_is_dated_because_its_celex_cannot_date_it(monkeypatch):
+    """``effective_date``'s identifier rung needs a ``/YYYY/`` path segment, which a
+    CELEX has not got — so without an explicit decision_date every resolution in the
+    corpus sorted and filtered as undated."""
+    from raglex.storage.catalogue import effective_date
+
+    assert effective_date(None, None, "52025IP0256") == (None, "none")
+
+    ad = EPResolutionsAdapter(celex="52025IP0256", use_ep_portal="false")
+    monkeypatch.setattr(ad, "_fetch_formex", lambda url, lang="en": formex_zip())
+    rec = ad.fetch(Stub(stable_id="52025IP0256",
+                        hints={"title": None, "ta_reference": None,
+                               "watermark": "2025-10-23"}))
+    assert rec.decision_date.isoformat() == "2025-10-23"
+
+
+def test_a_resolution_with_no_cellar_date_is_dated_from_its_own_title(monkeypatch):
+    ad = EPResolutionsAdapter(celex="52017IP0051", use_ep_portal="false")
+    monkeypatch.setattr(ad, "_fetch_formex", lambda url, lang="en": formex_zip())
+    rec = ad.fetch(Stub(stable_id="52017IP0051",
+                        hints={"title": None, "ta_reference": None, "watermark": None}))
+    # "European Parliament resolution of 16 February 2017 with recommendations …"
+    assert rec.decision_date.isoformat() == "2017-02-16"
+
+
 def test_discovery_carries_a_resumable_offset_and_the_parliament_reference(monkeypatch):
     ad = EPResolutionsAdapter(page_size=2, start_offset=4)
     pages = [

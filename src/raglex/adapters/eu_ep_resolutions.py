@@ -38,6 +38,7 @@ resolve a citation *to*, and the OJ reference is on it for a human to follow.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Iterator
 
 from ..core.errors import FetchError
@@ -131,6 +132,38 @@ def title_from_text(text: str | None) -> str | None:
             if len(" ".join(parts)) >= 250:
                 break
         return " ".join(parts)[:300].strip(" .,;")
+    return None
+
+
+#: "European Parliament resolution of 18 December 2025 on …" — the vote date, printed
+#: in the title of every resolution in every rendition.
+_DATE_IN_TITLE = re.compile(
+    r"\bof\s+(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\s+(\d{4})\b", re.I)
+_MONTHS = {m: i for i, m in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"), start=1)}
+
+
+def resolution_date(watermark: str | None, title: str | None) -> date | None:
+    """The date the resolution was adopted.
+
+    It matters more here than the ladder in ``effective_date`` can supply: a CELEX like
+    ``52025IP0256`` carries a year but no ``/YYYY/`` path segment, so the identifier rung
+    never fires and every resolution sorted as undated. CELLAR's ``work_date_document``
+    is the vote date; where it is missing the title says it in words, because that is how
+    a resolution is cited — "resolution of 18 December 2025"."""
+    if watermark:
+        try:
+            return date.fromisoformat(str(watermark)[:10])
+        except ValueError:
+            pass
+    m = _DATE_IN_TITLE.search(title or "")
+    if m:
+        try:
+            return date(int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1)))
+        except ValueError:
+            return None
     return None
 
 
@@ -369,6 +402,7 @@ SELECT DISTINCT ?title ?docid ?date WHERE {{
         # CELLAR records no work_id_document for the older resolutions; the OJ prints the
         # reference in the body, and it is what a citation to them uses.
         ta = ta or metadata.get("ep_document_id") or ta_from_text(text)
+        adopted = resolution_date(stub.hints.get("watermark"), title)
 
         extra: dict = {
             "celex": celex,
@@ -409,12 +443,14 @@ SELECT DISTINCT ?title ?docid ?date WHERE {{
             return Record(
                 source=self.source, stable_id=celex, doc_type=DocType.PREPARATORY,
                 title=title, language="en", source_language="en",
+                decision_date=adopted,
                 landing_url=landing, raw_bytes=celex.encode(), raw_ext="txt",
                 relations=relations, extracted_via=ExtractedVia.STRUCTURED, extra=extra)
 
         return Record(
             source=self.source, stable_id=celex, doc_type=DocType.PREPARATORY,
             title=title, language="en", source_language="en",
+            decision_date=adopted,
             landing_url=landing, raw_bytes=raw, raw_ext=raw_ext,
             text=parsed.text, segments=list(parsed.segments or []),
             relations=relations, extracted_via=ExtractedVia.STRUCTURED,
