@@ -4,6 +4,7 @@ a published edition onto a newer consolidation. Network-free."""
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import date
@@ -34,8 +35,11 @@ class _Row(dict):
         return dict.keys(self)
 
 
-def _v(stable_id, has_text=1):
-    return _Row(stable_id=stable_id, has_text=has_text)
+def _v(stable_id, has_text=1, as_at=None):
+    row = _Row(stable_id=stable_id, has_text=has_text)
+    if as_at is not None:
+        row["meta_json"] = json.dumps({"currency": {"as_at": as_at}})
+    return row
 
 
 # ── the collapse ─────────────────────────────────────────────────────────────
@@ -63,6 +67,39 @@ def test_collapse_does_not_jump_to_a_future_consolidation():
     assert [r["stable_id"] for r in got] == ["x/1@2024-01-01"]
 
 
+def test_a_uk_act_is_not_displaced_by_its_own_point_in_time_snapshot():
+    """The two version families are shaped differently and treating them alike published
+    the wrong text.
+
+    An EU base act is the ORIGINAL and each dated expression is a later amended state,
+    so newest wins. A UK base row is the REVISED text legislation.gov.uk serves today —
+    RIPA 2000 is current to 2026-04-07 — and a dated sibling is a snapshot fetched on
+    purpose so an old judgment reads against the law as it then stood. Ranking the base
+    as undated made the snapshot win: a static edition of RIPA published the text as at
+    1 June 2010, and the search box offered the snapshot in place of the Act."""
+    rows = [_v("ukpga/2000/23@2010-06-01", as_at="2010-06-01"),
+            _v("ukpga/2000/23", as_at="2026-04-07")]
+    got = Catalogue.collapse_version_rows(rows, on_date="2026-08-07")
+    assert [r["stable_id"] for r in got] == ["ukpga/2000/23"]
+
+
+def test_a_base_act_that_claims_no_currency_still_loses_to_its_consolidation():
+    """The EU case the newest-wins rule was written for: sector-3 acts carry no
+    ``currency.as_at``, so they must keep falling back to "undated, therefore oldest"."""
+    rows = [_v("02002L0058-20091219", as_at="2009-12-19"), _v("02002L0058")]
+    got = Catalogue.collapse_version_rows(rows, on_date="2026-08-07")
+    assert [r["stable_id"] for r in got] == ["02002L0058-20091219"]
+
+
+def test_a_current_base_act_still_loses_to_a_newer_snapshot():
+    """The claim is a date, not a trump card — a snapshot later than what the base says
+    it is current to is still the better text."""
+    rows = [_v("ukpga/2000/23", as_at="2020-01-01"),
+            _v("ukpga/2000/23@2024-06-01", as_at="2024-06-01")]
+    got = Catalogue.collapse_version_rows(rows, on_date="2026-08-07")
+    assert [r["stable_id"] for r in got] == ["ukpga/2000/23@2024-06-01"]
+
+
 def test_collapse_falls_back_to_the_base_act():
     rows = [_v("ukpga/2017/30"), _v("ukpga/2017/30@2030-01-01")]
     got = Catalogue.collapse_version_rows(rows, on_date="2026-08-05")
@@ -82,11 +119,13 @@ def _facade() -> Facade:
     return Facade(Config.from_env())
 
 
-def _law(f: Facade, stable_id: str, title: str, when: date, *, cited: int = 0) -> None:
+def _law(f: Facade, stable_id: str, title: str, when: date, *, cited: int = 0,
+         as_at: str | None = None) -> None:
     rec = Record(source="uk-legislation", stable_id=stable_id,
                  doc_type=DocType.LEGISLATION, title=title, decision_date=when,
                  language="en", text=f"{title} body text", raw_bytes=stable_id.encode(),
-                 raw_ext="xml", extracted_via=ExtractedVia.STRUCTURED)
+                 raw_ext="xml", extracted_via=ExtractedVia.STRUCTURED,
+                 extra={"currency": {"as_at": as_at}} if as_at else {})
     rec.ensure_payload_hash()
     with f._open() as (cat, _rs, ts):
         cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
@@ -157,6 +196,44 @@ def test_latest_readable_version_follows_an_id_shaped_series():
         # already current → nothing to do
         assert cat.latest_readable_version(
             "european/regulation/2016/0679@2024-01-01") is None
+
+
+def test_a_build_repoints_a_uk_edition_off_a_stale_point_in_time_snapshot():
+    """The RIPA edition was configured as ``ukpga/2000/23@2010-06-01`` because that is
+    what the picker offered, and every build published the law as it stood in 2010. Now
+    that the Act outranks its own snapshot, the next build moves the edition back onto
+    the Act and records the move — no re-configuration needed."""
+    from raglex.static_bundle import _repoint_to_current_versions
+
+    f = _facade()
+    _law(f, "ukpga/2000/23", "Regulation of Investigatory Powers Act 2000",
+         date(2000, 7, 28), as_at="2026-04-07")
+    _law(f, "ukpga/2000/23@2010-06-01",
+         "Regulation of Investigatory Powers Act 2000 (as at 2010-06-01)",
+         date(2000, 7, 28), as_at="2010-06-01")
+    items = [{"stable_id": "ukpga/2000/23@2010-06-01", "short": "RIPA",
+              "title": "Regulation of Investigatory Powers Act 2000 (as at 2010-06-01)"}]
+    moves = _repoint_to_current_versions(f, items)
+    assert [m["to"] for m in moves] == ["ukpga/2000/23"]
+    assert items[0]["stable_id"] == "ukpga/2000/23"
+    assert items[0]["short"] == "RIPA"
+    # idempotent: the Act is where it should be, so a second build moves nothing
+    assert _repoint_to_current_versions(f, items) == []
+
+
+def test_an_assimilated_edition_still_follows_its_dated_expression():
+    """The counter-case, and the reason the rule reads the base's own claim rather than
+    just preferring bases: the assimilated series' base row carries no ``currency``, so
+    its dated expressions remain the text to publish."""
+    from raglex.static_bundle import _repoint_to_current_versions
+
+    f = _facade()
+    _law(f, "european/regulation/2016/0679", "UK GDPR", date(2016, 4, 27))
+    _law(f, "european/regulation/2016/0679@2026-03-01", "UK GDPR (as at 2026-03-01)",
+         date(2026, 3, 1), as_at="2026-03-01")
+    items = [{"stable_id": "european/regulation/2016/0679", "title": "UK GDPR"}]
+    moves = _repoint_to_current_versions(f, items)
+    assert [m["to"] for m in moves] == ["european/regulation/2016/0679@2026-03-01"]
 
 
 def test_a_build_repoints_an_edition_onto_the_newer_consolidation():

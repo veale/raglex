@@ -6616,12 +6616,48 @@ class Catalogue:
                 best[base] = row
         return [best[b] for b in sorted(best, key=lambda b: rank[b])]
 
+    @staticmethod
+    def _declared_as_at(row) -> str | None:
+        """The date a row says its text is current to (``currency.as_at``).
+
+        Only meaningful for a base row: a dated expression carries the same date in its
+        id, and :meth:`version_base_and_date` already has it from there."""
+        try:
+            meta = row["meta_json"]
+        except (IndexError, KeyError, TypeError):
+            return None
+        if not meta:
+            return None
+        try:
+            currency = (json.loads(meta) or {}).get("currency") or {}
+        except (TypeError, ValueError):
+            return None
+        as_at = currency.get("as_at")
+        return str(as_at)[:10] if as_at else None
+
     @classmethod
     def _better_version(cls, row, incumbent, cutoff: str) -> bool:
-        """Is ``row`` the one to show, against the family's current pick?"""
+        """Is ``row`` the one to show, against the family's current pick?
+
+        The version families are not all shaped alike, and treating them alike published
+        the wrong text. For an EU act the base is the ORIGINAL and each dated expression
+        is a later amended state, so newest wins. For UK legislation the base row IS the
+        revised text legislation.gov.uk serves today — RIPA 2000 is current to
+        2026-04-07 — and a dated sibling is a point-in-time snapshot fetched on purpose
+        so an old judgment can be read against the law as it then stood. Ranking a base
+        row as if it had no date at all made every such snapshot beat it: adding RIPA to
+        a static edition published the text as at 1 June 2010, sixteen years stale, and
+        the search box showed the snapshot in place of the Act.
+
+        So a base row is dated by what it CLAIMS — ``currency.as_at`` — and only falls
+        back to "undated, therefore oldest" when it claims nothing, which is exactly the
+        EU sector-3 case the newest-wins rule was written for.
+        """
         def key(r):
             _base, version = cls.version_base_and_date(str(r["stable_id"] or ""))
             has_text = bool(r["has_text"]) if "has_text" in r.keys() else True
+            if version is None:
+                version = cls._declared_as_at(r)
             # A future-dated snapshot is held deliberately but is not the law today, so
             # it ranks below every applicable one — and below the base act.
             applicable = version is None or version <= cutoff

@@ -1,5 +1,6 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, CanliiBudget, Hit, ImportBatchResult, ImportItem, ImportOptions, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, StaticBundleWebhook, UsCaselawBudget } from "./api";
+import { AcMore, useAutosuggest } from "./autosuggest";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
@@ -927,20 +928,13 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
   { filters: Filters; setQuery: (q: string) => void; onSearch: () => void; open: (id: string) => void;
     semantic: boolean; setSemantic: (v: boolean) => void }) {
   const q = filters.query || "";
-  const [sugg, setSugg] = useState<any[]>([]);
-  const [hi, setHi] = useState(-1);
   const [openList, setOpenList] = useState(false);
-  useEffect(() => {
-    let live = true;
-    if (q.trim().length < 2 || semantic) { setSugg([]); return; }
-    const t = setTimeout(async () => {
-      try {
-        const r = await api.searchCorpus({ query: q.trim(), limit: "8", facets: "false" });
-        if (live) { setSugg(r.items || []); setHi(-1); setOpenList(true); }
-      } catch { /* ignore */ }
-    }, 110);
-    return () => { live = false; clearTimeout(t); };
-  }, [q, semantic]);
+  const ac = useAutosuggest<any>(
+    q,
+    (limit) => api.searchCorpus({ query: q.trim(), limit: String(limit), facets: "false" })
+      .then((r: any) => r.items || []),
+    { batch: 8, delay: 110, enabled: !semantic });
+  useEffect(() => { if (ac.items.length) setOpenList(true); }, [ac.items]);
   const pick = (o: any) => { if (o) { open(o.stable_id); setOpenList(false); } };
   const search = () => { setOpenList(false); onSearch(); };   // running a search dismisses the dropdown
   return (
@@ -948,24 +942,32 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
       <div className="row ac" style={{ position: "relative" }}>
         <input autoFocus value={q} placeholder="Search cases, statutes… (any words, any order)"
           onChange={(e) => { setQuery(e.target.value); }}
-          onFocus={() => sugg.length && setOpenList(true)}
+          onFocus={() => ac.items.length && setOpenList(true)}
           onBlur={() => setTimeout(() => setOpenList(false), 150)}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, sugg.length - 1)); }
-            else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, -1)); }
-            else if (e.key === "Enter") { if (hi >= 0 && openList) pick(sugg[hi]); else search(); }
-            else if (e.key === "Escape") setOpenList(false);
+            if (e.key === "Escape") { setOpenList(false); return; }
+            if (ac.onNavKey(e)) return;
+            if (e.key === "Enter") {
+              if (!openList) { search(); return; }
+              // the "show more" row is a list member, so Enter on it fetches rather
+              // than running the search and throwing the dropdown away
+              if (ac.onMoreRow) { e.preventDefault(); ac.showMore(); }
+              else if (ac.highlighted) pick(ac.highlighted);
+              else search();
+            }
           }} />
         <button className="primary" style={{ flex: "0 0 auto" }} onClick={search}>Search</button>
-        {openList && sugg.length > 0 && (
+        {openList && ac.items.length > 0 && (
           <div className="ac-list">
-            {sugg.map((o, i) => (
-              <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
-                onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
+            {ac.items.map((o, i) => (
+              <div key={o.stable_id} className={`ac-opt${i === ac.hi ? " hi" : ""}`}
+                onMouseEnter={() => ac.setHi(i)} onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
                 <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
                 <span className="muted"> · {o.source}/{docTypeLabel(o.doc_type)}{o.court ? " · " + o.court : ""}</span>
               </div>
             ))}
+            {ac.hasMore && <AcMore onClick={ac.showMore} loading={ac.loading}
+              hi={ac.onMoreRow} onHover={() => ac.setHi(ac.items.length)} />}
           </div>
         )}
       </div>
@@ -2206,33 +2208,28 @@ export function DocAutocomplete({ initial, onPick, placeholder, autoFocus }:
   { initial?: string; onPick: (id: string, title: string) => void; placeholder?: string;
     autoFocus?: boolean }) {
   const [q, setQ] = useState(initial || "");
-  const [opts, setOpts] = useState<any[]>([]);
-  const [hi, setHi] = useState(0);
-  useEffect(() => {
-    let live = true;
-    if (q.trim().length < 2) { setOpts([]); return; }
-    const t = setTimeout(async () => {
-      try {
-        const r = await api.listDocuments({ query: q.trim(), limit: "8" });
-        if (live) { setOpts(r); setHi(0); }
-      } catch { /* ignore */ }
-    }, 160);
-    return () => { live = false; clearTimeout(t); };
-  }, [q]);
+  const ac = useAutosuggest<any>(
+    q, (limit) => api.listDocuments({ query: q.trim(), limit: String(limit) }),
+    { batch: 8, delay: 160 });
+  const opts = ac.items;
   const pick = (o: any) => o && onPick(o.stable_id, o.title || o.stable_id);
   return (
     <div className="ac">
       <input autoFocus={!!autoFocus} value={q} placeholder={placeholder || "find a case or act by name…"}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, opts.length - 1)); }
-          else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)); }
-          else if (e.key === "Enter") { e.preventDefault(); pick(opts[hi]); }
+          if (ac.onNavKey(e)) return;
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (ac.onMoreRow) ac.showMore();
+            // no highlight yet means "the obvious one" — the first row, as before
+            else pick(ac.highlighted ?? opts[0]);
+          }
         }} />
       {opts.length > 0 && <div className="ac-list">
         {opts.map((o, i) => (
-          <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
-            onMouseEnter={() => setHi(i)}
+          <div key={o.stable_id} className={`ac-opt${i === ac.hi ? " hi" : ""}`}
+            onMouseEnter={() => ac.setHi(i)}
             onMouseDown={(e) => { e.preventDefault(); pick(o); }}>
             {/* jurisdiction token — the search spans every jurisdiction, so a UK case
                 citing an Irish Act shows an "Ireland" tag right in the dropdown */}
@@ -2242,6 +2239,8 @@ export function DocAutocomplete({ initial, onPick, placeholder, autoFocus }:
             <span className="muted"> {o.court_label || `${o.source}/${o.doc_type}`} · {o.stable_id}</span>
           </div>
         ))}
+        {ac.hasMore && <AcMore onClick={ac.showMore} loading={ac.loading}
+          hi={ac.onMoreRow} onHover={() => ac.setHi(opts.length)} />}
       </div>}
     </div>
   );

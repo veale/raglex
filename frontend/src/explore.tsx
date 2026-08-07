@@ -8,6 +8,7 @@
 // always states exactly what the panel is showing. PageRank ranks throughout.
 import { Fragment, useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { AcMore, useAutosuggest } from "./autosuggest";
 import { DocLink } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, ResultRow, dimsFromFreetext,
          yearsFromFreetext } from "./results";
@@ -475,8 +476,6 @@ export function ExploreView({ open, goSearch }:
   const [shape, setShape] = useState<any | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [q, setQ] = useState("");
-  const [sugg, setSugg] = useState<any[]>([]);
-  const [hi, setHi] = useState(-1);
   useEffect(() => {
     let live = true;
     const load = () => api.corpusShape().then((s) => {
@@ -488,17 +487,12 @@ export function ExploreView({ open, goSearch }:
     return () => { live = false; };
   }, []);
   // instant find-a-document autocomplete on the hero search
-  useEffect(() => {
-    let live = true;
-    if (q.trim().length < 2) { setSugg([]); return; }
-    const t = setTimeout(async () => {
-      try {
-        const r = await api.searchCorpus({ query: q.trim(), limit: "6", facets: "false" });
-        if (live) { setSugg(r.items || []); setHi(-1); }
-      } catch { /* ignore */ }
-    }, 120);
-    return () => { live = false; clearTimeout(t); };
-  }, [q]);
+  const ac = useAutosuggest<any>(
+    q,
+    (limit) => api.searchCorpus({ query: q.trim(), limit: String(limit), facets: "false" })
+      .then((r: any) => r.items || []),
+    { batch: 6, delay: 120 });
+  const sugg = ac.items;
 
   const rows: ShapeRow[] = shape?.jurisdictions || [];
   return (
@@ -511,18 +505,21 @@ export function ExploreView({ open, goSearch }:
           <input value={q} autoFocus placeholder="Find a case, act or concept…  (⌘K jumps straight to a citation)"
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "ArrowDown") { e.preventDefault(); setHi((h) => Math.min(h + 1, sugg.length - 1)); }
-              else if (e.key === "ArrowUp") { e.preventDefault(); setHi((h) => Math.max(h - 1, -1)); }
-              else if (e.key === "Enter") {
-                if (hi >= 0 && sugg[hi]) open(sugg[hi].stable_id); else goSearch(q);
-              } else if (e.key === "Escape") setSugg([]);
+              if (ac.onNavKey(e)) return;
+              if (e.key === "Enter") {
+                // "show more" is a row of the list, so Enter on it fetches the next
+                // batch instead of abandoning the dropdown for a full search
+                if (ac.onMoreRow) { e.preventDefault(); ac.showMore(); }
+                else if (ac.highlighted) open(ac.highlighted.stable_id);
+                else goSearch(q);
+              }
             }} />
           <button className="primary" onClick={() => goSearch(q)}>Search</button>
           {sugg.length > 0 && (
             <div className="ac-list">
               {sugg.map((o, i) => (
-                <div key={o.stable_id} className={`ac-opt${i === hi ? " hi" : ""}`}
-                  onMouseEnter={() => setHi(i)} onMouseDown={(e) => { e.preventDefault(); open(o.stable_id); }}>
+                <div key={o.stable_id} className={`ac-opt${i === ac.hi ? " hi" : ""}`}
+                  onMouseEnter={() => ac.setHi(i)} onMouseDown={(e) => { e.preventDefault(); open(o.stable_id); }}>
                   <FlagIcon jurisdiction={o.jurisdiction} opacity={0.85} />
                   <span className="ac-opt-text">
                     <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
@@ -530,6 +527,8 @@ export function ExploreView({ open, goSearch }:
                   </span>
                 </div>
               ))}
+              {ac.hasMore && <AcMore onClick={ac.showMore} loading={ac.loading}
+                hi={ac.onMoreRow} onHover={() => ac.setHi(sugg.length)} />}
             </div>
           )}
         </div>
