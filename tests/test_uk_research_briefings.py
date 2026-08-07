@@ -217,8 +217,56 @@ def test_a_feed_page_past_the_end_stops_discovery():
     assert uk_parl_library.parse_feed(empty, host=COMMONS["host"]) == []
 
 
-def test_markup_that_will_not_parse_stops_rather_than_yielding_junk():
-    assert uk_parl_library.parse_feed(b"<html><body>not xml", host=COMMONS["host"]) == []
+def test_bytes_that_are_not_a_feed_are_an_error_not_an_empty_archive():
+    """A browser timeout, a challenge page, a truncated body — none of them mean the
+    archive ended. Returning [] for these is how a 1,200-page walk stops at page 700
+    wearing a success."""
+    for bad in (b"", b"<html><body>not xml", b"<html><body>Just a moment...</body></html>"):
+        with pytest.raises(uk_parl_library.FeedUnreadable):
+            uk_parl_library.parse_feed(bad, host=COMMONS["host"])
+
+
+def test_a_feed_page_that_misses_is_retried_before_being_believed(monkeypatch):
+    adapter = ADAPTERS["uk-commons-library"]()
+    calls = {"n": 0}
+    good = (DATA / "commons_library_feed.xml").read_bytes()
+
+    def flaky(url, referer=None):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else good      # one hiccup, then fine
+
+    monkeypatch.setattr(adapter, "_bytes", flaky)
+    rows = adapter._feed_page(1, first=True)
+    assert rows, "a single miss must not read as the end of the archive"
+    assert calls["n"] == 2
+
+
+def test_a_first_page_that_never_answers_fails_the_run(monkeypatch):
+    """A run that read nothing must fail, not record "discovered 0 — done" over twelve
+    thousand briefings it never looked at."""
+    from raglex.core.errors import FetchError
+
+    adapter = ADAPTERS["uk-commons-library"]()
+    monkeypatch.setattr(adapter, "_bytes", lambda url, referer=None: None)
+    with pytest.raises(FetchError):
+        list(adapter.discover(None))
+
+
+def test_a_later_page_that_never_answers_stops_without_claiming_the_end(monkeypatch):
+    """By then there is partial work and resume_offset says where to continue."""
+    adapter = ADAPTERS["uk-commons-library"]()
+    good = (DATA / "commons_library_feed.xml").read_bytes()
+    seen: list[str] = []
+
+    def fake(url, referer=None):
+        seen.append(url)
+        return good if "paged" not in url else None
+
+    monkeypatch.setattr(adapter, "_bytes", fake)
+    stubs = list(adapter.discover(None))
+    assert stubs, "page 1 succeeded and its briefings must survive"
+    # page 2 was attempted twice (the retry) and then abandoned, not treated as the end
+    assert sum(1 for u in seen if "paged=2" in u) == adapter.FEED_ATTEMPTS
 
 
 def test_discovery_stops_at_the_end_of_the_archive(monkeypatch):

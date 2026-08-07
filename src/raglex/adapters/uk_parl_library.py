@@ -42,6 +42,7 @@ from datetime import date, datetime, timezone
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.errors import FetchError
 from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
 
 log = logging.getLogger("raglex.adapters.uk_parl_library")
@@ -96,6 +97,12 @@ _ATOM = {"content": "http://purl.org/rss/1.0/modules/content/",
          "dc": "http://purl.org/dc/elements/1.1/"}
 
 
+class FeedUnreadable(Exception):
+    """The bytes were not a feed — a timeout, a challenge page, a truncated body.
+
+    Distinct from a feed carrying no items, which is the archive's real end."""
+
+
 def _clean(fragment: str) -> str:
     import html as _html
 
@@ -139,16 +146,18 @@ def parse_pub_date(value: str | None) -> date | None:
 def parse_feed(raw: bytes, *, host: str) -> list[dict]:
     """One feed page → its items, in feed order (newest first).
 
-    Returns ``[]`` for a well-formed feed with no items, which is how the end of the
-    archive announces itself, and also for markup that will not parse at all — the
-    caller cannot tell those apart and must not, because both mean "stop here"."""
+    Raises :class:`FeedUnreadable` when the bytes are not a feed at all. That is a
+    different fact from a feed with no ``<item>`` in it, and conflating them is how a
+    1,200-page walk ends at page 700 wearing a success — one browser timeout, an empty
+    list, and discovery decides it has reached 1993."""
     if not raw:
-        return []
+        raise FeedUnreadable("no bytes")
     try:
         root = ET.fromstring(raw)
-    except ET.ParseError:
-        log.warning("uk-parl-library: feed page did not parse as XML (%d bytes)", len(raw))
-        return []
+    except ET.ParseError as exc:
+        raise FeedUnreadable(f"not XML ({len(raw)} bytes)") from exc
+    if root.find(".//channel") is None:
+        raise FeedUnreadable("no <channel>; this is not the feed")
     out: list[dict] = []
     for item in root.iter("item"):
         link = canonical_url((item.findtext("link") or "").strip(), host)
@@ -356,6 +365,30 @@ class ParliamentLibraryAdapter(BaseAdapter):
         found a 404 and reported the briefing as unavailable."""
         return [f"{self.host}/research-briefings/{slug}/", f"{self.host}/{slug}/"]
 
+    #: One feed page is one browser navigation through a Cloudflare challenge, and those
+    #: miss occasionally. A single retry is the difference between losing one page and
+    #: losing the five hundred below it.
+    FEED_ATTEMPTS = 2
+
+    def _feed_page(self, page: int, *, first: bool) -> list[dict] | None:
+        """One feed page's items, ``[]`` at the end of the archive, ``None`` if
+        unreadable. A refused FIRST page raises, because a run that read nothing must
+        fail rather than record "discovered 0 — done" over twelve thousand briefings."""
+        url = self.feed_page_url(page)
+        last = ""
+        for attempt in range(self.FEED_ATTEMPTS):
+            try:
+                return parse_feed(self._bytes(url) or b"", host=self.host)
+            except FeedUnreadable as exc:
+                last = str(exc)
+                log.warning("%s: feed page %d unreadable (%s), attempt %d/%d",
+                            self.source, page, last, attempt + 1, self.FEED_ATTEMPTS)
+        if first:
+            raise FetchError(
+                f"{self.source}: the feed did not answer at page {page} ({last})",
+                transient=True)
+        return None
+
     # ---- discovery -----------------------------------------------------------------
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
@@ -369,8 +402,13 @@ class ParliamentLibraryAdapter(BaseAdapter):
         seen: set[str] = set()
         walked = 0
         for page in range(self.start_page, self.start_page + self.max_feed_pages):
-            raw = self._bytes(self.feed_page_url(page))
-            rows = parse_feed(raw or b"", host=self.host)
+            rows = self._feed_page(page, first=page == self.start_page)
+            if rows is None:
+                # Unreadable after a retry, and not the first page: there IS partial work
+                # and ``resume_offset`` says where to continue, so stop loudly rather
+                # than pretending the archive ended here.
+                log.warning("%s: giving up at feed page %d; resume from there", self.source, page)
+                return
             if not rows:
                 return          # a feed page with no <item> IS the end of the archive
             for row in rows:
