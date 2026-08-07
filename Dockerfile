@@ -20,9 +20,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
+
+# ── Layer order is the build's performance contract ───────────────────────────
+# Everything from here to `COPY src` depends ONLY on pyproject.toml + uv.lock, so an
+# ordinary code change reuses all of it. That is not how this was written: `COPY src`
+# used to sit ABOVE the dependency install, which put the app's own source in the cache
+# key for every layer below it — so a one-line edit to a Python file re-ran the
+# dependency install, the Playwright system deps AND the 1.3 GB Camoufox fetch. Measured
+# on build 5c4dbb8 (a source-only change), those three ran for 7.6s + 16.7s + 17.3s on
+# native amd64 and 31.2s + 142.2s + 108.9s emulated, every single push. The comment
+# below already claimed the browser was "fetched once and cached across app-only
+# rebuilds"; the intent was right and the ordering silently defeated it.
 COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-COPY schema ./schema
+
 # Install with web + import + postgres + scrape + ocr + bulk extras (FastAPI, MCP, pypdf,
 # psycopg, BeautifulSoup — bs4 is needed by the EUR-Lex HTML and BWB parsers).
 #
@@ -32,22 +42,27 @@ COPY schema ./schema
 # import — from a commit that changed nothing about MCP. The lock is what the tests run
 # against, so this makes the image the same thing. Updating a dependency now means updating
 # uv.lock, deliberately, in a commit.
+#
+# `--no-emit-project` is what lets this run before the source exists: it exports the
+# THIRD-PARTY requirements only, and needs nothing but the manifest and the lock.
 RUN uv export --frozen --no-emit-project \
         --extra web --extra import --extra postgres --extra scrape --extra ocr --extra bulk \
         --extra browser \
         -o /tmp/requirements.txt \
-    && uv pip install --system -r /tmp/requirements.txt \
-    && uv pip install --system --no-deps .
+    && uv pip install --system -r /tmp/requirements.txt
 
 # The browser itself (~1.3 GB), in its own layer so it is fetched once and cached across
-# app-only rebuilds. It is what makes a Cloudflare-walled committee PDF readable at all:
-# every plain request for one answers 403, and so does an XHR from a browser that has
-# already cleared the challenge — only a real navigation returns the file.
+# app-only rebuilds — which, with `COPY src` now below it, is finally true. It is what
+# makes a Cloudflare-walled committee PDF readable at all: every plain request for one
+# answers 403, and so does an XHR from a browser that has already cleared the challenge —
+# only a real navigation returns the file.
 #
 # Its ANTI-FINGERPRINT PATCHES ARE IN THE BINARY, not the Python package, so this layer
 # is where "current anti-bot technology" actually lives. The weekly dependency workflow
 # (.github/workflows/update-antibot.yml) bumps the pins and rebuilds, which re-fetches
-# this — that, and not an unpinned install, is how it stays current.
+# this — that, and not an unpinned install, is how it stays current. Note that it stays
+# current for exactly the right reason: the bump lands in uv.lock, which is in the cache
+# key for this layer, so a pin change still re-fetches while a code change does not.
 #
 # `|| true` on the deps step only: a missing optional font package must not fail the
 # build, but a missing BROWSER must, or the image silently ships unable to read Lords
@@ -56,6 +71,13 @@ RUN python -m playwright install-deps firefox || true
 RUN python -m camoufox fetch \
     && python -c "import camoufox.sync_api" \
     && du -sh /root/.cache/camoufox
+
+# ── From here down is the only part a code change rebuilds ────────────────────
+COPY src ./src
+COPY schema ./schema
+# The project itself, without deps: they are already installed above from the same lock,
+# so resolving again here could only disagree with it.
+RUN uv pip install --system --no-deps .
 
 # Bundle the built UI; the API serves it when RAGLEX_FRONTEND_DIST points here.
 COPY --from=ui /ui/dist /app/frontend/dist
