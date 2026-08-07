@@ -52,6 +52,7 @@ from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
 from .eu_ep_followups import EPFollowUpsAdapter
+from .eu_ep_thinktank import EPThinkTankAdapter
 from .eu_ep_resolutions import EPResolutionsAdapter
 from .eu_preparatory import EUPreparatoryAdapter
 from .eu_ombudsman import EUOmbudsmanAdapter
@@ -235,6 +236,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "eu-preparatory": EUPreparatoryAdapter,
     "eu-ep-resolutions": EPResolutionsAdapter,
     "eu-ep-followups": EPFollowUpsAdapter,
+    "eu-ep-thinktank": EPThinkTankAdapter,
     "eu-ombudsman": EUOmbudsmanAdapter,
     "eu-edps-opinions": EDPSOpinionsAdapter,
     "eu-edps-investigations": EDPSInvestigationsAdapter,
@@ -955,6 +957,25 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "recognise a legal citation in them.",
         (),
         ("EP external-document id (SP-2026-04-14-TA-10-2025-0343)",),
+    ),
+    "eu-ep-thinktank": SourceInfo(
+        "eu-ep-thinktank", "European Parliament research (EPRS, policy departments)",
+        "guidance", "EU", False,
+        "EPRS briefings, policy-department studies, in-depth analyses and the Fact Sheets "
+        "on the European Union \u2014 the Parliament\u2019s own research, which no API "
+        "serves. Read from the Think Tank\u2019s advanced search, windowed by date back to "
+        "1989 and paged to exhaustion within each window. Text comes from the published "
+        "JATS or Fact-Sheet XML where there is one (sections and endnotes preserved) and "
+        "from the PDF otherwise. Each document carries its publication type, authors "
+        "(internal and commissioned), policy areas, EuroVoc keywords and geographical "
+        "areas, each with the facet code the Think Tank itself filters by. Published "
+        "under CC-BY 4.0.",
+        (SourceOption("years", "Year range", "1989-2026"),
+         SourceOption("window_days", "Days per search window", "blank = calendar months"),
+         SourceOption("document_ids", "Fetch exactly these",
+                      "EPRS_BRI(2026)789356,IPOL_STU(2015)510012"),
+         SourceOption("language", "Language of the rendition", "en (default)")),
+        ("Think Tank document id (EPRS_BRI(2026)789356)", "Fact Sheet id (04A_FT(2017)N51055)"),
     ),
     "eu-ombudsman": SourceInfo(
         "eu-ombudsman", "European Ombudsman decisions", "guidance", "EU", False,
@@ -1693,6 +1714,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     # run stops at its cursor; the Parliament’s external-documents register offers
     # neither a date filter nor a sort, so that one is honestly a full walk.
     "eu-ep-resolutions": "early-stop", "eu-ep-followups": "full-walk",
+    # date-windowed newest-first, so an incremental run stops in the first
+    # window or two; a backfill walks every month back to 1989.
+    "eu-ep-thinktank": "early-stop",
     "au-tas": "full-walk", "au-vic": "full-walk", "au-sa": "server",
     "au-wa": "full-walk", "au-esafety-osa": "full-walk",
     "ie-legislation": "full-walk",
