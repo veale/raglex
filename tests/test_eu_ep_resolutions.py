@@ -404,6 +404,33 @@ def test_followup_fetch_writes_the_edge_towards_the_resolution(monkeypatch):
         ("related_to", "P10_TA(2025)0343")]
 
 
+def test_a_refused_first_page_is_an_error_not_an_empty_register(monkeypatch):
+    """The service answers pressure with a 404 or an empty page, never a 429. Returning
+    quietly recorded "discovered 0 — done" over a register of 4,301 records it had not
+    read, which is the same lie as a truncated walk wearing a success."""
+    from raglex.core.errors import FetchError
+
+    ad = EPFollowUpsAdapter()
+
+    def refuse(url, **kw):
+        raise FetchError("HTTP 404", transient=True)
+
+    monkeypatch.setattr(ad._client, "get", refuse)
+    with pytest.raises(FetchError):
+        list(ad.discover(None))
+
+    # …and its quiet form: 200 with no rows while meta still claims thousands
+    monkeypatch.setattr(ad._client, "get",
+                        lambda url, **kw: _Resp(b"{}", payload={"data": [], "meta": {"total": 4301}}))
+    with pytest.raises(FetchError):
+        list(ad.discover(None))
+
+    # a genuinely empty register is not an error
+    monkeypatch.setattr(ad._client, "get",
+                        lambda url, **kw: _Resp(b"{}", payload={"data": [], "meta": {"total": 0}}))
+    assert list(ad.discover(None)) == []
+
+
 def test_followup_discovery_stops_at_the_reported_total(monkeypatch):
     ad = EPFollowUpsAdapter()
     payload = {"data": [{"id": "eli/dl/doc/SP-2026-04-14-TA-10-2025-0343",

@@ -132,10 +132,29 @@ class EPFollowUpsAdapter(BaseAdapter):
                             "offset": offset},
                     headers={"Accept": "application/ld+json"})
                 payload = resp.json() if (resp.content or b"").strip() else {}
-            except (FetchError, ValueError):
+            except (FetchError, ValueError) as exc:
+                # Swallowing this made a throttled run indistinguishable from a finished
+                # one: the service answers pressure with a 404 or an empty page rather
+                # than a 429, discovery returned quietly, and the job recorded
+                # "discovered 0 — done" over a register of 4,301 it had not read. A feed
+                # that did not answer is not a feed with nothing in it. Later pages still
+                # stop, because by then there IS partial work and ``resume_offset`` says
+                # where to continue.
+                if pages == 0:
+                    raise FetchError(
+                        f"{self.source}: external-documents did not answer at offset "
+                        f"{offset} ({exc})", transient=True) from exc
                 return
             rows = followup_stubs(payload)
             if not rows:
+                # Same trap in its quiet form — a 200 carrying an empty ``data`` while
+                # ``meta.total`` still claims thousands.
+                claimed = int((payload.get("meta") or {}).get("total") or 0)
+                if pages == 0 and claimed:
+                    raise FetchError(
+                        f"{self.source}: external-documents returned no rows but claims "
+                        f"{claimed:,} records — the service is refusing, not empty",
+                        transient=True)
                 return
             if total is None:
                 total = int((payload.get("meta") or {}).get("total") or 0) or None
