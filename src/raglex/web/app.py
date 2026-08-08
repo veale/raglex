@@ -1029,6 +1029,15 @@ def create_app(config: Config | None = None) -> FastAPI:
         params = {k: (payload or {})[k] for k in ("source", "dry_run") if k in (payload or {})}
         return _start_job("repair-de-renditions", "fold duplicate German renditions", params)
 
+    @app.post("/jobs/recase-titles")
+    def job_recase_titles_ep(payload: dict = Body(default={})) -> dict:
+        """Re-case a register's SHOUTY case names — HUDOC publishes every docname in
+        upper case. Only upper-case tokens move; the register's own spelling is kept in
+        the document's metadata. ``dry_run`` counts and samples."""
+        params = {k: (payload or {})[k] for k in ("source", "dry_run") if k in (payload or {})}
+        label = f"re-case {params.get('source', 'echr')} titles"
+        return _start_job("recase-titles", label, params)
+
     @app.post("/jobs/repair-eu-repeals")
     def job_repair_eu_repeals_ep(payload: dict = Body(default={})) -> dict:
         """Re-ask CELLAR which of an EU act's stored "repeals" edges were only

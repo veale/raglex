@@ -7319,6 +7319,64 @@ class Facade:
                     st["repaired"] += 1
         return st
 
+    def recase_shouty_titles(self, *, source: str = "echr", dry_run: bool = False,
+                             on_progress=None, cancel_check=None) -> dict:
+        """Re-case the upper-case case names a register publishes — HUDOC ships every
+        ``docname`` shouting, which is 37,635 of the corpus's 38,191 Strasbourg titles.
+
+        Only the SHOUTY tokens move (see ``core.case_title``); a token that already
+        carries a lower-case letter is left byte-for-byte, so the human-written half of a
+        HUDOC docname — "(Judgment : Violation of Article 6 …)", "[Armenian Translation]
+        by the COE …" — survives untouched.
+
+        Reversible by construction: the register's own spelling is already kept in the
+        document's metadata (``docname`` for HUDOC), and where it is not, this records it
+        as ``title_original`` before writing. ``curate=False`` — a system re-casing is not
+        a human correction and must not claim to be one.
+
+        Idempotent, so a re-run is a no-op and it is safe behind the import path that now
+        cases new documents on the way in."""
+        from .core.case_title import titlecase_case_name
+
+        st = {"scanned": 0, "recased": 0, "unchanged": 0}
+        samples: list[dict] = []
+        with self._open() as (cat, _rs, _ts):
+            rows = cat.conn.execute(
+                "SELECT stable_id, title, meta_json FROM documents "
+                "WHERE source = ? AND title IS NOT NULL AND title <> ''",
+                (source,)).fetchall()
+            total = len(rows)
+            for row in rows:
+                if cancel_check and cancel_check():
+                    break
+                st["scanned"] += 1
+                original = row["title"]
+                recased = titlecase_case_name(original)
+                if not recased or recased == original:
+                    st["unchanged"] += 1
+                    continue
+                st["recased"] += 1
+                if len(samples) < 25:
+                    samples.append({"id": row["stable_id"], "from": original,
+                                    "to": recased})
+                if dry_run:
+                    continue
+                try:
+                    meta = json.loads(row["meta_json"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                # Keep the register's own spelling if the adapter didn't already.
+                if not meta.get("docname") and not meta.get("title_original"):
+                    meta["title_original"] = original
+                    cat.set_document_meta(row["stable_id"], meta, commit=False)
+                cat.update_document_fields(row["stable_id"], {"title": recased},
+                                           curate=False)
+                if st["recased"] % 500 == 0:
+                    _progress(on_progress, stage=f"re-casing {source} titles",
+                              done=st["scanned"], total=total)
+        self._invalidate_caches()
+        return {**st, "source": source, "dry_run": dry_run, "sample": samples}
+
     def repair_de_duplicate_renditions(self, *, source: str = "de-neuris",
                                        dry_run: bool = False,
                                        on_progress=None, cancel_check=None) -> dict:

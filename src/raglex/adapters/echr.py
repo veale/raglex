@@ -27,6 +27,7 @@ from bs4 import BeautifulSoup
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
+from ..core.case_title import titlecase_case_name
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..core.segmentation import assemble
 
@@ -453,7 +454,8 @@ class ECHRAdapter(BaseAdapter):
             stable_id=stub.stable_id,
             ecli=ecli,
             doc_type=DocType.JUDGMENT,
-            title=stub.title,
+            # HUDOC ships docname in upper case; the raw form stays in extra["docname"]
+            title=titlecase_case_name(stub.title),
             court="echr",
             decision_date=dec_date,
             language=lang,
