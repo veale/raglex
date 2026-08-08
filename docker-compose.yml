@@ -22,6 +22,15 @@ services:
       RAGLEX_DATA_DIR: /data
       # Use the Postgres spine; omit to fall back to SQLite at /data/catalogue.sqlite
       RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
+      # PISTE (Légifrance + Judilibre). An app is issued FOUR values: an API key/secret
+      # pair and an OAuth client id/secret pair. Judilibre takes either the key as
+      # KeyId or an OAuth bearer; Légifrance is OAuth only. Without them the French
+      # API sources degrade silently to nothing, which is exactly how they spent their
+      # first months here.
+      PISTE_KEY_ID: ${PISTE_KEY_ID:-}
+      PISTE_API_SECRET: ${PISTE_API_SECRET:-}
+      PISTE_CLIENT_ID: ${PISTE_CLIENT_ID:-}
+      PISTE_CLIENT_SECRET: ${PISTE_CLIENT_SECRET:-}
       # OPENROUTER_API_KEY: ...  # optional: env overrides the settings file
 
   # The MCP server is served by raglex-api at http://localhost:8000/mcp (same origin) —
@@ -40,6 +49,15 @@ services:
     environment:
       RAGLEX_DATA_DIR: /data
       RAGLEX_DB_URL: postgresql://postgres:raglex@db:5432/raglex
+      # PISTE (Légifrance + Judilibre). An app is issued FOUR values: an API key/secret
+      # pair and an OAuth client id/secret pair. Judilibre takes either the key as
+      # KeyId or an OAuth bearer; Légifrance is OAuth only. Without them the French
+      # API sources degrade silently to nothing, which is exactly how they spent their
+      # first months here.
+      PISTE_KEY_ID: ${PISTE_KEY_ID:-}
+      PISTE_API_SECRET: ${PISTE_API_SECRET:-}
+      PISTE_CLIENT_ID: ${PISTE_CLIENT_ID:-}
+      PISTE_CLIENT_SECRET: ${PISTE_CLIENT_SECRET:-}
       PYTHONUNBUFFERED: "1"      # so scheduler tick logs stream to `docker compose logs`
     restart: unless-stopped
 
