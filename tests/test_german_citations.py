@@ -321,3 +321,35 @@ def test_pre_lisbon_ec_treaty_keeps_its_own_work():
     old abbreviation must cluster on the EC Treaty's own consolidated CELEX."""
     assert [c.candidate_id for c in _de("Art. 81 EG", "de_eu_article")] == ["12002E"]
     assert [c.candidate_id for c in _de("Artikel 95 EGV", "de_eu_article")] == ["12002E"]
+
+
+def test_repair_folds_a_same_register_copy_once_that_register_supplies_an_ecli(
+        tmp_path, monkeypatch):
+    """The reason NeuRIS forked the corpus has since gone away — the beta answered
+    `ecli: null` and now populates it — so a decision held as de/<documentNumber> comes
+    back ECLI-keyed and lands beside its own older copy. Both carry `de-neuris`, and a
+    rule that only ever compared different registers could not see it."""
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config.from_env())
+    docket = case_alias("BGH", "VII ZR 128/25")
+    with f._open() as (cat, _rs, ts):
+        for sid, ecli in (("de/KORE601272026", None),
+                          ("ECLI:DE:BGH:2026:220726BVIIZR128.25.0",
+                           "ECLI:DE:BGH:2026:220726BVIIZR128.25.0")):
+            rec = Record(source="de-neuris", stable_id=sid, ecli=ecli,
+                         doc_type=DocType.JUDGMENT, title="BGH VII ZR 128/25",
+                         court="BGH", text=f"text {sid}", raw_bytes=sid.encode(),
+                         extracted_via=ExtractedVia.STRUCTURED,
+                         extra={"aliases": [docket]})
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        cat.put_alias(docket.casefold(), "de/KORE601272026", source="adapter-alias")
+
+    res = f.repair_de_duplicate_renditions()
+    assert res["duplicates"] == 1 and res["documents_deleted"] == 1
+    with f._open() as (cat, _rs, _ts):
+        assert cat.get_document("de/KORE601272026") is None
+        assert cat.find_document_id(docket) == "ECLI:DE:BGH:2026:220726BVIIZR128.25.0"

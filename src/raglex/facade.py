@@ -7358,13 +7358,21 @@ class Facade:
             return keys
 
         with self._open() as (cat, _rs, _ts):
-            # The originals, keyed by docket: every German document from ANOTHER register.
-            # The alias TABLE can't answer this — it holds one row per key, and the copy
-            # has already taken it; the question is which document also *claims* the key.
+            # The originals, keyed by docket: every German document from another
+            # register — OR from this one, once it has an ECLI. The alias TABLE can't
+            # answer this — it holds one row per key, and the copy has already taken it;
+            # the question is which document also *claims* the key.
+            #
+            # The same-source rung matters because the reason NeuRIS forked the corpus
+            # has since gone away: the beta answered `ecli: null` and now populates it,
+            # so a decision held as de/<documentNumber> comes back ECLI-keyed and is
+            # stored beside its own older copy. Both carry `de-neuris`, and a rule that
+            # only ever looked at other registers could not see it.
             origins: dict[str, str] = {}
             for o in cat.conn.execute(
                     "SELECT stable_id, source, court, meta_json, ecli FROM documents "
-                    "WHERE source LIKE 'de-%' AND source <> ?", (source,)).fetchall():
+                    "WHERE source LIKE 'de-%' AND (source <> ? OR ecli IS NOT NULL)",
+                    (source,)).fetchall():
                 try:
                     ometa = json.loads(o["meta_json"] or "{}")
                 except (ValueError, TypeError):
@@ -7377,9 +7385,12 @@ class Facade:
                         if o["ecli"]:
                             origins[k] = o["stable_id"]
 
+            # A copy is by definition the rendition with NO identifier of its own; a
+            # document that carries an ECLI is never folded away, whichever register
+            # supplied it.
             rows = cat.conn.execute(
-                "SELECT stable_id, court, meta_json FROM documents WHERE source = ?",
-                (source,)).fetchall()
+                "SELECT stable_id, court, meta_json FROM documents "
+                "WHERE source = ? AND ecli IS NULL", (source,)).fetchall()
             for r in rows:
                 if cancel_check and cancel_check():
                     break
