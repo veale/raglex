@@ -320,3 +320,33 @@ def test_the_key_id_is_not_the_oauth_client_id(monkeypatch):
     assert _piste.piste_key_id() is None
     monkeypatch.setenv("PISTE_API_KEY", "the-api-key")
     assert _piste.piste_key_id() == "the-api-key"
+
+
+def test_judilibre_cursor_reads_the_same_clock_the_walk_is_ordered_by():
+    """The export is a changes feed — date_type=update, order=asc, resumed with
+    date_start — so the watermark must be the update date. It rode on the decision date,
+    and the first live run of the watch came back with a cursor of 1965 after reading
+    2,000 decisions."""
+    from raglex.adapters.fr_judilibre import FrJudilibreAdapter
+
+    page = {"results": [{"id": "abc123", "ecli": "ECLI:FR:CCASS:2026:C100400",
+                         "decision_date": "1965-03-18", "update_date": "2026-08-07"}],
+            "next_batch": None}
+
+    class _Client:
+        def configured(self):
+            return True
+
+        def get(self, url, **kw):
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return page
+            return _R()
+
+    stub = next(iter(FrJudilibreAdapter(client=_Client()).discover(None)))
+    assert stub.hints["watermark"] == "2026-08-07"
+    assert stub.hint_date.isoformat() == "1965-03-18"   # still the decision's own date
+    assert stub.stable_id == "ECLI:FR:CCASS:2026:C100400"

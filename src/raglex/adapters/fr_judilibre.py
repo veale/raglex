@@ -233,7 +233,17 @@ class FrJudilibreAdapter(BaseAdapter):
                     stable_id=ecli or ident,
                     hint_date=_iso_date(decision.get("decision_date")),
                     # stash the whole exported decision so fetch needn't re-request it
-                    hints={"id": ident, "decision": decision},
+                    hints={"id": ident, "decision": decision,
+                           # The walk is a CHANGES FEED — ordered by update date
+                           # (date_type=update, order=asc) and resumed with date_start —
+                           # so the cursor has to be the update date too. It rode on the
+                           # DECISION date, which is a different clock entirely: the
+                           # first run of this watch ended up with a watermark of
+                           # 1965-03-18 after reading 2,000 decisions, and a later batch
+                           # whose newest decision happened to be recent would have
+                           # jumped the cursor forward over every pending update before
+                           # it. Same mistake as de-rii's ToC, same fix.
+                           "watermark": decision.get("update_date")},
                 )
             pages += 1
             # `next_batch` is a URL (null on the last batch) — advance the batch index
