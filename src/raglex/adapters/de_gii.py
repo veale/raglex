@@ -151,7 +151,10 @@ class DeGiiAdapter(BaseAdapter):
             if not link.endswith(".zip"):
                 continue
             slug = link.rstrip("/").rsplit("/", 2)[-2] if "/" in link else ""
-            modified = self._last_modified(link) if since else None
+            # HEAD even on the seeding pass: the cursor is built from what the stubs
+            # carry, so a seed that skipped the HEADs would end with no cursor at all
+            # and the NEXT run would be a seed too — for ever.
+            modified = self._last_modified(link)
             # A law the server cannot date is always offered: silently never updating a
             # statute is a worse failure than re-reading one.
             if since and modified and modified < since:

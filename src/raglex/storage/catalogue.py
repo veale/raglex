@@ -1348,9 +1348,20 @@ class Catalogue:
         """Note that another register also publishes this authority, WITHOUT minting a
         second document for it (see Pipeline._reconcile_identity). The corpus keeps one
         node per judgment; this records where else it can be read."""
+        # The foreign id points AT the held document, so the pipeline's prefilter can
+        # answer "held?" for it without paying a fetch. Without this the reconciliation
+        # is invisible to the next run: the other register's id was never registered
+        # anywhere the crawl looks, so every pass re-downloaded every rendition only to
+        # fold it away again — permanently, for as long as the source stayed scheduled.
+        # overwrite=False, for the same reason adapter aliases use it: a key that
+        # already names a held document keeps naming it.
+        self.put_alias(foreign_id, stable_id, source="de-rendition",
+                       commit=False, overwrite=False)
         meta = self.document_meta(stable_id)
         rends = [r for r in (meta.get("renditions") or []) if isinstance(r, dict)]
         if any(r.get("source") == source and r.get("id") == foreign_id for r in rends):
+            if commit:
+                self.commit()
             return
         rends.append({"source": source, "id": foreign_id})
         meta["renditions"] = rends

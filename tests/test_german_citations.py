@@ -353,3 +353,29 @@ def test_repair_folds_a_same_register_copy_once_that_register_supplies_an_ecli(
     with f._open() as (cat, _rs, _ts):
         assert cat.get_document("de/KORE601272026") is None
         assert cat.find_document_id(docket) == "ECLI:DE:BGH:2026:220726BVIIZR128.25.0"
+
+
+def test_a_reconciled_rendition_is_recognised_without_re_fetching_it(
+        tmp_path, monkeypatch):
+    """Reconciliation folds the second register's copy away, but it used to leave no
+    trace the crawl could see: the foreign id was recorded in metadata only, so the
+    prefilter still answered "not held" and every pass re-downloaded every rendition
+    to fold it again — for as long as the source stayed scheduled."""
+    monkeypatch.setenv("RAGLEX_DATA_DIR", str(tmp_path))
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    f = Facade(Config.from_env())
+    with f._open() as (cat, _rs, ts):
+        rec = Record(source="de-rii", stable_id="ECLI:DE:BGH:2026:1805",
+                     ecli="ECLI:DE:BGH:2026:1805", doc_type=DocType.JUDGMENT,
+                     title="BGH AnwZ (Brfg) 40/25", court="BGH", text="text",
+                     raw_bytes=b"x", extracted_via=ExtractedVia.STRUCTURED)
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+        cat.record_rendition("ECLI:DE:BGH:2026:1805", "de-neuris", "de/KORE615362026")
+
+        assert cat.alias_targets(["de/KORE615362026"]) == {
+            "de/KORE615362026": "ECLI:DE:BGH:2026:1805"}
+        assert cat.document_meta("ECLI:DE:BGH:2026:1805")["renditions"] == [
+            {"source": "de-neuris", "id": "de/KORE615362026"}]
