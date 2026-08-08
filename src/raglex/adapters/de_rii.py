@@ -106,7 +106,15 @@ class DeRiiAdapter(BaseAdapter):
                 hint_date=_compact_date(item.findtext("entsch-datum")),
                 title=" ".join(x for x in (item.findtext("gericht"),
                                            item.findtext("aktenzeichen")) if x) or None,
-                hints={"url": xml_url},
+                # The cursor must be the ToC's own ``modified`` stamp, because that is
+                # the ONLY thing discover() filters on above. It used to ride on the
+                # decision date instead, so the run compared two different clocks: rii
+                # publishes decisions weeks-to-months after they are decided, so the
+                # stored cursor (max ENTSCHEIDUNGS-date) sat far behind the modified
+                # stamps, and a decision from 2015 re-published today — the case the
+                # ``modified`` filter exists for — was judged against a date that has
+                # nothing to do with it. Both sides now read the same clock.
+                hints={"url": xml_url, "watermark": modified or None},
             )
 
     def fetch(self, stub: Stub) -> Record | None:

@@ -21,12 +21,41 @@ from .models import Citation
 # to the CELEX Work rather than a fictitious ``de/gesetz/dsgvo`` node.  Keep this list
 # deliberately small and unambiguous: these are official or universally established
 # abbreviations, not learned aliases.
+#
+# Primary law belongs here as much as the regulations do, and its absence was the
+# single biggest source of phantom German "laws" in the corpus: 1,491 references to
+# ``de/gesetz/aeuv``, 753 to ``euv``, 421 to ``emrk``, 279 to ``grc``/``grch`` and
+# 7,888 to ``eg`` — every one of them a real, held instrument the citation could not
+# reach.  The candidate is the same consolidated-CELEX Work the English and French
+# treaty grammars mint (``12016E`` TFEU, ``12016M`` TEU, ``12012P`` Charter,
+# ``echr/convention``), so a German "Art. 267 AEUV" and an English "Article 267 TFEU"
+# land on ONE node.  ``EG``/``EGV`` is the pre-Lisbon EC Treaty, whose articles were
+# renumbered in 2009 — it therefore maps to its OWN Work (12002E), never to the TFEU,
+# so "Art. 81 EG" cannot be silently read as today's Article 81.
 _EU_LAW_IDS = {
+    # secondary law — the digital acquis German courts cite by acronym
     "DSGVO": "32016R0679",
     "DSA": "32022R2065",
     "DMA": "32022R1925",
     "NIS2": "32022L2555",
+    "KIVO": "32024R1689",
+    "DGA": "32022R0868",
+    "DSRL": "31995L0046",
+    # primary law + the Convention
+    "AEUV": "12016E",
+    "EUV": "12016M",
+    "EGV": "12002E",
+    "EG": "12002E",
+    "GRC": "12012P",
+    "GRCH": "12012P",
+    "GRCHARTA": "12012P",
+    "EUGRCHARTA": "12012P",
+    "EUGRCH": "12012P",
+    "EMRK": "echr/convention",
 }
+# Which of those are treaties rather than regulations/directives — the entity_kind the
+# rest of the pipeline keys treatment and the relevance gate off.
+_EU_TREATY_IDS = frozenset({"12016E", "12016M", "12002E", "12012P", "echr/convention"})
 
 
 def law_id(abbreviation: str) -> str:
@@ -62,8 +91,16 @@ _PARA = r"\d{1,5}[a-z]?"
 # absence here did not merely lose the pinpoint: the pattern must run from § / Art. to a
 # law abbreviation, so an unrecognised sub-clause in between made the whole reference
 # unmatchable. Every "lit." citation in the corpus was invisible.
-_SUB = (r"(?:Abs(?:atz)?\.?|S(?:atz)?\.?|Nrn?\.?|Nummer|Buchst(?:abe)?\.?|"
-        r"lit(?:t(?:era)?)?\.?|Alt(?:ernative)?\.?|Halbs(?:atz)?\.?|HS\.?)"
+# ``UAbs.`` (Unterabsatz) is the subparagraph level, and it sits BETWEEN the two rungs
+# this vocabulary already knew: the canonical long form of the most-cited provision in
+# European data-protection law is "Art. 6 Abs. 1 UAbs. 1 Buchst. f DSGVO". Because the
+# pattern must run unbroken from § / Art. to a law abbreviation, an unrecognised rung in
+# the middle did not merely lose the pinpoint — it ended the match at "UAbs", which then
+# read as the law, minting de/gesetz/uabs (and de/gesetz/unterabs) and losing the GDPR
+# reference entirely. Same failure mode as "lit." before it.
+_SUB = (r"(?:U(?:nter)?[Aa]bs(?:atz)?\.?|Abs(?:atz)?\.?|S(?:atz)?\.?|Nrn?\.?|Nummer|"
+        r"Buchst(?:abe)?\.?|lit(?:t(?:era)?)?\.?|Alt(?:ernative)?\.?|"
+        r"Halbs(?:atz)?\.?|HS\.?)"
         r"\s*(?:\d+[a-z]?|[a-z]|[IVX]+)")
 _TAIL = rf"(?:\s*(?:{_SUB}|[,;]|und\b|oder\b|bis\s+{_PARA}|[-–—]\s*{_PARA}|f{{1,2}}\.))*"
 _ONE = rf"(?:§§?|Art(?:ikel|\.)?)\s*{_PARA}{_TAIL}"
@@ -102,7 +139,8 @@ LAW_REFERENCE_RE = re.compile(
 _LAW_STOPWORDS = {
     # structural / pinpoint vocabulary
     "rn", "rn.", "rdn", "rdnr", "rdnrn", "rz", "ziff", "ziffer", "satz", "saetze",
-    "abs", "absatz", "nr", "nrn", "nummer", "buchst", "buchstabe", "halbs", "hs",
+    "abs", "absatz", "uabs", "uabsatz", "unterabs", "unterabsatz",
+    "nr", "nrn", "nummer", "buchst", "buchstabe", "halbs", "hs",
     "alt", "alternative", "var", "variante", "unterabs", "unterabsatz", "spiegelstrich",
     "abschn", "abschnitt", "kap", "kapitel", "teil", "anl", "anlage", "anh", "fn",
     "art", "artikel", "s", "seite", "ff", "f",
@@ -209,8 +247,11 @@ def law_citations(text: str) -> list[Citation]:
             # DS-GVO / DSGVO / DS-GVO are one instrument; fold the separators away
             # before the lookup so the spelling doesn't decide whether it resolves.
             eu_id = _EU_LAW_IDS.get(re.sub(r"[\s.-]+", "", law).upper())
+            kind = "act"
+            if eu_id:
+                kind = "treaty" if eu_id in _EU_TREATY_IDS else "regulation"
             found.append(Citation(
-                raw=raw, entity_kind="regulation" if eu_id else "act",
+                raw=raw, entity_kind=kind,
                 candidate_id=eu_id or law_id(law),
                 pinpoint=_eu_pinpoint(pinpoint) if eu_id else pinpoint,
                 char_start=match.start(), char_end=match.end(),

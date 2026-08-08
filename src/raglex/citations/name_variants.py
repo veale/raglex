@@ -84,11 +84,24 @@ _NORM_RE = re.compile(
 _CANON_OF = {f.lower(): c for f, c in _FORMS}
 
 
+def _canon_of(form: str) -> str:
+    """The canonical token for a matched form.
+
+    ``_NORM_RE`` matches case-INSENSITIVELY, but ``str.lower()`` is not the inverse of
+    that for every alphabet: Turkish "LİMİTED" matches "Limited" and lowercases to
+    "li̇mi̇ted" (i + COMBINING DOT ABOVE), which is not a key. The direct lookup then
+    raised KeyError from inside a corpus-wide pass and killed the whole relink — a full
+    rescan died at "resolving matched legislation" on one Turkish company name in a
+    case title. Fall back through the same fold the table was built with."""
+    key = form.lower()
+    return _CANON_OF.get(key) or _CANON_OF.get(_canon(key)) or _canon(key)
+
+
 def normalise_abbrev(text: str) -> str:
     """Replace every abbreviation form — long or short — with its single canonical token,
     so "Attorney General" and "A-G" both become "attorneygeneral". Used before tokenising
     a case name/title for comparison (the two forms then share the token)."""
-    return _NORM_RE.sub(lambda m: _CANON_OF[m.group(1).lower()], text or "")
+    return _NORM_RE.sub(lambda m: _canon_of(m.group(1)), text or "")
 
 
 # ── readable variants (aliases) ──────────────────────────────────────────────

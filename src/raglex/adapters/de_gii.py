@@ -116,7 +116,24 @@ class DeGiiAdapter(BaseAdapter):
                        hints={"file": str(xml), "jurabk": jurabk, "builddate": builddate})
 
     def _discover_toc(self, since: str | None) -> Iterator[Stub]:
-        """Network seed: the gii ToC lists per-law XML zips."""
+        """Network seed: the gii ToC lists per-law XML zips.
+
+        The ToC carries a title and a link and NOTHING else — no builddate, no jurabk —
+        so the only change signal for the ~6,130 federal statutes is each zip's HTTP
+        ``Last-Modified``, and gesetze-im-internet serves it (and honours
+        If-Modified-Since). An incremental run therefore HEADs every law and yields only
+        those the server says have moved since the cursor: a few dozen a week instead of
+        6,130 downloads, each of which had to be unzipped and XML-parsed (the whole of
+        the BGB, the EStG…) purely to be discarded on its payload hash.
+
+        A run with no cursor keeps the old shape — yield everything, no HEADs — because
+        that is the seeding/catch-up pass and every law has to be read anyway.
+
+        Each yielded stub declares ``revision``: the law is HELD, and the feed says its
+        text moved. Without it the pipeline (rightly) treats a held document as a reason
+        to skip, and a German statute could never be updated in place at all — the
+        amendment was fetched, then dropped at the provisional-id gate, on every run
+        since the source was added."""
         resp = self._client.get(TOC_URL, raise_for_4xx=False)
         if resp.status_code >= 400:
             return
@@ -133,8 +150,37 @@ class DeGiiAdapter(BaseAdapter):
             title = (item.findtext("title") or "").strip()
             if not link.endswith(".zip"):
                 continue
-            yield Stub(stable_id=title or link, title=title,
-                       hints={"zip_url": link})
+            slug = link.rstrip("/").rsplit("/", 2)[-2] if "/" in link else ""
+            modified = self._last_modified(link) if since else None
+            # A law the server cannot date is always offered: silently never updating a
+            # statute is a worse failure than re-reading one.
+            if since and modified and modified < since:
+                continue
+            yield Stub(
+                stable_id=f"de/gii/{slug}" if slug else (title or link),
+                title=title,
+                hints={k: v for k, v in {
+                    "zip_url": link, "slug": slug, "watermark": modified,
+                    "revision": True,
+                }.items() if v},
+            )
+
+    def _last_modified(self, zip_url: str) -> str | None:
+        """The zip's ``Last-Modified`` as an ISO-8601 UTC stamp, so it sorts and
+        date-shifts like every other watermark in the pipeline."""
+        try:
+            resp = self._client.request("HEAD", zip_url, raise_for_4xx=False)
+        except Exception:  # noqa: BLE001 — one unreachable law must not end the walk
+            return None
+        raw = resp.headers.get("last-modified") if resp.status_code < 400 else None
+        if not raw:
+            return None
+        from email.utils import parsedate_to_datetime
+
+        try:
+            return parsedate_to_datetime(raw).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError):
+            return None
 
     # -- fetch -------------------------------------------------------------
     def fetch(self, stub: Stub) -> Record | None:
@@ -153,6 +199,12 @@ class DeGiiAdapter(BaseAdapter):
         parsed = parse_gii(data)
         jurabk = parsed.metadata.get("jurabk") or stub.hints.get("jurabk")
         stable_id = _slug(jurabk) if jurabk else stub.stable_id
+        # The ToC's own path segment — "bdsg_2018", not the jurabk "BDSG". It is the
+        # only thing the landing page answers to, so deriving the URL from the jurabk
+        # pointed every de-gii document at a 404.
+        gii_slug = stub.hints.get("slug")
+        landing = (f"{_BASE}/{gii_slug}/" if gii_slug
+                   else (f"{_BASE}/{jurabk.lower()}" if jurabk else _BASE))
         return Record(
             source=self.source,
             stable_id=stable_id,
@@ -161,7 +213,7 @@ class DeGiiAdapter(BaseAdapter):
             decision_date=parsed.decision_date or stub.hint_date,
             language="de",
             source_language="de",
-            landing_url=f"{_BASE}/{jurabk.lower()}" if jurabk else _BASE,
+            landing_url=landing,
             raw_bytes=data,
             raw_ext="xml",
             text=parsed.text,
@@ -169,7 +221,13 @@ class DeGiiAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in {
                 "jurabk": jurabk, "doknr": parsed.metadata.get("doknr"),
-                "aliases": [law_id(jurabk)] if jurabk else None,
+                "gii_slug": gii_slug,
+                # The ToC path AS WELL AS the jurabk: the discovery stub knows only the
+                # former, so without it the pipeline has no way to tell that the law it
+                # is looking at is one it already holds.
+                "aliases": [a for a in (law_id(jurabk) if jurabk else None,
+                                        f"de/gii/{gii_slug}" if gii_slug else None) if a]
+                           or None,
             }.items() if v},
         )
 

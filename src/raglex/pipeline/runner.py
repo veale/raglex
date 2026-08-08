@@ -270,10 +270,19 @@ class Pipeline:
                         # contenthash (FCL's change signal) means the held copy is a
                         # superseded revision — re-fetch it. No hash on either side →
                         # assume unchanged (the old rule).
+                        #
+                        # ``revision`` is the same statement made by a feed that has no
+                        # hash to compare, only a timestamp it has ALREADY compared
+                        # against the cursor (gesetze-im-internet's per-law
+                        # Last-Modified). Consolidated legislation is amended IN PLACE
+                        # under one id, so without a way to say "held, and changed" a
+                        # statute source can never be anything but a first-seeding.
                         feed_hash = stub.hints.get("contenthash")
                         held_hash = (self.catalogue.document_meta(held_id) or {}).get(
                             "contenthash") if feed_hash else None
-                        if not (feed_hash and held_hash and feed_hash != held_hash):
+                        revised = bool(stub.hints.get("revision"))
+                        if not (revised
+                                or (feed_hash and held_hash and feed_hash != held_hash)):
                             stats.deduped += 1
                             # A durable document is not necessarily a completed pipeline
                             # item. Carry held-but-unscanned ids into extraction.

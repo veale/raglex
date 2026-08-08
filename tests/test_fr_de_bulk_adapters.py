@@ -262,3 +262,71 @@ def test_de_rii_network_stub_id_matches_the_stored_id():
     stubs = list(DeRiiAdapter(client=_HTTP()).discover(None))
     assert [s.stable_id for s in stubs] == ["jb-JURE100054597"]
     assert stubs[0].hints["url"].endswith("jb-JURE100054597.zip")   # the fetch still gets the zip
+
+
+def test_de_rii_cursor_is_the_toc_modified_stamp_not_the_decision_date():
+    """discover() filters on the ToC's <modified>, so the cursor it advances has to be
+    the same clock. It rode on the decision date instead — and rii publishes decisions
+    weeks to months after they are decided, so the two never lined up."""
+    feed = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss><channel>
+      <item>
+        <link>https://www.rechtsprechung-im-internet.de/jportal/docs/bsjrs/jb-JURE100054597.zip</link>
+        <entsch-datum>20150108</entsch-datum>
+        <gericht>BGH</gericht><aktenzeichen>VI ZR 100/20</aktenzeichen>
+        <modified>2026-08-07T21:08:51.192Z</modified>
+      </item>
+    </channel></rss>"""
+
+    class _Resp:
+        content = feed
+        status_code = 200
+
+    class _HTTP:
+        def get(self, url, **kw):
+            return _Resp()
+
+    stub = list(DeRiiAdapter(client=_HTTP()).discover(None))[0]
+    assert stub.hints["watermark"] == "2026-08-07T21:08:51.192Z"
+    # a 2015 decision re-published today is exactly what the modified filter is for
+    assert stub.hint_date.isoformat() == "2015-01-08"
+    assert list(DeRiiAdapter(client=_HTTP()).discover("2026-08-08T00:00:00Z")) == []
+
+
+def test_de_gii_incremental_only_yields_laws_the_server_says_moved():
+    """The gii ToC carries a title and a link and nothing else, so each law's HTTP
+    Last-Modified is the only change signal for the ~6,130 federal statutes. Without it
+    a routine run downloaded, unzipped and XML-parsed every one of them — the whole BGB
+    included — purely to discard it on the payload hash."""
+    from raglex.adapters.de_gii import DeGiiAdapter
+
+    toc = b"""<?xml version="1.0"?><rss><channel>
+      <item><title>BGB</title><link>http://www.gesetze-im-internet.de/bgb/xml.zip</link></item>
+      <item><title>BDSG</title><link>http://www.gesetze-im-internet.de/bdsg_2018/xml.zip</link></item>
+    </channel></rss>"""
+    last_modified = {
+        "http://www.gesetze-im-internet.de/bgb/xml.zip": "Wed, 05 Aug 2026 10:00:00 GMT",
+        "http://www.gesetze-im-internet.de/bdsg_2018/xml.zip": "Mon, 13 Jul 2026 19:55:13 GMT",
+    }
+
+    class _Resp:
+        def __init__(self, content=b"", headers=None):
+            self.status_code, self.content = 200, content
+            self.headers = headers or {}
+
+    class _HTTP:
+        def get(self, url, **kw):
+            return _Resp(toc)
+
+        def request(self, method, url, **kw):
+            return _Resp(headers={"last-modified": last_modified[url]})
+
+    seed = list(DeGiiAdapter(client=_HTTP()).discover(None))
+    assert [s.stable_id for s in seed] == ["de/gii/bgb", "de/gii/bdsg_2018"]
+
+    incremental = list(DeGiiAdapter(client=_HTTP()).discover("2026-08-01T00:00:00Z"))
+    assert [s.stable_id for s in incremental] == ["de/gii/bgb"]
+    assert incremental[0].hints["watermark"] == "2026-08-05T10:00:00Z"
+    # a consolidated statute is amended in place under one id, so the pipeline has to be
+    # told the held copy is superseded or it will (rightly) skip it
+    assert incremental[0].hints["revision"] is True

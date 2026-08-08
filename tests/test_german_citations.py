@@ -280,3 +280,44 @@ def test_repair_folds_an_existing_duplicate_back_into_the_original(tmp_path, mon
         assert cat.find_document_id(docket) == "ECLI:DE:BGH:2026:1805"
         assert cat.get_document("de/KORE615362026") is None
         assert cat.document_meta("ECLI:DE:BGH:2026:1805")["renditions"][0]["id"] == "de/KORE615362026"
+
+
+def test_unterabsatz_does_not_break_the_reference_or_mint_a_law():
+    """"Art. 6 Abs. 1 UAbs. 1 Buchst. f DSGVO" is the canonical long form of the most
+    cited provision in European data-protection law. The pattern has to run unbroken
+    from Art. to the abbreviation, so an unknown rung in the middle did not merely lose
+    the pinpoint — the match ended at "UAbs", which then read as the law."""
+    for text in ("Art. 6 Abs. 1 UAbs. 1 Buchst. f DSGVO",
+                 "Art. 6 Abs. 1 UAbs. 1 lit. f DS-GVO",
+                 "Art. 6 Abs. 1 Unterabs. 1 Buchst. f DSGVO"):
+        cites = _de(text, "de_eu_article")
+        assert [(c.candidate_id, c.pinpoint) for c in cites] == [
+            ("32016R0679", "Article 6(1)(f)")], text
+    assert not [c for c in extract_citations("Art. 53 Abs. 2 UAbs. 1 GG")
+                if c.candidate_id in ("de/gesetz/uabs", "de/gesetz/unterabs")]
+
+
+def test_german_primary_law_resolves_to_the_treaty_work_not_a_phantom_statute():
+    """AEUV/EUV/GRCh/EMRK have the surface form of a domestic statute reference, so
+    without a mapping each minted a de/gesetz/… node the corpus can never hold — and
+    a German "Art. 267 AEUV" could not meet an English "Article 267 TFEU"."""
+    expected = {
+        "Art. 267 AEUV": "12016E",
+        "Artikel 78 Absatz 3 AEUV": "12016E",
+        "Art. 6 EUV": "12016M",
+        "Art. 31 Abs. 2 GRC": "12012P",
+        "Art. 7 GRCh": "12012P",
+        "Art. 8 EMRK": "echr/convention",
+    }
+    for text, candidate in expected.items():
+        cites = _de(text, "de_eu_article")
+        assert [c.candidate_id for c in cites] == [candidate], text
+        assert cites[0].entity_kind == "treaty"
+        assert cites[0].pinpoint.startswith("Article ")
+
+
+def test_pre_lisbon_ec_treaty_keeps_its_own_work():
+    """Article 81 EG is not Article 81 TFEU — the treaty was renumbered in 2009, so the
+    old abbreviation must cluster on the EC Treaty's own consolidated CELEX."""
+    assert [c.candidate_id for c in _de("Art. 81 EG", "de_eu_article")] == ["12002E"]
+    assert [c.candidate_id for c in _de("Artikel 95 EGV", "de_eu_article")] == ["12002E"]

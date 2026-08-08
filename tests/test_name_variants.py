@@ -38,3 +38,15 @@ def test_single_party_kind_is_generated_but_distinct():
 
 def test_empty_title_is_safe():
     assert name_variants("") == []
+
+
+def test_dotted_capital_i_does_not_crash_the_abbreviation_fold():
+    """The form regex matches case-INSENSITIVELY, but str.lower() is not its inverse in
+    every alphabet: Turkish "LİMİTED" matches "Limited" and lowercases to i + COMBINING
+    DOT ABOVE, which is not a table key. The KeyError propagated out of a corpus-wide
+    pass and killed the whole relink — a full rescan died on one company name in a
+    case title, at "resolving matched legislation"."""
+    from raglex.citations.name_variants import normalise_abbrev
+
+    assert normalise_abbrev("ACME LİMİTED v Smith") == "ACME limited v Smith"
+    assert normalise_abbrev("Acme Ltd v Smith") == "Acme limited v Smith"
