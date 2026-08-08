@@ -7,6 +7,7 @@ collapsed accordions, IPCO's lastmod. Those are what these tests pin.
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from datetime import date
 from pathlib import Path
 
@@ -252,8 +253,81 @@ def test_a_first_page_that_never_answers_fails_the_run(monkeypatch):
         list(adapter.discover(None))
 
 
-def test_a_later_page_that_never_answers_stops_without_claiming_the_end(monkeypatch):
-    """By then there is partial work and resume_offset says where to continue."""
+def test_an_xml_illegal_control_byte_does_not_cost_the_page():
+    """Lords page 109 carries a raw 0x02 inside an image's alt text ("EN-1 to EN\\x025",
+    a mangled en-dash). XML 1.0 forbids C0 controls, so that ONE byte made all 149 KB
+    unparseable — and it is in the stored post, served identically every time, so no
+    amount of retrying was ever going to help."""
+    good = (DATA / "commons_library_feed.xml").read_bytes()
+    poisoned = good.replace(b"<title>", b"<title>EN-1 to EN\x025 ", 1)
+    with pytest.raises(ET.ParseError):
+        ET.fromstring(poisoned)          # genuinely invalid, not a test artefact
+    rows = uk_parl_library.parse_feed(poisoned, host=COMMONS["host"])
+    assert rows, "the page must survive one illegal byte"
+
+
+def test_the_feed_publishes_its_own_length_in_the_channel_title():
+    """"All research - Page 108 of 281" — the walk's end, from the feed itself. Without
+    it there is no way to tell a broken page from the bottom of the archive."""
+    titled = (DATA / "commons_library_feed.xml").read_bytes().replace(
+        b"<title>All briefings - House of Commons Library</title>",
+        b"<title>All briefings - Page 108 of 281 - House of Commons Library</title>", 1)
+    assert uk_parl_library.feed_position(titled) == (108, 281)
+    assert uk_parl_library.feed_position(b"<rss><channel><title>x</title></channel></rss>") is None
+
+
+def test_one_unreadable_page_does_not_abandon_the_archive_below_it(monkeypatch):
+    """The bug this cost us for real: Commons stopped at page 750 of 1200 and Lords at
+    109 of 281, each reporting `done` with 0 errors, leaving thousands of briefings
+    unread and nothing in the result to say so."""
+    adapter = ADAPTERS["uk-commons-library"]()
+    good = (DATA / "commons_library_feed.xml").read_bytes().replace(
+        b"<title>All briefings - House of Commons Library</title>",
+        b"<title>All briefings - Page 1 of 4 - House of Commons Library</title>", 1)
+    asked: list[int] = []
+
+    def fake(url, referer=None):
+        page = int(url.split("paged=")[1]) if "paged=" in url else 1
+        asked.append(page)
+        if page == 2:
+            return b"<rss><channel>this is not xml at all"      # permanently broken
+        if page == 3:
+            return good.replace(b"Page 1 of 4", b"Page 3 of 4")  # fine
+        if page == 4:
+            return good.replace(b"Page 1 of 4", b"Page 4 of 4")
+        return good
+
+    monkeypatch.setattr(adapter, "_bytes", fake)
+    list(adapter.discover(None))
+    assert 3 in asked and 4 in asked, "pages below the broken one must still be walked"
+    assert max(asked) == 4, "and it must stop at the feed's own declared last page"
+
+
+def test_an_empty_page_before_the_declared_end_is_not_the_end(monkeypatch):
+    """A page that failed to render comes back as a well-formed feed with no items.
+    Believing it is the same bug in a quieter form."""
+    adapter = ADAPTERS["uk-commons-library"]()
+    good = (DATA / "commons_library_feed.xml").read_bytes().replace(
+        b"<title>All briefings - House of Commons Library</title>",
+        b"<title>All briefings - Page 1 of 3 - House of Commons Library</title>", 1)
+    asked: list[int] = []
+
+    def fake(url, referer=None):
+        page = int(url.split("paged=")[1]) if "paged=" in url else 1
+        asked.append(page)
+        if page == 2:
+            return (b'<rss version="2.0"><channel><title>All briefings - Page 2 of 3 - '
+                    b"House of Commons Library</title></channel></rss>")
+        return good.replace(b"Page 1 of 3", f"Page {page} of 3".encode())
+
+    monkeypatch.setattr(adapter, "_bytes", fake)
+    list(adapter.discover(None))
+    assert 3 in asked, "an empty page short of the declared end must not stop the walk"
+
+
+def test_a_run_of_dead_pages_stops_rather_than_walking_to_page_two_thousand(monkeypatch):
+    """Skipping is for isolated damage. If the feed simply stops answering, asking every
+    remaining page twice is not diligence — it is 4,000 browser fetches."""
     adapter = ADAPTERS["uk-commons-library"]()
     good = (DATA / "commons_library_feed.xml").read_bytes()
     seen: list[str] = []
@@ -265,7 +339,10 @@ def test_a_later_page_that_never_answers_stops_without_claiming_the_end(monkeypa
     monkeypatch.setattr(adapter, "_bytes", fake)
     stubs = list(adapter.discover(None))
     assert stubs, "page 1 succeeded and its briefings must survive"
-    # page 2 was attempted twice (the retry) and then abandoned, not treated as the end
+    pages = {int(u.split("paged=")[1]) for u in seen if "paged=" in u}
+    assert len(pages) == adapter.MAX_CONSECUTIVE_MISSES
+    assert max(pages) == 1 + adapter.MAX_CONSECUTIVE_MISSES
+    # each was genuinely retried before being written off
     assert sum(1 for u in seen if "paged=2" in u) == adapter.FEED_ATTEMPTS
 
 

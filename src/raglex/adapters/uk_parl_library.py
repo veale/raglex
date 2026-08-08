@@ -10,9 +10,20 @@ per request.
 **And it paginates all the way to the beginning.** ``?paged=N`` on a WordPress feed is
 not documented anywhere on either site, but it works: the Commons feed runs to page 1,200
 (12,000 items, back to a 1993 research paper) and the Lords feed to page 281 (back to
-1998), and one page past the end returns a well-formed feed with no ``<item>`` in it,
-which is an unambiguous stop. A full Commons backfill is therefore ~1,200 requests rather
-than ~12,000, and an incremental run is one.
+1998). A full Commons backfill is therefore ~1,200 requests rather than ~12,000, and an
+incremental run is one. **The feed states its own length** in the channel title — "All
+research - Page 108 of 281" — and that number is what makes the walk safe, because it is
+the only way to tell a page that failed from the bottom of the archive.
+
+**One post can break a whole page, permanently.** Lords page 109 carries a raw ``0x02``
+inside an image's alt text ("EN-1 to EN\\x025", a mangled en-dash); XML 1.0 forbids the C0
+controls, so that single byte makes all 149 KB unparseable, every time. Treating an
+unreadable page as the end of the archive stopped the first real backfill at page 109 of
+281 — and Commons at 750 of 1,200 — each reporting success with zero errors while
+thousands of briefings went unread. So the illegal bytes are stripped before parsing, a
+page that still will not parse is **skipped rather than fatal**, and the walk continues to
+the length the feed declared. A *run* of failures is different from a bad post and does
+stop the walk.
 
 **The feed must be fetched as bytes, not as rendered HTML.** Everything on
 ``parliament.uk`` sits behind a Cloudflare managed challenge that refuses a plain client
@@ -103,6 +114,29 @@ class FeedUnreadable(Exception):
     Distinct from a feed carrying no items, which is the archive's real end."""
 
 
+#: XML 1.0 forbids the C0 control characters, and the Lords feed contains one: a raw
+#: ``0x02`` sits inside an image's alt text ("EN-1 to EN\x025", a mangled en-dash) on
+#: page 109, which makes all 149 KB of that page unparseable. It is not a glitch to wait
+#: out — the byte is in the stored post and is served identically every time.
+_ILLEGAL_XML = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+#: WordPress puts the walk's own length in the channel title — "All research - Page 108
+#: of 281 - House of Lords Library". That is the authoritative end of the archive, and
+#: knowing it is what separates "this page is broken, skip it" from "there is nothing
+#: below this".
+_PAGE_OF = re.compile(r"Page\s+(\d+)\s+of\s+(\d+)", re.I)
+
+
+def feed_position(raw: bytes) -> tuple[int, int] | None:
+    """``(page, total_pages)`` from the channel title, or None if it does not say."""
+    try:
+        title = ET.fromstring(_ILLEGAL_XML.sub(b"", raw or b"")).findtext(".//channel/title")
+    except ET.ParseError:
+        return None
+    found = _PAGE_OF.search(title or "")
+    return (int(found.group(1)), int(found.group(2))) if found else None
+
+
 def _clean(fragment: str) -> str:
     import html as _html
 
@@ -152,10 +186,12 @@ def parse_feed(raw: bytes, *, host: str) -> list[dict]:
     list, and discovery decides it has reached 1993."""
     if not raw:
         raise FeedUnreadable("no bytes")
+    # Strip the XML-illegal control bytes the Libraries publish before parsing; one of
+    # them costs the whole page otherwise, and everything below it.
     try:
-        root = ET.fromstring(raw)
+        root = ET.fromstring(_ILLEGAL_XML.sub(b"", raw))
     except ET.ParseError as exc:
-        raise FeedUnreadable(f"not XML ({len(raw)} bytes)") from exc
+        raise FeedUnreadable(f"not XML ({len(raw)} bytes): {exc}") from exc
     if root.find(".//channel") is None:
         raise FeedUnreadable("no <channel>; this is not the feed")
     out: list[dict] = []
@@ -370,15 +406,21 @@ class ParliamentLibraryAdapter(BaseAdapter):
     #: losing the five hundred below it.
     FEED_ATTEMPTS = 2
 
-    def _feed_page(self, page: int, *, first: bool) -> list[dict] | None:
-        """One feed page's items, ``[]`` at the end of the archive, ``None`` if
-        unreadable. A refused FIRST page raises, because a run that read nothing must
-        fail rather than record "discovered 0 — done" over twelve thousand briefings."""
+    #: Skipping is for isolated damage. This many unreadable pages in a row means
+    #: the feed is refusing us, not that it has a bad post — stop and resume later.
+    MAX_CONSECUTIVE_MISSES = 5
+
+    def _feed_page(self, page: int, *, first: bool) -> tuple[list[dict] | None, int | None]:
+        """``(items, total_pages)``. ``items`` is ``None`` when the page is unreadable.
+
+        A refused FIRST page raises, because a run that read nothing must fail rather
+        than record "discovered 0 — done" over twelve thousand briefings."""
         url = self.feed_page_url(page)
         last = ""
         for attempt in range(self.FEED_ATTEMPTS):
+            raw = self._bytes(url) or b""
             try:
-                return parse_feed(self._bytes(url) or b"", host=self.host)
+                return parse_feed(raw, host=self.host), (feed_position(raw) or (0, 0))[1] or None
             except FeedUnreadable as exc:
                 last = str(exc)
                 log.warning("%s: feed page %d unreadable (%s), attempt %d/%d",
@@ -387,7 +429,7 @@ class ParliamentLibraryAdapter(BaseAdapter):
             raise FetchError(
                 f"{self.source}: the feed did not answer at page {page} ({last})",
                 transient=True)
-        return None
+        return None, None
 
     # ---- discovery -----------------------------------------------------------------
 
@@ -401,16 +443,37 @@ class ParliamentLibraryAdapter(BaseAdapter):
         cutoff = _as_date(since)
         seen: set[str] = set()
         walked = 0
+        total_pages: int | None = None
+        skipped: list[int] = []
+        misses = 0
         for page in range(self.start_page, self.start_page + self.max_feed_pages):
-            rows = self._feed_page(page, first=page == self.start_page)
-            if rows is None:
-                # Unreadable after a retry, and not the first page: there IS partial work
-                # and ``resume_offset`` says where to continue, so stop loudly rather
-                # than pretending the archive ended here.
-                log.warning("%s: giving up at feed page %d; resume from there", self.source, page)
-                return
+            rows, declared = self._feed_page(page, first=page == self.start_page)
+            if declared:
+                total_pages = declared
+            if rows is None or (not rows and total_pages and page < total_pages):
+                # ONE BAD PAGE MUST NOT COST THE ARCHIVE BELOW IT. This is not the
+                # hypothetical timeout it was written for: Lords page 109 carries a raw
+                # 0x02 in an image's alt text and will never parse, and abandoning the
+                # walk there cost 173 pages back to 1998 while the job reported success.
+                # The pages below a broken one are fine, so skip and keep going — an
+                # empty page short of the declared end is the same failure, quieter.
+                skipped.append(page)
+                misses += 1
+                log.warning("%s: skipping unreadable/empty feed page %d (of %s)",
+                            self.source, page, total_pages or "?")
+                if misses >= self.MAX_CONSECUTIVE_MISSES:
+                    # Skipping is for ISOLATED damage. A run of them is the feed refusing
+                    # us, and walking to page 2,000 asking twice each is not diligence.
+                    log.warning("%s: %d feed pages in a row unreadable at page %d; "
+                                "stopping. Resume from there.",
+                                self.source, misses, page)
+                    break
+                if total_pages and page >= total_pages:
+                    break
+                continue
+            misses = 0
             if not rows:
-                return          # a feed page with no <item> IS the end of the archive
+                break           # no items, and the feed agrees this is the end
             for row in rows:
                 url, slug = row["url"], row["slug"]
                 if not slug or url in seen:
@@ -428,11 +491,19 @@ class ParliamentLibraryAdapter(BaseAdapter):
                     landing_url=url, raw_url=url,
                     title=row["title"], hint_date=when,
                     hints={"slug": slug, "feed_page": page, "resume_offset": page,
+                           "feed_pages": total_pages,
                            "watermark": when.isoformat() if when else None},
                 )
             walked += 1
             if max_pages is not None and walked >= max_pages:
                 return
+            if total_pages and page >= total_pages:
+                break           # the feed's own count says this was the last page
+        if skipped:
+            # Say so at the end as well as at the time: a harvest that quietly omits
+            # pages is the failure this whole path exists to prevent.
+            log.warning("%s: finished with %d unreadable/empty page(s) skipped: %s",
+                        self.source, len(skipped), skipped[:20])
 
     # ---- fetch ---------------------------------------------------------------------
 
