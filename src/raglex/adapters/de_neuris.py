@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 from datetime import date
 from typing import Iterator
-from urllib.parse import urljoin
 
 from ..core.adapter import BaseAdapter
 from ..core.http import RateLimitedClient
@@ -35,7 +34,27 @@ from ..core.segmentation import assemble
 from ..formats.ldml_de import parse_ldml_de
 from ..citations.german import case_alias, law_id
 
-BASE = "https://testphase.rechtsinformationen.bund.de/v1"
+HOST = "https://testphase.rechtsinformationen.bund.de"
+BASE = f"{HOST}/v1"
+
+
+def _url(path: str) -> str:
+    """Absolute URL for an API path.
+
+    The register answers with root-absolute ``@id``/``contentUrl`` values —
+    ``/v1/legislation/eli/…`` — which already carry the version segment. Joining those
+    onto BASE (which ends in ``/v1``) produced ``/v1/v1/legislation/…``, a 404 on every
+    request the legislation collection has ever made: the expression JSON, the
+    LDML.de manifestation, and the ``.xml`` fallback alike. The collection has therefore
+    never stored a single document, and the 404s surfaced as the host's generic 403,
+    which reads like an anti-bot wall rather than a wrong path. Case law was unaffected
+    because it builds its paths itself (``case-law/<id>``, no leading version)."""
+    if path.startswith("http"):
+        return path
+    p = "/" + path.lstrip("/")
+    return f"{HOST}{p}" if p.startswith("/v1/") else f"{BASE}{p}"
+
+
 # The register's own limits, measured against the live API (2026-07): a query never
 # reports more than 10,000 hits and pageIndex 100 is a 422 — so one unbounded walk can
 # only ever see 10,000 decisions. Case law starts 2010-01-04.
@@ -184,7 +203,7 @@ class DeNeurisAdapter(BaseAdapter):
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     def _get_json(self, url: str, params: dict | None = None) -> dict:
-        full = url if url.startswith("http") else f"{BASE}/{url.lstrip('/')}"
+        full = _url(url)
         resp = self._client.get(full, params=params or {},
                                 headers={"Accept": "application/json"}, raise_for_4xx=False)
         if resp.status_code >= 400:
@@ -195,7 +214,7 @@ class DeNeurisAdapter(BaseAdapter):
             return {}
 
     def _get_bytes(self, url: str, *, accept: str) -> bytes | None:
-        full = url if url.startswith("http") else urljoin(f"{BASE}/", url.lstrip("/"))
+        full = _url(url)
         resp = self._client.get(full, headers={"Accept": accept}, raise_for_4xx=False)
         if resp.status_code >= 400 or not resp.content:
             return None

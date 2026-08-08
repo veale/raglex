@@ -215,3 +215,19 @@ def test_incremental_run_keeps_the_simple_path():
     http = _FakeHTTP({"case-law": _Resp(listing)})
     stubs = list(DeNeurisAdapter(mode="caselaw", client=http).discover("2026-06-30"))
     assert [s.stable_id for s in stubs] == ["de/KVRE1"]
+
+
+def test_neuris_root_absolute_paths_are_not_double_versioned():
+    """The register answers with root-absolute @id/contentUrl values that already carry
+    the version segment. Joining those onto BASE (which ends in /v1) produced
+    /v1/v1/legislation/… — a 404 on the expression JSON, the LDML.de manifestation and
+    the .xml fallback alike, so the legislation collection never stored one document.
+    The 404s surfaced as the host's generic 403, which reads like an anti-bot wall."""
+    from raglex.adapters.de_neuris import HOST, _url
+
+    assert _url("/v1/legislation/eli/bund/bgbl-1/2026/201/2026-07-10/1/deu") == (
+        f"{HOST}/v1/legislation/eli/bund/bgbl-1/2026/201/2026-07-10/1/deu")
+    assert "/v1/v1/" not in _url("/v1/legislation/eli/x.xml")
+    # case law builds its own paths and must still get the version segment added
+    assert _url("case-law/KORE300492026") == f"{HOST}/v1/case-law/KORE300492026"
+    assert _url("https://elsewhere.example/x") == "https://elsewhere.example/x"
