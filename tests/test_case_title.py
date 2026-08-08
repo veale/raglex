@@ -161,3 +161,13 @@ def test_the_backfill_recases_and_keeps_the_registers_own_spelling(tmp_path, mon
 
     # idempotent: a second pass finds nothing left to do
     assert f.recase_shouty_titles()["recased"] == 0
+
+
+def test_an_elided_article_does_not_shield_the_state_behind_it():
+    """"contre l'ITALIE": the lower-case "l" makes the token look already-cased, so a
+    whole-token gate lets the State through untouched — the one shape that survived a
+    first pass over the live collection."""
+    assert tc("A.R. contre l'ITALIE") == "A.R. contre l'Italie"
+    assert tc("T.F. et G.L. contre l'ITALIE") == "T.F. et G.L. contre l'Italie"
+    # an upper-case Irish O' is a name, not an elision, and keeps its own capital
+    assert tc("CASE OF O'KEEFFE v. IRELAND") == "Case of O'Keeffe v. Ireland"

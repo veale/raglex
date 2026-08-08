@@ -132,6 +132,10 @@ _INITIALS_RE = re.compile(r"^(?:[A-Z]\.)+(?:[-‐-―](?:[A-Z]\.)+)*$")
 _DOTTED_ABBREV_RE = re.compile(r"^[A-Z]{1,3}(?:\.[A-Z]{1,3})+\.?$")
 _HAS_LOWER_RE = re.compile(r"[a-zà-öø-ÿœ]")
 _HAS_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+# A French/Italian elided article welded onto the front of a shouty word: "contre
+# l'ITALIE". The lower-case "l" is enough to make the token look cased already, so the
+# State behind it was the one thing the whole-token gate let through untouched.
+_ELIDED_PREFIX_RE = re.compile(r"^(\W*[a-zà-öø-ÿ]{1,4}['’])(.+)$")
 
 
 def _lower(text: str) -> str:
@@ -242,8 +246,13 @@ def titlecase_case_name(title: str | None) -> str | None:
 
         has_letter = bool(_HAS_LETTER_RE.search(piece))
         shouty = has_letter and not _HAS_LOWER_RE.search(piece)
-
-        if shouty:
+        elided = None if shouty else _ELIDED_PREFIX_RE.match(piece)
+        if elided and not _HAS_LOWER_RE.search(elided.group(2)):
+            # keep the article exactly as written, re-case only what it is glued to
+            out.append(elided.group(1) + _recase_token(
+                elided.group(2), segment_start=segment_start,
+                title_start=not seen_word, after_count=after_count))
+        elif shouty:
             out.append(_recase_token(piece, segment_start=segment_start,
                                      title_start=not seen_word,
                                      after_count=after_count))
