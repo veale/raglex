@@ -231,3 +231,92 @@ def test_neuris_root_absolute_paths_are_not_double_versioned():
     # case law builds its own paths and must still get the version segment added
     assert _url("case-law/KORE300492026") == f"{HOST}/v1/case-law/KORE300492026"
     assert _url("https://elsewhere.example/x") == "https://elsewhere.example/x"
+
+
+def test_legifrance_search_payload_carries_the_operateur_the_api_demands():
+    """Omit ``operateur`` on the CHAMP and Légifrance answers 500 "une exception non
+    gérée est survenue" — an outage-shaped reply to a malformed body. It is the only
+    difference between no French administrative case law and 26,806 deliberations."""
+    from raglex.adapters.fr_legislation import FrLegislationAdapter
+
+    sent = {}
+
+    class _Client:
+        def configured(self):
+            return True
+
+        def post(self, url, json=None, headers=None):
+            sent["url"], sent["json"] = url, json
+
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"results": []}
+            return _R()
+
+    list(FrLegislationAdapter(fond="CNIL", client=_Client()).discover(None, max_pages=1))
+    champ = sent["json"]["recherche"]["champs"][0]
+    assert champ["operateur"] == "ET"
+    assert champ["criteres"][0]["operateur"] == "ET"
+    assert sent["json"]["recherche"]["operateur"] == "ET"
+    assert "filtres" in sent["json"]["recherche"]
+
+
+def test_each_fund_gets_the_sort_it_actually_implements():
+    """An unknown sort is not rejected — the API answers 200 and orders by something
+    else, so CNIL asked for PUBLICATION_DATE_DESC returns 2019 at the top of a fund
+    whose newest deliberation is 2026-07-24, and the cursor is set from a stale slice."""
+    from raglex.adapters.fr_legislation import _SORT_BY_FOND
+
+    assert _SORT_BY_FOND["CNIL"] == "DATE_DECISION_DESC"
+    assert _SORT_BY_FOND["CONSTIT"] == "DATE_DESC"
+    assert _SORT_BY_FOND["JORF"] == "PUBLICATION_DATE_DESC"
+
+
+def test_each_fund_gets_its_own_consult_route():
+    from raglex.adapters.fr_legislation import _text_kind
+
+    assert _text_kind("CNILTEXT000054466005") == "cnil"
+    assert _text_kind("CONSTEXT000054617301") == "juri"
+    assert _text_kind("LEGITEXT000006072051") == "legipart"
+    assert _text_kind("LEGIARTI000006465098") == "article"
+    assert _text_kind("JORFTEXT000054595429") == "jorf"
+
+
+def test_constit_date_comes_out_of_the_title_because_every_date_field_is_null():
+    from raglex.adapters.fr_legislation import _date_in_title
+
+    assert _date_in_title(
+        "Décision 2026-1214/1215 QPC - 31 juillet 2026 - Société Airbnb") == "2026-07-31"
+    assert _date_in_title("Décision du 1er août 2026") == "2026-08-01"
+    assert _date_in_title("Décision 2026-327 L") is None
+
+
+def test_a_whole_text_body_is_not_an_empty_document():
+    """CNIL and CONSTIT are one body of text under ``text.texte``, not a tree of
+    articles. Without that branch the fetch succeeds and stores an empty document."""
+    from raglex.formats.legifrance_json import parse_legifrance_obj
+
+    doc = parse_legifrance_obj({"executionTime": 5, "text": {
+        "id": "CONSTEXT1", "titre": "Décision 2026-1 QPC",
+        "ecli": "ECLI:FR:CC:2026:2026.1.QPC",
+        "texte": "LE CONSEIL CONSTITUTIONNEL A ÉTÉ SAISI…"}})
+    assert doc.ecli == "ECLI:FR:CC:2026:2026.1.QPC"
+    assert doc.title == "Décision 2026-1 QPC"
+    assert doc.text and "CONSEIL CONSTITUTIONNEL" in doc.text
+
+
+def test_the_key_id_is_not_the_oauth_client_id(monkeypatch):
+    """Four different values are issued per PISTE app. Sending the client id as KeyId
+    earns a bare 400, so the old fallback turned an OAuth-only configuration into a
+    silently dead source."""
+    from raglex.adapters import _piste
+
+    monkeypatch.delenv("PISTE_KEY_ID", raising=False)
+    monkeypatch.delenv("PISTE_API_KEY", raising=False)
+    monkeypatch.setenv("PISTE_CLIENT_ID", "the-oauth-client-id")
+    assert _piste.piste_key_id() is None
+    monkeypatch.setenv("PISTE_API_KEY", "the-api-key")
+    assert _piste.piste_key_id() == "the-api-key"

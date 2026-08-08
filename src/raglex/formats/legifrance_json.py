@@ -105,6 +105,7 @@ class LegifranceDoc:
     article_states: list[ArticleState] = field(default_factory=list)  # per-article currency
     nature: str | None = None         # CODE | LOI | DECRET | DELIBERATION …
     num: str | None = None            # article number for a single-article fetch
+    ecli: str | None = None           # CONSTIT decisions are ECLI-native (ECLI:FR:CC:…)
 
 
 def _article_label(art: dict) -> str:
@@ -162,9 +163,13 @@ def parse_legifrance_obj(obj: dict) -> LegifranceDoc:
 
     Handles both a whole text/code (``legiPart``/``consult`` with ``sections``) and a
     single article (``getArticle`` with a top-level ``article``)."""
-    # a getArticle response nests the payload under "article"
+    # a getArticle response nests the payload under "article"; consult/cnil and
+    # consult/juri nest theirs under "text", with nothing useful at the top level but
+    # "executionTime" — read that one document's worth of fields wherever it is put.
     art = obj.get("article") if isinstance(obj.get("article"), dict) else None
-    root = art or obj
+    nested = obj.get("text") if isinstance(obj.get("text"), dict) else None
+    root = art or (nested if (nested and not obj.get("titre") and not obj.get("title"))
+                   else obj)
 
     doc = LegifranceDoc(
         title=_first(root, "title", "titre", "titreLong", "nom"),
@@ -175,6 +180,7 @@ def parse_legifrance_obj(obj: dict) -> LegifranceDoc:
         date_fin=_epoch_ms_to_date(_first(root, "dateFin", "dateFinVersion", "fin")),
         nature=_first(root, "nature", "natureText"),
         num=_first(root, "num", "numeroArticle"),
+        ecli=_first(root, "ecli", "ECLI"),
     )
 
     if art is not None:
@@ -192,6 +198,14 @@ def parse_legifrance_obj(obj: dict) -> LegifranceDoc:
         _collect_articles(root, blocks, states)
         if not blocks and isinstance(root.get("section"), dict):
             _collect_articles(root["section"], blocks, states)
+        # A CNIL deliberation or a Conseil constitutionnel decision is not a tree of
+        # articles — it is one body of text hanging off the root as ``texte`` /
+        # ``texteHtml``. Without this branch both funds parse to a Record with no text at
+        # all: the fetch succeeds, the document stores, and it is empty.
+        if not blocks:
+            whole = strip_html(_first(root, "texte", "texteHtml", "contenu"))
+            if whole:
+                blocks = [(doc.title or "texte", "zone", whole)]
         doc.article_states = states
 
     text, segments = assemble(blocks)

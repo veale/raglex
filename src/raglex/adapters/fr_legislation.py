@@ -28,22 +28,67 @@ before a real backfill — the response bodies here are read defensively by
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter
 from ..core.models import (
     DocType,
+    RelationshipType,
     ExtractedVia,
     Record,
     Stub,
     TypedRelation,
 )
+from ..formats.legifrance_json import _epoch_ms_to_date as _epoch_ms_date
 from ..formats.legifrance_json import parse_legifrance_obj
 from ._piste import PisteClient, piste_api_root
 
 # lf-engine-app service path on the PISTE root.
 _APP = "dila/legifrance/lf-engine-app"
+
+# The newest-first sort each fund actually implements (DILA's own
+# "description des tris et filtres de l'API"). The vocabulary is NOT shared: a
+# deliberation is sorted by DATE_DECISION_DESC, a Conseil constitutionnel decision by
+# DATE_DESC, a Journal officiel text by PUBLICATION_DATE_DESC.
+#
+# Getting this wrong is silent. An unknown sort is not rejected — the API answers 200 and
+# quietly orders by something else, so asking CNIL for PUBLICATION_DATE_DESC returns 2019
+# at the top of a fund whose newest deliberation is 2026-07-24. Every incremental run
+# here depends on newest-first, so a wrong sort means the cursor is set from a stale
+# slice and everything after it is skipped for good.
+_SORT_BY_FOND = {
+    "CNIL": "DATE_DECISION_DESC",
+    "CONSTIT": "DATE_DESC",
+    "JURI": "DATE_DESC",
+    "CETAT": "DATE_DESC",
+    "JORF": "PUBLICATION_DATE_DESC",
+    "LODA": "PUBLICATION_DATE_DESC",
+}
+
+# French long-form dates, for the funds whose search hits carry no date field at all.
+_FR_MONTHS = {
+    "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5,
+    "juin": 6, "juillet": 7, "août": 8, "aout": 8, "septembre": 9, "octobre": 10,
+    "novembre": 11, "décembre": 12, "decembre": 12,
+}
+_FR_DATE_RE = re.compile(
+    r"\b(\d{1,2})(?:er)?\s+(" + "|".join(_FR_MONTHS) + r")\s+(\d{4})\b", re.IGNORECASE)
+
+
+def _date_in_title(title: str | None) -> str | None:
+    """The decision date written into a Conseil constitutionnel title.
+
+    Every date field on a CONSTIT search hit is null — ``date``, ``datePublication``,
+    ``dateSignature``, ``dateDiffusion``, all of them — so the only date the search gives
+    back is the one inside the title: "Décision 2026-1214/1215 QPC - 31 juillet 2026 -
+    Société Airbnb …". Without it the fund has no cursor at all and every run re-walks
+    the whole thing."""
+    m = _FR_DATE_RE.search(title or "")
+    if not m:
+        return None
+    return f"{int(m.group(3)):04d}-{_FR_MONTHS[m.group(2).lower()]:02d}-{int(m.group(1)):02d}"
 
 # Fund → (DILA `fond` code, DocType). CNIL deliberations and Conseil constitutionnel
 # decisions are DECISION/GUIDANCE, not LEGISLATION.
@@ -56,13 +101,24 @@ _FUNDS = {
 
 
 def _text_kind(text_id: str) -> str:
-    """Which consult endpoint an id wants, from its prefix."""
+    """Which consult endpoint an id wants, from its prefix.
+
+    Each fund has its OWN consult route and they are not interchangeable: a CNIL
+    deliberation is ``consult/cnil``, a Conseil constitutionnel decision is
+    ``consult/juri`` (it is case law, not a consolidated text), and only LEGITEXT goes to
+    ``consult/legiPart``. Sending a CNILTEXT id to legiPart earns "L'expression à valider
+    est fausse", and sending it to consult/cnil under any key but ``textId`` — ``cid``,
+    ``textCid`` — earns a 500. All four routes were checked against production."""
     tid = (text_id or "").upper()
     if tid.startswith("LEGIARTI") or "ARTI" in tid[:8]:
         return "article"
     if tid.startswith("JORFTEXT") or tid.startswith("JORF"):
         return "jorf"
-    return "legipart"  # LEGITEXT, CNILTEXT, CONSTEXT … — consolidated text
+    if tid.startswith("CNILTEXT"):
+        return "cnil"
+    if tid.startswith("CONSTEXT"):
+        return "juri"
+    return "legipart"  # LEGITEXT … — consolidated text
 
 
 class FrLegislationAdapter(BaseAdapter):
@@ -142,10 +198,17 @@ class FrLegislationAdapter(BaseAdapter):
                 "recherche": {
                     "pageNumber": page,
                     "pageSize": 100,
-                    "sort": "PUBLICATION_DATE_DESC",
+                    "sort": _SORT_BY_FOND.get(self.fond, "PUBLICATION_DATE_DESC"),
                     "typePagination": "DEFAUT",
                     "operateur": "ET",
-                    "champs": [{"typeChamp": "ALL", "criteres": [
+                    # ``operateur`` is required on the CHAMP as well as on the criteria
+                    # inside it and on the search as a whole. Omit it and Légifrance does
+                    # not answer 400 — it answers 500, "une exception non gérée est
+                    # survenue", which reads like an outage at the far end rather than a
+                    # malformed body. It is the only difference between no French
+                    # administrative case law at all and 26,806 CNIL deliberations.
+                    "filtres": [],
+                    "champs": [{"typeChamp": "ALL", "operateur": "ET", "criteres": [
                         {"typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP",
                          "valeur": "*", "operateur": "ET"}]}],
                 },
@@ -159,13 +222,19 @@ class FrLegislationAdapter(BaseAdapter):
                 text_id = _hit_id(hit)
                 if not text_id:
                     continue
-                d = str(hit.get("datePublication") or hit.get("date") or "")
-                if since and d and d < since:
+                title = _hit_title(hit)
+                # CONSTIT answers with every date field null, so fall back to the date
+                # written into the title. Without a date there is no cursor, and a
+                # "server-side incremental" fund silently becomes a full re-walk.
+                d = str(hit.get("datePublication") or hit.get("date") or "")[:10]
+                if not d:
+                    d = _date_in_title(title) or ""
+                if since and d and d < since[:10]:
                     stop = True
                     continue
                 yield Stub(
                     stable_id=text_id,
-                    title=hit.get("titre") or hit.get("title"),
+                    title=title,
                     hint_date=_iso_date(d),
                     hints={"text_id": text_id, "fond": self.fond},
                 )
@@ -184,6 +253,8 @@ class FrLegislationAdapter(BaseAdapter):
             body = self._post("consult/getArticle", {"id": text_id})
         elif kind == "jorf":
             body = self._post("consult/jorf", {"textCid": text_id, "searchedString": ""})
+        elif kind in ("cnil", "juri"):
+            body = self._post(f"consult/{kind}", {"textId": text_id})
         else:
             body = self._post("consult/legiPart", {"textId": text_id, "date": today})
         if not body:
@@ -191,9 +262,31 @@ class FrLegislationAdapter(BaseAdapter):
 
         doc = parse_legifrance_obj(body)
         _fond, doc_type = _FUNDS.get(fond, ("LEGI", DocType.LEGISLATION))
-        stable_id = doc.eli or f"fr/{fond.lower()}/{doc.cid or text_id}"
+        # IDENTITY, and the whole reason this source can be switched on safely: the DILA
+        # bulk already seeded these funds and PISTE is only filling in the tail, so the
+        # live increment MUST land on the ids the backfill used or the French corpus
+        # forks the way the German one did. The bulk keys a Conseil constitutionnel
+        # decision by its ECLI (7,112 of them held as ECLI:FR:CC:…) and a CNIL
+        # deliberation as fr/cnil/<CNILTEXT…> (26,367 held). Légifrance answers `cid:
+        # null` for both funds, so the CNIL branch falls through to the text id — which
+        # is the same string the bulk used — and CONSTIT has to be keyed on the ECLI it
+        # does return, not on fr/constit/<CONSTEXT…>, which nothing else in the corpus
+        # knows about.
+        stable_id = doc.ecli or doc.eli or f"fr/{fond.lower()}/{doc.cid or text_id}"
 
         relations: list[TypedRelation] = []
+        raw_text = body.get("text") if isinstance(body.get("text"), dict) else {}
+        # The API states the publication link itself — a CONSTIT decision names the
+        # Journal officiel text that promulgated it (idTexteJo) — so the edge is
+        # structured fact, not something the citation grammar has to find in prose.
+        jo_id = raw_text.get("idTexteJo")
+        if jo_id:
+            relations.append(TypedRelation(
+                relationship_type=RelationshipType.RELATED_TO,
+                raw_citation_string=" | ".join(
+                    str(x) for x in (raw_text.get("titreJo"), jo_id) if x),
+                dst_id=None,
+            ))
         # record the version series as point-in-time metadata; the pipeline maps these
         # onto document_versions (§6b — "what did the article say in 1992?").
         versions_meta = [
@@ -208,6 +301,24 @@ class FrLegislationAdapter(BaseAdapter):
             extra["cid"] = doc.cid
         if doc.eli:
             extra["eli"] = doc.eli
+        if doc.ecli:
+            extra["ecli"] = doc.ecli
+        # What the fund actually knows about the decision. These are the facets the
+        # Court and the CNIL publish alongside the text — the outcome, the kind of
+        # review, the official reference and the Journal officiel it appeared in — and
+        # they are the difference between a searchable decision and a wall of French.
+        for key, field in (
+            ("nature", "nature"), ("solution", "solution"), ("nor", "nor"),
+            ("numero", "num"), ("juridiction", "juridiction"),
+            ("type_decision", "typeDecision"),
+            ("type_controle", "typeControleNormes"),
+            ("nature_qualifiee", "natureQualifiee"),
+            ("demandeur", "demandeur"), ("jo_reference", "titreJo"),
+            ("jo_text_id", "idTexteJo"), ("url_officielle", "urlCC"),
+        ):
+            value = raw_text.get(field)
+            if value not in (None, "", [], {}):
+                extra[key] = value
         if versions_meta:
             extra["article_versions"] = versions_meta
         # Unified legislative currency (§CUR): map the French état vocabulary onto the canonical
@@ -228,9 +339,15 @@ class FrLegislationAdapter(BaseAdapter):
         return Record(
             source=self.source,
             stable_id=stable_id,
+            ecli=doc.ecli,
             doc_type=doc_type,
             title=doc.title or stub.title,
-            decision_date=doc.date_debut or stub.hint_date,
+            # A decision's date is its decision date (dateTexte), not the dateDebut of a
+            # consolidated version — and for CONSTIT the stub's date, parsed out of the
+            # title, is the only one the search gave us.
+            decision_date=(_epoch_ms_date(raw_text.get("dateTexte"))
+                           if doc_type is not DocType.LEGISLATION else None)
+                          or doc.date_debut or stub.hint_date,
             language="fr",
             source_language="fr",
             landing_url=f"https://www.legifrance.gouv.fr/{'eli/' + doc.eli if doc.eli else 'search/all'}",
@@ -251,6 +368,18 @@ def _iso_date(value: str) -> date | None:
         return date.fromisoformat(value[:10])
     except ValueError:
         return None
+
+
+def _hit_title(hit: dict) -> str | None:
+    """A search hit's title — nested in ``titles[0]`` for the funds whose top-level
+    ``titre`` is null (CONSTIT, CNIL), which is also where the only date lives."""
+    for key in ("titre", "title"):
+        if hit.get(key):
+            return hit[key]
+    titles = hit.get("titles") or hit.get("titres")
+    if isinstance(titles, list) and titles:
+        return titles[0].get("title") or titles[0].get("titre")
+    return None
 
 
 def _hit_id(hit: dict) -> str | None:

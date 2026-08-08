@@ -4,10 +4,11 @@ France's Cour de cassation (Judilibre) and DILA/Légifrance APIs both sit behind
 **PISTE** API gateway (piste.gouv.fr), and one PISTE app can subscribe to both — but the
 two APIs authenticate **differently**, so this helper supports both modes:
 
-- **Judilibre** — a static API key sent in the ``KeyId`` header (confirmed by the Cour de
-  cassation's own tutorials: ``headers={"KeyId": key}``). No token exchange. The key is
-  the app's API key (``PISTE_KEY_ID``); on PISTE the client id doubles as it, so we fall
-  back to ``PISTE_CLIENT_ID``.
+- **Judilibre** — accepts EITHER a static API key in the ``KeyId`` header (the Cour de
+  cassation's own tutorials: ``headers={"KeyId": key}``) or an OAuth2 bearer token. Both
+  were checked against production and both answer 200. The API key is ``PISTE_KEY_ID`` /
+  ``PISTE_API_KEY``; it is a different value from the OAuth client id, and sending the
+  client id as ``KeyId`` earns a bare 400.
 - **Légifrance** — OAuth2 *client-credentials*: exchange ``PISTE_CLIENT_ID`` /
   ``PISTE_CLIENT_SECRET`` for a short-lived bearer token, refresh on expiry/401.
 
@@ -49,8 +50,18 @@ def piste_credentials() -> tuple[str | None, str | None]:
 
 
 def piste_key_id() -> str | None:
-    """The Judilibre ``KeyId`` — its own setting, else the client id (they coincide)."""
-    return os.environ.get("PISTE_KEY_ID") or os.environ.get("PISTE_CLIENT_ID") or None
+    """The Judilibre ``KeyId`` — the PISTE app's **API key**.
+
+    It does NOT coincide with the OAuth client id, whatever the old comment here said:
+    a PISTE application is issued an API key/secret pair AND an OAuth client id/secret
+    pair, and they are four different values. Sending the client id as ``KeyId`` earns a
+    bare HTTP 400 with no body — checked against production — so falling back to it
+    turned a working OAuth-only configuration into a silently dead source. With no API
+    key configured, return None and let ``auth="auto"`` choose OAuth, which Judilibre
+    accepts (also checked: ``Bearer`` on the taxonomy endpoint answers 200)."""
+    return (os.environ.get("PISTE_KEY_ID")
+            or os.environ.get("PISTE_API_KEY")      # the name the PISTE console uses
+            or None)
 
 
 def piste_configured(auth: str = "oauth") -> bool:

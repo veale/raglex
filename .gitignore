@@ -4,7 +4,7 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
-
+.scratch/
 # Design references — large third-party material (IBM Carbon source, fonts), not part
 # of the app. The real folder name has spaces, so match both it and the hyphenated form.
 raglex design docs/
