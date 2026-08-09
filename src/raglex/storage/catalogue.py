@@ -5378,25 +5378,32 @@ class Catalogue:
     ) -> int:
         """Replace only a document's structural-label index, preserving body FTS."""
         self.conn.execute("DELETE FROM doc_headings WHERE doc_id = ?", (doc_id,))
-        written = 0
+        rows: list[tuple[object, ...]] = []
         for heading_no, (label, char_start) in enumerate(headings):
             label = str(label or "").strip()
             if not label:
                 continue
+            rows.append((doc_id, heading_no, label, int(char_start or 0), label))
+        # One execute per label made an ordinary 200-article regulation 200 database
+        # round trips. Insert bounded multi-row batches instead; 1,000 rows stays well
+        # below PostgreSQL's parameter ceiling even for unusually large instruments.
+        for start in range(0, len(rows), 1_000):
+            batch = rows[start:start + 1_000]
             if self.backend == "postgres":
+                values = ",".join(
+                    "(?,?,?,?,to_tsvector('english',?))" for _ in batch)
                 self.conn.execute(
                     "INSERT INTO doc_headings (doc_id,heading_no,label,char_start,tsv) "
-                    "VALUES (?,?,?,?,to_tsvector('english', ?))",
-                    (doc_id, heading_no, label, int(char_start or 0), label))
+                    f"VALUES {values}", tuple(value for row in batch for value in row))
             else:
-                self.conn.execute(
+                self.conn.executemany(
                     "INSERT INTO doc_headings (doc_id,heading_no,label,char_start,tsv) "
                     "VALUES (?,?,?,?,?)",
-                    (doc_id, heading_no, label, int(char_start or 0), ""))
-            written += 1
+                    [(doc, number, label, char_start, "")
+                     for doc, number, label, char_start, _tsv_text in batch])
         if commit:
             self.conn.commit()
-        return written
+        return len(rows)
 
     def drop_doc_fts(self, doc_id: str, *, commit: bool = True) -> None:
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
