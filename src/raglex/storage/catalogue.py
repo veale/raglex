@@ -6846,6 +6846,7 @@ class Catalogue:
         limit: int = 100,
         offset: int = 0,
         collapse_versions: bool = False,
+        instrument_only: bool = False,
     ) -> list[sqlite3.Row]:
         """Browse/filter documents — lets an agent iterate, e.g., a law's sections
         to augment each with secondary material.
@@ -6867,6 +6868,17 @@ class Catalogue:
             clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t "
                               "WHERE t.doc_id = d.stable_id AND t.tag = ?)")
             params.append(tag)
+        if instrument_only:
+            # Static editions are whole instruments.  DILA article rows deliberately
+            # repeat the parent law's title ("Loi n° … — Article 4"), so without
+            # this gate an article with a larger citation count can be predicted ahead
+            # of the law itself.  Keep article rows available to the ordinary document
+            # picker, where linking directly to a provision is useful.
+            clauses.extend([
+                "d.doc_type = 'legislation'",
+                "d.stable_id NOT LIKE 'LEGIARTI%'",
+                "d.stable_id NOT LIKE 'JORFARTI%'",
+            ])
         params.extend(fparams)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)

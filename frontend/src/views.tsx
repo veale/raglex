@@ -2204,12 +2204,13 @@ function GuidanceChips({ id }: { id: string }) {
 // near the bottom of a very long page and the browser scrolled the caret into view: you
 // arrived most of the way down a page you had not scrolled. Pass it only where the field's
 // appearance IS the user's action.
-export function DocAutocomplete({ initial, onPick, placeholder, autoFocus }:
+export function DocAutocomplete({ initial, onPick, placeholder, autoFocus, instrumentOnly }:
   { initial?: string; onPick: (id: string, title: string) => void; placeholder?: string;
-    autoFocus?: boolean }) {
+    autoFocus?: boolean; instrumentOnly?: boolean }) {
   const [q, setQ] = useState(initial || "");
   const ac = useAutosuggest<any>(
-    q, (limit) => api.listDocuments({ query: q.trim(), limit: String(limit) }),
+    q, (limit) => api.listDocuments({ query: q.trim(), limit: String(limit),
+      ...(instrumentOnly ? { instrument_only: "true" } : {}) }),
     { batch: 8, delay: 160 });
   const opts = ac.items;
   const pick = (o: any) => o && onPick(o.stable_id, o.title || o.stable_id);
@@ -4341,7 +4342,8 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
         {adding ? (
           <div className="row" style={{ alignItems: "center", gap: 6 }}>
             <div style={{ flex: 1 }}>
-              <DocAutocomplete autoFocus placeholder="find a statute by name — GDPR, Online Safety Act…"
+              <DocAutocomplete autoFocus instrumentOnly
+                placeholder="find a statute by name — GDPR, Online Safety Act…"
                 onPick={(id, title) => {
                   setAdding(false);
                   if (items.some((it) => it.stable_id === id)) { setMsg("error: already in the set"); return; }

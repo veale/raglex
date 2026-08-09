@@ -1383,11 +1383,12 @@ def create_app(config: Config | None = None) -> FastAPI:
     def documents(
         source: str | None = None, doc_type: str | None = None, tag: str | None = None,
         query: str | None = None, court: str | None = None, id_prefix: str | None = None,
-        limit: int = 100, offset: int = 0,
+        limit: int = 100, offset: int = 0, instrument_only: bool = False,
     ) -> list[dict]:
         return facade.list_documents(
             source=source, doc_type=doc_type, tag=tag, query=query, court=court,
             id_prefix=id_prefix, limit=limit, offset=offset,
+            instrument_only=instrument_only,
         )
 
     @app.get("/documents/count")

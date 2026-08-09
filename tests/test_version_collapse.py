@@ -154,6 +154,19 @@ def test_the_act_outranks_the_commencement_orders_made_under_it():
     assert hits[0]["stable_id"] == "ukpga/2017/30"
 
 
+def test_whole_instrument_picker_excludes_french_article_rows():
+    f = _facade()
+    stem = "Loi n° 2004-575 du 21 juin 2004"
+    _law(f, "LEGITEXT000005789847", stem + " pour la confiance dans l'économie numérique",
+         date(2004, 6, 21), cited=5)
+    _law(f, "LEGIARTI000006421544", stem + " — Article 1", date(2004, 6, 21), cited=500)
+
+    ordinary = f.list_documents(query=stem, limit=8)
+    assert ordinary[0]["stable_id"] == "LEGIARTI000006421544"
+    whole = f.list_documents(query=stem, limit=8, instrument_only=True)
+    assert [row["stable_id"] for row in whole] == ["LEGITEXT000005789847"]
+
+
 def test_a_tie_breaks_on_the_cached_citation_count():
     """Where relevance cannot separate two documents, how much the corpus cites them
     does — read from the citation_counts roll-up, never counted live."""
