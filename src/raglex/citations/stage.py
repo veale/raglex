@@ -863,6 +863,14 @@ def aliases_for_document(doc, aliases: dict[str, str] | None,
     """
     extra: dict[str, str] = {}
     extra.update(_SOURCE_ALIASES.get((doc["source"] or "") if doc is not None else "", {}))
+    # A source may know a shorthand is document-local even where the prose does not
+    # formally define it.  Explanatory notes are the canonical example: "the Act"
+    # means the Act whose notes these are, never a corpus-wide law.  Keep this metadata
+    # out of the learned shorthand store and apply it only while scanning this record.
+    declared = _meta_of(doc).get("citation_local_aliases") if doc is not None else None
+    if isinstance(declared, dict):
+        extra.update({str(name): str(target) for name, target in declared.items()
+                      if name and target})
     extra.update(_statutory_basis_alias(doc, text))
     if text:
         lowered = text.lower()
@@ -960,6 +968,17 @@ _SAYS_EU_GDPR = re.compile(
     r"|\bEU\s+General\s+Data\s+Protection\s+Regulation\b",
     re.IGNORECASE)
 
+# A post-exit UK judgment may deliberately compare the domestic and EU versions of an
+# instrument.  In that setting ``Regulation (EU) ...`` really can mean the EU node, so
+# the general existence-gated rebinding below must stand down.  Keep this deliberately
+# narrower than a bare ``(EU)``: assimilated regulations retain that text in their
+# formal titles.
+_SAYS_EU_VERSION = re.compile(
+    r"\b(?:EU\s+law\s+version|version\s+applicable\s+in\s+the\s+EU|"
+    r"as\s+it\s+applies\s+in\s+the\s+EU)\b",
+    re.IGNORECASE,
+)
+
 
 def _doc_field(doc, name: str) -> str:
     """One column of a document row, tolerating a row that doesn't carry it.
@@ -1028,6 +1047,37 @@ def _rebind_assimilated_eu_law(doc, cites: list, text: str | None = None) -> lis
         if c.candidate_id in _ASSIMILATED_EU_LAW else c
         for c in cites
     ]
+
+
+def _rebind_held_assimilated_regulations(
+    catalogue: Catalogue | None, doc, cites: list, text: str | None = None,
+) -> list:
+    """Prefer a held UK assimilated Regulation in post-exit UK judgments.
+
+    This is intentionally existence-gated.  If legislation.gov.uk has supplied the
+    domestic node, a numeric EU Regulation citation is routed to it; if it has not, the
+    CELEX candidate is retained and continues to resolve to the EU original.  That gives
+    every regulation the same treatment as the older GDPR/eIDAS special cases without
+    manufacturing domestic documents that the catalogue does not actually hold.
+    """
+    if (catalogue is None or not _is_post_exit_uk_judgment(doc)
+            or (text and _SAYS_EU_VERSION.search(text))):
+        return cites
+
+    held: dict[str, str | None] = {}
+    rebound = []
+    for cite in cites:
+        match = re.fullmatch(r"3(\d{4})R(\d{4})", cite.candidate_id or "",
+                             re.IGNORECASE)
+        if not match:
+            rebound.append(cite)
+            continue
+        domestic = f"european/regulation/{match.group(1)}/{match.group(2)}"
+        if domestic not in held:
+            held[domestic] = catalogue.find_document_id(domestic)
+        rebound.append(replace(cite, candidate_id=held[domestic])
+                       if held[domestic] else cite)
+    return rebound
 
 
 def _is_irish_host(doc) -> bool:
@@ -1473,6 +1523,7 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str,
     # all unambiguous and kept. Domestic (ICO etc.) guidance is deliberately NOT gated —
     # there a "Data Protection Act 2018" reference IS to the national statute.
     cites = _gate_domestic_statute_names(doc, cites, text)
+    cites = _rebind_held_assimilated_regulations(catalogue, doc, cites, text)
 
     # Bare "the Charter" is EU-local shorthand: in a national text it may mean a
     # domestic constitutional charter. Explicit "EU Charter", CFREU and the formal

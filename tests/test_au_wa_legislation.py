@@ -1,4 +1,11 @@
-from raglex.adapters.au_wa_legislation import parse_wa_document, parse_wa_index
+from datetime import date
+
+from raglex.adapters.au_wa_legislation import (
+    WesternAustraliaLegislationAdapter,
+    parse_wa_document,
+    parse_wa_index,
+)
+from raglex.core.models import Stub
 
 
 INDEX = b"""
@@ -27,3 +34,21 @@ def test_parse_wa_document_keeps_sections():
     )
     assert "Example Act" in text
     assert segments[0].label == "1. Short title"
+
+
+def test_future_consolidation_date_is_currency_not_document_date():
+    class Client:
+        def get(self, _url):
+            return type("Response", (), {"content": (
+                b"<html><body><p>As at 30 June 2027</p><p>1. Short title</p>"
+                b"<p>This Act may be cited as the Example Act. " + b"x" * 120 + b"</p></body></html>"
+            )})()
+
+    stub = Stub(
+        stable_id="au/wa/act/2002/28", title="Example Act 2002",
+        landing_url="https://example.test/law", raw_url="https://example.test/law.htm",
+        hint_date=date(2002, 1, 1), hints={"kind": "act", "year": 2002},
+    )
+    record = WesternAustraliaLegislationAdapter(client=Client()).fetch(stub)
+    assert record.decision_date == date(2002, 1, 1)
+    assert record.extra["effective_date"] == "2027-06-30"

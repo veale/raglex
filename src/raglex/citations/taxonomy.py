@@ -30,6 +30,7 @@ from .snowball import (
 CATEGORY_LABELS: dict[str, str] = {
     "uk-caselaw": "UK case-law",
     "uk-legislation": "UK legislation",
+    "uk-legislation-materials": "UK explanatory material",
     "ie-caselaw": "Irish case-law",
     "ie-legislation": "Irish legislation",
     "eu-cellar": "EU case-law",
@@ -67,7 +68,8 @@ CATEGORY_LABELS: dict[str, str] = {
     "sg-legislation": "Singapore legislation",
     "other": "Other / unrouted",
 }
-CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "ie-caselaw", "ie-legislation",
+CATEGORY_ORDER = ["uk-caselaw", "uk-legislation", "uk-legislation-materials",
+                  "ie-caselaw", "ie-legislation",
                   "eu-cellar", "eu-legislation", "eu-preparatory", "echr", "fr-caselaw", "fr-legislation",
                   "de-caselaw", "de-legislation", "guidance",
                   "nl-caselaw", "nl-legislation",
@@ -274,6 +276,14 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         sub, label = _leg_subtype(prefix)
         return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"], sub, label,
                    {"source": "uk-legislation", "id_prefix": prefix})
+    if source == "uk-legislation-materials":
+        impacts = prefix == "ukia" or doc_type == "preparatory"
+        return Tax(
+            "uk-legislation-materials", CATEGORY_LABELS["uk-legislation-materials"],
+            "impact-assessments" if impacts else "explanatory-notes",
+            "Impact assessments" if impacts else "Explanatory notes",
+            {"source": "uk-legislation-materials", "doc_type": doc_type},
+        )
     if source == "uk-cpr":
         is_pd = stable_id.startswith("uk/cpr/pd/")
         return Tax("uk-legislation", CATEGORY_LABELS["uk-legislation"],

@@ -92,3 +92,42 @@ def test_held_ukut_aac_variant_is_canonicalised_before_set_based_resolution():
 
     kept = _guard_cites(Catalogue(), doc, [cite], stable_id=doc["stable_id"])
     assert kept[0].candidate_id == "ukut/aac/2014/0310"
+
+
+def test_post_exit_uk_judgment_prefers_a_held_assimilated_regulation_only():
+    text = ("Regulation (EU) 2019/1150 applies, but Regulation (EU) 2022/2065 "
+            "is also discussed.")
+    cites = extract_citations(text)
+    doc = defaultdict(lambda: None, {
+        "doc_type": "judgment", "source": "uk-caselaw", "court": "ewhc",
+        "stable_id": "ewhc/kb/2026/1", "decision_date": "2026-01-02",
+        "meta_json": None,
+    })
+
+    class Catalogue:
+        @staticmethod
+        def find_document_id(candidate):
+            return candidate if candidate == "european/regulation/2019/1150" else None
+
+    kept = _guard_cites(Catalogue(), doc, cites, stable_id=doc["stable_id"], text=text)
+    assert [c.candidate_id for c in kept] == [
+        "european/regulation/2019/1150", "32022R2065",
+    ]
+
+
+def test_explicit_eu_version_comparison_keeps_the_eu_regulation_node():
+    text = "The version applicable in the EU is Regulation (EU) 2019/1150."
+    cites = extract_citations(text)
+    doc = defaultdict(lambda: None, {
+        "doc_type": "judgment", "source": "uk-caselaw", "court": "ewhc",
+        "stable_id": "ewhc/kb/2026/2", "decision_date": "2026-01-02",
+        "meta_json": None,
+    })
+
+    class Catalogue:
+        @staticmethod
+        def find_document_id(candidate):
+            return candidate
+
+    kept = _guard_cites(Catalogue(), doc, cites, stable_id=doc["stable_id"], text=text)
+    assert kept[0].candidate_id == "32019R1150"

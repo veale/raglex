@@ -187,11 +187,14 @@ class FrJudilibreAdapter(BaseAdapter):
         *,
         ids: str | list[str] | None = None,
         batch_size: int = 100,
+        since_date: str | None = None,
         client: PisteClient | None = None,
     ) -> None:
         if isinstance(ids, str):
             ids = [i.strip() for i in ids.split(",") if i.strip()]
         self.ids = ids or []
+        # Where the offline bulk already covers, so a descending seed stops there.
+        self.floor = (since_date or "").strip() or None
         self.batch_size = min(batch_size, 100)  # /export caps at 100 per batch
         # Judilibre auth depends on the app's PISTE plan: KeyId (API-key plan) or Bearer
         # (OAuth plan). "auto" uses the KeyId when one is configured, else OAuth.
@@ -215,14 +218,40 @@ class FrJudilibreAdapter(BaseAdapter):
             for ident in self.ids:
                 yield Stub(stable_id=ident, hints={"id": ident})
             return
+        # WHICH END TO START FROM. Both directions are a sweep over the same changes
+        # feed, and the choice only matters when the walk is cut short — which it always
+        # is, because a query is capped at 10,000 and the register holds 566,124.
+        #
+        #   incremental (a cursor exists) → ASCENDING from it. That is what a changes
+        #   feed is for: small, ordered, resumable, and it cannot skip an update.
+        #
+        #   seeding (no cursor) → DESCENDING. Ascending from the beginning spends every
+        #   window it is given on the 1860s; the first real backfill covered 10,000
+        #   decisions, stopped in July 1971 and reported success. Whatever budget a run
+        #   gets should buy the most recent law first and work back towards the point the
+        #   DILA bulk already covers, so a truncated run leaves the OLDEST hole, not the
+        #   newest.
+        #
+        # ``floor`` (source option ``since_date``) is where the bulk takes over — set it
+        # to the newest decision DILA holds and a descending sweep stops there instead of
+        # re-deriving two centuries the corpus already has.
+        descending = not since
         batch = 0
         pages = 0
-        cursor = since
+        cursor = since                      # ascending: lower bound, moves up
+        edge: str | None = None             # descending: upper bound, moves down
         newest_seen: str | None = None
+        oldest_seen: str | None = None
         while True:
             params = {"batch": batch, "batch_size": self.batch_size,
-                      "date_type": "update", "order": "asc", "resolve_references": "true"}
-            if cursor:
+                      "date_type": "update", "resolve_references": "true",
+                      "order": "desc" if descending else "asc"}
+            if descending:
+                if edge:
+                    params["date_end"] = edge
+                if self.floor:
+                    params["date_start"] = self.floor
+            elif cursor:
                 params["date_start"] = cursor
             body = self._get("export", params)
             results = body.get("results") or []
@@ -233,8 +262,11 @@ class FrJudilibreAdapter(BaseAdapter):
                 ecli = decision.get("ecli")
                 ident = decision.get("id")
                 update_date = decision.get("update_date")
-                if update_date and (newest_seen is None or update_date > newest_seen):
-                    newest_seen = update_date
+                if update_date:
+                    if newest_seen is None or update_date > newest_seen:
+                        newest_seen = update_date
+                    if oldest_seen is None or update_date < oldest_seen:
+                        oldest_seen = update_date
                 yield Stub(
                     stable_id=ecli or ident,
                     hint_date=_iso_date(decision.get("decision_date")),
@@ -268,6 +300,12 @@ class FrJudilibreAdapter(BaseAdapter):
             if body.get("next_batch") is not None:
                 batch += 1
                 continue
+            if descending:
+                # step the upper bound down to the oldest update this window returned
+                if oldest_seen and oldest_seen != edge:
+                    edge, batch = oldest_seen, 0
+                    continue
+                return
             if newest_seen and newest_seen != cursor:
                 cursor, batch = newest_seen, 0
                 continue

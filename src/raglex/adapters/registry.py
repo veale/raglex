@@ -97,6 +97,7 @@ from .uk_govuk_regulator import GOVUKRegulatorAdapter
 from .uk_fca_notices import FCANoticesAdapter
 from .uk_ico import ICOAdapter
 from .uk_legislation import UKLegislationAdapter
+from .uk_legislation_materials import UKLegislationMaterialsAdapter
 from .uk_ftt_ir import InformationRightsAdapter
 from .eu_digital_strategy import DigitalStrategyLibraryAdapter
 from .uk_judiciary import JudiciaryGuidanceAdapter
@@ -236,6 +237,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Legislation — statute, not just cases. stable_ids are the resolution targets, so
     # harvesting these closes the §5b loop for every statutory citation in the corpus.
     "uk-legislation": UKLegislationAdapter,
+    # Official explanatory notes and impact assessments stay separate from the
+    # enacted text, but carry structured links back to the Act/SI they explain.
+    "uk-legislation-materials": UKLegislationMaterialsAdapter,
     "eu-legislation": EULegislationAdapter,
     "eu-preparatory": EUPreparatoryAdapter,
     "eu-ep-resolutions": EPResolutionsAdapter,
@@ -899,6 +903,19 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("types", "Feed types", "ukpga,uksi (default)"),
          SourceOption("query", "Title search", "e.g. companies")),
         ("legislation id (ukpga/2000/36)", "legislation.gov.uk URI"),
+    ),
+    "uk-legislation-materials": SourceInfo(
+        "uk-legislation-materials", "UK explanatory notes & impact assessments",
+        "guidance", "GB", False,
+        "Imports official explanatory notes and impact assessments from "
+        "legislation.gov.uk. Name Acts/SIs to pull their accompanying material; "
+        "with no ids, follows the newest-first UK impact-assessment feed. Older "
+        "structured notes and newer paged HTML notes are both supported.",
+        (SourceOption("ids", "Parent legislation or impact-assessment ids",
+                      "ukpga/2000/36,ukpga/2018/12,ukia/2016/251"),
+         SourceOption("notes", "Include explanatory notes", "true (default)"),
+         SourceOption("impacts", "Include impact assessments", "true (default)")),
+        ("parent legislation id", "impact-assessment id (ukia/2016/251)"),
     ),
     "edpb": SourceInfo(
         "edpb", "EDPB documents (guidelines, opinions, decisions…)", "guidance", "EU", False,
@@ -1590,7 +1607,9 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "/export by update date, each decision's functional zones (motivations, "
         "dispositif…) become citable segments, and the court-authored textes appliqués "
         "and rapprochements become typed edges to legislation and case law.",
-        (SourceOption("ids", "Decision ids/ECLIs", "ECLI:FR:CCASS:2021:C100400"),),
+        (SourceOption("ids", "Decision ids/ECLIs", "ECLI:FR:CCASS:2021:C100400"),
+         SourceOption("since_date", "Stop a seed here (where the DILA bulk ends)",
+                      "2025-07-01")),
         ("ECLI:FR:CCASS:…", "Judilibre decision id"),
     ),
     "fr-conseil-etat": SourceInfo(
@@ -1780,6 +1799,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     # client-side early-stop on a newest-first feed
     "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-ftt-tax": "early-stop",
     "uk-utaac": "early-stop", "uk-iac": "early-stop", "uk-legislation": "early-stop",
+    "uk-legislation-materials": "early-stop",
     "uk-cma": "early-stop", "uk-cma-guidance": "early-stop",
     "uk-ofgem": "early-stop", "uk-ofwat": "early-stop",
     # newest-first Search API, same as the other GOV.UK feeds

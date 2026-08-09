@@ -5,7 +5,7 @@ from pathlib import Path
 
 from raglex.adapters.de_gii import DeGiiAdapter, _slug
 from raglex.adapters.de_rii import DeRiiAdapter
-from raglex.adapters.fr_dila import FrDilaAdapter
+from raglex.adapters.fr_dila import FrDilaAdapter, _display_date
 from raglex.core.models import DocType, RelationshipType
 from raglex.formats.gii_xml import parse_gii
 from raglex.formats.rii_xml import parse_rii
@@ -137,6 +137,11 @@ def test_dila_article_parse():
     assert a.date_debut == date(2016, 10, 1)
     assert a.code_cid == "LEGITEXT000006070721"
     assert a.code_title == "Code civil"
+
+
+def test_dila_future_validity_sentinels_are_not_display_dates():
+    assert _display_date(date(2999, 1, 1)) is None
+    assert _display_date(date(2020, 1, 1)) == date(2020, 1, 1)
 
 
 def test_fr_dila_fetch_juri_and_article(tmp_path):

@@ -116,3 +116,54 @@ def test_discover_no_credentials_yields_nothing():
         def configured(self): return False
     adapter = FrJudilibreAdapter(client=_Unconfigured([]))
     assert list(adapter.discover(None)) == []
+
+
+def test_a_seed_runs_newest_first_and_stops_at_the_bulk_edge():
+    """Both directions sweep the same feed; the direction only matters when the walk is
+    cut short, which it always is (10,000 per query, 566,124 in the register). A seed
+    ascending from the beginning spends its whole budget in the 1860s — the first real
+    backfill stopped in July 1971 and reported success. Newest-first means a truncated
+    run leaves the oldest hole, not the newest."""
+    windows = {
+        None: [{"id": "new", "decision_date": "2026-07-08", "update_date": "2026-08-07"}],
+        "2026-08-07": [{"id": "older", "decision_date": "2025-09-01",
+                        "update_date": "2025-10-01"}],
+        "2025-10-01": [],
+    }
+    calls = []
+
+    class _Client:
+        def configured(self):
+            return True
+
+        def get(self, url, params=None, headers=None):
+            calls.append(params or {})
+            return _Resp({"results": windows.get((params or {}).get("date_end"), []),
+                          "next_batch": None, "total": 566124})
+
+    stubs = list(FrJudilibreAdapter(client=_Client(), since_date="2025-07-01").discover(None))
+    assert [s.stable_id for s in stubs] == ["new", "older"]
+    assert [c["order"] for c in calls] == ["desc", "desc", "desc"]
+    # the upper bound steps DOWN through the feed…
+    assert [c.get("date_end") for c in calls] == [None, "2026-08-07", "2025-10-01"]
+    # …and every window is floored where the offline bulk already covers
+    assert {c.get("date_start") for c in calls} == {"2025-07-01"}
+
+
+def test_an_incremental_run_still_ascends_from_its_cursor():
+    """With a cursor the feed is small and ordered, and ascending is what guarantees no
+    update is stepped over."""
+    calls = []
+
+    class _Client:
+        def configured(self):
+            return True
+
+        def get(self, url, params=None, headers=None):
+            calls.append(params or {})
+            return _Resp({"results": [], "next_batch": None})
+
+    list(FrJudilibreAdapter(client=_Client()).discover("2026-01-01"))
+    assert calls[0]["order"] == "asc"
+    assert calls[0]["date_start"] == "2026-01-01"
+    assert "date_end" not in calls[0]

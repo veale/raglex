@@ -177,7 +177,10 @@ class WesternAustraliaLegislationAdapter(BaseAdapter):
             stable_id=stub.stable_id,
             doc_type=DocType.LEGISLATION,
             title=stub.title,
-            decision_date=consolidated or stub.hint_date,
+            # The consolidation-as-at date is currency metadata, not the date the Act
+            # was made. Using it here put future commencements in Explore as if they
+            # were future legislation (for example a 2002 Act appeared as 2027).
+            decision_date=stub.hint_date,
             language="en",
             source_language="en",
             landing_url=stub.landing_url,

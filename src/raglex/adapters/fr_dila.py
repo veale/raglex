@@ -19,6 +19,7 @@ watermark. Licence: Licence Ouverte / Etalab 2.0 (attribution).
 from __future__ import annotations
 
 import tarfile
+from datetime import date
 from pathlib import Path
 from typing import Iterator
 from xml.etree import ElementTree as ET
@@ -38,6 +39,17 @@ _FUND_JURI = {
     "CONSTIT": (DocType.DECISION, "Conseil constitutionnel"),
     "CNIL": (DocType.DECISION, "CNIL"),
 }
+
+
+def _display_date(value: date | None) -> date | None:
+    """A publication/decision date shown in Explore cannot be in the future.
+
+    DILA uses 2999-01-01 as an open-ended validity sentinel and also publishes future
+    commencement dates for legislation. Those remain in ``date_debut`` metadata; they
+    are not dates on which the document was made. Case-law future dates are likewise
+    source sentinels/bad metadata, never decisions from the future.
+    """
+    return value if value is not None and value <= date.today() else None
 
 # Canonical document files in each DILA bulk fund.  The archives also contain XML
 # indexes, packaging metadata and (for LEGI) ELI/version trees; those are not legal
@@ -135,7 +147,7 @@ class FrDilaAdapter(BaseAdapter):
             stable_id=stable_id,
             doc_type=DocType.LEGISLATION,
             title=title,
-            decision_date=art.date_debut,
+            decision_date=_display_date(art.date_debut),
             language="fr",
             source_language="fr",
             landing_url=f"https://www.legifrance.gouv.fr/codes/article_lc/{stable_id}",
@@ -169,7 +181,7 @@ class FrDilaAdapter(BaseAdapter):
             doc_type=doc_type,
             title=j.title or ", ".join(x for x in (j.jurisdiction, j.number) if x) or ecli,
             court=j.jurisdiction or default_court,
-            decision_date=j.date,
+            decision_date=_display_date(j.date),
             language="fr",
             source_language="fr",
             landing_url=f"https://www.legifrance.gouv.fr/juri/id/{j.doc_id}" if j.doc_id else None,

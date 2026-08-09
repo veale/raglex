@@ -380,18 +380,20 @@ def test_static_export_declares_the_document_language():
     assert '"language": target["language"]' in src
 
 
-def test_judilibre_opens_a_new_window_when_one_is_exhausted():
-    """A Judilibre query is capped at 10,000 results however many the register holds,
-    and it holds 566,124. Treating the last batch of a query as the end of the walk
-    ended the backfill after 10,000 with a cursor in 1971 and reported success."""
+def test_judilibre_incremental_opens_a_new_window_when_one_is_exhausted():
+    """A query is capped at 10,000 results however many the register holds, and it holds
+    566,124. Treating the last batch of a query as the end of the walk ended the first
+    backfill after 10,000 with a cursor in 1971 and reported success. With a cursor the
+    sweep ascends, so each exhausted window re-opens at the newest update date seen."""
     from raglex.adapters.fr_judilibre import FrJudilibreAdapter
 
     windows = {
-        None: [{"id": "a", "decision_date": "1960-01-01", "update_date": "1970-01-01"}],
-        "1970-01-01": [{"id": "b", "decision_date": "1961-01-01",
+        "1970-01-01": [{"id": "a", "decision_date": "1960-01-01",
+                        "update_date": "1975-01-01"}],
+        "1975-01-01": [{"id": "b", "decision_date": "1961-01-01",
                         "update_date": "1980-01-01"}],
         "1980-01-01": [{"id": "c", "decision_date": "1962-01-01",
-                        "update_date": "1980-01-01"}],   # cursor cannot advance → stop
+                        "update_date": "1980-01-01"}],   # cursor cannot advance -> stop
     }
     seen_starts = []
 
@@ -412,7 +414,7 @@ def test_judilibre_opens_a_new_window_when_one_is_exhausted():
                             "total": 566124}
             return _R()
 
-    stubs = list(FrJudilibreAdapter(client=_Client()).discover(None))
+    stubs = list(FrJudilibreAdapter(client=_Client()).discover("1970-01-01"))
     assert [s.stable_id for s in stubs] == ["a", "b", "c"]
-    assert seen_starts == [None, "1970-01-01", "1980-01-01"]   # terminates, no spin
+    assert seen_starts == ["1970-01-01", "1975-01-01", "1980-01-01"]   # terminates
     assert stubs[0].hints["feed_total"] == 566124
