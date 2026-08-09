@@ -217,18 +217,24 @@ class FrJudilibreAdapter(BaseAdapter):
             return
         batch = 0
         pages = 0
+        cursor = since
+        newest_seen: str | None = None
         while True:
             params = {"batch": batch, "batch_size": self.batch_size,
                       "date_type": "update", "order": "asc", "resolve_references": "true"}
-            if since:
-                params["date_start"] = since
+            if cursor:
+                params["date_start"] = cursor
             body = self._get("export", params)
             results = body.get("results") or []
             if not results:
                 return
+            feed_total = body.get("total")
             for decision in results:
                 ecli = decision.get("ecli")
                 ident = decision.get("id")
+                update_date = decision.get("update_date")
+                if update_date and (newest_seen is None or update_date > newest_seen):
+                    newest_seen = update_date
                 yield Stub(
                     stable_id=ecli or ident,
                     hint_date=_iso_date(decision.get("decision_date")),
@@ -243,14 +249,29 @@ class FrJudilibreAdapter(BaseAdapter):
                            # whose newest decision happened to be recent would have
                            # jumped the cursor forward over every pending update before
                            # it. Same mistake as de-rii's ToC, same fix.
-                           "watermark": decision.get("update_date")},
+                           "watermark": decision.get("update_date"),
+                           "feed_total": feed_total},
                 )
             pages += 1
-            # `next_batch` is a URL (null on the last batch) — advance the batch index
-            # until it runs out (or the 10,000/window cap ends the results).
-            if body.get("next_batch") is None or (max_pages is not None and pages >= max_pages):
+            if max_pages is not None and pages >= max_pages:
                 return
-            batch += 1
+            # `next_batch` is a URL, null on the last batch of THIS QUERY — and a query
+            # is capped at 10,000 results however many the register holds. Judilibre
+            # holds 566,124, so treating that null as the end of the walk ended the
+            # backfill after 10,000 with a cursor in 1971 and called it a success: at one
+            # window per run a weekly watch reaches the present in about fifty years.
+            #
+            # The window is exhausted, not the register. Open the next one at the newest
+            # update date this window returned and keep sweeping. Items sharing that
+            # exact date are re-offered and dedup by id; if a single date fills a whole
+            # window the cursor cannot advance and we stop rather than spin.
+            if body.get("next_batch") is not None:
+                batch += 1
+                continue
+            if newest_seen and newest_seen != cursor:
+                cursor, batch = newest_seen, 0
+                continue
+            return
 
     def fetch(self, stub: Stub) -> Record | None:
         decision = stub.hints.get("decision")
