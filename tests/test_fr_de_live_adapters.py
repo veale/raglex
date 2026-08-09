@@ -350,3 +350,31 @@ def test_judilibre_cursor_reads_the_same_clock_the_walk_is_ordered_by():
     assert stub.hints["watermark"] == "2026-08-07"
     assert stub.hint_date.isoformat() == "1965-03-18"   # still the decision's own date
     assert stub.stable_id == "ECLI:FR:CCASS:2026:C100400"
+
+
+def test_provenance_follows_the_fund_not_the_class():
+    """One adapter class serves three registry keys. A class-level ``source`` stored a
+    CNIL deliberation, a Conseil constitutionnel decision and a consolidated code
+    indistinguishably as "fr-legislation", so the keep-current view could not tell which
+    of the three registers had gone stale."""
+    from raglex.adapters.fr_legislation import FrLegislationAdapter
+
+    class _C:
+        def configured(self):
+            return True
+
+    assert FrLegislationAdapter(fond="LEGI", client=_C()).source == "fr-legislation"
+    assert FrLegislationAdapter(fond="CNIL", client=_C()).source == "fr-cnil"
+    assert FrLegislationAdapter(fond="CONSTIT", client=_C()).source == "fr-constit"
+
+
+def test_static_export_declares_the_document_language():
+    """The renderer already read law["language"] for <html lang> and schema.org
+    inLanguage; build_data never set it, so a 2.6 MB Code des postes with 70,209
+    accented characters went out as lang="en"."""
+    import inspect
+
+    from raglex import static_export
+
+    src = inspect.getsource(static_export.StaticLawExporter.build_data)
+    assert '"language": target["language"]' in src

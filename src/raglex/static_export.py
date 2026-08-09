@@ -1018,6 +1018,12 @@ class StaticLawExporter:
                 "short_title": _short_instrument_title(
                     display_title, fallback=stable_id),
                 "jurisdiction": target_jurisdiction,
+                # The renderer already reads this for <html lang> and schema.org
+                # inLanguage — it was just never set, so every export declared itself
+                # English. A 2.6 MB Code des postes with 70,209 accented characters and
+                # lang="en" is wrong for a screen reader, for hyphenation, and for
+                # anything indexing it.
+                "language": target["language"] or None,
                 "cite": target_cite.get("text") or target["title"] or stable_id,
                 "source": self.facade.source_label(target["source"]),
                 "links": target_links,

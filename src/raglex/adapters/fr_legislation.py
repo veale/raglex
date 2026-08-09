@@ -99,6 +99,19 @@ _FUNDS = {
     "CONSTIT": ("CONSTIT", DocType.DECISION),
 }
 
+# Fund → the registry key it is reached by, which is also the provenance a document
+# should carry. One adapter class serves three registry keys, and a class-level
+# ``source`` made all three store as "fr-legislation": a CNIL deliberation and a Conseil
+# constitutionnel decision arrived indistinguishable from a consolidated code, so the
+# keep-current view could not say whether either had gone stale and the per-source health
+# counters were the sum of three unrelated registers.
+_SOURCE_BY_FOND = {
+    "LEGI": "fr-legislation",
+    "JORF": "fr-legislation",
+    "CNIL": "fr-cnil",
+    "CONSTIT": "fr-constit",
+}
+
 
 def _text_kind(text_id: str) -> str:
     """Which consult endpoint an id wants, from its prefix.
@@ -136,6 +149,9 @@ class FrLegislationAdapter(BaseAdapter):
         client: PisteClient | None = None,
     ) -> None:
         self.fond = (fond or "LEGI").upper()
+        # Provenance follows the fund, not the class (see _SOURCE_BY_FOND). Set before
+        # the client is built so rate-limiting and health are booked per register too.
+        self.source = _SOURCE_BY_FOND.get(self.fond, "fr-legislation")
         if isinstance(ids, str):
             ids = [i.strip() for i in ids.split(",") if i.strip()]
         self.ids = ids or []
