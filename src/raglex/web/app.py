@@ -2263,6 +2263,14 @@ def serve_app(config: Config | None = None) -> FastAPI:
     @app.get("/")
     @app.get("/{_path:path}")  # SPA fallback (tabs are client state, not routes)
     def index(_path: str = "") -> FileResponse:
-        return FileResponse(str(dist / "index.html"))
+        # The JS/CSS filenames are content-hashed, but this small shell is what points a
+        # browser at the current hashes.  Letting an already-open/admin browser cache the
+        # shell made a freshly deployed server and catalogue fix look as though it had not
+        # shipped (notably the instrument-only Static Export picker).  Revalidate the shell
+        # on every navigation; the large hashed assets remain normally cacheable.
+        return FileResponse(
+            str(dist / "index.html"),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     return app
