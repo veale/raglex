@@ -158,6 +158,15 @@ def test_carry_forward_attaches_bare_provision_to_last_statute():
     assert s167.method == "carry_forward" and s167.confidence < 1.0
 
 
+def test_carry_forward_keeps_hierarchical_application_paragraph_pinpoint():
+    text = ("Article 4 of Regulation (EC) No 1049/2001 applies. The Commission failed "
+            "to carry out the assessment described in paragraph 13.1(a) of the application.")
+    cite = next(c for c in extract_citations(text)
+                if c.method == "carry_forward" and c.raw.startswith("paragraph"))
+    assert cite.candidate_id == "32001R1049"
+    assert cite.pinpoint == "para 13.1(a)"
+
+
 def test_carry_forward_needs_a_legislation_antecedent():
     # no statute mentioned → a bare "section 5" is left alone (no false edge)
     cites = extract_citations("The judge said section 5 was decisive.")

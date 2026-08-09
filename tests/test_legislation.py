@@ -251,6 +251,20 @@ def test_point_in_time_copy_does_not_track_effects():
     assert not [r for r in rec.relations if r.relationship_type.value == "amended_by"]
 
 
+def test_enacted_copy_has_a_distinct_human_identity_not_a_fake_date():
+    ad = UKLegislationAdapter(ids="ukpga/1998/29", version_date="enacted",
+                              client=_FakeClient(AKN_WITH_EFFECTS))
+    stub = next(ad.discover(None))
+    assert stub.stable_id == "ukpga/1998/29@enacted"
+    assert stub.raw_url.endswith("/ukpga/1998/29/enacted/data.akn")
+    rec = ad.fetch(stub)
+    assert rec.title.endswith("(as enacted)")
+    assert rec.extra["version_kind"] == "enacted"
+    assert (rec.extra.get("currency") or {}).get("as_at") is None
+    assert any(r.relationship_type.value == "point_in_time_of"
+               and r.dst_id == "ukpga/1998/29" for r in rec.relations)
+
+
 def test_uk_adapter_treats_eur_typecode_as_assimilated_eu_law():
     # legislation.gov.uk type-code form for assimilated EU law (eur/eudr/eudn) must be
     # titled "Assimilated …" and linked to the EU original's CELEX, like /european/…
@@ -805,6 +819,32 @@ def test_a_textless_consolidation_never_takes_over_the_read(tmp_path, monkeypatc
                         lambda self, sid: (REAL, "2025-01-01"))
     got = f.canonical_read_target(BASE)
     assert got["stable_id"] == REAL and got["redirected"] is True
+
+
+def test_original_read_uses_the_held_enacted_rendition(tmp_path):
+    from raglex.config import Config
+    from raglex.core.models import DocType, ExtractedVia, Record
+    from raglex.facade import Facade
+
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "s.json", embed_provider="local-hashing",
+                 embed_model=None)
+    f = Facade(cfg)
+    with f._open() as (cat, _rs, ts):
+        for sid, body in (("ukpga/1998/29", ". . . . . ." * 60),
+                          ("ukpga/1998/29@enacted", "The original operative words.")):
+            record = Record(source="uk-legislation", stable_id=sid,
+                            doc_type=DocType.LEGISLATION, title="Data Protection Act 1998",
+                            text=body, extracted_via=ExtractedVia.STRUCTURED)
+            record.ensure_payload_hash()
+            cat.upsert_document(record, text_path=str(ts.put(record.payload_hash, body)))
+    assert f.canonical_read_target("ukpga/1998/29", original=True) == {
+        "requested_stable_id": "ukpga/1998/29",
+        "stable_id": "ukpga/1998/29@enacted",
+        "as_enacted": True,
+        "redirected": True,
+    }
 
 
 def test_a_ceilinged_body_window_starts_at_the_articles_not_the_recitals(tmp_path):

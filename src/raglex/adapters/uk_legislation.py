@@ -157,8 +157,8 @@ class UKLegislationAdapter(BaseAdapter):
         self.types = tuple(t.strip().lower() for t in (types or "").split(",") if t.strip()) \
             or DEFAULT_FEED_TYPES
         self.query = (query or "").strip() or None
-        # point-in-time: fetch the law as it stood at this date (YYYY-MM-DD), so a
-        # citation from an old case sees the live provisions, not today's repealed text.
+        # Point-in-time: fetch the law as it stood at this date (YYYY-MM-DD), or the
+        # publisher's ``enacted`` rendition when the original text is requested.
         self.version_date = version_date
         # Fail FAST by default: a few very large Acts (e.g. FSMA 2000) make
         # legislation.gov.uk take minutes generating /data.akn. With the default 5×30s
@@ -456,8 +456,10 @@ class UKLegislationAdapter(BaseAdapter):
         from ..leg_currency import Currency, Provision, CanonStatus
         cur = Currency(scheme="uk-leg", point_in_time_capable=True)
         if base_id:
-            cur.as_at = stub.hints.get("version_date")
-            cur.status = str(CanonStatus.CONSOLIDATED)   # a dated point-in-time snapshot
+            version_value = stub.hints.get("version_date")
+            cur.as_at = version_value if version_value != "enacted" else None
+            cur.status = (str(CanonStatus.CONSOLIDATED)
+                          if version_value != "enacted" else None)
         else:
             # The revised text is CONTINUOUSLY maintained, so "the current text" means
             # nothing without the date it was current on — and the publisher stamps that
@@ -493,7 +495,11 @@ class UKLegislationAdapter(BaseAdapter):
         if cur_meta:
             extra["currency"] = cur_meta
         if base_id:
-            title = f"{title} (as at {stub.hints.get('version_date')})"
+            version_value = stub.hints.get("version_date")
+            title = (f"{title} (as enacted)" if version_value == "enacted"
+                     else f"{title} (as at {version_value})")
+            if version_value == "enacted":
+                extra["version_kind"] = "enacted"
             relations.append(TypedRelation(
                 relationship_type=RelationshipType.POINT_IN_TIME_OF,
                 raw_citation_string=base_id, dst_id=base_id,

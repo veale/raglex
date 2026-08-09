@@ -252,7 +252,7 @@ function MentionsTray({ target, anchor, exact, open }: { target: string; anchor?
   // straight to the categories.
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance & reports",
-    preparatory: "preparatory documents",
+    preparatory: "preparatory documents", explanatory: "explanatory notes",
     // A question put to the Court is not a decision of it. Kept apart from "cases" (and
     // out of the "other" bucket that swallowed it before): a pending reference is what
     // is about to change, not what has been settled.
@@ -2873,7 +2873,7 @@ function CitedByPanel({ id, incoming, count, inferred }: { id?: string; incoming
   // GDPR once read as "no French case law" because none cracked the top page.
   const KIND_LABEL: Record<string, string> = {
     cases: "cases", legislation: "legislation", guidance: "guidance & reports",
-    preparatory: "preparatory documents",
+    preparatory: "preparatory documents", explanatory: "explanatory notes",
     // A question put to the Court is not a decision of it. Kept apart from "cases" (and
     // out of the "other" bucket that swallowed it before): a pending reference is what
     // is about to change, not what has been settled.

@@ -1929,20 +1929,31 @@ class Facade:
     def canonical_read_target(self, stable_id: str, *, original: bool = False) -> dict:
         """Resolve an ordinary legislation read to today's applicable consolidation.
 
-        Explicit dated versions are stable. ``original=True`` also keeps a base act
-        literal. The small provenance envelope lets web/MCP callers redirect without
-        concealing what the user or agent originally requested.
+        Explicit dated versions are stable. For legislation.gov.uk, ``original=True``
+        means the publisher's *enacted* rendition — not its revised-in-place base, which
+        can be a wholly-repealed wall of dots. The small provenance envelope lets
+        web/MCP callers redirect without concealing what was requested.
         """
+        fetch_enacted = False
         with self._open() as (cat, _rs, _ts):
             doc = cat.get_document(stable_id)
             if doc is None:
                 return {"requested_stable_id": stable_id, "stable_id": stable_id,
                         "redirected": False}
-            if original or doc["doc_type"] != "legislation" \
+            if original and doc["source"] == "uk-legislation" \
+                    and doc["doc_type"] == "legislation" \
+                    and not cat.consolidation_base_for(stable_id):
+                enacted_id = f"{stable_id.split('@', 1)[0]}@enacted"
+                enacted = cat.get_document(enacted_id)
+                if enacted is not None and enacted["has_text"]:
+                    return {"requested_stable_id": stable_id, "stable_id": enacted_id,
+                            "as_enacted": True, "redirected": enacted_id != stable_id}
+                fetch_enacted = True
+            elif original or doc["doc_type"] != "legislation" \
                     or cat.consolidation_base_for(stable_id):
                 return {"requested_stable_id": stable_id, "stable_id": stable_id,
                         "redirected": False}
-            current = cat.applicable_consolidation(stable_id)
+            current = None if fetch_enacted else cat.applicable_consolidation(stable_id)
             # A consolidation that holds NO TEXT must never take over the read. 1,965 EU
             # consolidations are metadata stubs — a CELEX row minted from the linked data
             # with no body ever fetched — and redirecting to one replaced the instrument
@@ -1952,13 +1963,14 @@ class Facade:
             # stand in for the act.
             if current and not (cat.get_document(current[0]) or {})["has_text"]:
                 current = None
-            # A consolidation that holds NO TEXT must never take over the read. 1,965 EU
-            # consolidations are metadata stubs — a CELEX row minted from the linked data
-            # with no body ever fetched — and redirecting to one replaced the instrument
-            # with nothing: opening the AI Act showed only the recitals it inherits from
-            # its base act, because the expression the reader had been sent to was empty.
-            # The dated version stays reachable by asking for it; it just cannot silently
-            # stand in for the act.
+        if fetch_enacted:
+            result = self.ensure_uk_legislation_original(stable_id=stable_id)
+            enacted_id = result.get("stable_id")
+            if enacted_id and not result.get("error"):
+                return {"requested_stable_id": stable_id, "stable_id": enacted_id,
+                        "as_enacted": True, "redirected": enacted_id != stable_id}
+            return {"requested_stable_id": stable_id, "stable_id": stable_id,
+                    "redirected": False, "original_unavailable": result.get("error")}
         return {
             "requested_stable_id": stable_id,
             "stable_id": current[0] if current else stable_id,
@@ -5323,6 +5335,8 @@ class Facade:
             return "guidance"
         if doc_type == "preparatory":
             return "preparatory" if source in self._TRAVAUX_SOURCES else "guidance"
+        if doc_type == "note" and source == "uk-legislation-materials":
+            return "explanatory"
         if source in self._GUIDANCE_SOURCES:
             return "guidance"
         # then an administrative body's DECISIONS (a DPA decision, an enforcement
@@ -9344,6 +9358,38 @@ class Facade:
         self._invalidate_caches()
         return {"stable_id": base, "refreshed": True, "changed": changed,
                 "stored": stats.stored, "fetched_at": fetched_at}
+
+    def ensure_uk_legislation_original(self, *, stable_id: str) -> dict:
+        """Hold the official ``/enacted`` rendition used by ``original=true`` reads."""
+        from .adapters.registry import get_adapter
+        from .pipeline import Pipeline
+        from .citations import extract_corpus
+
+        base = _act_level((stable_id or "").split("@", 1)[0])
+        enacted_id = f"{base}@enacted"
+        with self._open() as (cat, rs, ts):
+            base_row = cat.get_document(base)
+            if base_row is None:
+                return {"error": "document is not held", "stable_id": base}
+            if base_row["source"] != "uk-legislation":
+                return {"error": "original retrieval is available only for legislation.gov.uk documents",
+                        "stable_id": base}
+            held = cat.get_document(enacted_id)
+            if held is not None and held["has_text"]:
+                return {"stable_id": enacted_id, "base_id": base, "as_enacted": True,
+                        "fetched": False}
+            adapter = get_adapter(
+                "uk-legislation", ids=base, version_date="enacted", patient=True)
+            stats = Pipeline(cat, rs, textstore=ts).run(
+                adapter, backfill=True, refetch_held=True, max_pages=1)
+            original = cat.get_document(enacted_id)
+            if original is None or not original["has_text"]:
+                return {"error": "publisher returned no enacted text", "stable_id": base}
+            extract_corpus(cat, ts, stable_id=enacted_id)
+            Resolver(cat).run_for_documents([enacted_id])
+        self._invalidate_caches()
+        return {"stable_id": enacted_id, "base_id": base, "as_enacted": True,
+                "fetched": True, "stored": stats.stored}
 
     def ensure_uk_legislation_current(self, *, stable_id: str) -> dict:
         """Cheaply verify one UK rendition, downloading it only when it changed.

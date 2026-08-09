@@ -2331,7 +2331,8 @@ _SCRIPT = r"""
   const kindNames = {
     cases: "case law", administrative: "admin decisions",
     legislation: "legislation", guidance: "guidance & reports",
-    preparatory: "preparatory documents", other: "other"
+    preparatory: "preparatory documents", explanatory: "explanatory notes",
+    other: "other"
   };
   const jurisdictionNames = {
     "European Union": "EU", "United Kingdom": "UK", "Ireland": "Irish",

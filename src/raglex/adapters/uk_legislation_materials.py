@@ -68,9 +68,17 @@ def _iso_date(value: str | None) -> date | None:
 
 
 def _impact_title(value: str | None, stable_id: str) -> str:
-    title = _clean(value) or stable_id
+    title = re.sub(r"\bAnd\b", "and", _clean(value) or stable_id)
     return (title if re.search(r"\bimpact assessment\b", title, re.IGNORECASE)
             else f"Impact Assessment: {title}")
+
+
+def _notes_instrument_title(value: str, parent_id: str) -> str:
+    """Repair the notes site's display title when it omits ``Act`` for a UKPGA."""
+    title = re.sub(r"\bAnd\b", "and", _clean(value))
+    if parent_id.startswith("ukpga/") and " act " not in f" {title.casefold()} ":
+        title = re.sub(r"\s+(\d{4})$", r" Act \1", title)
+    return title
 
 
 def _parent_id(value: str | None) -> str | None:
@@ -445,6 +453,7 @@ class UKLegislationMaterialsAdapter(BaseAdapter):
             if not act_title:
                 act_title = _clean(title_soup.title.get_text(" ") if title_soup.title else "")
                 act_title = re.sub(r"\s*[—-]\s*Explanatory Notes\s*$", "", act_title, flags=re.I)
+            act_title = _notes_instrument_title(act_title, parent)
             title = f"Explanatory Notes to {act_title}" if act_title else None
             links = _notes_links(contents.content, str(contents.url))
             pages: list[bytes] = []

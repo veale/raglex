@@ -1128,7 +1128,9 @@ _BARE_PROVISION = re.compile(
     r"artikel|artikelen|articolo|articoli|"
     r"recital|recitals|"
     r"regulation|regulations|reg|regs|paragraph|paragraphs|para|paras|schedule|sch)\.?\s*"
-    r"(?P<num>\d+[A-Z]?(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?!\s*:)(?=\W|$)",
+    # Application/pleading paragraph labels can be hierarchical (13.1(a)); stopping
+    # at the first integer linked the wrong, much broader pinpoint (feedback 142).
+    r"(?P<num>\d+[A-Z]?(?:\.\d+)*(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
 # The two-level forms, which the single-cue pattern above cannot express and therefore

@@ -12,10 +12,12 @@ from raglex.adapters.uk_legislation_materials import (
     parse_impact_metadata,
     _parent_id,
     _impact_title,
+    _notes_instrument_title,
 )
 from raglex.citations.extractor import extract_citations
 from raglex.citations.taxonomy import classify_document
 from raglex.core.models import DocType, RelationshipType, Stub
+from raglex.facade import Facade
 from raglex.static_export import _public_links
 
 
@@ -101,6 +103,17 @@ def test_impact_titles_are_self_explanatory_in_mixed_search_results():
         "Impact Assessment: Communications Data"
     assert _impact_title("Overarching Impact Assessment", "ukia/2017/130") == \
         "Overarching Impact Assessment"
+    assert _impact_title("Data Use And Access", "ukia/2025/1") == \
+        "Impact Assessment: Data Use and Access"
+
+
+def test_modern_notes_title_repairs_the_publishers_omitted_act_word():
+    assert _notes_instrument_title(
+        "Product Security And Telecommunications Infrastructure 2022",
+        "ukpga/2022/46",
+    ) == "Product Security and Telecommunications Infrastructure Act 2022"
+    assert _notes_instrument_title("Online Safety Act 2023", "ukpga/2023/50") == \
+        "Online Safety Act 2023"
 
 
 @dataclass
@@ -148,6 +161,8 @@ def test_registry_and_taxonomy_expose_an_appropriate_material_category():
                                stable_id="ukia/2016/251", doc_type="preparatory")
     assert (note.category, note.subtype) == ("uk-legislation-materials", "explanatory-notes")
     assert impact.subtype == "impact-assessments"
+    assert Facade.__new__(Facade)._doc_kind(
+        "uk-legislation-materials", "note", None) == "explanatory"
 
 
 def test_static_links_offer_the_human_page_and_pdf_not_ingest_xml():
