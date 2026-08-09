@@ -888,6 +888,21 @@ class JobManager:
                 return
         except Exception:  # noqa: BLE001 — if the check fails, fall through and chain anyway
             log.exception("could not check pending trigger jobs; chaining regardless")
+        # This corpus backfill changes exactly the companion documents exposed on the
+        # published statute editions.  Its operational contract therefore ends with a
+        # registered fresh static-bundle build, even when the recurring weekly build is
+        # disabled.  Queue it (and let DEDUP_KINDS coalesce an existing build) rather than
+        # doing an invisible export inside the harvest worker.
+        if kind == "backfill-uk-materials":
+            try:
+                from .static_bundle import load_config as _load_static_config
+                if _load_static_config(self.facade.config).get("items"):
+                    self.start(
+                        "static-bundle", "publish static editions after UK materials backfill",
+                        {"zip": False, "refresh": True}, queue=True,
+                    )
+            except Exception:  # noqa: BLE001 — embedding follow-up must still be considered
+                log.exception("could not queue static editions after UK materials backfill")
         now = time.time()
         followups = CHAIN_FOLLOWUPS
         if _schedule.is_enabled("postprocess-rollups"):

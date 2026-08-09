@@ -279,6 +279,19 @@ def test_rollup_chain_is_off_unless_asked_for():
         assert "rebuild-authority" not in {j["kind"] for j in cat.queued_jobs()}
 
 
+def test_uk_materials_completion_queues_visible_static_rebuild(monkeypatch):
+    from raglex import static_bundle
+
+    f = _facade()
+    monkeypatch.setattr(static_bundle, "load_config", lambda _config: {"items": [{}]})
+    JobManager(f, origin="api")._chain_postprocess(
+        "backfill-uk-materials", {"stored": 5})
+    with f._open() as (cat, _rs, _ts):
+        static_jobs = [j for j in cat.queued_jobs() if j["kind"] == "static-bundle"]
+    assert len(static_jobs) == 1
+    assert "UK materials" in static_jobs[0]["label"]
+
+
 def test_rollup_chain_deferred_until_the_import_batch_drains(monkeypatch):
     """With the chain switched on: importing 11 zips must rebuild the citation counts +
     PageRank ONCE at the end, not after each zip. While any other trigger-kind job is
