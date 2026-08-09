@@ -135,6 +135,27 @@ def test_harvest_restart_always_finishes_stored_extraction_backlog(monkeypatch):
     assert started["params"]["resume_unfinished"] is True
 
 
+def test_uk_materials_restart_restores_parent_and_postprocess_cursors(monkeypatch):
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job(
+            "ukmat-old", "backfill-uk-materials", "UK materials", {}, origin="api",
+            checkpoint={"phase": "notes", "after_stable_id": "uksi/2019/999"},
+        )
+        cat.finish_job("ukmat-old", "interrupted", {})
+    started = {}
+    mgr = JobManager(f, origin="api")
+    monkeypatch.setattr(
+        mgr, "start",
+        lambda kind, label, params, **resume:
+            started.update(kind=kind, params=params) or {"job_id": "ukmat-new"},
+    )
+    mgr.restart("ukmat-old")
+    assert started["kind"] == "backfill-uk-materials"
+    assert started["params"]["start_phase"] == "notes"
+    assert started["params"]["after_stable_id"] == "uksi/2019/999"
+
+
 def test_eu_annex_repair_restart_uses_stable_id_checkpoint(monkeypatch):
     f = _facade()
     with f._open() as (cat, _rs, _ts):

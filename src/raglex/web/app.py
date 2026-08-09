@@ -1304,6 +1304,19 @@ def create_app(config: Config | None = None) -> FastAPI:
         label = f"finish bulk post-processing — {params.get('source') or 'whole graph'}"
         return _start_job("finish-bulk-postprocess", label, params)
 
+    @app.post("/jobs/backfill-uk-materials")
+    def job_backfill_uk_materials_ep(payload: dict = Body(default={})) -> dict:
+        """Backfill explanatory notes/memoranda and impact assessments for every held
+        legislation.gov.uk instrument. Publisher-paced, checkpointed and resumable."""
+        p = payload or {}
+        params = {k: p[k] for k in (
+            "after_stable_id", "start_phase", "batch_size", "cooldown_seconds"
+        ) if p.get(k) is not None}
+        return _start_job(
+            "backfill-uk-materials", "UK explanatory materials and impact assessments",
+            params, queue=bool(p.get("queue")),
+        )
+
     @app.get("/health/embedding")
     def embedding_health() -> dict:
         return facade.provider_health()

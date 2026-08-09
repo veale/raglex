@@ -56,6 +56,8 @@ SINGLETON_KINDS = frozenset({
     "hpc-embed",
     # the whole point is serial: one maintenance pass at a time, never competing with itself
     "maintenance-run",
+    # one publisher-paced walk over every held UK instrument and the global IA feed
+    "backfill-uk-materials",
 })
 MAX_CONCURRENT_JOBS = 6
 # Keyed jobs deduped by (kind, params): don't start an IDENTICAL one while it's in flight,
@@ -99,6 +101,7 @@ RESUME_POLICIES = {
     "import-westlaw-zip": "deduplicate", "import-westlaw-dir": "deduplicate",
     "import-caselaw-zip": "deduplicate", "import-caselaw-dir": "deduplicate",
     "gap-scan": "deduplicate", "repair-au-cth": "deduplicate",
+    "backfill-uk-materials": "checkpoint",
     # resumes from the persisted relation-id / tag cursors (see _resume_row)
     "finish-bulk-postprocess": "checkpoint",
     # resumes the whole-source reparse from the last stable_id checkpoint
@@ -139,6 +142,7 @@ CHAIN_TRIGGER_KINDS = frozenset({
     # a phantom prune changes the counts as surely as a harvest does
     "repair-de-citations",
     "repair-eu-annexes", "sync-eu-consolidations",
+    "backfill-uk-materials",
 })
 # (follow-up kind, min seconds since its last completion before re-running). embed is cheap
 # and incremental, so it stays in the chain: a document with no vector is genuinely absent
@@ -354,6 +358,9 @@ def _static_bundle(facade, params, on_progress, cancel_check):
 RUNNERS: dict[str, Callable] = {
     "static-export": _static_export,
     "static-bundle": _static_bundle,
+    "backfill-uk-materials": lambda f, p, cb, cancel: __import__(
+        "raglex.uk_materials_backfill", fromlist=["run_uk_materials_backfill"]
+    ).run_uk_materials_backfill(f, p, cb, cancel),
     # Re-extract everything whose TEXT matches a query. The scope a citation fix needs:
     # when a grammar or shorthand changes, the documents to re-read are the ones that
     # MENTION the thing, which is exactly what the edges do not yet record.
@@ -1070,6 +1077,16 @@ class JobManager:
                 params["resolve"] = False
                 if checkpoint.get("completed") is not None:
                     params["tag_start"] = int(checkpoint["completed"])
+        elif row.get("kind") == "backfill-uk-materials":
+            phase = checkpoint.get("phase")
+            if phase:
+                params["start_phase"] = phase
+            if phase == "notes" and checkpoint.get("after_stable_id"):
+                params["after_stable_id"] = checkpoint["after_stable_id"]
+            elif phase == "postprocess":
+                for key in ("after_relation_id", "tag_start", "resolution_complete"):
+                    if checkpoint.get(key) is not None:
+                        params[key] = checkpoint[key]
         # A whole-source reparse / re-anchor continues from the last stable_id it committed.
         if (row.get("kind") in ("reparse-source", "reanchor-citations", "repair-eu-annexes")
                 and checkpoint.get("after_stable_id")
