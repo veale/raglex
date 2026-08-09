@@ -6876,6 +6876,10 @@ class Catalogue:
             # picker, where linking directly to a provision is useful.
             clauses.extend([
                 "d.doc_type = 'legislation'",
+                # A metadata-only synthetic parent is not exportable as an edition.
+                # In particular, the first DILA parent seed inherited an article title;
+                # requiring text prevents that shell from masquerading as the law.
+                "d.has_text = 1",
                 "d.stable_id NOT LIKE 'LEGIARTI%'",
                 "d.stable_id NOT LIKE 'JORFARTI%'",
             ])
