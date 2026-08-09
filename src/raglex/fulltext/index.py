@@ -267,16 +267,27 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
 
     needs_check = parsed.needs_verification
     seen: set[str] = set()
-    matched: list[tuple[str, float, int | None]] = []
+    # doc id, rank, source-text offset, optional structural heading that matched
+    matched: list[tuple[str, float, int | None, str | None]] = []
     # one batched lookup for the whole candidate set, not one query per document
     hashes = _hashes_for(cat, list({r["doc_id"] for r in rows})) if needs_check else {}
     for r in rows:
         doc_id = r["doc_id"]
         if doc_id in seen:
             continue
-        seen.add(doc_id)
+        heading = str(r.get("heading") or "").strip() or None
         if not needs_check:
-            matched.append((doc_id, float(r.get("rank") or 0), None))
+            seen.add(doc_id)
+            matched.append((doc_id, float(r.get("rank") or 0),
+                            int(r.get("char_start") or 0) if heading else None,
+                            heading))
+            continue
+        if heading:
+            if verify(heading, parsed) is None:
+                continue
+            seen.add(doc_id)
+            matched.append((doc_id, float(r.get("rank") or 0),
+                            int(r.get("char_start") or 0), heading))
             continue
         # EVERY candidate is verified, not merely enough of them to fill a page:
         # the facets and the count must describe the real result set. At 0.046 ms a
@@ -291,7 +302,8 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
         at = verify(text, parsed)
         if at is None:
             continue
-        matched.append((doc_id, float(r.get("rank") or 0), at))
+        seen.add(doc_id)
+        matched.append((doc_id, float(r.get("rank") or 0), at, None))
     if needs_check:
         out.verified = len(matched)
         # the honest count is what survived verification; the tsquery total counts
@@ -301,7 +313,13 @@ def search(cat, ts, query: str, *, filters: dict | None = None, exact: bool = Tr
 
     # snippets are built only for the page being shown — the text was read during
     # verification but 4,000 documents is 124 MB, far too much to hold
-    for doc_id, rank, at in matched[offset:want]:
+    for doc_id, rank, at, heading in matched[offset:want]:
+        if heading:
+            frag = heading
+            out.hits.append(Hit(
+                doc_id=doc_id, rank=rank, char_start=at, snippet=frag,
+                highlights=highlight_spans(frag, parsed)))
+            continue
         text = _text_of(cat, ts, doc_id)
         if text is None:
             continue
@@ -380,7 +398,7 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
         where += f" AND source IN ({','.join('?' * len(sources))})"
         params.extend(sources)
     rows = cat.conn.execute(
-        f"SELECT stable_id, payload_hash FROM {'documents'} {where} "
+        f"SELECT stable_id, payload_hash, title FROM {'documents'} {where} "
         "ORDER BY stable_id LIMIT ?", params + [limit]).fetchall()
     done = set() if reindex else cat.fts_indexed_ids()
     total = len(rows)
@@ -400,13 +418,21 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
             continue
         try:
             text = ts.get(r["payload_hash"])
+            segments = ts.get_segments(r["payload_hash"])
         except OSError:
             st["unreadable"] += 1
             continue
         if not text.strip():
             continue
         try:
-            st["parts"] += cat.put_doc_fts(sid, text, commit=False)
+            labels = [(str(r["title"] or sid), 0)]
+            labels.extend((segment.label, segment.char_start) for segment in segments
+                          if segment.label and segment.label != r["title"])
+            st["parts"] += cat.put_doc_fts(
+                sid, text,
+                headings=labels,
+                commit=False,
+            )
         except Exception:  # noqa: BLE001 — one bad document must not end the run
             log.warning("[fts] %s failed to index", sid, exc_info=True)
             continue

@@ -853,6 +853,28 @@ def test_a_mappings_type_can_be_corrected_in_place(tmp_path):
     assert {r["mapping_type"] for r in rows} == {"equivalent"}
 
 
+def test_retype_can_target_one_anchor_in_a_mixed_pair(tmp_path):
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, _ts):
+        for sid in ("dsa", "ecd"):
+            cat.upsert_document(Record(source="user-import", stable_id=sid,
+                                       doc_type=DocType.LEGISLATION, title=sid))
+    f.upsert_provision_mappings(
+        current_id="dsa", previous_id="ecd",
+        mappings=[
+            {"current_anchor": "Article 3", "previous_anchor": "Article 2"},
+            {"current_anchor": "Article 4", "previous_anchor": "Article 12"},
+        ])
+    out = f.retype_provision_mappings(
+        current_id="dsa", previous_id="ecd", current_anchor="Article 3",
+        previous_anchor="Article 2", to_type="equivalent")
+    assert out["updated"] == 1
+    got = {(m["current_anchor"], m["mapping_type"])
+           for m in f.provision_mappings(stable_id="dsa")["mappings"]}
+    assert got == {("Article 3", "equivalent"),
+                   ("Article 4", "functional_predecessor")}
+
+
 def test_a_write_names_the_rows_it_did_not_send(tmp_path):
     """A bulk call whose RESPONSE is lost still ran. The caller saw nothing, re-sent a
     slightly different list, and the pair silently kept both — diagnosable only by

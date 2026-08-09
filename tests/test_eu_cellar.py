@@ -754,14 +754,17 @@ def test_formex_legislation_combines_split_zip_members():
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("01.xml", """
-          <ACT><ENACTING.TERMS><ARTICLE><TI.ART>Article 1</TI.ART>
-          <P>Purpose.</P></ARTICLE></ENACTING.TERMS></ACT>""")
-        z.writestr("02.xml", """
+        # Annex filename sorts first: it must not become the document title.
+        z.writestr("01-annex.xml", """
           <ACT><ANNEX><TITLE>ANNEX I</TITLE>
           <P>Commercial practices always considered unfair.</P></ANNEX></ACT>""")
+        z.writestr("02-act.xml", """
+          <ACT><TITLE>Unfair Commercial Practices Directive</TITLE>
+          <ENACTING.TERMS><ARTICLE><TI.ART>Article 1</TI.ART>
+          <P>Purpose.</P></ARTICLE></ENACTING.TERMS></ACT>""")
         z.writestr("notice.doc.xml", "<DOC><TITLE>notice</TITLE></DOC>")
     parsed = parse_formex_legislation(buf.getvalue())
+    assert parsed.title == "Unfair Commercial Practices Directive"
     assert [segment.label for segment in parsed.segments] == ["Article 1", "ANNEX I"]
     assert "Commercial practices always considered unfair" in parsed.text
 

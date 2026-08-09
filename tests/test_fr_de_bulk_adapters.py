@@ -113,10 +113,13 @@ DILA_ARTICLE = """<?xml version="1.0" encoding="UTF-8"?>
   <META_SPEC><META_ARTICLE><NUM>1240</NUM><ETAT>VIGUEUR</ETAT>
    <DATE_DEBUT>2016-10-01</DATE_DEBUT><DATE_FIN>2999-01-01</DATE_FIN></META_ARTICLE></META_SPEC>
  </META>
- <CONTEXTE><TEXTE cid="LEGITEXT000006070721" nature="CODE">
-   <TITRE_TXT c_titre_court="Code civil" id_txt="LEGITEXT000006070721">Code civil</TITRE_TXT>
+ <CONTEXTE><TEXTE cid="JORFTEXT000000000001" nature="LOI" num="2016-999"
+   date_signature="2016-09-30" date_publi="2016-10-01">
+   <TITRE_TXT c_titre_court="Code civil" id_txt="LEGITEXT000006070721">Code civil relatif aux obligations</TITRE_TXT>
   </TEXTE></CONTEXTE>
  <BLOC_TEXTUEL><CONTENU><p>Tout fait quelconque de l'homme...</p></CONTENU></BLOC_TEXTUEL>
+ <LIENS><LIEN id="LEGIARTI000000000002" cidtexte="JORFTEXT000000000002"
+   typelien="MODIFICATION" num="2">Loi antérieure - art. 2 (M)</LIEN></LIENS>
 </ARTICLE>""".encode("utf-8")
 
 
@@ -137,6 +140,11 @@ def test_dila_article_parse():
     assert a.date_debut == date(2016, 10, 1)
     assert a.code_cid == "LEGITEXT000006070721"
     assert a.code_title == "Code civil"
+    assert a.full_title == "Code civil relatif aux obligations"
+    assert a.jorf_cid == "JORFTEXT000000000001"
+    assert a.text_number == "2016-999"
+    assert {r.dst_id for r in a.relations} == {
+        "LEGIARTI000000000002", "JORFTEXT000000000002"}
 
 
 def test_dila_future_validity_sentinels_are_not_display_dates():

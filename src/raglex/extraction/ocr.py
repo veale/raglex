@@ -24,6 +24,10 @@ manager knows about this: a worker inside OCR is quiet, not wedged (see
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 log = logging.getLogger("raglex.extraction.ocr")
 
@@ -50,9 +54,42 @@ def ocr_available() -> bool:
         from PIL import Image  # noqa: F401
 
         pytesseract.get_tesseract_version()
-    except Exception:  # noqa: BLE001 — any missing piece means no OCR here
-        return False
+    except Exception:  # noqa: BLE001 — try the dependency-light CLI route below
+        return bool(shutil.which("pdftoppm") and shutil.which("tesseract"))
     return True
+
+
+def _ocr_pdf_cli(data: bytes, *, dpi: int, max_pages: int, language: str) -> str | None:
+    """OCR using Poppler + Tesseract binaries when Python imaging extras are absent."""
+    pdftoppm = shutil.which("pdftoppm")
+    tesseract = shutil.which("tesseract")
+    if not pdftoppm or not tesseract:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="raglex-ocr-") as tmp:
+            root = Path(tmp)
+            pdf = root / "source.pdf"
+            pdf.write_bytes(data)
+            prefix = root / "page"
+            subprocess.run(
+                [pdftoppm, "-f", "1", "-l", str(max_pages), "-r", str(dpi),
+                 "-png", str(pdf), str(prefix)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                timeout=max(120, max_pages * 30),
+            )
+            parts: list[str] = []
+            for image in sorted(root.glob("page-*.png")):
+                result = subprocess.run(
+                    [tesseract, str(image), "stdout", "-l", language],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=120, text=True,
+                )
+                if result.stdout.strip():
+                    parts.append(result.stdout.strip())
+            return "\n\n".join(parts).strip() or None
+    except Exception:  # noqa: BLE001 — preserve needs_ocr on tool/corrupt-input failure
+        log.warning("CLI OCR failed on a %d-byte PDF", len(data or b""), exc_info=True)
+        return None
 
 
 def ocr_pdf(data: bytes, *, dpi: int = 200, max_pages: int = DEFAULT_MAX_PAGES,
@@ -69,8 +106,8 @@ def ocr_pdf(data: bytes, *, dpi: int = 200, max_pages: int = DEFAULT_MAX_PAGES,
         from PIL import Image
 
         pytesseract.get_tesseract_version()
-    except Exception:  # noqa: BLE001 — any missing piece → no OCR available
-        return None
+    except Exception:  # noqa: BLE001 — optional wrappers absent; binaries may exist
+        return _ocr_pdf_cli(data, dpi=dpi, max_pages=max_pages, language=language)
     try:
         doc = fitz.open(stream=data, filetype="pdf")
         pages = []

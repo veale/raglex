@@ -194,6 +194,7 @@ def test_pipeline_records_outstanding_effects_queue(catalogue, rawstore):
     # refetch_held: the effects worker re-pulls a HELD doc to re-read its state
     Pipeline(catalogue, rawstore).run(FakeAdapter([rec]), backfill=True, refetch_held=True)
     assert catalogue.list_effects_refresh() == []
+    assert catalogue.document_meta("ukpga/2018/12")["unapplied_effects"]["outstanding"] == 0
 
 
 def test_pipeline_watermark_advances_on_clean_run(catalogue, rawstore):

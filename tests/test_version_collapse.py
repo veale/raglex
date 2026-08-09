@@ -236,6 +236,37 @@ def test_an_assimilated_edition_still_follows_its_dated_expression():
     assert [m["to"] for m in moves] == ["european/regulation/2016/0679@2026-03-01"]
 
 
+def test_static_refresh_makes_the_newer_revised_base_beat_an_old_snapshot(monkeypatch):
+    """The publisher's 2026-06-19 base must replace the held 2026-03-01 edition."""
+    from raglex.static_bundle import (
+        _refresh_revised_in_place_items,
+        _repoint_to_current_versions,
+    )
+
+    f = _facade()
+    base = "european/regulation/2016/0679"
+    _law(f, base, "UK GDPR", date(2016, 4, 27))
+    _law(f, f"{base}@2026-03-01", "UK GDPR (as at 2026-03-01)",
+         date(2016, 4, 27), as_at="2026-03-01")
+
+    def refresh(*, stable_id):
+        assert stable_id == base
+        with f._open() as (cat, _rs, _ts):
+            row = cat.get_document(base)
+            meta = json.loads(row["meta_json"] or "{}")
+            meta["currency"] = {"as_at": "2026-06-19"}
+            cat.conn.execute("UPDATE documents SET meta_json=? WHERE stable_id=?",
+                             (json.dumps(meta), base))
+            cat.conn.commit()
+        return {"stable_id": base, "refreshed": True}
+
+    monkeypatch.setattr(f, "ensure_uk_legislation_current", refresh)
+    items = [{"stable_id": f"{base}@2026-03-01", "title": "UK GDPR"}]
+    _refresh_revised_in_place_items(f, items)
+    moves = _repoint_to_current_versions(f, items)
+    assert [move["to"] for move in moves] == [base]
+
+
 def test_a_build_repoints_an_edition_onto_the_newer_consolidation():
     """An edition names one expression of a law, and laws are consolidated again. Left
     alone it publishes the same superseded text for ever."""

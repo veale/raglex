@@ -1706,7 +1706,7 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     for c in ordered:
         exact_multi = c.method in ("de_law_reference", "nl_juriconnect",
                                    "fr_code_articles", "fr_echr_articles",
-                                   "fr_eu_articles",
+                                   "fr_eu_articles", "fr_statute_articles",
                                    "uk_cpr_rule_list", "uk_cpr_pd_paragraph_list") and any(
             k.char_start == c.char_start and k.char_end == c.char_end
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)

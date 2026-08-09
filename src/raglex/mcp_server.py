@@ -912,7 +912,9 @@ def build_server(config: Config | None = None) -> MCPServer:
     @admin
     def retype_provision_mappings(
         current_id: str, to_type: str, previous_id: Optional[str] = None,
-        from_type: Optional[str] = None, dry_run: bool = False,
+        from_type: Optional[str] = None, mapping_ids: Optional[list[int]] = None,
+        current_anchor: Optional[str] = None, previous_anchor: Optional[str] = None,
+        dry_run: bool = False,
     ) -> dict:
         """Change what existing mappings CLAIM, leaving the correspondences alone.
 
@@ -920,11 +922,14 @@ def build_server(config: Config | None = None) -> MCPServer:
         provisions written as ``functional_predecessor``, say. Re-sending the table would
         also work now (a pair is identified by its two provisions, so an upsert updates
         the type), but that is hundreds of anchors resolved again for one attribute.
-        Scope with ``previous_id`` (one pair of laws) and/or ``from_type`` (only rows
-        currently claiming that). ``dry_run`` reports the count without writing."""
+        Scope with ``mapping_ids`` or an anchor to correct one row in a mixed pair of
+        laws; ``previous_id`` and ``from_type`` are broader filters. ``dry_run`` reports
+        the count without writing."""
         return facade.retype_provision_mappings(
             current_id=current_id, to_type=to_type, previous_id=previous_id,
-            from_type=from_type, dry_run=dry_run)
+            from_type=from_type, mapping_ids=mapping_ids,
+            current_anchor=current_anchor, previous_anchor=previous_anchor,
+            dry_run=dry_run)
 
     @admin
     def backfill_effective_dates(dry_run: bool = True) -> dict:

@@ -385,6 +385,9 @@ class UKLegislationAdapter(BaseAdapter):
             )
         except Exception:  # malformed/unsupported CLML: retain the normal retry path
             return None
+        stamp = _last_modified(clml)
+        if stamp:
+            record.extra["source_last_modified"] = stamp
         return record if record.text else None
 
     def record_from_akn(self, stable_id: str, raw: bytes, *,

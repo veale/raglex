@@ -20,6 +20,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterator
 
 
@@ -1877,6 +1878,11 @@ class Facade:
             "consolidation_versions": consolidation_versions,
             "point_in_time_versions": point_in_time_versions,
             "consolidations_checked_at": meta.get("consolidations_checked_at"),
+            # Two distinct clocks: when the official rendition says it changed, and
+            # when this exact RagLex copy was fetched. Showing both avoids presenting
+            # an old fetch date as the law's currency date (or vice versa).
+            "source_last_modified": meta.get("source_last_modified"),
+            "raglex_fetched_at": doc["fetched_at"] if doc is not None else None,
             # A property of the SOURCE, not of this stored record. legislation.gov.uk
             # serves a dated version of everything it publishes, assimilated EU law
             # included; reading the flag off harvested metadata alone made it false for
@@ -3220,6 +3226,14 @@ class Facade:
                         dropped_inferred.append(dict(row))
                     else:
                         rels.append(dict(row))
+            # A law or judgment can cite another rendition/identifier of itself. That
+            # is an internal cross-reference, not a later document citing it. The
+            # lookup count already excludes these; dropping them here keeps
+            # citing_documents().total on the same evidenced-document definition.
+            identity_set = set(identity_ids)
+            rels = [row for row in rels if row["src_id"] not in identity_set]
+            dropped_inferred = [row for row in dropped_inferred
+                                if row["src_id"] not in identity_set]
             direct_keys = {
                 (r["src_id"], r["dst_anchor"], r["context_start"], r["context_end"])
                 for r in rels
@@ -9163,6 +9177,210 @@ class Facade:
                 ),
             }
 
+    def _materialize_fr_legislation_parents_open(self, cat, ts, parent_ids: list[str]) -> list[str]:
+        """Aggregate DILA LEGI article rows into searchable, citable statute nodes."""
+        from .formats.dila_xml import parse_dila_article
+        from .citations.french import text_alias
+        from .core.models import Record, Segment, DocType, ExtractedVia
+        from xml.etree import ElementTree as _ET
+
+        parents = list(dict.fromkeys(p for p in parent_ids if p and p.startswith("LEGITEXT")))
+        made: list[str] = []
+        meta_expr = ("meta_json::jsonb ->> 'code_cid'" if cat.backend == "postgres"
+                     else "json_extract(meta_json, '$.code_cid')")
+        for parent in parents:
+            existing = cat.get_document(parent)
+            if existing is not None and existing["has_text"] and existing["source"] != "fr-dila":
+                continue
+            rows = cat.conn.execute(
+                f"SELECT * FROM documents WHERE source='fr-dila' AND doc_type='legislation' "
+                f"AND {meta_expr} = ? ORDER BY stable_id", (parent,)).fetchall()
+            parsed = []
+            for row in rows:
+                raw_path = row["raw_path"]
+                if not raw_path:
+                    continue
+                try:
+                    art = parse_dila_article(_ET.fromstring(Path(raw_path).read_bytes()))
+                except (OSError, _ET.ParseError):
+                    continue
+                parsed.append((row, art))
+            if not parsed:
+                continue
+
+            # One current/best version per article number. DILA's 2999 date is an
+            # open-ended sentinel, not a publication date; substantive text wins before
+            # recency so an empty historical shell cannot erase the article.
+            by_num: dict[str, tuple] = {}
+            for row, art in parsed:
+                num = art.num or row["stable_id"]
+                key = (bool((art.text or "").strip()), art.etat == "VIGUEUR",
+                       art.date_debut.isoformat() if art.date_debut and art.date_debut.year < 2999 else "")
+                old = by_num.get(num)
+                if old is None or key > old[0]:
+                    by_num[num] = (key, row, art)
+
+            def number_key(value: str):
+                return [int(x) if x.isdigit() else x.casefold()
+                        for x in re.split(r"(\d+)", value)]
+
+            chunks: list[str] = []
+            segments: list[Segment] = []
+            relations = []
+            seen_rel: set[tuple[str, str]] = set()
+            for num in sorted(by_num, key=number_key):
+                _key, row, art = by_num[num]
+                body = (art.text or "").strip()
+                if body:
+                    value = f"Article {num}\n{body}"
+                    if chunks:
+                        chunks.append("\n\n")
+                    start = sum(map(len, chunks))
+                    chunks.append(value)
+                    segments.append(Segment(f"Article {num}", start, start + len(value),
+                                            kind="article"))
+                for rel in art.relations:
+                    target = rel.dst_id or ""
+                    if not target.startswith(("JORFTEXT", "LEGITEXT")):
+                        continue
+                    rel_key = (str(rel.relationship_type), target)
+                    if rel_key not in seen_rel and target != parent:
+                        seen_rel.add(rel_key)
+                        relations.append(rel)
+
+            exemplar = next((art for _row, art in parsed if art.full_title), parsed[0][1])
+            title = re.sub(r"\s*\(\d+\)\.?\s*$", "", exemplar.full_title
+                           or exemplar.code_title or parent).strip()
+            subject_title = re.sub(
+                r"(?i)^loi\s+n(?:o|°)\s*\d{2,4}-\d+\s+du\s+"
+                r"\d{1,2}\s+\S+\s+\d{4}\s+", "Loi ", title).strip()
+            aliases = [x for x in (exemplar.jorf_cid,
+                                    text_alias(exemplar.text_number)
+                                    if exemplar.text_number else None) if x]
+            text = "".join(chunks) or None
+            record = Record(
+                source="fr-dila", stable_id=parent, doc_type=DocType.LEGISLATION,
+                title=title, decision_date=exemplar.signature_date,
+                language="fr", source_language="fr",
+                landing_url=(f"https://www.legifrance.gouv.fr/loda/id/{exemplar.jorf_cid}"
+                             if exemplar.jorf_cid else
+                             f"https://www.legifrance.gouv.fr/codes/texte_lc/{parent}"),
+                text=text, segments=segments, relations=relations,
+                extracted_via=ExtractedVia.STRUCTURED,
+                extra={"fond": "LEGI", "materialized_from_articles": len(parsed),
+                       "jorf_cid": exemplar.jorf_cid,
+                       "text_number": exemplar.text_number,
+                       "nature": exemplar.nature, "aliases": aliases},
+            )
+            record.ensure_payload_hash()
+            text_path = None
+            if text and record.payload_hash:
+                text_path = str(ts.put(record.payload_hash, text, source=record.source))
+                ts.put_segments(record.payload_hash, segments)
+            cat.upsert_document(record, text_path=text_path)
+            for alias in aliases:
+                cat.put_alias(str(alias).casefold(), parent, source="fr-legislation-parent")
+            # Conseil constitutionnel decisions are titled with the law they review.
+            # Preserve both documents, but connect the decision to the statute instead
+            # of letting an exact-title search make the decision look like the law.
+            from .core.models import RelationshipType, ResolutionStatus, TypedRelation
+            decisions = cat.conn.execute(
+                "SELECT stable_id FROM documents WHERE source='fr-dila' "
+                "AND doc_type='decision' AND (lower(title)=lower(?) OR lower(title)=lower(?) "
+                "OR lower(title) LIKE '%' || lower(?) || '%')",
+                (title, subject_title, subject_title)).fetchall()
+            for decision in decisions:
+                already = cat.conn.execute(
+                    "SELECT 1 FROM relations WHERE src_id=? AND candidate_id=? LIMIT 1",
+                    (decision["stable_id"], parent)).fetchone()
+                if not already:
+                    cat.add_relation(decision["stable_id"], TypedRelation(
+                        relationship_type=RelationshipType.CONSIDERS,
+                        raw_citation_string=title, dst_id=parent,
+                        extracted_via=ExtractedVia.STRUCTURED,
+                        resolution_status=ResolutionStatus.PENDING,
+                    ))
+            made.append(parent)
+        return made
+
+    def materialize_fr_legislation(self, *, parent_ids: list[str]) -> dict:
+        """Public targeted repair/backfill for full French statute nodes."""
+        with self._open() as (cat, _rs, ts):
+            made = self._materialize_fr_legislation_parents_open(cat, ts, parent_ids)
+            from .citations import extract_corpus
+            for stable_id in made:
+                extract_corpus(cat, ts, stable_id=stable_id)
+            Resolver(cat).run_for_documents(made)
+        self._invalidate_caches()
+        return {"requested": len(parent_ids), "materialized": len(made), "ids": made}
+
+    def refresh_uk_legislation(self, *, stable_id: str) -> dict:
+        """Re-fetch one held legislation.gov.uk instrument on explicit user request."""
+        from .adapters.registry import get_adapter
+        from .pipeline import Pipeline
+        from .citations import extract_corpus
+
+        base = _act_level((stable_id or "").split("@")[0])
+        with self._open() as (cat, rs, ts):
+            existing = cat.get_document(base)
+            if existing is None:
+                return {"error": "document is not held", "stable_id": base}
+            if existing["source"] != "uk-legislation":
+                return {"error": "refresh is available only for legislation.gov.uk documents",
+                        "stable_id": base}
+            before = existing["payload_hash"]
+            adapter = get_adapter("uk-legislation", ids=base, patient=True)
+            stats = Pipeline(cat, rs, textstore=ts).run(
+                adapter, backfill=True, refetch_held=True, max_pages=1)
+            current = cat.get_document(base)
+            if current is None:
+                return {"error": "publisher returned no document", "stable_id": base}
+            changed = current["payload_hash"] != before
+            # Re-extract even when only structured metadata/effects changed: a refresh
+            # is an explicit request for all projections to agree with the new source.
+            extract_corpus(cat, ts, stable_id=base)
+            Resolver(cat).run_for_documents([base])
+            fetched_at = current["fetched_at"]
+        self._invalidate_caches()
+        return {"stable_id": base, "refreshed": True, "changed": changed,
+                "stored": stats.stored, "fetched_at": fetched_at}
+
+    def ensure_uk_legislation_current(self, *, stable_id: str) -> dict:
+        """Cheaply verify one UK rendition, downloading it only when it changed.
+
+        The scheduled static export calls this for every UK law it publishes. A HEAD
+        comparison makes the steady state one small request per law; missing provenance,
+        a moved Last-Modified value, or an undated base escalates to the full refresh.
+        """
+        from .adapters.registry import get_adapter
+        from .adapters.uk_legislation import _last_modified
+
+        base = _act_level((stable_id or "").split("@")[0])
+        with self._open() as (cat, _rs, _ts):
+            row = cat.get_document(base)
+            if row is None:
+                return {"error": "document is not held", "stable_id": base}
+            if row["source"] != "uk-legislation":
+                return {"error": "currency check is available only for legislation.gov.uk documents",
+                        "stable_id": base}
+            meta = _row_meta(row)
+            held_stamp = meta.get("source_last_modified")
+            as_at = ((meta.get("currency") or {}).get("as_at")
+                     if isinstance(meta.get("currency"), dict) else None)
+        adapter = get_adapter("uk-legislation", ids=base, patient=True)
+        try:
+            stub = next(adapter.discover(None, max_pages=1))
+            response = adapter._client.request("HEAD", stub.raw_url, raise_for_4xx=False)
+            served_stamp = _last_modified(response)
+        except Exception:  # noqa: BLE001 — a full GET gives the authoritative outcome
+            served_stamp = None
+        if held_stamp and served_stamp == held_stamp and as_at:
+            return {"stable_id": base, "checked": True, "refreshed": False,
+                    "changed": False, "source_last_modified": served_stamp,
+                    "as_at": as_at}
+        result = self.refresh_uk_legislation(stable_id=base)
+        return {"checked": True, **result}
+
     def outstanding_effects(self, *, limit: int = 500) -> list[dict]:
         """Legislation we hold that has *unapplied amendments* — changes the editors
         know about but haven't yet written into the published text (§0). Each row shows
@@ -12928,7 +13146,9 @@ class Facade:
 
     def retype_provision_mappings(
         self, *, current_id: str, to_type: str, previous_id: str | None = None,
-        from_type: str | None = None, dry_run: bool = False,
+        from_type: str | None = None, mapping_ids: list[int] | None = None,
+        current_anchor: str | None = None, previous_anchor: str | None = None,
+        dry_run: bool = False,
     ) -> dict:
         """Re-label existing provision mappings in place: what they CLAIM, not what they
         connect.
@@ -12936,7 +13156,8 @@ class Facade:
         The correspondences are the work — every anchor pair resolved against both laws.
         A build that got the type wrong throughout (companion provisions written as
         'functional_predecessor') needs one relabelling, not a re-derivation of the
-        table. Scope it with ``previous_id`` (one pair of laws) and/or ``from_type``.
+        table. Scope it with ``mapping_ids`` or either anchor for a mixed pair of laws;
+        ``previous_id`` and ``from_type`` provide broader filters.
         """
         to_type = str(to_type or "").strip().lower()
         if to_type not in PROVISION_MAPPING_TYPES:
@@ -12950,11 +13171,15 @@ class Facade:
         with self._open() as (cat, _rs, _ts):
             n = cat.retype_provision_mappings(
                 current_id, to_type=to_type, previous_doc_id=previous_id,
-                from_type=from_type, dry_run=dry_run)
+                from_type=from_type, mapping_ids=mapping_ids,
+                current_anchor=current_anchor, previous_anchor=previous_anchor,
+                dry_run=dry_run)
         if not dry_run:
             self._invalidate_caches()
         return {"current_id": current_id, "previous_id": previous_id,
                 "from_type": from_type, "to_type": to_type,
+                "mapping_ids": mapping_ids, "current_anchor": current_anchor,
+                "previous_anchor": previous_anchor,
                 "updated": 0 if dry_run else n, "would_update": n if dry_run else None,
                 "dry_run": bool(dry_run)}
 
@@ -15368,7 +15593,10 @@ class Facade:
                     if m == canon_key:
                         continue
                     source = "parallel:adjacency" if m in adjacency_keys else "parallel:coref"
-                    cat.put_alias(m, canonical, source=source, commit=False)
+                    # Structured native/report aliases are stronger than a cluster
+                    # inferred from prose and must never be overwritten by it.
+                    cat.put_alias(m, canonical, source=source, commit=False,
+                                  overwrite=False)
                     st["aliased"] += 1
 
             # EU report links: alias each ECR string to its CJEU case, chaining one level
@@ -15621,6 +15849,27 @@ class Facade:
             # re-fetched (contenthash changed) aren't "new" but their text changed, so
             # they get the same re-extract/classify pass.
             new_ids = list(dict.fromkeys([*stats.stored_ids, *stats.refreshed_ids]))
+            # DILA's bulk LEGI fund is article-granular. Keep those precise nodes, but
+            # also materialise their LEGITEXT parent so a search/citation for "loi
+            # n° 2004-801" reaches one statute rather than a constitutional decision or
+            # twenty-two disconnected article rows. Only parents touched by this run are
+            # rebuilt, so daily deltas remain proportional to the delta.
+            if adapter.source == "fr-dila" and new_ids:
+                code_expr = ("meta_json::jsonb ->> 'code_cid'"
+                             if cat.backend == "postgres"
+                             else "json_extract(meta_json, '$.code_cid')")
+                parent_ids: list[str] = []
+                for start in range(0, len(new_ids), 20_000):
+                    chunk = new_ids[start:start + 20_000]
+                    qs = ",".join("?" for _ in chunk)
+                    parent_ids.extend(
+                        str(r["parent_id"]) for r in cat.conn.execute(
+                            f"SELECT DISTINCT {code_expr} AS parent_id FROM documents "
+                            f"WHERE stable_id IN ({qs}) AND {code_expr} LIKE 'LEGITEXT%'",
+                            tuple(chunk)).fetchall() if r["parent_id"])
+                parent_docs = self._materialize_fr_legislation_parents_open(
+                    cat, ts, parent_ids)
+                new_ids = list(dict.fromkeys([*new_ids, *parent_docs]))
             # Bulk primary-law/caselaw sources: no guidance can occur in them (skip the
             # per-document classification PK lookups) and their post-processing must be
             # rebuilt from durable state on restart (see below).

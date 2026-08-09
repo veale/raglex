@@ -203,6 +203,22 @@ def test_fts_index_tolerates_converter_nul_without_changing_offsets(catalogue):
     assert (row["char_start"], row["char_end"]) == (0, len(text))
 
 
+def test_fts_keeps_structural_headings_without_falsifying_body_offsets(catalogue):
+    text = "1. The body never repeats its heading."
+    catalogue.put_doc_fts(
+        "headed-doc", text,
+        headings=[("Article 51 Challenge of the competence of notified bodies", 0)])
+    heading = catalogue.conn.execute(
+        "SELECT label,char_start FROM doc_headings WHERE doc_id=?", ("headed-doc",)
+    ).fetchone()
+    assert (heading["label"], heading["char_start"]) == (
+        "Article 51 Challenge of the competence of notified bodies", 0)
+    body = catalogue.conn.execute(
+        "SELECT char_start,char_end FROM doc_fts WHERE doc_id=?", ("headed-doc",)
+    ).fetchone()
+    assert (body["char_start"], body["char_end"]) == (0, len(text))
+
+
 # -- the settings the Search page writes ---------------------------------------
 def test_the_search_settings_are_registered(tmp_path):
     """SettingsStore.update silently ignores keys it doesn't know, so an

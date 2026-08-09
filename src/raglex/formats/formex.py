@@ -163,6 +163,39 @@ def _is_case_law(root: ET.Element) -> bool:
                for e in root.iter())
 
 
+def _instrument_title(roots: list[ET.Element]) -> str | None:
+    """Title of the ACT member, never the first annex member in filename order.
+
+    A Formex archive can put ``ANNEX_*.xml`` before ``ACT_*.xml``.  After combining
+    members, ``root.iter('TITLE')`` therefore promoted an annex heading to the document
+    title for thousands of decisions and regulations.  Prefer the member carrying the
+    enacting terms, and reject TITLE nodes nested in provisions or annexes.
+    """
+    ordered = sorted(
+        roots,
+        key=lambda root: (
+            not any(localname(e.tag) == "ENACTING.TERMS" for e in root.iter()),
+            localname(root.tag).upper() not in {"ACT", "DOC"},
+        ),
+    )
+    for root in ordered:
+        parents = {child: parent for parent in root.iter() for child in parent}
+        for node in (e for e in root.iter() if localname(e.tag) == "TITLE"):
+            parent = parents.get(node)
+            nested = False
+            while parent is not None:
+                name = localname(parent.tag).upper()
+                if name == "ARTICLE" or name == "ANNEX" or name.endswith(".ANNEX"):
+                    nested = True
+                    break
+                parent = parents.get(parent)
+            if not nested:
+                value = " ".join(element_text(node).split())
+                if value:
+                    return value
+    return None
+
+
 def parse_formex_legislation(raw: bytes) -> ParsedDoc:
     members = unzip_formex_contents(raw)
     if not members:
@@ -194,16 +227,10 @@ def parse_formex_legislation(raw: bytes) -> ParsedDoc:
         from ..adapters.eu_cellar import extract_formex
 
         text, segments = extract_formex(data)
-        title = None
-        ti = next((e for e in root.iter() if localname(e.tag) == "TITLE"), None)
-        if ti is not None:
-            title = " ".join(element_text(ti).split()) or None
+        title = _instrument_title(roots)
         return ParsedDoc(text=text or None, segments=segments, title=title)
 
-    title = None
-    ti = next((e for e in root.iter() if localname(e.tag) == "TITLE"), None)
-    if ti is not None:
-        title = " ".join(element_text(ti).split()) or None
+    title = _instrument_title(roots)
 
     articles = _act_articles(root)
     # recitals first (preamble), then the enacting articles — in document order

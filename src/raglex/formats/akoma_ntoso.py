@@ -161,6 +161,16 @@ def expression_valid_from(data: bytes) -> str | None:
 
 
 def _title(root: ET.Element) -> str | None:
+    # legislation.gov.uk's Dublin Core title is the publisher's canonical, already
+    # whitespace-correct display title. Prefer it to reconstructing <longTitle> from
+    # adjacent <p> elements: XML text concatenation otherwise produces defects such as
+    # ``2016on`` and ``Councilof`` when the source has no literal inter-element space.
+    dc_ns = "{http://purl.org/dc/elements/1.1/}"
+    for e in root.iter():
+        if e.tag == f"{dc_ns}title":
+            txt = " ".join(element_text(e).split())
+            if txt:
+                return txt
     # Prefer a human title (UK AKN's FRBRname is the citation "2000 c. 36").
     for name in ("shortTitle", "docTitle", "FRBRalias", "longTitle"):
         for e in root.iter():

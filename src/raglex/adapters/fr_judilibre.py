@@ -41,7 +41,8 @@ from ..core.models import (
     TypedRelation,
 )
 from ._piste import PisteClient, piste_api_root
-from ..citations.french import pourvoi_alias
+from ..citations.french import normalise_fr_number, pourvoi_alias
+from ..core.text import fold
 
 _APP = "cassation/judilibre/v1.0"
 
@@ -152,6 +153,31 @@ def _rapprochement_relations(decision: dict) -> list[TypedRelation]:
     return rels
 
 
+def _number_alias(decision: dict, number: str | None) -> str | None:
+    """The key this decision can be cited by — and NOT a bare pourvoi key unless it
+    really is one.
+
+    A Cour de cassation number is a pourvoi number, unique nationally, and
+    ``fr:pourvoi:21-00400`` is a sound key. A cour d'appel or tribunal judiciaire number
+    is an RG number, unique only within the court that issued it: "24/00002" is a live
+    docket at Nîmes, at Amiens and at three dozen other courts on the same day. Minting
+    ``fr:pourvoi:24/00002`` for 1.3 million of those would not merely be noisy — the
+    pipeline folds an ECLI-less record whose declared alias names a held document from
+    another source into that document, and neither ca nor tj carries an ECLI. Unrelated
+    judgments from different cities would have been merged into one node, and into the
+    73,046 cours d'appel decisions the DILA bulk already holds under the same numbering.
+
+    So the RG number is scoped by the court that issued it, which ``location`` gives."""
+    if not number:
+        return None
+    juris = (decision.get("jurisdiction") or "").casefold()
+    if "cassation" in juris or not juris:
+        return pourvoi_alias(number)
+    court = re.sub(r"[^a-z0-9]+", "-",
+                   fold(decision.get("location") or juris)).strip("-")
+    return f"fr:rg:{court}:{normalise_fr_number(number)}" if court else None
+
+
 def parse_decision(decision: dict) -> ParsedDecision:
     """One ``/decision`` (or ``/export`` result) object → normalised fields + edges (pure)."""
     text = decision.get("text")
@@ -188,8 +214,17 @@ class FrJudilibreAdapter(BaseAdapter):
         ids: str | list[str] | None = None,
         batch_size: int = 100,
         since_date: str | None = None,
+        jurisdiction: str | None = None,
         client: PisteClient | None = None,
     ) -> None:
+        # Judilibre is three registers behind one endpoint, and asking for none of them
+        # gets you the first: cc (Cour de cassation, 566,124), ca (cours d'appel,
+        # 626,374), tj (tribunaux judiciaires, 697,807).
+        self.jurisdiction = (jurisdiction or "cc").strip().lower()
+        if self.jurisdiction not in ("cc", "ca", "tj"):
+            self.jurisdiction = "cc"
+        if self.jurisdiction != "cc":
+            self.source = f"fr-judilibre-{self.jurisdiction}"
         if isinstance(ids, str):
             ids = [i.strip() for i in ids.split(",") if i.strip()]
         self.ids = ids or []
@@ -245,6 +280,7 @@ class FrJudilibreAdapter(BaseAdapter):
         while True:
             params = {"batch": batch, "batch_size": self.batch_size,
                       "date_type": "update", "resolve_references": "true",
+                      "jurisdiction": self.jurisdiction,
                       "order": "desc" if descending else "asc"}
             if descending:
                 if edge:
@@ -344,8 +380,10 @@ class FrJudilibreAdapter(BaseAdapter):
                 "number": parsed.number, "formation": parsed.formation,
                 "solution": parsed.solution, "nac": parsed.nac,
                 "publication": parsed.publication or None,
+                "location": decision.get("location"),
+                "jurisdiction": decision.get("jurisdiction"),
                 "aliases": [x for x in (decision.get("id"),
-                                         pourvoi_alias(parsed.number) if parsed.number else None)
+                                         _number_alias(decision, parsed.number))
                             if x],
             }.items() if v},
         )

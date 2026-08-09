@@ -37,6 +37,68 @@ def text_alias(number: str) -> str:
     return f"fr:text:{normalise_fr_number(number)}"
 
 
+def _statute_number_ref(match: re.Match[str]) -> Normalised:
+    article = normalise_article(match.group("article")) if match.group("article") else None
+    return (text_alias(match.group("number")),
+            f"Article {article}" if article else None, "act")
+
+
+# Ordinary French statutes are cited by their official number, not only codes by article:
+# ``loi n° 2004-801`` / ``article 2 de la loi n° 78-17``.  Before this grammar the
+# corpus could hold every LEGI article of a law and still report that nothing cited the
+# law itself.
+register(Grammar(
+    "fr_statute_number", "act",
+    re.compile(
+        r"\b(?:(?:l['’])?article\s+(?P<article>\d+[A-Z]?)\s+(?:de\s+la|du)\s+)?"
+        # Older CNIL material commonly omits the ``n°`` marker (``loi 78-17``),
+        # while OCR may render it as ``no``.  The word ``loi`` and year-sequence
+        # shape keep the optional marker precise.
+        r"loi\s+(?:n(?:o|°)\s*)?(?P<number>\d{2,4}-\d+)\b",
+        re.IGNORECASE,
+    ),
+    _statute_number_ref,
+))
+
+
+def _fixed_statute(number: str):
+    def normalise(match: re.Match[str]) -> Normalised:
+        article = normalise_article(match.group("article")) if match.group("article") else None
+        return text_alias(number), f"Article {article}" if article else None, "act"
+    return normalise
+
+
+# The founding data-protection law is very often cited by date or familiar title only,
+# especially in early CNIL deliberations.  These are identities, not fuzzy title guesses:
+# both phrases denote Law 78-17.  Keep this narrow rather than teaching the resolver that
+# any date-only French law can be inferred without an official alias.
+register(Grammar(
+    "fr_informatique_libertes_law", "act",
+    re.compile(
+        r"\b(?:(?:l['’])?article\s+(?P<article>\d+[A-Z]?)\s+(?:de\s+la|du)\s+)?"
+        r"loi(?:\s+modifi[eé]e)?\s+(?:"
+        r"du\s+6\s+janvier\s+1978\b"
+        r"|(?:relative\s+à\s+)?l['’]informatique,?\s+aux\s+fichiers\s+et\s+aux\s+libert[eé]s\b"
+        r"|informatique\s+et\s+libert[eé]s\b)",
+        re.IGNORECASE,
+    ),
+    _fixed_statute("78-17"),
+))
+
+# The 2004 implementing law likewise appears under its long subject title without its
+# number in constitutional and administrative material.
+register(Grammar(
+    "fr_personal_data_2004_law", "act",
+    re.compile(
+        r"\b(?:(?:l['’])?article\s+(?P<article>\d+[A-Z]?)\s+(?:de\s+la|du)\s+)?"
+        r"loi\s+relative\s+à\s+la\s+protection\s+des\s+personnes\s+physiques\s+"
+        r"à\s+l['’][eé]gard\s+des\s+traitements\s+de\s+donn[eé]es\s+à\s+caract[eè]re\s+personnel",
+        re.IGNORECASE,
+    ),
+    _fixed_statute("2004-801"),
+))
+
+
 # How each code is CITED — the names a judgment actually prints, which are also the
 # extraction grammar's alternation. The official register titles are separate
 # (``_CODE_TITLES``): nobody writes "Code général des impôts, CGI." in prose.
@@ -266,6 +328,21 @@ _FR_EU_ARTICLE_REF = re.compile(
 )
 _FR_EU_ARTICLE_VALUE = re.compile(r"\d+[a-z]?", re.IGNORECASE)
 
+# CNIL deliberations frequently cite several provisions around a numbered law:
+# ``articles 15 et 20 de la loi n° 78-17`` and ``loi n° 78-17, notamment ses
+# articles 45 et 46``.  A single Grammar result cannot represent several pinpoints,
+# so expand both word orders here just as we do for French code and EU article lists.
+_FR_STATUTE_NUMBER = r"(?:n(?:o|°)\s*)?(?P<number>\d{2,4}-\d+)"
+_FR_STATUTE_PRE_LIST = re.compile(
+    rf"\b(?:articles?|arts?\.)\s+{_FR_ARTICLE_LIST}\s+"
+    rf"(?:de\s+la|du)\s+loi\s+{_FR_STATUTE_NUMBER}\b", re.IGNORECASE)
+_FR_STATUTE_POST_LIST = re.compile(
+    rf"\bloi\s+{_FR_STATUTE_NUMBER}\b[^.;\n]{{0,60}}?"
+    # The possessive is essential: without it, ``la loi 2004-801 modifie
+    # l'article 2 de la loi 78-17`` incorrectly gives Article 2 to both laws.
+    rf"(?:dans\s+)?ses\s+(?:articles?|arts?\.)\s+{_FR_ARTICLE_LIST}",
+    re.IGNORECASE)
+
 
 def _fr_eu_kind(value: str) -> str:
     return {
@@ -378,6 +455,16 @@ def french_citations(text: str) -> list[Citation]:
                 pinpoint=pinpoint, char_start=m.start(), char_end=m.end(),
                 method="fr_eu_articles", confidence=1.0,
             ))
+    for rx in (_FR_STATUTE_PRE_LIST, _FR_STATUTE_POST_LIST):
+        for m in rx.finditer(text):
+            candidate = text_alias(m.group("number"))
+            for am in _FR_ARTICLE_VALUE.finditer(m.group("list")):
+                value = normalise_article(am.group(0))
+                out.append(Citation(
+                    raw=m.group(0), entity_kind="act", candidate_id=candidate,
+                    pinpoint=f"Article {value}", char_start=m.start(), char_end=m.end(),
+                    method="fr_statute_articles", confidence=1.0,
+                ))
     return out
 
 # Légifrance identifiers and URLs are already canonical corpus identifiers.

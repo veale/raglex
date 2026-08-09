@@ -167,3 +167,51 @@ def test_an_incremental_run_still_ascends_from_its_cursor():
     assert calls[0]["order"] == "asc"
     assert calls[0]["date_start"] == "2026-01-01"
     assert "date_end" not in calls[0]
+
+
+def test_the_three_registers_are_separate_sources():
+    """Judilibre is three registers behind one endpoint and asking for none of them gets
+    you the first, which is why 1.3M appellate and first-instance decisions were
+    invisible."""
+    class _C:
+        def configured(self): return True
+
+    assert FrJudilibreAdapter(client=_C()).jurisdiction == "cc"
+    assert FrJudilibreAdapter(client=_C()).source == "fr-judilibre"
+    ca = FrJudilibreAdapter(jurisdiction="ca", client=_C())
+    assert (ca.jurisdiction, ca.source) == ("ca", "fr-judilibre-ca")
+    tj = FrJudilibreAdapter(jurisdiction="tj", client=_C())
+    assert (tj.jurisdiction, tj.source) == ("tj", "fr-judilibre-tj")
+    assert FrJudilibreAdapter(jurisdiction="nonsense", client=_C()).jurisdiction == "cc"
+
+
+def test_the_export_asks_for_the_register_it_wants():
+    calls = []
+
+    class _C:
+        def configured(self): return True
+        def get(self, url, params=None, headers=None):
+            calls.append(params or {})
+            return _Resp({"results": [], "next_batch": None})
+
+    list(FrJudilibreAdapter(jurisdiction="tj", client=_C()).discover("2026-01-01"))
+    assert calls[0]["jurisdiction"] == "tj"
+
+
+def test_an_rg_number_is_scoped_by_the_court_that_issued_it():
+    """A pourvoi number is unique nationally; an RG number is unique only within its
+    court. "24/00002" is a live docket at Nîmes and at Amiens on the same day, and the
+    pipeline folds an ECLI-less record whose alias names another source's document —
+    neither ca nor tj carries an ECLI, so a bare fr:pourvoi: key would have merged
+    unrelated judgments from different cities into one node."""
+    from raglex.adapters.fr_judilibre import _number_alias
+
+    assert _number_alias({"jurisdiction": "Cour de cassation"}, "21-00400") == (
+        "fr:pourvoi:21-00400")
+    nimes = _number_alias(
+        {"jurisdiction": "Cour d'appel", "location": "Cour d'appel de Nîmes"}, "24/00002")
+    amiens = _number_alias(
+        {"jurisdiction": "Cour d'appel", "location": "Cour d'appel d'Amiens"}, "24/00002")
+    assert nimes != amiens
+    assert nimes.startswith("fr:rg:") and "nimes" in nimes
+    assert _number_alias({"jurisdiction": "Cour d'appel", "location": "x"}, None) is None

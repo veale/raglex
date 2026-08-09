@@ -25,7 +25,7 @@ def test_uk_ewhc_chamber_citation():
 def test_uk_pre_2001_pseudo_neutral():
     out = cite({"stable_id": "ukhl/1998/1", "source": "uk-hol", "doc_type": "judgment",
                 "title": "Kleinwort Benson v Lincoln CC"})
-    assert "(pseudo-neutral citation)" in out["text"]
+    assert "(database-assigned citation; not court-issued)" in out["text"]
 
 
 def test_eu_judgment_from_celex():

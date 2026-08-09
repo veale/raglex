@@ -205,6 +205,22 @@ def test_uk_act_is_not_described_as_a_missing_eu_consolidation(tmp_path):
     assert st["as_at"] == "2026-06-19"          # the date the reader actually needs
 
 
+def test_uk_status_exposes_publisher_and_raglex_refresh_clocks(tmp_path):
+    import json
+    f = _facade(tmp_path)
+    with f._open() as (cat, _r, _t):
+        cat.conn.execute(
+            "INSERT INTO documents (stable_id,source,doc_type,title,added_by,topic_tags,"
+            "upstream_status,fetched_at,meta_json) VALUES (?,?,?,?, 'harvest','[]','live',?,?)",
+            ("ukpga/2018/12", "uk-legislation", "legislation", "Data Protection Act 2018",
+             "2026-08-09T12:00:00Z", json.dumps({
+                 "source_last_modified": "Fri, 31 Jul 2026 12:00:00 GMT"})))
+        cat.conn.commit()
+    st = f.legislative_status("ukpga/2018/12")
+    assert st["source_last_modified"] == "Fri, 31 Jul 2026 12:00:00 GMT"
+    assert st["raglex_fetched_at"] == "2026-08-09T12:00:00Z"
+
+
 def test_held_uk_point_in_time_copies_are_not_dropped_as_non_consolidations(tmp_path):
     """Held ``@date`` snapshots must reach the status, not be filtered out as non-CELEX.
 

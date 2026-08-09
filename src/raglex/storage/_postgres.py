@@ -697,6 +697,16 @@ CREATE TABLE IF NOT EXISTS doc_fts (
 );
 CREATE INDEX IF NOT EXISTS doc_fts_tsv_idx ON doc_fts USING GIN (tsv);
 
+CREATE TABLE IF NOT EXISTS doc_headings (
+    doc_id      TEXT NOT NULL,
+    heading_no  INTEGER NOT NULL,
+    label       TEXT NOT NULL,
+    char_start  INTEGER NOT NULL DEFAULT 0,
+    tsv         tsvector NOT NULL,
+    PRIMARY KEY (doc_id, heading_no)
+);
+CREATE INDEX IF NOT EXISTS doc_headings_tsv_idx ON doc_headings USING GIN (tsv);
+
 CREATE TABLE IF NOT EXISTS embeddings (
     doc_id          TEXT NOT NULL,
     chunk_id        INTEGER NOT NULL,

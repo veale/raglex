@@ -470,6 +470,17 @@ CREATE TABLE IF NOT EXISTS doc_fts (
     PRIMARY KEY (doc_id, part)
 );
 
+-- Structural labels are searchable content too. Keep them separately so adding an
+-- article heading does not falsify the character offsets of the authoritative body.
+CREATE TABLE IF NOT EXISTS doc_headings (
+    doc_id      TEXT NOT NULL,
+    heading_no  INTEGER NOT NULL,
+    label       TEXT NOT NULL,
+    char_start  INTEGER NOT NULL DEFAULT 0,
+    tsv         TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (doc_id, heading_no)
+);
+
 -- Embeddings (§6b/§6d). pgvector in production (§7); here vectors are JSON for a
 -- portable brute-force cosine. provider/model/model_version/dimensions = the
 -- "family"; vectors are ONLY comparable within one family, so a model swap is a
@@ -628,6 +639,14 @@ _POST_MIGRATE_INDEXES = (
     "ON learned_shorthands (lower(shorthand))",
 )
 
+_SQLITE_JSON_INDEXES = (
+    # SQLite spelling of the DILA parent lookup; PostgreSQL's expression lives in
+    # _PG_TRGM_INDEXES below alongside the other backend-specific indexes.
+    "CREATE INDEX IF NOT EXISTS documents_fr_code_cid_idx ON documents "
+    "((json_extract(meta_json, '$.code_cid'))) "
+    "WHERE source = 'fr-dila' AND doc_type = 'legislation'",
+)
+
 # Postgres-only trigram indexes for substring search (§7): the corpus search matches a
 # tokenised query as a SUBSTRING of the title, id, ECLI, or a citation alias
 # (``lower(col) LIKE '%tok%'``) — which a btree can't serve, so without these it seq-scans
@@ -641,6 +660,11 @@ _PG_TRGM_INDEXES = (
     "CREATE INDEX IF NOT EXISTS documents_ecli_trgm ON documents USING gin (lower(ecli) gin_trgm_ops)",
     # aliases are stored folded (lower-case), so index the column directly (no lower()).
     "CREATE INDEX IF NOT EXISTS citation_aliases_alias_trgm ON citation_aliases USING gin (alias gin_trgm_ops)",
+    # PostgreSQL spelling of the DILA parent lookup above.  Keep this in the PG-only
+    # set because SQLite's json_extract expression is not valid here.
+    "CREATE INDEX IF NOT EXISTS documents_fr_code_cid_idx ON documents "
+    "((meta_json::jsonb ->> 'code_cid')) "
+    "WHERE source = 'fr-dila' AND doc_type = 'legislation'",
 )
 
 
@@ -1000,6 +1024,7 @@ class Catalogue:
             # historical behaviour (anything may pass).
             ("provision_mappings", "source_jurisdiction", "TEXT"),
         ):
+            migration_error: Exception | None = None
             try:
                 if self.backend == "postgres":
                     exists = self.conn.execute(
@@ -1007,14 +1032,43 @@ class Catalogue:
                         "WHERE table_name = ? AND column_name = ?", (table, col)).fetchone()
                     if not exists:
                         self.conn.execute("SET lock_timeout = '5s'")
-                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {decl}")
-                        self.conn.execute("SET lock_timeout = 0")
+                        try:
+                            self.conn.execute(
+                                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {decl}")
+                        finally:
+                            self.conn.execute("SET lock_timeout = 0")
                 else:
                     cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
                     if col not in cols:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-            except Exception:  # noqa: BLE001 — a migration mustn't block startup
-                pass
+            except Exception as exc:  # noqa: BLE001 — startup continues, but visibly
+                migration_error = exc
+            if migration_error is not None:
+                # A timed-out ALTER used to disappear here. Re-check the schema: an
+                # independent process may have completed the same migration while we
+                # waited, in which case there is no issue. Otherwise put the failure in
+                # the operator's normal feedback/error queue instead of declaring the
+                # API healthy with a column every subsequent query expects.
+                try:
+                    if self.backend == "postgres":
+                        still_missing = self.conn.execute(
+                            "SELECT 1 FROM information_schema.columns "
+                            "WHERE table_name = ? AND column_name = ?", (table, col)
+                        ).fetchone() is None
+                    else:
+                        still_missing = col not in {
+                            r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+                    if still_missing:
+                        self.record_issue(
+                            fingerprint=f"schema-migration:{table}.{col}",
+                            message=(f"schema migration did not add {table}.{col}: "
+                                     f"{type(migration_error).__name__}: {migration_error}"),
+                            page="startup:migrate",
+                            metadata=json.dumps({"table": table, "column": col,
+                                                 "declaration": decl}),
+                        )
+                except Exception:  # noqa: BLE001 — feedback schema may itself be migrating
+                    pass
         try:
             self._migrate_mapping_identity()
         except Exception:  # noqa: BLE001 — a migration mustn't block startup
@@ -1063,6 +1117,12 @@ class Catalogue:
                     finally:
                         self.conn.execute("SET lock_timeout = 0")
                 except Exception:  # noqa: BLE001 — a migration mustn't block startup
+                    pass
+        else:
+            for stmt in _SQLITE_JSON_INDEXES:
+                try:
+                    self.conn.execute(stmt)
+                except Exception:  # noqa: BLE001 — JSON1 may be absent in old SQLite
                     pass
 
     _MAPPING_PAIR_COLS = ("current_doc_id", "current_anchor",
@@ -1845,6 +1905,8 @@ class Catalogue:
     def retype_provision_mappings(
         self, current_doc_id: str, *, to_type: str,
         previous_doc_id: str | None = None, from_type: str | None = None,
+        mapping_ids: list[int] | None = None,
+        current_anchor: str | None = None, previous_anchor: str | None = None,
         dry_run: bool = False,
     ) -> int:
         """Change the CLAIM on existing mappings without rewriting them.
@@ -1862,6 +1924,16 @@ class Catalogue:
         if from_type:
             where.append("mapping_type = ?")
             params.append(from_type)
+        if mapping_ids:
+            clean_ids = list(dict.fromkeys(int(x) for x in mapping_ids))
+            where.append(f"mapping_id IN ({','.join('?' for _ in clean_ids)})")
+            params.extend(clean_ids)
+        if current_anchor:
+            where.append("lower(trim(current_anchor)) = lower(trim(?))")
+            params.append(current_anchor)
+        if previous_anchor:
+            where.append("lower(trim(previous_anchor)) = lower(trim(?))")
+            params.append(previous_anchor)
         clause = " AND ".join(where)
         if dry_run:
             return self.conn.execute(
@@ -3873,7 +3945,8 @@ class Catalogue:
         else:
             appno_expr = "json_extract(meta_json, '$.appno')"
         minted = {"echr_appno": 0, "fr_number": 0, "fr_code_article": 0,
-                  "de_case": 0, "de_law": 0, "ca_french_neutral": 0, "ni_division": 0}
+                  "de_case": 0, "de_law": 0, "ca_french_neutral": 0,
+                  "ni_division": 0, "westlaw_report": 0}
         rows = self.conn.execute(
             f"SELECT ecli, {appno_expr} AS appno FROM documents "
             "WHERE source = 'echr' AND ecli IS NOT NULL AND meta_json IS NOT NULL"
@@ -3954,6 +4027,34 @@ class Catalogue:
                         "ON CONFLICT(alias) DO NOTHING", (alias.casefold(), r["stable_id"], source)
                     )
                     minted["de_law" if source == "de-law" else "de_case"] += 1
+            # A report citation printed in a Westlaw export is the case's own
+            # structured identity.  It outranks a parallel-citation cluster inferred
+            # from running text: the latter once assigned Lewis v Daily Telegraph's
+            # [1964] AC 234 to Morgan v Odhams merely because Morgan cited Lewis.
+            from ..core.text import fold_citation
+
+            wl_rows = self.conn.execute(
+                "SELECT stable_id, meta_json FROM documents "
+                "WHERE meta_json IS NOT NULL AND meta_json LIKE '%report_citations%'"
+            )
+            for r in wl_rows:
+                try:
+                    reports = (json.loads(r["meta_json"] or "{}").get("westlaw") or {}).get(
+                        "report_citations") or []
+                except (ValueError, TypeError, AttributeError):
+                    reports = []
+                for report in reports:
+                    alias = fold_citation(str(report))
+                    if not alias:
+                        continue
+                    cur = self.conn.execute(
+                        "INSERT INTO citation_aliases (alias,dst_id,source) VALUES (?,?,?) "
+                        "ON CONFLICT(alias) DO UPDATE SET dst_id=excluded.dst_id, "
+                        "source=excluded.source WHERE citation_aliases.source IS NULL "
+                        "OR citation_aliases.source LIKE 'parallel:%'",
+                        (alias, r["stable_id"], "westlaw-report-alias"),
+                    )
+                    minted["westlaw_report"] += max(cur.rowcount, 0)
             # Canadian decisions are one Work with English and French neutral-citation
             # codes.  Older imports keyed the Work on SCC/FCA/FC/TCC/CMAC but left the
             # corresponding CSC/CAF/CF/CCI/CACM candidates dangling.  Rebuild those
@@ -5238,7 +5339,10 @@ class Catalogue:
     FTS_PART_CHARS = 120_000
     FTS_PART_WORDS = 10_000
 
-    def put_doc_fts(self, doc_id: str, text: str, *, commit: bool = True) -> int:
+    def put_doc_fts(
+        self, doc_id: str, text: str, *, headings: list[tuple[str, int]] | None = None,
+        commit: bool = True,
+    ) -> int:
         """(Re)index one document. Returns the number of parts written.
 
         Splitting is on a paragraph boundary where one is available, so a phrase is
@@ -5252,6 +5356,7 @@ class Catalogue:
         parts = _fts_parts(text, self.FTS_PART_CHARS, word_cap=self.FTS_PART_WORDS)
         now = _now()
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM doc_headings WHERE doc_id = ?", (doc_id,))
         for i, (start, end) in enumerate(parts):
             body = text[start:end]
             if self.backend == "postgres":
@@ -5264,17 +5369,36 @@ class Catalogue:
                     "INSERT INTO doc_fts (doc_id, part, char_start, char_end, words,"
                     " tsv, indexed_at) VALUES (?,?,?,?,?,?,?)",
                     (doc_id, i, start, end, len(body.split()), "", now))
+        for heading_no, (label, char_start) in enumerate(headings or []):
+            label = str(label or "").strip()
+            if not label:
+                continue
+            if self.backend == "postgres":
+                self.conn.execute(
+                    "INSERT INTO doc_headings (doc_id,heading_no,label,char_start,tsv) "
+                    "VALUES (?,?,?,?,to_tsvector('english', ?))",
+                    (doc_id, heading_no, label, int(char_start or 0), label))
+            else:
+                self.conn.execute(
+                    "INSERT INTO doc_headings (doc_id,heading_no,label,char_start,tsv) "
+                    "VALUES (?,?,?,?,?)",
+                    (doc_id, heading_no, label, int(char_start or 0), ""))
         if commit:
             self.conn.commit()
         return len(parts)
 
     def drop_doc_fts(self, doc_id: str, *, commit: bool = True) -> None:
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
+        self.conn.execute("DELETE FROM doc_headings WHERE doc_id = ?", (doc_id,))
         if commit:
             self.conn.commit()
 
     def fts_indexed_ids(self, source: str | None = None) -> set[str]:
+        # Requiring the companion heading row makes this an automatic one-time upgrade:
+        # indexes built before structural labels existed are not considered complete and
+        # the next resumable build fills them without a special migration command.
         sql = ("SELECT DISTINCT f.doc_id FROM doc_fts f "
+               "JOIN doc_headings h ON h.doc_id = f.doc_id "
                "JOIN documents d ON d.stable_id = f.doc_id")
         params: list[object] = []
         if source:
@@ -5460,9 +5584,12 @@ class Catalogue:
         not a result count."""
         if self.backend != "postgres":
             return []
-        sql = ("SELECT f.doc_id, f.part, f.char_start,"
+        sql = ("SELECT f.doc_id, f.part, f.char_start, f.heading,"
                "       ts_rank_cd(f.tsv, query) AS rank "
-               "FROM doc_fts f JOIN documents d ON d.stable_id = f.doc_id,"
+               "FROM (SELECT doc_id,part,char_start,tsv,NULL::text AS heading FROM doc_fts "
+               "      UNION ALL "
+               "      SELECT doc_id,-1,char_start,tsv,label AS heading FROM doc_headings) f "
+               "JOIN documents d ON d.stable_id = f.doc_id,"
                "     to_tsquery('english', ?) AS query "
                "WHERE f.tsv @@ query")
         params: list[object] = [tsquery]
@@ -5486,7 +5613,9 @@ class Catalogue:
         if self.backend != "postgres":
             return 0
         sql = ("SELECT count(DISTINCT f.doc_id) AS n "
-               "FROM doc_fts f JOIN documents d ON d.stable_id = f.doc_id,"
+               "FROM (SELECT doc_id,tsv FROM doc_fts UNION ALL "
+               "      SELECT doc_id,tsv FROM doc_headings) f "
+               "JOIN documents d ON d.stable_id = f.doc_id,"
                "     to_tsquery('english', ?) AS query "
                "WHERE f.tsv @@ query")
         params: list[object] = [tsquery]

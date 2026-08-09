@@ -39,7 +39,7 @@ _DC = "{http://purl.org/dc/elements/1.1/}"
 _DCT = "{http://purl.org/dc/terms/}"
 _PARENT_RE = re.compile(
     r"/(?:id/)?(?P<id>(?:ukpga|ukla|ukcm|uksi|ukmo|ukci|asp|ssi|anaw|asc|wsi|"
-    r"nia|nisr|apni|aosp|aep|mnia)/[^/?#]+/[^/?#]+)(?:/|$)", re.I)
+    r"nia|nisr|apni|aosp|aep|mnia)/(?:\d{4}/\d+|[^/?#]+/[^/?#]+/\d+))(?:/|$)", re.I)
 _UKIA_RE = re.compile(r"/(?:id/)?(?P<id>ukia/\d{4}/\d+)(?:/|$)", re.I)
 _PARENT_IMPACT_RE = re.compile(r"/impacts/(?P<year>\d{4})/(?P<number>\d+)(?:/|$)", re.I)
 _NOTES_TYPES = ("notes", "memorandum", "executive-note", "policy-note")
@@ -65,6 +65,12 @@ def _iso_date(value: str | None) -> date | None:
         return datetime.fromisoformat(value).date() if value else None
     except ValueError:
         return None
+
+
+def _impact_title(value: str | None, stable_id: str) -> str:
+    title = _clean(value) or stable_id
+    return (title if re.search(r"\bimpact assessment\b", title, re.IGNORECASE)
+            else f"Impact Assessment: {title}")
 
 
 def _parent_id(value: str | None) -> str | None:
@@ -527,7 +533,10 @@ class UKLegislationMaterialsAdapter(BaseAdapter):
         segments = [Segment(label=f"p. {page}", char_start=start, char_end=end,
                             kind="page") for page, start, end in page_spans]
         parent = metadata.get("parent_id") or stub.hints.get("parent_id")
-        title = metadata.get("title") or stub.title or f"Impact Assessment {stub.stable_id}"
+        title = _impact_title(metadata.get("title") or stub.title, stub.stable_id)
+        # Feed titles are often only a subject (``Communications Data``), which is
+        # opaque in mixed search results. Preserve the official wording but identify
+        # what the record is; avoid doubling titles that already say it themselves.
         extra = {
             "format": "pdf",
             "material_type": "impact_assessment",
@@ -542,10 +551,18 @@ class UKLegislationMaterialsAdapter(BaseAdapter):
         relations: list[TypedRelation] = []
         if parent:
             relations.append(_related(parent, RelationshipType.RELATED_TO))
+            parent_kind = ("act" if parent.startswith(
+                ("ukpga/", "asp/", "nia/", "anaw/", "asc/")) else "named")
+            local_aliases = ({"the Act": parent, "this Act": parent}
+                             if parent_kind == "act" else {
+                                 "the Regulations": parent,
+                                 "these Regulations": parent,
+                                 "the instrument": parent,
+                             })
             extra.update({
                 "parent_legislation": parent,
-                "citation_default_instrument": {"id": parent, "kind": "act"},
-                "citation_local_aliases": {"the Act": parent, "this Act": parent},
+                "citation_default_instrument": {"id": parent, "kind": parent_kind},
+                "citation_local_aliases": local_aliases,
             })
         return Record(
             source=self.source,

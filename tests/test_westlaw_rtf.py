@@ -260,6 +260,23 @@ def test_duplicate_case_files_merge_via_a_shared_report_citation(facade, tmp_pat
     assert len(docs) == 1
 
 
+def test_structured_westlaw_report_alias_repairs_weaker_parallel_guess(facade):
+    from raglex.core.models import DocType, Record
+    from raglex.core.text import fold_citation
+
+    target = "westlaw:1964-a-c-234"
+    wrong = "westlaw:1971-1-w-l-r-1239"
+    with facade._open() as (cat, _rs, _ts):
+        for sid, reports in ((target, ["[1964] A.C. 234"]), (wrong, [])):
+            cat.upsert_document(Record(
+                source="uk-caselaw", stable_id=sid, doc_type=DocType.JUDGMENT,
+                title=sid, extra={"westlaw": {"report_citations": reports}}))
+        alias = fold_citation("[1964] A.C. 234")
+        cat.put_alias(alias, wrong, source="parallel:adjacency")
+        assert cat.backfill_alias_from_meta()["westlaw_report"] == 1
+        assert cat.get_alias(alias) == target
+
+
 def _bailii_page(*, url="https://www.bailii.org/uk/cases/UKHL/2000/57.html",
                  title="Turkington v Times Newspapers [2000] UKHL 57 (2nd November, 2000)") -> bytes:
     html = (f"<HTML><HEAD><TITLE>{title}</TITLE></HEAD><BODY>"

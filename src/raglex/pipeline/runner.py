@@ -411,7 +411,8 @@ class Pipeline:
                         continue
 
                 try:
-                    stored = self._ingest(record, stats)
+                    stored = self._ingest(
+                        record, stats, refresh_projection=bool(refetch_held))
                 except Exception as exc:  # noqa: BLE001
                     # Same rule as the fetch guard above, for the store half: a record
                     # that reached us intact can still be unstorable (text carrying a
@@ -572,7 +573,9 @@ class Pipeline:
             else:
                 yield s, None, None, None
 
-    def _ingest(self, record: Record, stats: RunStats) -> bool:
+    def _ingest(
+        self, record: Record, stats: RunStats, *, refresh_projection: bool = False,
+    ) -> bool:
         """Dedup → store raw → catalogue. Returns True if stored."""
         # Broad regulator registers mix decisions and legal guidance with speeches,
         # vacancies and newsletters. Sources may opt into a strict relevance gate:
@@ -642,6 +645,18 @@ class Pipeline:
         # Content-hash dedup (§5): identical bytes → skip the expensive downstream
         # work even when the feed bumped 'last modified'.
         if record.payload_hash and self.catalogue.payload_hash_seen(record.payload_hash):
+            # An explicit refetch is also a metadata refresh. legislation.gov.uk can
+            # advance its expression date / Last-Modified header while the rendered
+            # body remains byte-for-byte identical; treating that as a total no-op left
+            # the live UK GDPR permanently labelled with an older point-in-time date.
+            # Reuse the immutable raw/text objects but rewrite the catalogue projection.
+            held_same = self.catalogue.get_document(record.stable_id)
+            if (refresh_projection and held_same is not None
+                    and held_same["payload_hash"] == record.payload_hash):
+                self.catalogue.upsert_document(
+                    record, raw_path=held_same["raw_path"],
+                    text_path=held_same["text_path"])
+                return True
             stats.deduped += 1
             return False
 

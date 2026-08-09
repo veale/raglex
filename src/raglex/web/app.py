@@ -452,6 +452,11 @@ def create_app(config: Config | None = None) -> FastAPI:
     def legislation_version_ep(payload: dict = Body(...)) -> dict:
         return facade.harvest_legislation_at(stable_id=payload["id"], date=payload["date"])
 
+    @app.post("/legislation/refresh")
+    def refresh_uk_legislation_ep(payload: dict = Body(...)) -> dict:
+        """Explicitly re-pull one held legislation.gov.uk instrument."""
+        return facade.refresh_uk_legislation(stable_id=payload["id"])
+
     # -- outstanding amendments (the editorial lag) ------------------------
     @app.get("/legislation/effects")
     def outstanding_effects_ep(limit: int = 500) -> list[dict]:

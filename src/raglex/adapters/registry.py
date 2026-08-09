@@ -374,6 +374,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "fr-cnil": lambda **kw: FrLegislationAdapter(fond="CNIL", **kw),
     "fr-constit": lambda **kw: FrLegislationAdapter(fond="CONSTIT", **kw),
     "fr-judilibre": FrJudilibreAdapter,
+    "fr-judilibre-ca": lambda **kw: FrJudilibreAdapter(jurisdiction="ca", **kw),
+    "fr-judilibre-tj": lambda **kw: FrJudilibreAdapter(jurisdiction="tj", **kw),
     "fr-conseil-etat": FrConseilEtatAdapter,
     # Germany — NeuRIS / rechtsinformationen.bund.de (beta), ELI + ECLI native. One
     # adapter, two modes: federal case law (default) and federal legislation (LDML.de).
@@ -1612,6 +1614,29 @@ SOURCE_INFO: dict[str, SourceInfo] = {
                       "2025-07-01")),
         ("ECLI:FR:CCASS:…", "Judilibre decision id"),
     ),
+    "fr-judilibre-ca": SourceInfo(
+        "fr-judilibre-ca", "France — cours d'appel (Judilibre)", "caselaw", "FR", False,
+        "The appellate half of Judilibre — 626,374 decisions, the same endpoint under "
+        "jurisdiction=ca. NOT ECLI-native: these carry no ECLI at all, so they are keyed "
+        "by their Judilibre id, and their number is an RG number unique only within the "
+        "issuing court (24/00002 is live at Nîmes and at Amiens on the same day), so the "
+        "citation key is scoped by court. Complements the DILA CAPP bulk (73,046 held) "
+        "rather than replacing it.",
+        (SourceOption("ids", "Decision ids", "5fca…"),
+         SourceOption("since_date", "Stop a seed here", "2020-01-01")),
+        ("Judilibre decision id",),
+    ),
+    "fr-judilibre-tj": SourceInfo(
+        "fr-judilibre-tj", "France — tribunaux judiciaires (Judilibre)", "caselaw", "FR",
+        False,
+        "First-instance civil France — 697,807 decisions, jurisdiction=tj on the same "
+        "endpoint, and the largest single register PISTE exposes. No ECLI and a "
+        "court-scoped RG number, as with the cours d'appel. Nothing else in the corpus "
+        "reaches this material.",
+        (SourceOption("ids", "Decision ids", "5fca…"),
+         SourceOption("since_date", "Stop a seed here", "2020-01-01")),
+        ("Judilibre decision id",),
+    ),
     "fr-conseil-etat": SourceInfo(
         "fr-conseil-etat", "France — administrative order (Conseil d'État)", "caselaw",
         "FR", False,
@@ -1792,7 +1817,8 @@ GAP_SCAN_SOURCES = frozenset({"uk-caselaw"})
 INCREMENTAL_MODE: dict[str, str] = {
     # server-side incremental
     "us-caselaw": "server", "nl-rechtspraak": "server", "nl-legislation": "server",
-    "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server",
+    "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server", "fr-judilibre-ca": "server",
+    "fr-judilibre-tj": "server",
     "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
     "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
     "eu-cellar": "server", "eu-legislation": "server",

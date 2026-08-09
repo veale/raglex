@@ -168,20 +168,28 @@ class DilaArticle:
     date_fin: date | None = None
     code_cid: str | None = None
     code_title: str | None = None
+    full_title: str | None = None
+    jorf_cid: str | None = None
+    text_number: str | None = None
+    signature_date: date | None = None
+    publication_date: date | None = None
+    nature: str | None = None
     text: str | None = None
     segments: list[Segment] = field(default_factory=list)
+    relations: list[TypedRelation] = field(default_factory=list)
 
 
-def _code_context(root: ET.Element) -> tuple[str | None, str | None]:
+def _article_context(root: ET.Element) -> dict:
     """(code_cid, code_title) from an article's ``<CONTEXTE>``. The title lives in a
     ``<TITRE_TXT>`` (with a ``c_titre_court`` short form and an ``id_txt`` that is the
     LEGITEXT id for codified articles) — NOT in a ``@titre`` attribute."""
     ctx = _find(root, "CONTEXTE")
     if ctx is None:
-        return None, None
+        return {}
     texte = _find(ctx, "TEXTE")
     cid = texte.get("cid") if texte is not None else None
-    title = None
+    jorf_cid = cid if (cid or "").startswith("JORFTEXT") else None
+    title = full_title = None
     for tt in ctx.iter():
         if localname(tt.tag).upper() != "TITRE_TXT":
             continue
@@ -190,8 +198,45 @@ def _code_context(root: ET.Element) -> tuple[str | None, str | None]:
             cid = tt.get("id_txt")
         title = tt.get("c_titre_court") or " ".join("".join(tt.itertext()).split()) or title
         if (tt.get("id_txt") or "").startswith("LEGITEXT"):
+            full_title = " ".join("".join(tt.itertext()).split()) or None
             break
-    return cid, title
+    return {
+        "code_cid": cid, "code_title": title, "full_title": full_title,
+        "jorf_cid": jorf_cid, "text_number": texte.get("num") if texte is not None else None,
+        "signature_date": _iso(texte.get("date_signature") if texte is not None else None),
+        "publication_date": _iso(texte.get("date_publi") if texte is not None else None),
+        "nature": texte.get("nature") if texte is not None else None,
+    }
+
+
+def _article_relations(root: ET.Element) -> list[TypedRelation]:
+    """Native Légifrance links, including the parent law as well as target articles."""
+    out: list[TypedRelation] = []
+    seen: set[tuple[str, str]] = set()
+    for lien in root.iter():
+        if localname(lien.tag).upper() != "LIEN":
+            continue
+        label = " ".join("".join(lien.itertext()).split())
+        kind = (lien.get("typelien") or lien.get("nature") or "").upper()
+        rel_type = (RelationshipType.AMENDS if "MODIF" in kind
+                    else RelationshipType.MENTIONS)
+        targets = [_lien_dst(lien), (lien.get("cidtexte") or "").strip() or None]
+        for target in targets:
+            if not target or not _LEGIFRANCE_ID.match(target):
+                continue
+            key = (str(rel_type), target)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(TypedRelation(
+                relationship_type=rel_type,
+                raw_citation_string=label or target,
+                dst_id=target,
+                dst_anchor=(f"Article {lien.get('num')}" if lien.get("num") else None),
+                extracted_via=ExtractedVia.STRUCTURED,
+                resolution_status=ResolutionStatus.PENDING,
+            ))
+    return out
 
 
 def parse_dila_article(root: ET.Element) -> DilaArticle:
@@ -199,17 +244,17 @@ def parse_dila_article(root: ET.Element) -> DilaArticle:
     body = _contenu_text(root)
     label = f"Article {num}" if num else (_text(root, "ID") or "article")
     text, segments = assemble([(label, "article", body)] if body else [])
-    code_cid, code_title = _code_context(root)
+    context = _article_context(root)
     return DilaArticle(
         art_id=_text(root, "ID"),
         num=num,
         etat=_text(root, "ETAT"),
         date_debut=_iso(_text(root, "DATE_DEBUT")),
         date_fin=_iso(_text(root, "DATE_FIN")),
-        code_cid=code_cid,
-        code_title=code_title,
+        **context,
         text=text or None,
         segments=segments,
+        relations=_article_relations(root),
     )
 
 

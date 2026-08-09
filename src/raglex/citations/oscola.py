@@ -217,7 +217,7 @@ def _uk_case(doc: Mapping) -> dict | None:
         # citation, flagged per OSCOLA so the reader knows it isn't an official one.
         m = re.match(r"\[(\d{4})\]", neutral)
         if m and int(m.group(1)) < 2001:
-            parts.append(_run(" (pseudo-neutral citation)"))
+            parts.append(_run(" (database-assigned citation; not court-issued)"))
     if not parts:
         return None
     return _pack(parts)
@@ -263,7 +263,7 @@ def _neutral_case(doc: Mapping) -> dict | None:
     # An LII-minted pseudo-neutral citation is not court-issued; say so rather than
     # presenting a database key as though the court had assigned it.
     if court.authority != COURT_ISSUED:
-        out.append(_run(" (pseudo-neutral citation)"))
+        out.append(_run(" (database-assigned citation; not court-issued)"))
     return _pack(out)
 
 

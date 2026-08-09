@@ -320,3 +320,16 @@ def test_an_acts_sections_are_still_sections():
       </body></act></akomaNtoso>"""
     segs = {s.label: s.kind for s in parse_akn(akn).segments}
     assert segs["s. 5 Duties"] == "section"
+
+
+def test_uk_akn_prefers_canonical_dc_title_with_publisher_spacing():
+    """Adjacent long-title paragraphs have no XML whitespace between them (``2016on``)."""
+    from raglex.formats.akoma_ntoso import parse_akn
+
+    akn = b'''<akomaNtoso xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0"
+        xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <act><meta><proprietary><dc:title>Regulation (EU) 2016/1927 of 4 November
+      2016 on templates</dc:title></proprietary></meta>
+      <preface><longTitle><p>Regulation (EU) 2016/1927</p><p>of 4 November 2016</p>
+      <p>on templates</p></longTitle></preface><body/></act></akomaNtoso>'''
+    assert parse_akn(akn).title == "Regulation (EU) 2016/1927 of 4 November 2016 on templates"

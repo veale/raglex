@@ -10,10 +10,13 @@ from raglex.adapters.uk_legislation_materials import (
     parse_explanatory_notes_xml,
     parse_impact_feed,
     parse_impact_metadata,
+    _parent_id,
+    _impact_title,
 )
 from raglex.citations.extractor import extract_citations
 from raglex.citations.taxonomy import classify_document
 from raglex.core.models import DocType, RelationshipType, Stub
+from raglex.static_export import _public_links
 
 
 OLD_NOTES = b'''<EN xmlns="http://www.legislation.gov.uk/namespaces/legislation"
@@ -85,6 +88,21 @@ def test_impact_feed_and_per_act_metadata_link_both_directions():
     assert {s.stable_id for s in linked} == {"ukia/2016/251", "ukia/2017/125"}
 
 
+def test_parent_identity_supports_both_calendar_year_and_old_regnal_routes():
+    assert _parent_id("https://www.legislation.gov.uk/id/ukpga/2018/12") == "ukpga/2018/12"
+    assert _parent_id("https://www.legislation.gov.uk/id/ukpga/Geo5/10-11/41") == \
+        "ukpga/geo5/10-11/41"
+    assert _parent_id("https://www.legislation.gov.uk/ukpga/2018/12/impacts") == \
+        "ukpga/2018/12"
+
+
+def test_impact_titles_are_self_explanatory_in_mixed_search_results():
+    assert _impact_title("Communications Data", "ukia/2017/126") == \
+        "Impact Assessment: Communications Data"
+    assert _impact_title("Overarching Impact Assessment", "ukia/2017/130") == \
+        "Overarching Impact Assessment"
+
+
 @dataclass
 class Response:
     content: bytes
@@ -130,3 +148,22 @@ def test_registry_and_taxonomy_expose_an_appropriate_material_category():
                                stable_id="ukia/2016/251", doc_type="preparatory")
     assert (note.category, note.subtype) == ("uk-legislation-materials", "explanatory-notes")
     assert impact.subtype == "impact-assessments"
+
+
+def test_static_links_offer_the_human_page_and_pdf_not_ingest_xml():
+    class Facade:
+        @staticmethod
+        def source_label(_source):
+            return "UK explanatory material"
+
+    row = {
+        "landing_url": "https://www.legislation.gov.uk/uksi/2013/3134/memorandum",
+        "source": "uk-legislation-materials",
+    }
+    links = _public_links(Facade(), row, {
+        "download_url": "http://www.legislation.gov.uk/uksi/2013/3134/pdfs/em.pdf",
+    })
+    urls = [link["url"] for link in links]
+    assert row["landing_url"] in urls
+    assert any(url.endswith(".pdf") for url in urls)
+    assert not any(url.endswith("data.xml") for url in urls)

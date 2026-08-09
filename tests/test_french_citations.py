@@ -41,6 +41,48 @@ def test_french_eu_instruments_resolve_to_celex():
     assert cites["directive 95/46/CE"].candidate_id == "31995L0046"
 
 
+def test_french_numbered_statutes_resolve_at_law_level_with_pinpoints():
+    cites = extract_citations(
+        "La loi n° 2004-801 modifie l'article 2 de la loi n° 78-17 du 6 janvier 1978.")
+    got = {(c.candidate_id, c.pinpoint, c.method) for c in cites}
+    assert ("fr:text:2004-801", None, "fr_statute_number") in got
+    assert ("fr:text:78-17", "Article 2", "fr_statute_number") in got
+
+
+def test_older_cnil_spellings_resolve_to_the_data_protection_law():
+    samples = (
+        "Vu la loi 78-17 du 6 janvier 1978 relative à l'informatique, aux fichiers et aux libertés ;",
+        "Vu la loi du 6 janvier 1978 relative à l’informatique, aux fichiers et aux libertés ;",
+        "L'article 45 de la loi Informatique et Libertés s'applique.",
+    )
+    for text in samples:
+        assert any(c.candidate_id == "fr:text:78-17" for c in extract_citations(text))
+
+
+def test_cnil_numbered_law_article_lists_expand_in_both_word_orders():
+    text = (
+        "Vu les articles 15 et 20 de la loi N° 78-17 du 6 janvier 1978. "
+        "La loi n° 2004-801, notamment ses articles 2 et 3, est applicable."
+    )
+    got = {(c.candidate_id, c.pinpoint) for c in extract_citations(text)
+           if c.method == "fr_statute_articles"}
+    assert got == {
+        ("fr:text:78-17", "Article 15"),
+        ("fr:text:78-17", "Article 20"),
+        ("fr:text:2004-801", "Article 2"),
+        ("fr:text:2004-801", "Article 3"),
+    }
+
+
+def test_long_2004_data_protection_title_is_a_law_not_a_constitutional_decision():
+    cite = _one(
+        "Loi relative à la protection des personnes physiques à l'égard des traitements "
+        "de données à caractère personnel et modifiant la loi n° 78-17 du 6 janvier 1978",
+        "fr_personal_data_2004_law",
+    )
+    assert cite.candidate_id == "fr:text:2004-801"
+
+
 def test_french_eu_articles_keep_pinpoints_before_numeric_instrument():
     cites = extract_citations(
         "L'article 13 du règlement (UE) 2016/679 s'applique. "

@@ -155,9 +155,15 @@ class FrDilaAdapter(BaseAdapter):
             raw_ext="xml",
             text=art.text,
             segments=art.segments,
+            relations=art.relations,
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in {
                 "fond": "LEGI", "etat": art.etat, "code_cid": art.code_cid,
+                "parent_title": art.full_title, "jorf_cid": art.jorf_cid,
+                "text_number": art.text_number,
+                "signature_date": art.signature_date.isoformat() if art.signature_date else None,
+                "publication_date": art.publication_date.isoformat() if art.publication_date else None,
+                "nature": art.nature,
                 "aliases": [article_alias] if article_alias else None,
                 "date_debut": art.date_debut.isoformat() if art.date_debut else None,
                 "date_fin": art.date_fin.isoformat() if art.date_fin else None,
@@ -174,12 +180,16 @@ class FrDilaAdapter(BaseAdapter):
             aliases.append(pourvoi_alias(j.number))
         elif j.number and self.fond in ("JADE", "CONSTIT", "CNIL"):
             aliases.append(decision_alias(j.number))
+        title = j.title or ", ".join(x for x in (j.jurisdiction, j.number) if x) or ecli
+        if self.fond == "CONSTIT" and j.title:
+            number = f" n° {j.number}" if j.number else ""
+            title = f"Conseil constitutionnel, décision{number} — {j.title}"
         return Record(
             source=self.source,
             stable_id=stable_id,
             ecli=ecli,
             doc_type=doc_type,
-            title=j.title or ", ".join(x for x in (j.jurisdiction, j.number) if x) or ecli,
+            title=title,
             court=j.jurisdiction or default_court,
             decision_date=_display_date(j.date),
             language="fr",

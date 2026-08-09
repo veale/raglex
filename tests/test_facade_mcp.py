@@ -93,6 +93,10 @@ def test_facade_document_mentions_grouped_and_ranked(config):
     b = f.import_bytes(data=b"<p>citing b</p>", filename="b.html", doc_type="judgment", title="C v D")["stable_id"]
     f.link(src_id=a, dst_id=target, relationship="applies", src_anchor="12", dst_anchor="1.")
     f.link(src_id=b, dst_id=target, relationship="considers", src_anchor="4", dst_anchor="2.")
+    # Imported consolidated texts can contain formal self-references.  They are not
+    # independent citing documents and must not make the headline and detail totals
+    # disagree.
+    f.link(src_id=target, dst_id=target, relationship="mentions", dst_anchor="1.")
 
     m = f.document_mentions(target)
     assert m["total"] == 2
@@ -103,6 +107,8 @@ def test_facade_document_mentions_grouped_and_ranked(config):
     # filtering to one paragraph narrows the groups
     only1 = f.document_mentions(target, anchor="1.")
     assert {g["src_id"] for g in only1["groups"]} == {a}
+    assert f.get_document(target)["cited_by_count"] == 2
+    assert f.citing_documents(target)["total"] == 2
 
 
 def test_preparatory_mentions_are_a_separate_conditional_section_and_flag(config):

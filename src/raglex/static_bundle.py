@@ -583,6 +583,33 @@ def _repoint_to_current_versions(facade: Facade, items: list[dict]) -> list[dict
     return moves
 
 
+def _refresh_revised_in_place_items(facade: Facade, items: list[dict]) -> list[dict]:
+    """Refresh legislation.gov.uk bases before deciding which expression is latest.
+
+    A dated ``@...`` snapshot can only be compared fairly with the revised-in-place base
+    when the base has just disclosed its current ``currency.as_at``.  Otherwise an old
+    snapshot wins merely because its date is explicit — exactly how the UK GDPR static
+    page remained on 2026-03-01 while the publisher's base had moved to 2026-06-19.
+    """
+    bases: list[str] = []
+    with facade._open() as (cat, _rs, _ts):
+        for item in items:
+            current = str(item.get("stable_id") or "")
+            base, _version = cat.version_base_and_date(current)
+            row = cat.get_document(base)
+            if row is not None and row["source"] == "uk-legislation" and base not in bases:
+                bases.append(base)
+    results = []
+    for base in bases:
+        result = facade.ensure_uk_legislation_current(stable_id=base)
+        results.append(result)
+        if result.get("error"):
+            raise RuntimeError(
+                f"could not verify the current legislation.gov.uk text for {base}: "
+                f"{result['error']}")
+    return results
+
+
 def build_bundle(
     facade: Facade,
     params: dict | None = None,
@@ -615,6 +642,11 @@ def build_bundle(
     def check_cancelled() -> None:
         if cancel_check and cancel_check():
             raise RuntimeError("static bundle export cancelled")
+
+    # Check revised-in-place UK sources first. Repointing without this check compares an
+    # explicitly dated snapshot against a possibly stale/undated base and can select the
+    # old snapshot forever. A non-refresh render deliberately reuses the prior payload.
+    source_refreshes = _refresh_revised_in_place_items(facade, items) if refresh else []
 
     # An edition names one expression of a law, and laws are consolidated again. Left
     # alone, a set published from "the ePrivacy Directive as at 2009-12-19" keeps
@@ -747,6 +779,7 @@ def build_bundle(
         # Editions moved onto a newer consolidation by this run — the set changed which
         # text it publishes, which the operator should be told rather than discover.
         **({"repointed": repointed} if repointed else {}),
+        **({"source_refreshes": source_refreshes} if source_refreshes else {}),
     }
     if want_zip:
         emit(len(items) + 1, f"packing {len(files)} files into a zip")

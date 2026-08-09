@@ -2003,7 +2003,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   const recitalContent = inheritedRecitals?.text && recitalSegs.length > 0 ? (
     <div className="inherited-recitals">
       <div className="leg-version-state">
-        <b>Unchanged inherited recitals.</b>{" "}
+        <b>Recitals from the original act.</b>{" "}
         {inheritedRecitals.note}
         {inheritedRecitals.source_url && <>{" "}
           <a href={inheritedRecitals.source_url} target="_blank" rel="noreferrer">
@@ -6949,8 +6949,10 @@ function ProvisionRow({ p, open, actId }:
 // — where the source pinpoints it — per-provision markers. Quiet for a plainly-in-force act
 // with nothing to report; expands with detail when there's something a reader needs to know.
 function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: string) => void }) {
-  const [s] = useAsync(() => api.legislativeStatus(id), [id]);
+  const [s, _statusError, reloadStatus] = useAsync(() => api.legislativeStatus(id), [id]);
   const [allProv, setAllProv] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState("");
   if (!s) return null;
   const links = (ids: string[]) => ids.map((x, i) => (
     <Fragment key={x}>{i > 0 && ", "}<DocLink id={x} onOpen={() => open(x)}>{x}</DocLink></Fragment>));
@@ -7036,6 +7038,22 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
         {s.degraded && <span className="muted" title="status inferred from absence of recorded changes; not confirmed by the source">· unconfirmed</span>}
       </div>
       {versionNotice && <div className="leg-version-state">{versionNotice}</div>}
+      {s.source === "uk-legislation" && <div className="leg-status-line muted">
+        Official rendition last modified: {s.source_last_modified
+          ? String(s.source_last_modified) : "not recorded on the last fetch"}
+        {s.raglex_fetched_at && <> · fetched by RagLex {String(s.raglex_fetched_at).slice(0, 19).replace("T", " ")} UTC</>}
+        {" · "}<button disabled={refreshing} onClick={async () => {
+          setRefreshing(true); setRefreshNote("");
+          try {
+            const result = await api.refreshUkLegislation(id);
+            setRefreshNote(result.error ? `refresh failed: ${result.error}`
+              : result.changed ? "refreshed — source changed" : "refreshed — source unchanged");
+            if (!result.error) reloadStatus();
+          } catch (e: any) { setRefreshNote(`refresh failed: ${e?.message || e}`); }
+          finally { setRefreshing(false); }
+        }}>{refreshing ? "Refreshing…" : "↻ Refresh from legislation.gov.uk"}</button>
+        {refreshNote && <> · {refreshNote}</>}
+      </div>}
       {s.currency_note && <div className="leg-version-state">{s.currency_note}</div>}
       {dates && <div className="leg-status-line muted">{dates}</div>}
       {lines.map((b, i) => <div key={i} className="leg-status-line">{b}</div>)}
