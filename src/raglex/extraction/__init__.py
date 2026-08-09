@@ -8,6 +8,7 @@ from .extractors import (
     PdfExtractor,
     PlainTextExtractor,
     extract_bytes,
+    text_extension,
 )
 from .ocr import looks_unocrd, ocr_available, ocr_pdf, text_or_ocr
 
@@ -22,5 +23,6 @@ __all__ = [
     "looks_unocrd",
     "ocr_available",
     "ocr_pdf",
+    "text_extension",
     "text_or_ocr",
 ]

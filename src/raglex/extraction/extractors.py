@@ -269,3 +269,41 @@ def extract_bytes(
             return provider.extract(data, ext=ext, mime=mime)
     # last resort: decode as text so nothing is ever silently dropped
     return PlainTextExtractor().extract(data, ext=ext, mime=mime)
+
+
+#: File extensions the router above has a real engine for, mapped to the ``ext`` to
+#: call it with. Anything absent falls through ``extract_bytes`` to the last-resort
+#: byte decode, which is right for an unlabelled text file and catastrophic for a
+#: binary one: a 2.6 MB XLSX decodes to 2.6 MB of zip noise and, inlined into a
+#: record, swamps both the document's real text and the search index. Adapters that
+#: harvest a page's whole downloads panel — a regulator attaching spreadsheets and
+#: slide decks beside its PDFs — ask here first and record the rest as attachments
+#: they deliberately did not read.
+_EXTRACTABLE: dict[str, str] = {
+    "pdf": "pdf", "docx": "docx", "rtf": "rtf",
+    "html": "html", "htm": "html", "xhtml": "html",
+    "txt": "txt", "text": "txt", "md": "md", "markdown": "md",
+    # delimited text: no engine of its own, and the byte decode IS the right answer
+    "csv": "txt", "tsv": "txt", "json": "txt", "xml": "txt",
+}
+
+
+def text_extension(ext: str | None, mime: str | None = None) -> str | None:
+    """The ``ext`` to pass :func:`extract_bytes`, or ``None`` if this format has no
+    text engine and must not be byte-decoded. See :data:`_EXTRACTABLE`."""
+    key = (ext or "").lower().lstrip(".")
+    if key in _EXTRACTABLE:
+        return _EXTRACTABLE[key]
+    lowered = (mime or "").lower()
+    if lowered == "application/pdf":
+        return "pdf"
+    if lowered == ("application/vnd.openxmlformats-officedocument."
+                   "wordprocessingml.document"):
+        return "docx"
+    if lowered in ("application/rtf", "text/rtf"):
+        return "rtf"
+    if lowered.startswith("text/html"):
+        return "html"
+    if lowered.startswith("text/"):
+        return "txt"
+    return None

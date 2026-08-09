@@ -106,6 +106,9 @@ from .uk_parl_library import ParliamentLibraryAdapter
 from .scot_spice import SPICeBriefingsAdapter
 from .uk_ipco import IPCOPublicationsAdapter
 from .uk_isc import ISCReportsAdapter
+from .uk_ehrc import EHRCAdapter
+from .uk_ofgem import OfgemPublicationsAdapter
+from .uk_ofs import OfSPublicationsAdapter
 
 
 def _scrape_factory(recipe):
@@ -155,6 +158,17 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "uk-ofwat": lambda **kw: GOVUKRegulatorAdapter(
         source="uk-ofwat", organisation="the-water-services-regulation-authority",
         court="Ofwat", id_prefix="govuk", **kw),
+    # Ofgem's OWN register (ofgem.gov.uk), which is where the regulator actually
+    # publishes: 24,000 decisions, consultations, licence and code modifications back
+    # to 1998, none of them on GOV.UK. Rides the site's Drupal listing API, whose
+    # facet/keyword/sort grammar is documented in the adapter.
+    "uk-ofgem-publications": OfgemPublicationsAdapter,
+    # The Office for Students — the whole publications listing, with a long report's
+    # chapters followed one level deep and its PDFs/DOCX inlined.
+    "uk-ofs": OfSPublicationsAdapter,
+    # The Equality and Human Rights Commission — discovered from the sitemap rather
+    # than the Turnstile-walled search, so no browser tier and a real lastmod cursor.
+    "uk-ehrc": EHRCAdapter,
     # The whole-of-government policy corpus (~25,000 items): policy papers, impact
     # assessments, consultations and calls for evidence with their outcomes. No fixed
     # publisher — each record is attributed to the body on its own "From:" line — and
@@ -614,6 +628,52 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "uk-ofwat", "Ofwat regulatory publications", "guidance", "GB", False,
         "Official Water Services Regulation Authority GOV.UK publications and attached "
         "PDFs, relevance-gated by recognised case or legislation citations.",
+    ),
+    "uk-ofgem-publications": SourceInfo(
+        "uk-ofgem-publications", "Ofgem publications (ofgem.gov.uk)", "guidance", "GB",
+        True,
+        "Ofgem's own register — ~24,000 decisions, consultations, guidance, licence and "
+        "code modifications and enforcement cases back to 1998, none of which are on "
+        "GOV.UK. Keywords are searched at the source; a facet may be pinned by term id "
+        "(the vocabulary is in the listing response's own facets). Each publication's "
+        "PDFs and Word documents are inlined; spreadsheets are recorded unread. "
+        "Relevance-gated, because the register also carries blogs and press notices.",
+        (SourceOption("query", "Keyword query", "free text, searched in the API"),
+         SourceOption("facet", "Facet to filter on",
+                      "facet_case_publication_type | topic | facet_scheme_name | "
+                      "facet_industry_sector | facet_publication_date"),
+         SourceOption("facet_value", "Facet term id", "e.g. 1602 for Decision"),
+         SourceOption("include_documents", "Download attached files", "true/false"),
+         SourceOption("max_documents", "Attachments per publication", "default 20")),
+        ("ofgem.gov.uk publication path",),
+    ),
+    "uk-ofs": SourceInfo(
+        "uk-ofs", "Office for Students publications", "guidance", "GB", False,
+        "The English higher education regulator's whole publications listing (~670 "
+        "items): registration conditions, quality and access guidance, consultations "
+        "and their outcomes, and independent research. A multi-chapter report's "
+        "sub-pages are followed one level deep and its PDFs/DOCX inlined; the OfS's own "
+        "'OfS 2026.38' reference is kept as an alias, and every record links to the "
+        "Higher Education and Research Act 2017.",
+        (SourceOption("include_child_pages", "Follow report chapters", "true/false"),
+         SourceOption("include_documents", "Download attached files", "true/false"),
+         SourceOption("max_documents", "Attachments per publication", "default 20")),
+        ("officeforstudents.org.uk publication path", "OfS reference (OfS 2026.38)"),
+    ),
+    "uk-ehrc": SourceInfo(
+        "uk-ehrc", "Equality and Human Rights Commission", "guidance", "GB", False,
+        "The EHRC's published site (~1,970 pages): statutory codes of practice under "
+        "the Equality Act 2010, technical guidance on the public sector equality duty, "
+        "research and its advice to Parliament. Discovered from the sitemap — the "
+        "on-site search is behind a Cloudflare challenge and its pager is unreliable — "
+        "so an incremental run uses each page's real lastmod. Attached PDFs and Word "
+        "documents are inlined and bare provision references resolve to the Equality "
+        "Act 2010. Relevance-gated: the sitemap also holds careers and corporate pages.",
+        (SourceOption("section", "One part of the site only",
+                      "guidance | our-work | human-rights | news | about-us"),
+         SourceOption("include_documents", "Download attached files", "true/false"),
+         SourceOption("max_documents", "Attachments per page", "default 20")),
+        ("equalityhumanrights.com page path",),
     ),
     "nl-rechtspraak": SourceInfo(
         "nl-rechtspraak", "NL Rechtspraak (Open Data)", "caselaw", "NL", False,
@@ -1828,6 +1888,12 @@ INCREMENTAL_MODE: dict[str, str] = {
     "uk-legislation-materials": "early-stop",
     "uk-cma": "early-stop", "uk-cma-guidance": "early-stop",
     "uk-ofgem": "early-stop", "uk-ofwat": "early-stop",
+    # Ofgem's own listing sorts newest-first, but only APPROXIMATELY — a 28 July item
+    # lands after a 21 July one — so the stop is three consecutive exhausted pages
+    # rather than the first old item. The OfS listing is properly ordered.
+    "uk-ofgem-publications": "early-stop", "uk-ofs": "early-stop",
+    # One sitemap for the whole site, filtered on each entry's lastmod.
+    "uk-ehrc": "full-walk",
     # newest-first Search API, same as the other GOV.UK feeds
     "uk-govuk-policy": "early-stop",
     "uk-fca-notices": "early-stop",
