@@ -215,3 +215,17 @@ def test_an_rg_number_is_scoped_by_the_court_that_issued_it():
     assert nimes != amiens
     assert nimes.startswith("fr:rg:") and "nimes" in nimes
     assert _number_alias({"jurisdiction": "Cour d'appel", "location": "x"}, None) is None
+
+
+def test_the_bulk_and_the_api_can_recognise_the_same_appeal_judgment():
+    """The DILA CAPP bulk keys a cour d'appel judgment JURITEXT…, Judilibre keys the same
+    judgment by an opaque hash, and neither carries an ECLI — so the court-scoped RG key
+    is the only identifier they share. Without it the live register would store a second
+    copy of all 73,046 the bulk already holds."""
+    from raglex.adapters.fr_judilibre import _number_alias
+    from raglex.citations.french import rg_alias
+
+    from_api = _number_alias(
+        {"jurisdiction": "Cour d'appel", "location": "Cour d'appel de Nîmes"}, "1999/4512")
+    from_bulk = rg_alias("Cour d'appel de Nîmes", "1999/4512")
+    assert from_api == from_bulk == "fr:rg:cour-d-appel-de-nimes:1999/4512"

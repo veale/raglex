@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from ..core.text import fold
 from .grammars import Grammar, Normalised, _eu_celex, register
 from .models import Citation
 
@@ -31,6 +32,23 @@ def decision_alias(number: str) -> str:
 
 def pourvoi_alias(number: str) -> str:
     return f"fr:pourvoi:{normalise_fr_number(number)}"
+
+
+def rg_alias(court: str | None, number: str | None) -> str | None:
+    """A key for a *numéro de rôle général* — the docket of a court below the Cour de
+    cassation, which is unique only within the court that issued it.
+
+    "24/00002" is a live docket at Nîmes, at Amiens and at dozens of other courts on the
+    same day, so a bare key is not just noisy: the pipeline folds an ECLI-less record
+    whose declared alias names another source's document, and nothing below Cassation
+    carries an ECLI. Scoped by the issuing court it is safe — and it is the ONLY thing
+    that lets the two registers of the same material recognise each other, because
+    Judilibre's cours d'appel (626,374, keyed by an opaque id) and the DILA CAPP bulk
+    (73,046, keyed JURITEXT…) share no identifier at all otherwise."""
+    if not (court and number):
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", fold(str(court))).strip("-")
+    return f"fr:rg:{slug}:{normalise_fr_number(number)}" if slug else None
 
 
 def text_alias(number: str) -> str:

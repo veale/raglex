@@ -41,8 +41,7 @@ from ..core.models import (
     TypedRelation,
 )
 from ._piste import PisteClient, piste_api_root
-from ..citations.french import normalise_fr_number, pourvoi_alias
-from ..core.text import fold
+from ..citations.french import pourvoi_alias, rg_alias
 
 _APP = "cassation/judilibre/v1.0"
 
@@ -173,9 +172,7 @@ def _number_alias(decision: dict, number: str | None) -> str | None:
     juris = (decision.get("jurisdiction") or "").casefold()
     if "cassation" in juris or not juris:
         return pourvoi_alias(number)
-    court = re.sub(r"[^a-z0-9]+", "-",
-                   fold(decision.get("location") or juris)).strip("-")
-    return f"fr:rg:{court}:{normalise_fr_number(number)}" if court else None
+    return rg_alias(decision.get("location") or juris, number)
 
 
 def parse_decision(decision: dict) -> ParsedDecision:

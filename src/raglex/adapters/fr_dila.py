@@ -27,7 +27,8 @@ from xml.etree import ElementTree as ET
 from ..core.adapter import BaseAdapter
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..formats.dila_xml import dila_root_kind, parse_dila_article, parse_dila_juri
-from ..citations.french import code_article_alias, decision_alias, pourvoi_alias
+from ..citations.french import (code_article_alias, decision_alias,
+                                 pourvoi_alias, rg_alias)
 
 # fund → (DocType for its jurisprudence, default court label). LEGI is legislation and
 # handled separately (article-level).
@@ -180,6 +181,16 @@ class FrDilaAdapter(BaseAdapter):
             aliases.append(pourvoi_alias(j.number))
         elif j.number and self.fond in ("JADE", "CONSTIT", "CNIL"):
             aliases.append(decision_alias(j.number))
+        elif self.fond == "CAPP":
+            # A bare appeal docket collides between courts, which is why this fund had
+            # no alias at all — but scoped by the issuing court it is safe, and it is the
+            # only identifier this bulk shares with Judilibre's cours d'appel. Neither
+            # side carries an ECLI and the two key on different opaque ids (JURITEXT…
+            # here, a Judilibre hash there), so without this the live register would
+            # store a second copy of all 73,046 of these.
+            rg = rg_alias(j.jurisdiction or default_court, j.number)
+            if rg:
+                aliases.append(rg)
         title = j.title or ", ".join(x for x in (j.jurisdiction, j.number) if x) or ecli
         if self.fond == "CONSTIT" and j.title:
             number = f" n° {j.number}" if j.number else ""
