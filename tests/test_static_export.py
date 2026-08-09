@@ -71,6 +71,13 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
             Segment("Article 15 Right of access", article_15, len(law_text), kind="article"),
         ],
         extracted_via=ExtractedVia.STRUCTURED,
+        extra={
+            "currency": {
+                "as_at": "2026-06-19", "up_to_date": False,
+                "unapplied_count": 63,
+            },
+            "source_last_modified": "Wed, 22 Jul 2026 18:56:31 GMT",
+        },
     )
     _store(cat, textstore, law)
 
@@ -186,6 +193,10 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
     assert third_paragraph["marks"][0]["key"] == "exact:art15(3)"
     assert data["flags"]["United Kingdom"].startswith("data:image/svg+xml;base64,")
     assert data["groups"][0]["links"][0]["url"].startswith("https://www.bailii.org/")
+    assert data["law"]["currency"]["as_at"] == "2026-06-19"
+    assert data["law"]["currency"]["unapplied_count"] == 63
+    assert "Publisher text current to" in page
+    assert "63 publisher-recorded effects not yet applied" in page
 
 
 def test_static_export_names_the_previous_law_behind_inherited_mentions(tmp_path):

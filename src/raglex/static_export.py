@@ -1030,6 +1030,21 @@ class StaticLawExporter:
                 "cite": target_cite.get("text") or target["title"] or stable_id,
                 "source": self.facade.source_label(target["source"]),
                 "links": target_links,
+                # A static page must say which publisher edition it contains.  The
+                # bundle refresh checks legislation.gov.uk immediately before build;
+                # carry both that check date and the publisher's currency date into
+                # the self-contained page instead of leaving them only in the job log.
+                "currency": {
+                    "as_at": ((target_meta.get("currency") or {}).get("as_at")),
+                    "up_to_date": ((target_meta.get("currency") or {}).get(
+                        "up_to_date")),
+                    "unapplied_count": ((target_meta.get("currency") or {}).get(
+                        "unapplied_count")),
+                    "source_last_modified": target_meta.get("source_last_modified"),
+                    "checked_at": generated_at,
+                } if (
+                    target_meta.get("currency") or target_meta.get("source_last_modified")
+                ) else None,
                 "sections": sections,
                 "provision_mappings": provision_mappings,
                 "inherited_recitals": (
@@ -1501,7 +1516,36 @@ def _prerendered_law(data: dict) -> tuple[str, str]:
     law = data.get("law") or {}
     sections = law.get("sections") or []
     nav: list[str] = []
-    body: list[str] = []
+    source_bits = [
+        '<a href="{url}" target="_blank" rel="noopener noreferrer">{label} →</a>'.format(
+            url=html.escape(str(link.get("url") or ""), quote=True),
+            label=html.escape(str(link.get("label") or "source")),
+        )
+        for link in (law.get("links") or []) if link.get("url")
+    ]
+    currency = law.get("currency") or {}
+    currency_line = ""
+    if currency.get("as_at"):
+        as_at = html.escape(str(currency["as_at"]))
+        checked = html.escape(str(
+            currency.get("checked_at") or data.get("generated_at") or "")[:10])
+        effects = ""
+        unapplied = int(currency.get("unapplied_count") or 0)
+        if currency.get("up_to_date") is False and unapplied:
+            effects = (
+                f" · {unapplied:,} publisher-recorded "
+                f"{'effect' if unapplied == 1 else 'effects'} not yet applied to the text"
+            )
+        currency_line = (
+            f'<br><span class="muted">Publisher text current to '
+            f'<time datetime="{as_at}">{as_at}</time>; checked for updates '
+            f"{checked}{effects}.</span>"
+        )
+    source_note = (
+        '<p class="source-note">' + " · ".join(source_bits) + currency_line + "</p>"
+        if source_bits or currency_line else ""
+    )
+    body: list[str] = [source_note] if source_note else []
     for section in sections:
         sid = html.escape(str(section.get("id") or ""), quote=True)
         label = html.escape(str(section.get("label") or ""))
@@ -2098,6 +2142,12 @@ _SCRIPT = r"""
         `<a href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">${esc(link.label)} →</a>`).join(" · ")
     : `<span class="no-source">No public copy recorded</span>`;
   const inheritedRecitals = data.law.inherited_recitals;
+  const currency = data.law.currency || {};
+  const currencyNote = currency.as_at
+    ? `<br><span class="muted">Publisher text current to <time datetime="${esc(currency.as_at)}">${esc(currency.as_at)}</time>; checked for updates ${esc((currency.checked_at || data.generated_at).slice(0, 10))}${currency.up_to_date === false && Number(currency.unapplied_count || 0) > 0
+        ? ` · ${number(currency.unapplied_count)} publisher-recorded ${Number(currency.unapplied_count) === 1 ? "effect" : "effects"} not yet applied to the text`
+        : ""}.</span>`
+    : "";
   // The short form, with the official title on hover — a provenance note is a
   // footnote, not a place to reprint 40 words of instrument title.
   const recitalSourceName = inheritedRecitals?.source_label
@@ -2105,7 +2155,7 @@ _SCRIPT = r"""
   const recitalSource = inheritedRecitals?.source_url
     ? `<a href="${esc(inheritedRecitals.source_url)}" title="${esc(inheritedRecitals.source_title || "")}" target="_blank" rel="noopener noreferrer">${esc(recitalSourceName)} →</a>`
     : `<span title="${esc(inheritedRecitals?.source_title || "")}">${esc(recitalSourceName)}</span>`;
-  sourceNote.innerHTML = lawLinks + (inheritedRecitals
+  sourceNote.innerHTML = lawLinks + currencyNote + (inheritedRecitals
     ? `<br><span class="muted">${esc(inheritedRecitals.note)} Source: ${recitalSource}</span>`
     : "");
   $("law").appendChild(sourceNote);
