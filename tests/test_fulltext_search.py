@@ -219,6 +219,20 @@ def test_fts_keeps_structural_headings_without_falsifying_body_offsets(catalogue
     assert (body["char_start"], body["char_end"]) == (0, len(text))
 
 
+def test_heading_only_upgrade_preserves_an_existing_body_index(catalogue):
+    catalogue.put_doc_fts("upgrade-doc", "authoritative body text")
+    before = dict(catalogue.conn.execute(
+        "SELECT part,char_start,char_end,words FROM doc_fts WHERE doc_id=?",
+        ("upgrade-doc",)).fetchone())
+    catalogue.put_doc_headings("upgrade-doc", [("Article 7 Scope", 3)])
+    after = dict(catalogue.conn.execute(
+        "SELECT part,char_start,char_end,words FROM doc_fts WHERE doc_id=?",
+        ("upgrade-doc",)).fetchone())
+    assert after == before
+    assert "upgrade-doc" in catalogue.fts_body_indexed_ids()
+    assert "upgrade-doc" in catalogue.fts_indexed_ids()
+
+
 # -- the settings the Search page writes ---------------------------------------
 def test_the_search_settings_are_registered(tmp_path):
     """SettingsStore.update silently ignores keys it doesn't know, so an

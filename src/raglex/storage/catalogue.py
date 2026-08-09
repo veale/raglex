@@ -5356,7 +5356,6 @@ class Catalogue:
         parts = _fts_parts(text, self.FTS_PART_CHARS, word_cap=self.FTS_PART_WORDS)
         now = _now()
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
-        self.conn.execute("DELETE FROM doc_headings WHERE doc_id = ?", (doc_id,))
         for i, (start, end) in enumerate(parts):
             body = text[start:end]
             if self.backend == "postgres":
@@ -5369,7 +5368,18 @@ class Catalogue:
                     "INSERT INTO doc_fts (doc_id, part, char_start, char_end, words,"
                     " tsv, indexed_at) VALUES (?,?,?,?,?,?,?)",
                     (doc_id, i, start, end, len(body.split()), "", now))
-        for heading_no, (label, char_start) in enumerate(headings or []):
+        self.put_doc_headings(doc_id, headings or [], commit=False)
+        if commit:
+            self.conn.commit()
+        return len(parts)
+
+    def put_doc_headings(
+        self, doc_id: str, headings: list[tuple[str, int]], *, commit: bool = True,
+    ) -> int:
+        """Replace only a document's structural-label index, preserving body FTS."""
+        self.conn.execute("DELETE FROM doc_headings WHERE doc_id = ?", (doc_id,))
+        written = 0
+        for heading_no, (label, char_start) in enumerate(headings):
             label = str(label or "").strip()
             if not label:
                 continue
@@ -5383,9 +5393,10 @@ class Catalogue:
                     "INSERT INTO doc_headings (doc_id,heading_no,label,char_start,tsv) "
                     "VALUES (?,?,?,?,?)",
                     (doc_id, heading_no, label, int(char_start or 0), ""))
+            written += 1
         if commit:
             self.conn.commit()
-        return len(parts)
+        return written
 
     def drop_doc_fts(self, doc_id: str, *, commit: bool = True) -> None:
         self.conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
@@ -5398,11 +5409,19 @@ class Catalogue:
         # indexes built before structural labels existed are not considered complete and
         # the next resumable build fills them without a special migration command.
         sql = ("SELECT DISTINCT f.doc_id FROM doc_fts f "
-               "JOIN doc_headings h ON h.doc_id = f.doc_id "
-               "JOIN documents d ON d.stable_id = f.doc_id")
+               "JOIN doc_headings h ON h.doc_id = f.doc_id")
         params: list[object] = []
         if source:
-            sql += " WHERE d.source = ?"
+            sql += " JOIN documents d ON d.stable_id = f.doc_id WHERE d.source = ?"
+            params.append(source)
+        return {r["doc_id"] for r in self.conn.execute(sql, params)}
+
+    def fts_body_indexed_ids(self, source: str | None = None) -> set[str]:
+        """Documents whose body FTS already exists, irrespective of heading upgrade."""
+        sql = "SELECT DISTINCT f.doc_id FROM doc_fts f"
+        params: list[object] = []
+        if source:
+            sql += " JOIN documents d ON d.stable_id = f.doc_id WHERE d.source = ?"
             params.append(source)
         return {r["doc_id"] for r in self.conn.execute(sql, params)}
 

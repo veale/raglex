@@ -390,8 +390,8 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
           reindex: bool = False, on_progress=None, cancel_check=None) -> dict:
     """Index the gated scope. Resumable: a document already indexed is skipped unless
     ``reindex``, so an interrupted run continues rather than starting over."""
-    st = {"scanned": 0, "indexed": 0, "parts": 0, "skipped": 0, "unreadable": 0,
-          "chars": 0}
+    st = {"scanned": 0, "indexed": 0, "headings_only": 0, "parts": 0,
+          "skipped": 0, "unreadable": 0, "chars": 0}
     where = "WHERE has_text = 1 AND search_excluded = 0"
     params: list[object] = []
     if sources:
@@ -401,6 +401,7 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
         f"SELECT stable_id, payload_hash, title FROM {'documents'} {where} "
         "ORDER BY stable_id LIMIT ?", params + [limit]).fetchall()
     done = set() if reindex else cat.fts_indexed_ids()
+    body_done = set() if reindex else cat.fts_body_indexed_ids()
     total = len(rows)
     for n, r in enumerate(rows, 1):
         if cancel_check and cancel_check():
@@ -428,11 +429,18 @@ def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
             labels = [(str(r["title"] or sid), 0)]
             labels.extend((segment.label, segment.char_start) for segment in segments
                           if segment.label and segment.label != r["title"])
-            st["parts"] += cat.put_doc_fts(
-                sid, text,
-                headings=labels,
-                commit=False,
-            )
+            if sid in body_done:
+                # One-time structural-label upgrade: the authoritative body index is
+                # already valid. Rebuilding its tsvector merely to add headings turned
+                # a minutes-long migration into hours on the live EU corpus.
+                cat.put_doc_headings(sid, labels, commit=False)
+                st["headings_only"] += 1
+            else:
+                st["parts"] += cat.put_doc_fts(
+                    sid, text,
+                    headings=labels,
+                    commit=False,
+                )
         except Exception:  # noqa: BLE001 — one bad document must not end the run
             log.warning("[fts] %s failed to index", sid, exc_info=True)
             continue
