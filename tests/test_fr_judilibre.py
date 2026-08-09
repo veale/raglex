@@ -81,11 +81,16 @@ class _FakePiste:
         return _Resp(self._payloads.pop(0))
 
 
-def test_discover_pages_export_until_next_batch_null():
+def test_discover_pages_export_then_opens_the_next_window():
+    """Batches inside one query, then the NEXT query. `next_batch` going null means the
+    query's 10,000-result window is exhausted, not the register — Judilibre holds
+    566,124 — so the walk re-opens at the newest update date it saw and only stops when
+    a fresh window comes back empty."""
     page1 = {"results": [DECISION], "next_batch": "https://.../export?batch=1", "batch": 0}
     page2 = {"results": [dict(DECISION, ecli="ECLI:FR:CCASS:2021:C100401")],
              "next_batch": None, "batch": 1}
-    fake = _FakePiste([page1, page2])
+    page3 = {"results": [], "next_batch": None, "batch": 0}
+    fake = _FakePiste([page1, page2, page3])
     adapter = FrJudilibreAdapter(client=fake)
     stubs = list(adapter.discover("2021-05-01"))
     assert [s.stable_id for s in stubs] == [
@@ -94,12 +99,16 @@ def test_discover_pages_export_until_next_batch_null():
     assert fake.calls[0][1]["date_type"] == "update"
     assert fake.calls[0][1]["date_start"] == "2021-05-01"
     assert fake.calls[0][1]["resolve_references"] == "true"
+    # …and the second query starts from the newest update date the first one returned
+    assert fake.calls[1][1]["batch"] == 1
+    assert fake.calls[2][1] == {**fake.calls[2][1], "batch": 0,
+                                "date_start": DECISION["update_date"]}
     # the exported decision is stashed so fetch needn't re-request
     rec = adapter.fetch(stubs[0])
     assert rec.ecli == "ECLI:FR:CCASS:2021:C100400"
     assert rec.text == TEXT and rec.segments
     # fetch used the stash — no extra /decision call was made
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3
 
 
 def test_discover_no_credentials_yields_nothing():
