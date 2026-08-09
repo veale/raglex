@@ -14,7 +14,7 @@ mentions carrying a provision, and it never travels to the store.
 
 from __future__ import annotations
 
-from raglex.citations.extractor import extract_citations
+from raglex.citations.extractor import declared_instrument_host, extract_citations
 
 CODE = (
     "This code of practice relates to the powers in Part 2 (interception) of the "
@@ -112,3 +112,49 @@ def test_trailing_form_does_not_swallow_the_next_reference():
                      "named_alias")
     assert ("ukpga/2000/23", "s. 8(4)") in got
     assert ("ukpga/2000/23", "s. 15") in got
+
+
+# --- the unquoted house style -------------------------------------------------
+# `_SHORTHAND_DEF` requires quotes inside a round bracket, because a bare round-
+# bracket name is far too loose to learn as a corpus-wide shorthand. That is right
+# for shorthands and wrong for hosts: UK regulator drafting overwhelmingly writes
+# "(the Act)" with no quotes at all, so the binding was invisible and the
+# document's own provisions carried forward onto whatever statute a passing
+# sentence last named.
+
+UNQUOTED = (
+    "This code is issued under the Equality Act 2010 (the Act). "
+    "Section 13 of the Act defines direct discrimination, and section 19 of the "
+    "Act defines indirect discrimination. See also Schedule 9 to the Act."
+)
+
+
+def test_an_unquoted_bracket_binds_the_host_too():
+    got = _by_method(extract_citations(UNQUOTED), "doc_host")
+    assert got == {
+        ("ukpga/2010/15", "s. 13"),
+        ("ukpga/2010/15", "s. 19"),
+        ("ukpga/2010/15", "Sch. 9"),
+    }
+
+
+def test_an_unquoted_bracket_still_never_reaches_the_store():
+    defs: list[dict] = []
+    extract_citations(UNQUOTED, defs_out=defs)
+    assert not [d for d in defs if d["shorthand"].lower().endswith("act")]
+
+
+def test_only_an_instrument_noun_may_be_bound_unquoted():
+    # "(the Commission)" is a body, not an instrument: binding it would let any
+    # bracketed noun in the corpus claim the statute it happens to follow.
+    text = ("A duty arises under the Equality Act 2010 (the Commission). "
+            "Section 13 of the Commission is not a citation.")
+    assert not _by_method(extract_citations(text), "doc_host")
+
+
+def test_declared_instrument_host_reports_what_a_document_binds():
+    assert declared_instrument_host(UNQUOTED) == ("ukpga/2010/15", "act")
+    assert declared_instrument_host(CODE) == ("ukpga/2016/25", "act")
+    # A document that binds nothing must not be given a host it never claimed.
+    assert declared_instrument_host(
+        "The Commission published a report on equality in Wales.") is None

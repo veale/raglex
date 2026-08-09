@@ -36,8 +36,21 @@ inlined, so a code of practice is searchable as the document and not as its land
 The site is a whole organisation's site — careers pages and staff biographies sit in the
 sitemap beside the codes of practice — so it opts into RagLex's relevance gate: all of it
 is held and deduped, and only what cites a case or an instrument is embedded and searched.
-Bare provision references ("section 149") are resolved against the Equality Act 2010,
-which in this Commission's material is what they always mean.
+
+**"The Act" is read from the document, not assumed from the publisher.** A code of
+practice binds its own host once — "The Equality Act 2010 (the Act) consolidates…" — and
+then prints bare marginal citations (``s.9(1)``, ``s.13(4)``) beside each paragraph.
+Without a declared host those carry forward onto whatever statute a passing sentence last
+named: in the employment code, 503 of 530 landed on the Employment Rights Act 1996 or the
+Civil Partnership Act 2004. Declaring the host fixes 522 of them.
+
+It is tempting to go one better and pin the Equality Act 2010 across the whole site.
+That is measurably wrong. On ``/human-rights/`` material the bare provisions belong to the
+Human Rights Act 1998 and the Commission's own Equality Act 2006, and pinning the 2010 Act
+moves them off both — a briefing on the Convention against Torture acquired eleven false
+Equality Act edges. So the host is taken from
+:func:`~raglex.citations.declared_instrument_host`, which reads what each document itself
+declares, and pages that declare nothing get nothing.
 """
 
 from __future__ import annotations
@@ -50,13 +63,15 @@ from datetime import date
 from typing import Iterator
 from urllib.parse import urljoin, urlsplit
 
+from ..citations import declared_instrument_host
 from ..core.adapter import BaseAdapter, option_flag, option_int
 from ..core.errors import FetchError, RateLimitException
 from ..core.models import DocType, ExtractedVia, Record, Stub
 
 BASE = "https://www.equalityhumanrights.com"
 SITEMAP = BASE + "/sitemap.xml"
-#: The Equality Act 2010 — what a bare provision reference in EHRC material means.
+#: The Commission's usual subject. Recorded as a tag, never assumed as a document's
+#: citation host — see the module docstring.
 EQUALITY_ACT_ID = "ukpga/2010/15"
 
 #: Cloudflare answers a real browser handshake; ``/sitemap.xml`` and every content page
@@ -414,6 +429,9 @@ class EHRCAdapter(BaseAdapter):
 
         section = stub.hints.get("section")
         node = _NODE_ID.search(html)
+        # What THIS document says "the Act" means — see the module docstring for why
+        # the Commission's own subject matter is not a safe substitute for it.
+        host = declared_instrument_host(text)
         # The page states its own "Last updated"; the sitemap's ``lastmod`` is the
         # publishing system's stamp and stands in when the page prints no date.
         last_updated = updated.isoformat() if updated else stub.hints.get("lastmod")
@@ -448,7 +466,8 @@ class EHRCAdapter(BaseAdapter):
                 "found_on": urljoin(BASE, found_on.group(1)) if found_on else None,
                 "attachments": attachments,
                 "licence": "© Equality and Human Rights Commission",
-                "citation_default_instrument": {"id": EQUALITY_ACT_ID, "kind": "act"},
+                "citation_default_instrument": ({"id": host[0], "kind": host[1]}
+                                                if host else None),
                 "require_recognized_legal_citation":
                     self.require_recognized_legal_citation,
             }.items() if v not in (None, [], "")},

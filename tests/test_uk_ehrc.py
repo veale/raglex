@@ -158,7 +158,7 @@ def test_unknown_section_is_refused():
         EHRCAdapter(section="not-a-section")
 
 
-def test_fetch_inlines_readable_downloads_and_defaults_bare_provisions_to_the_act():
+def test_fetch_inlines_readable_downloads_and_records_the_page_metadata():
     http = _FakeHTTP()
     adapter = EHRCAdapter(http=http)
     stub = list(adapter.discover(None))[1]
@@ -170,8 +170,6 @@ def test_fetch_inlines_readable_downloads_and_defaults_bare_provisions_to_the_ac
     assert record.extra["updated"] == "2021-03-04"
     assert record.extra["node_id"] == "12627"
     assert record.extra["countries"] == ["england", "scotland"]
-    assert record.extra["citation_default_instrument"] == {"id": EQUALITY_ACT_ID,
-                                                           "kind": "act"}
     # the pair of pages carrying the same report in different formats stays linked
     assert record.extra["alternative_formats"].endswith("/effect-coronavirus")
     assert record.extra["found_on"].endswith("/our-work/our-research/coronavirus")
@@ -180,6 +178,36 @@ def test_fetch_inlines_readable_downloads_and_defaults_bare_provisions_to_the_ac
     assert set(by_format) == {"pdf", "docx", "xlsx"}
     assert "Share with Linkedin" not in record.text
     assert "england" in record.topic_tags
+
+
+def test_a_page_that_declares_no_host_pins_no_instrument():
+    """Pinning the Equality Act across the whole site is measurably wrong: on the
+    Commission's human-rights material the bare provisions belong to the Human Rights
+    Act 1998 and the Equality Act 2006, and a blanket default moves them off both."""
+    record = EHRCAdapter(http=_FakeHTTP()).fetch(
+        list(EHRCAdapter(http=_FakeHTTP()).discover(None))[1])
+    assert "citation_default_instrument" not in record.extra
+
+
+def test_a_code_of_practice_pins_the_act_it_declares():
+    declaring = PAGE.replace(
+        "<p>This report summarises evidence about the pandemic.</p>",
+        "<p>This code of practice is guidance. The Equality Act 2010 (the Act) "
+        "consolidates discrimination law. Section 9(1) of the Act defines race.</p>")
+
+    class _Declaring(_FakeHTTP):
+        def get(self, url, **kwargs):
+            self.urls.append(url)
+            if url.endswith("sitemap.xml"):
+                return SITEMAP.encode()
+            if url.endswith((".pdf", ".docx", ".xlsx")):
+                return b""
+            return declaring.encode()
+
+    adapter = EHRCAdapter(include_documents=False, http=_Declaring())
+    record = adapter.fetch(list(adapter.discover(None))[1])
+    assert record.extra["citation_default_instrument"] == {"id": EQUALITY_ACT_ID,
+                                                           "kind": "act"}
 
 
 def test_http_retries_a_reset_connection_rather_than_losing_the_document():

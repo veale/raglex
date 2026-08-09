@@ -5,6 +5,7 @@ from .courts import KNOWN_COURTS, Court, lookup
 from .extractor import (
     CitationExtractor,
     all_grammar_citations,
+    declared_instrument_host,
     extract_citations,
     grammar_citations,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "extract_citations",
     "grammar_citations",
     "all_grammar_citations",
+    "declared_instrument_host",
     "CitationExtractor",
     "LLMCitationExtractor",
     "KNOWN_COURTS",

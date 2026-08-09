@@ -293,6 +293,20 @@ def _is_host_noun(name: str) -> bool:
     m = _HOST_NAME_RE.match((name or "").strip())
     return bool(m) and m.group(1).casefold() in _HOST_NOUNS
 
+
+# UNQUOTED house style: "the Equality Act 2010 (the Act) consolidates…".
+# ``_SHORTHAND_DEF`` requires quotes inside a round bracket — deliberately, because a
+# bare round-bracket name is far too loose to learn as a corpus-wide shorthand — and
+# accepts a bare name only in square brackets. So the commonest binding form in UK
+# regulator drafting defined nothing at all: the EHRC's employment code writes
+# "(the Act)" and its 312 later "section N of the Act" references carried forward onto
+# whatever statute a passing sentence last named (233 landed on the Employment Rights
+# Act 1996, 147 on the Civil Partnership Act 2004). This pattern is matched ONLY
+# against the instrument-noun vocabulary and only feeds ``hosts_out``, so the
+# looseness stays out: the binding is document-scoped and never reaches the store.
+_BARE_HOST_DEF = re.compile(
+    r"\s*[\[(]\s*(?P<name>(?:the\s+)?(?:(?:18|19|20)\d{2}\s+)?[A-Za-z]+)\s*[\])]")
+
 # --- what may become a shorthand ---------------------------------------------
 # A shorthand links every later bare mention of a name to one authority, and the
 # corpus-wide store then carries that name into OTHER documents. So a name that is
@@ -629,6 +643,14 @@ def _collect_shorthand_defs(
             nm = _STATUTE_NAME_BEFORE.search(text[max(0, c.char_start - 140):c.char_start])
             if nm:
                 _register(nm.group("name"), c, abbrev=True)
+            # "(the Act)" with no quotes — see _BARE_HOST_DEF. Registered straight into
+            # the document-scoped hosts rather than through _register, because it is
+            # only ever an instrument noun and must never be offered to the store.
+            hm = _BARE_HOST_DEF.match(text[c.char_end: c.char_end + 40])
+            if hm and hosts_out is not None:
+                name = hm.group("name").strip()
+                if _is_host_noun(name) and name not in hosts_out:
+                    hosts_out[name] = (c, True)
         if not is_case:
             continue
         # CJEU "judgment in <Name>" label, immediately either side of the citation
@@ -830,6 +852,47 @@ def shorthand_defs(text: str, cites: list[Citation]) -> list[dict]:
     on a 700k-document rescan that duplicate harvest measured ~4% of the whole job.
     This standalone form is for callers holding citations from somewhere else."""
     return _def_rows(_collect_shorthand_defs(text, cites))
+
+
+#: Which generic noun to believe when a document binds several. "the Act" is the one
+#: that governs bare provision references; "the Code" usually names the guidance
+#: document itself, not the statute it is about.
+_HOST_NOUN_PRIORITY = ("act", "regulations", "regulation", "order", "rules",
+                       "directive", "convention", "treaty", "charter")
+
+
+def declared_instrument_host(text: str) -> tuple[str, str] | None:
+    """The instrument a document binds its OWN generic noun to, or ``None``.
+
+    "The Equality Act 2010 (the Act) consolidates…" → ``("ukpga/2010/15", "act")``.
+    A statutory code names its parent Act once and then says "the Act" for the rest of
+    the document; an adapter can use this to declare that Act as the document's
+    ``citation_default_instrument``, so a bare "s.9(1)" in a margin note returns to the
+    Act the document is ABOUT instead of carrying forward onto whatever statute a
+    passing sentence last named.
+
+    This reads what the document itself says rather than what its publisher usually
+    means, which is the difference between a fix and a new class of error: pinning the
+    Equality Act 2010 across every EHRC page moves its human-rights material's bare
+    provisions off the Human Rights Act 1998 and onto the wrong statute, whereas the
+    codes of practice — which do declare a host — are corrected.
+    """
+    if not text:
+        return None
+    hosts: dict[str, tuple[Citation, bool]] = {}
+    _collect_shorthand_defs(text, grammar_citations(text), hosts)
+    if not hosts:
+        return None
+    resolved = {}
+    for name, (host, _abbrev) in hosts.items():
+        m = _HOST_NAME_RE.match(name.strip())
+        if m and host.candidate_id:
+            resolved.setdefault(m.group(1).casefold(),
+                                (host.candidate_id, host.entity_kind or "act"))
+    for noun in _HOST_NOUN_PRIORITY:
+        if noun in resolved:
+            return resolved[noun]
+    return None
 
 
 # Initialisms too common across the corpus to trust on a bare mention even when their

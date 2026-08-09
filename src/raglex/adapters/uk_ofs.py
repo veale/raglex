@@ -28,6 +28,17 @@ not read: they have no text engine, and byte-decoding one produces noise, not da
 
 The ``Ref:`` line ("OfS 2026.38") is the OfS's own citation for a publication and is
 kept as an alias, so a reference to it resolves.
+
+**HERA is the host, and the documents say so.** OfS drafting abbreviates its parent Act
+in full — "the Higher Education and Research Act 2017 (HERA)", 84 times in one
+consultation — and then prints bare provision references. Left to carry forward those
+drift badly: in the *Guide to funding*, 108 of 177 landed on the Equality Act 2010, which
+the guide mentions once in passing. Declaring the host puts all 180 on HERA. A document
+that binds a *different* Act to its own generic noun is honoured over the default (see
+:func:`~raglex.citations.declared_instrument_host`); the freedom-of-speech consultation is
+the case that proves the default right rather than wrong, since it states in terms that
+"references to 'the Act' hereafter mean the Higher Education and Research Act 2017 (HERA),
+as amended" by the Higher Education (Freedom of Speech) Act 2023.
 """
 
 from __future__ import annotations
@@ -39,6 +50,7 @@ from datetime import date, datetime
 from typing import Iterator
 from urllib.parse import urljoin, urlsplit
 
+from ..citations import declared_instrument_host
 from ..core.adapter import BaseAdapter, option_flag, option_int
 from ..core.errors import RateLimitException
 from ..core.http import RateLimitedClient
@@ -421,6 +433,10 @@ class OfSPublicationsAdapter(BaseAdapter):
         aliases = list(dict.fromkeys(
             re.sub(r"\s+", " ", ref).upper()
             for ref in _REF.findall(f"{meta.get('ref', '')} {title or ''}")))
+        # What this document binds its own generic noun to, if it binds one; HERA
+        # otherwise, which is the Act every OfS publication is issued under and the
+        # one its bare provision references mean (see the module docstring).
+        host = declared_instrument_host(text) or (HERA_ID, "act")
         # Everything the OfS publishes is issued under its HERA 2017 powers, so the
         # statute is a structured edge on every record; anything more specific the
         # §5b extractor mines out of the text itself.
@@ -462,7 +478,7 @@ class OfSPublicationsAdapter(BaseAdapter):
                 "chapters": chapters,
                 "attachments": attachments,
                 "licence": "Crown copyright",
-                "citation_default_instrument": {"id": HERA_ID, "kind": "act"},
+                "citation_default_instrument": {"id": host[0], "kind": host[1]},
                 "require_recognized_legal_citation":
                     self.require_recognized_legal_citation,
             }.items() if v not in (None, [], "")},
