@@ -253,6 +253,25 @@ def explanatory_notes_metadata(raw: bytes) -> dict:
     }
 
 
+def advertised_notes_types(raw: bytes) -> list[str]:
+    """Companion note kinds advertised by the generic ``/notes/data.xml``.
+
+    Secondary legislation exposes one generic EN metadata shell whose Atom links name
+    the real ``/memorandum``, ``/executive-note`` or ``/policy-note`` document.  Reading
+    that shell once is both more complete and much kinder to the publisher than probing
+    every possible suffix for every instrument in a corpus backfill.
+    """
+    root = ET.fromstring(raw)
+    found: list[str] = []
+    for node in root.iter():
+        for value in node.attrib.values():
+            path = urlsplit(value).path.rstrip("/")
+            kind = path.rsplit("/", 1)[-1]
+            if kind in _NOTES_TYPES[1:] and kind not in found:
+                found.append(kind)
+    return found
+
+
 def _notes_links(contents: bytes, base_url: str) -> list[str]:
     soup = BeautifulSoup(contents, "html.parser")
     toc = soup.select_one(".table-of-contents, .ENContents, #viewLegContents")
@@ -340,33 +359,38 @@ class UKLegislationMaterialsAdapter(BaseAdapter):
                     continue
                 parent = requested.split("@", 1)[0]
                 if self.notes:
-                    # ``notes`` is always attempted: modern primary legislation has
-                    # HTML pages but deliberately 404s its XML representation. The
-                    # other three types are yielded only when their metadata advertises
-                    # a substantive PDF, avoiding three phantom records per Act.
-                    yield Stub(stable_id=f"{parent}/notes",
-                               landing_url=f"{BASE_URL}/{parent}/notes",
-                               raw_url=f"{BASE_URL}/{parent}/notes/data.xml",
-                               hints={"kind": "notes", "notes_type": "notes",
-                                      "parent_id": parent})
-                    for notes_type in _NOTES_TYPES[1:]:
-                        url = f"{BASE_URL}/{parent}/{notes_type}/data.xml"
-                        response = self._client.get(url, raise_for_4xx=False)
-                        if response.status_code >= 400:
-                            continue
+                    # One generic metadata request advertises the real companion kind
+                    # for secondary legislation. Modern primary Acts deliberately 404
+                    # here and serve HTML divisions, while older Acts return their
+                    # substantive EN XML. This replaces four speculative requests per
+                    # instrument with one authoritative discovery request.
+                    notes_url = f"{BASE_URL}/{parent}/notes/data.xml"
+                    response = self._client.get(notes_url, raise_for_4xx=False)
+                    advertised: list[str] = []
+                    if response.status_code < 400 and response.content.lstrip().startswith(b"<"):
                         try:
-                            metadata = explanatory_notes_metadata(response.content)
+                            advertised = advertised_notes_types(response.content)
                         except ET.ParseError:
-                            continue
-                        if not metadata.get("pdf_url"):
-                            continue
+                            advertised = []
+                    if advertised:
+                        for notes_type in advertised:
+                            url = f"{BASE_URL}/{parent}/{notes_type}/data.xml"
+                            yield Stub(
+                                stable_id=f"{parent}/{notes_type}",
+                                landing_url=f"{BASE_URL}/{parent}/{notes_type}",
+                                raw_url=url,
+                                hints={"kind": "notes", "notes_type": notes_type,
+                                       "parent_id": parent},
+                            )
+                    else:
                         yield Stub(
-                            stable_id=f"{parent}/{notes_type}",
-                            landing_url=f"{BASE_URL}/{parent}/{notes_type}",
-                            raw_url=url,
-                            title=metadata.get("material_title"),
-                            hints={"kind": "notes", "notes_type": notes_type,
-                                   "parent_id": parent, "metadata_raw": response.content},
+                            stable_id=f"{parent}/notes",
+                            landing_url=f"{BASE_URL}/{parent}/notes",
+                            raw_url=notes_url,
+                            hints={"kind": "notes", "notes_type": "notes",
+                                   "parent_id": parent,
+                                   **({"metadata_raw": response.content}
+                                      if response.status_code < 400 else {"xml_missing": True})},
                         )
                 if self.impacts:
                     response = self._client.get(
@@ -402,10 +426,11 @@ class UKLegislationMaterialsAdapter(BaseAdapter):
         parent = stub.hints.get("parent_id") or stub.stable_id.removesuffix("/notes")
         notes_type = stub.hints.get("notes_type") or stub.stable_id.rsplit("/", 1)[-1]
         xml_raw = stub.hints.get("metadata_raw")
-        xml = (None if xml_raw is not None
+        xml_missing = bool(stub.hints.get("xml_missing"))
+        xml = (None if xml_raw is not None or xml_missing
                else self._client.get(stub.raw_url, raise_for_4xx=False))
-        xml_status = 200 if xml_raw is not None else xml.status_code
-        xml_content = xml_raw if xml_raw is not None else xml.content
+        xml_status = 200 if xml_raw is not None else (404 if xml_missing else xml.status_code)
+        xml_content = xml_raw if xml_raw is not None else (b"" if xml_missing else xml.content)
         is_en_xml = False
         if xml_status < 400 and xml_content.lstrip().startswith(b"<"):
             try:

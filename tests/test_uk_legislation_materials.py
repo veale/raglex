@@ -8,6 +8,7 @@ from raglex.adapters.uk_legislation_materials import (
     combine_notes_html,
     impact_stubs_for_legislation,
     parse_explanatory_notes_xml,
+    advertised_notes_types,
     parse_impact_feed,
     parse_impact_metadata,
     _parent_id,
@@ -88,6 +89,28 @@ def test_impact_feed_and_per_act_metadata_link_both_directions():
     assert str(meta["date"]) == "2016-07-07"
     linked = impact_stubs_for_legislation(IMPACT_XML, "ukpga/2016/25")
     assert {s.stable_id for s in linked} == {"ukia/2016/251", "ukia/2017/125"}
+
+
+def test_generic_notes_shell_advertises_real_companion_without_suffix_probes():
+    shell = b'''<EN xmlns="http://www.legislation.gov.uk/namespaces/legislation"
+      xmlns:atom="http://www.w3.org/2005/Atom">
+      <atom:link href="http://www.legislation.gov.uk/id/uksi/2018/506/memorandum"/>
+      <atom:link href="http://www.legislation.gov.uk/uksi/2018/506/memorandum/contents"/>
+    </EN>'''
+    assert advertised_notes_types(shell) == ["memorandum"]
+
+    class ShellClient:
+        calls: list[str] = []
+        def get(self, url, **_kwargs):
+            self.calls.append(url)
+            return Response(shell, url=url)
+
+    client = ShellClient()
+    stubs = list(UKLegislationMaterialsAdapter(
+        ids="uksi/2018/506", impacts=False, client=client).discover(None))
+    assert [stub.stable_id for stub in stubs] == ["uksi/2018/506/memorandum"]
+    assert client.calls == [
+        "https://www.legislation.gov.uk/uksi/2018/506/notes/data.xml"]
 
 
 def test_parent_identity_supports_both_calendar_year_and_old_regnal_routes():
