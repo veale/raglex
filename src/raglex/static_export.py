@@ -34,7 +34,10 @@ _SOURCE_META_KEYS = ("url", "bailii_url", "gdprhub_url")
 # unchanged, but every v6 payload for a consolidation was built from a truncated set and
 # under-counts its citers, so they must not be re-rendered — hence a version bump rather
 # than a comment.
-_CACHE_VERSION = 7
+# v8 carries the document's language. Same reasoning: a v7 payload has no language to
+# read, so re-rendering one keeps declaring lang="en" over French and German text for
+# ever. The bump is what makes the fix reach editions already cached.
+_CACHE_VERSION = 8
 
 _DEFAULT_ATTRIBUTION = (
     'Document generated from a dataset held and maintained by '
