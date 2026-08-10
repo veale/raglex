@@ -115,7 +115,11 @@ def _eu_celex(kind: str, a: str, b: str) -> str | None:
         if not re.fullmatch(r"\d\d", yy):
             return None
         year = ("19" if int(yy) >= 31 else "20") + f"{int(yy):02d}"
-    if not re.fullmatch(r"(19|20)\d{2}", year):
+    # The same bound the four-digit path uses, applied to whatever this arrived at. The
+    # two-digit rule reads "29" as 2029 and "28" as 2028, which have not happened —
+    # "decision 29/10" and "directive 29/92/EEC" are numbered some other way, and a
+    # CELEX invented for them names nothing.
+    if not _plausible_eu_year(year):
         return None
     return f"3{year}{desc}{int(num):04d}"
 
