@@ -4246,8 +4246,19 @@ class Catalogue:
                 latest[base] = sid
         if not latest:
             return 0
-        held = self.find_existing(list(latest))
-        wanted = {base: sid for base, sid in latest.items() if not held.get(base)}
+        # Held as an actual DOCUMENT — deliberately not ``find_existing``, which follows
+        # aliases and would therefore report every base this method has already aliased
+        # as held, dropping it from the set on the second pass and leaving the re-point
+        # below to run exactly once in the corpus's life.
+        held: set[str] = set()
+        keys = list(latest)
+        for i in range(0, len(keys), 800):
+            chunk = keys[i: i + 800]
+            qs = ",".join(["?"] * len(chunk))
+            held.update(str(row["stable_id"]) for row in self.conn.execute(
+                f"SELECT stable_id FROM documents WHERE stable_id IN ({qs})",
+                tuple(chunk)).fetchall())
+        wanted = {base: sid for base, sid in latest.items() if base not in held}
         if not wanted:
             return 0
         existing: dict[str, tuple[str, str | None]] = {}
@@ -4265,21 +4276,29 @@ class Catalogue:
             was = existing.get(base)
             # Never overwrite a mapping somebody else owns — only our own, and only when
             # a newer consolidation has actually superseded it.
-            if was and (was[1] != self.VERSION_ALIAS_SOURCE or was[0] == sid):
+            owned = not was or was[1] == self.VERSION_ALIAS_SOURCE
+            if owned and (not was or was[0] != sid):
+                self.put_alias(base, sid, source=self.VERSION_ALIAS_SOURCE, commit=False)
+                minted += 1
+            if not owned:
                 continue
-            self.put_alias(base, sid, source=self.VERSION_ALIAS_SOURCE, commit=False)
             # Edges already RESOLVED against this base follow it. The base id means "the
             # Act", so it means whichever consolidation is current — and an edge that
             # resolved before this alias existed went wherever the raw title took it,
             # which for Ireland's Data Protection Act 2018 was the UK Act of that name.
             # Only the base id moves: a citation that named a dated expression asked for
             # that expression and keeps it.
+            #
+            # Run for EVERY mapping, not only the ones just written. A stale edge is
+            # stale whether or not the alias moved this time — the 82 that pointed at
+            # ukpga/2018/12 were written before the alias existed and would never be
+            # revisited by a rule that only fires on change. It is one indexed probe per
+            # version family (``relations_candidate_idx``), a few hundred in all.
             self.conn.execute(
                 "UPDATE relations SET dst_id = ?, resolution_status = 'resolved' "
                 "WHERE candidate_id = ? AND dst_id IS DISTINCT FROM ?",
                 (sid, base, sid),
             )
-            minted += 1
         if commit:
             self.conn.commit()
         return minted

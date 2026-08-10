@@ -423,3 +423,11 @@ def test_a_new_consolidation_takes_the_edges_that_named_the_base_act_with_it():
 
         edge = cat.relations_for("iehc/2024/9")[0]
         assert edge["dst_id"] == "ie/2018/act/7@2026-06-25"
+
+        # …and again on a later pass, when the alias is already there and unchanged: a
+        # stale edge is stale whether or not the consolidation moved this time.
+        cat.conn.execute("UPDATE relations SET dst_id = ? WHERE src_id = ?",
+                         ("ukpga/2018/12", "iehc/2024/9"))
+        cat.commit()
+        assert cat.refresh_version_aliases() == 0        # nothing new to mint
+        assert cat.relations_for("iehc/2024/9")[0]["dst_id"] == "ie/2018/act/7@2026-06-25"
