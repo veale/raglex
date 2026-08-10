@@ -273,3 +273,26 @@ def test_fetch_can_be_told_not_to_download_anything():
     record = adapter.fetch(next(iter(adapter.discover(None, max_pages=1))))
     assert "attachments" not in record.extra
     assert not any(u.endswith(".pdf") for u in client.urls)
+
+
+def test_a_reported_resume_offset_is_accepted_back():
+    """An adapter that reports ``resume_offset`` must accept it as ``start_offset``:
+    ``get_adapter`` passes the resumed job's options straight to the constructor, so
+    one that lacks the parameter does not restart from the top — it raises TypeError
+    and the resume fails. A 24,059-item walk WILL be interrupted."""
+    class _AnyPage(_FakeClient):
+        """Serves a full page whatever index is asked for, so the assertion is about
+        WHICH page the resumed walk requests."""
+
+        def get(self, url, headers=None):
+            self.urls.append(url)
+            return _Resp(json.dumps(
+                _full_page("p", "2026-07-29T12:00:00Z", 24059)).encode())
+
+    client = _AnyPage([])
+    adapter = OfgemPublicationsAdapter(client=client, start_offset=17780)
+    stubs = list(adapter.discover(None, max_pages=1))
+    assert len(stubs) == 10
+    # the resumed walk asks for the page the checkpoint stopped on, not page one
+    assert "page=1778" in client.urls[0]
+    assert stubs[0].hints["resume_offset"] == 17780

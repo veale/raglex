@@ -300,6 +300,7 @@ class OfgemPublicationsAdapter(BaseAdapter):
         include_documents: bool = True,
         max_documents: int = 20,
         require_recognized_legal_citation: bool = True,
+        start_offset: int = 0,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.listing_id = str(listing_id or PUBLICATIONS_LISTING).strip()
@@ -314,6 +315,13 @@ class OfgemPublicationsAdapter(BaseAdapter):
         self.max_documents = max(0, option_int(max_documents, 20))
         self.require_recognized_legal_citation = option_flag(
             require_recognized_legal_citation, True)
+        # An adapter that REPORTS ``resume_offset`` must also accept it back. An
+        # interrupted harvest is resumed with ``options["start_offset"]`` set from the
+        # checkpoint, and ``get_adapter`` passes options straight to the constructor —
+        # so an adapter without this parameter does not merely restart from the top, it
+        # raises TypeError and the resume fails outright. 24,059 publications is exactly
+        # the length of walk that will be interrupted at least once.
+        self.start_offset = max(0, option_int(start_offset, 0))
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=120)
 
@@ -341,12 +349,16 @@ class OfgemPublicationsAdapter(BaseAdapter):
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         cutoff = (since or "").strip() or None
-        page = 0
+        # Resume where the interrupted run left off, not at the top of the register.
+        first_page = self.start_offset // PAGE_SIZE
+        page = first_page
+        walked = 0
         stale_pages = 0
         total: int | None = None
         while True:
             page += 1
-            if max_pages is not None and page > max_pages:
+            walked += 1
+            if max_pages is not None and walked > max_pages:
                 return
             payload = self._client.get(self._listing_url(page),
                                        headers=_HEADERS).json()

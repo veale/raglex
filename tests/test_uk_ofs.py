@@ -218,3 +218,12 @@ def test_fetch_can_skip_chapters_and_downloads():
     record = adapter.fetch(next(iter(adapter.discover(None, max_pages=1))))
     assert "chapters" not in record.extra and "attachments" not in record.extra
     assert not any(u.endswith((".pdf", ".docx")) for u in client.urls)
+
+
+def test_a_reported_resume_offset_is_accepted_back():
+    """See the matching Ofgem test: options from a resumed job reach the constructor,
+    so reporting a cursor without accepting it back breaks the resume outright."""
+    client = _FakeClient()
+    adapter = OfSPublicationsAdapter(client=client, start_offset=30)
+    list(adapter.discover(None, max_pages=1))
+    assert client.urls[0].endswith("?pg=4")

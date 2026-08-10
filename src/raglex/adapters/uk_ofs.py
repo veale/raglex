@@ -281,6 +281,7 @@ class OfSPublicationsAdapter(BaseAdapter):
         include_child_pages: bool = True,
         max_documents: int = 20,
         require_recognized_legal_citation: bool = False,
+        start_offset: int = 0,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.include_documents = option_flag(include_documents, True)
@@ -288,6 +289,10 @@ class OfSPublicationsAdapter(BaseAdapter):
         self.max_documents = max(0, option_int(max_documents, 20))
         self.require_recognized_legal_citation = option_flag(
             require_recognized_legal_citation, False)
+        # Reported ``resume_offset`` comes back as ``start_offset`` on a resumed run,
+        # straight into this constructor — an adapter that does not accept it makes the
+        # resume raise TypeError. See the note in uk_ofgem.
+        self.start_offset = max(0, option_int(start_offset, 0))
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=120)
 
@@ -298,12 +303,15 @@ class OfSPublicationsAdapter(BaseAdapter):
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         cutoff = _as_date(since)
-        page = 0
+        # Resume where an interrupted run stopped rather than re-walking the listing.
+        page = self.start_offset // PAGE_SIZE
+        walked = 0
         total: int | None = None
         pages: int | None = None
         while True:
             page += 1
-            if max_pages is not None and page > max_pages:
+            walked += 1
+            if max_pages is not None and walked > max_pages:
                 return
             if pages is not None and page > pages:
                 return
@@ -312,7 +320,7 @@ class OfSPublicationsAdapter(BaseAdapter):
             rows = parse_listing(html)
             if not rows:
                 return
-            if page == 1:
+            if total is None:               # stated on every page, not just the first
                 total, pages = listing_total(html), last_page(html)
             for row in rows:
                 # The listing is ordered by updated date, so the first row at or before
