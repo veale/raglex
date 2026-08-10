@@ -1113,6 +1113,22 @@ _REVISED_TITLE_SUFFIX = re.compile(
     r"\s*(?:\(repealed\)\s*)?\(revised\s+to\s+\d{4}-\d{2}-\d{2}\)\s*$",
     re.IGNORECASE,
 )
+#: The series number the eISB prints IN FRONT of an older instrument's title, and the
+#: full stop it ends every one with. Neither is part of the citable name: an Irish
+#: judgment writes "the European Communities (Electronic Communications Networks and
+#: Services) (Privacy and Electronic Communications) Regulations 2011", never "S.I. No.
+#: 336/2011 - …", so the stored title has to be reduced to the name before it can be
+#: matched against one. (Modern eISB rows carry no prefix, so both shapes must work.)
+_EISB_SERIES_PREFIX = re.compile(
+    r"^\s*S\.?\s*(?:I|R\.?\s*&\s*O)\.?\s*No\.?\s*\d+[A-Za-z]?/\d{4}\s*[-–—]\s*",
+    re.IGNORECASE,
+)
+
+
+def _statutory_short_title(title: str) -> str:
+    """A held Irish instrument's title reduced to the name it is cited by."""
+    stripped = _REVISED_TITLE_SUFFIX.sub("", _EISB_SERIES_PREFIX.sub("", title or ""))
+    return stripped.strip().rstrip(".").strip()
 
 
 # The bracketed qualifiers that mark an Act as a MEMBER of an existing collective
@@ -1150,7 +1166,7 @@ def _irish_legislation_indexes(
         sid = str(row["stable_id"] or "")
         if not sid.lower().startswith("ie/"):
             continue
-        title = _REVISED_TITLE_SUFFIX.sub("", str(row["title"] or "")).strip()
+        title = _statutory_short_title(str(row["title"] or ""))
         key = normalise_title(title)
         if not key:
             continue
@@ -1350,6 +1366,62 @@ def _attach_irish_statute_families(catalogue: Catalogue, doc, cites: list,
             continue
         out.extend(replace(probe, candidate_id=sid, pinpoint=pinpoint)
                    for sid in members)
+    return out
+
+
+# "regulation 5 of the European Communities (Electronic Communications Networks and
+# Services) (Privacy and Electronic Communications) Regulations 2011" — Ireland's
+# ePrivacy transposition, and the shape most of its digital law takes: an SI made under
+# the European Communities Act, cited by its full name and pinpointed by REGULATION.
+#
+# No grammar reaches these. ``uk_statute_named`` matches "Act|Measure" only, and the
+# named-SI grammars resolve a hand-curated list of UK instruments — so an Irish judgment
+# citing the ePrivacy Regulations, the e-Commerce Regulations or the NIS Regulations
+# produced no observation at all, not even a name-only one. Bound here against the held
+# Oireachtas titles, for the same reason and by the same route as the Acts above.
+_IRISH_INSTRUMENT_RE = re.compile(
+    r"(?:(?:reg(?:ulation)?s?\.?\s*(?P<reg>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
+    r"|art(?:icle)?s?\.?\s*(?P<art>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
+    r"|Part\s+(?P<part>[IVXLC]+[A-Za-z]?|\d+[A-Za-z]?))\s+of\s+)?"
+    r"the\s+"
+    r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
+    r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,80}\)))"
+    r"{0,11}?)"
+    r"\s+(?P<noun>Regulations|Order|Rules|Scheme)"
+    r"(?:,?\s+(?P<year>(?:1[6-9]|20)\d{2}))\b"
+)
+
+
+def _attach_irish_named_instruments(catalogue: Catalogue, doc, cites: list,
+                                    text: str | None) -> list:
+    """Link Irish statutory instruments cited by their full name to the held SI."""
+    if not text or not _is_irish_host(doc):
+        return cites
+
+    from .extractor import Citation, _overlaps_any
+    from .statute_gazetteer import normalise_title
+
+    titles, _families = _irish_legislation_indexes(catalogue)
+    if not titles:
+        return cites
+
+    out = list(cites)
+    for m in _IRISH_INSTRUMENT_RE.finditer(text):
+        name = f"{m.group('title')} {m.group('noun')} {m.group('year')}"
+        sid = titles.get(normalise_title(name))
+        if not sid:
+            continue
+        reg = re.sub(r"\s+", "", m.groupdict().get("reg") or "") or None
+        art = re.sub(r"\s+", "", m.groupdict().get("art") or "") or None
+        part = re.sub(r"\s+", "", m.groupdict().get("part") or "") or None
+        pinpoint = (f"reg. {reg}" if reg else f"Article {art}" if art
+                    else f"Part {part}" if part else None)
+        cite = Citation(raw=m.group(0).strip(), entity_kind="regulation",
+                        candidate_id=sid, pinpoint=pinpoint,
+                        char_start=m.start(), char_end=m.end(),
+                        method="ie_instrument_named")
+        if not _overlaps_any(cite, out):
+            out.append(cite)
     return out
 
 
@@ -1770,6 +1842,7 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str,
     cites = _gate_domestic_statute_names(doc, cites, text)
     cites = _rebind_irish_legislation(catalogue, doc, cites)
     cites = _attach_irish_statute_families(catalogue, doc, cites, text)
+    cites = _attach_irish_named_instruments(catalogue, doc, cites, text)
     cites = _rebind_held_assimilated_regulations(catalogue, doc, cites, text)
 
     # Bare "the Charter" is EU-local shorthand: in a national text it may mean a

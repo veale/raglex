@@ -397,3 +397,29 @@ def test_a_statute_name_search_reaches_every_jurisdictions_act_of_that_name():
     # An IDENTIFIER still matches by primary key, which is the whole point of the hop.
     exact = f.search_corpus(query="ukpga/2018/12")
     assert [r["stable_id"] for r in exact["items"]] == ["ukpga/2018/12"]
+
+
+def test_a_new_consolidation_takes_the_edges_that_named_the_base_act_with_it():
+    """``ie/2018/act/7`` means "the Data Protection Act 2018", so it means whichever
+    consolidation is current. An edge that resolved BEFORE the alias existed went
+    wherever the raw title took it — for Ireland, the UK Act of the same name."""
+    from raglex.core.models import RelationshipType, ResolutionStatus, TypedRelation
+
+    f = _two_data_protection_acts()
+    with f._open() as (cat, _rs, _ts):
+        _doc(f, "iehc/2024/9", "A judgment.", "A v B")
+        cat.add_relations("iehc/2024/9", [TypedRelation(
+            relationship_type=RelationshipType.MENTIONS,
+            raw_citation_string="the Data Protection Act 2018",
+            dst_id="ukpga/2018/12",            # what the global title alias gave it
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+        cat.conn.execute(
+            "UPDATE relations SET candidate_id = ? WHERE src_id = ?",
+            ("ie/2018/act/7", "iehc/2024/9"))
+        cat.commit()
+
+        assert cat.refresh_version_aliases() == 1
+
+        edge = cat.relations_for("iehc/2024/9")[0]
+        assert edge["dst_id"] == "ie/2018/act/7@2026-06-25"

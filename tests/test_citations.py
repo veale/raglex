@@ -725,6 +725,33 @@ def test_a_yearless_act_name_binds_only_to_the_act_the_document_named(
     assert all(not e["dst_id"] for e in catalogue.relations_for("iehc/2024/13"))
 
 
+def test_an_irish_statutory_instrument_binds_by_the_name_it_is_cited_by(
+    catalogue, tmp_path
+):
+    """The eISB prints an older instrument's series number in front of its title and a
+    full stop after it. Neither is part of the name: Ireland's ePrivacy transposition is
+    cited as "regulation 5 of the European Communities (…) Regulations 2011", never as
+    "S.I. No. 336/2011 - …", so the stored title has to be reduced to the name before it
+    can be matched — and the provision prefix has to be stripped off the citation, which
+    for an instrument is a REGULATION rather than a section."""
+    ts = TextStore(tmp_path / "text")
+    _doc(catalogue, ts, "ie/2011/si/336", "Regulation 1. Citation.",
+         source="ie-legislation", doc_type=DocType.LEGISLATION,
+         title="S.I. No. 336/2011 - European Communities (Electronic Communications "
+               "Networks and Services) (Privacy and Electronic Communications) "
+               "Regulations 2011.")
+    _doc(catalogue, ts, "iehc/2024/20",
+         "The defendant relies on regulation 5 of the European Communities (Electronic "
+         "Communications Networks and Services) (Privacy and Electronic Communications) "
+         "Regulations 2011.",
+         source="ie-caselaw", decision_date=date(2024, 5, 1))
+
+    extract_document(catalogue, ts, "iehc/2024/20")
+
+    assert "ie/2011/si/336" in {e["dst_id"] for e in
+                                catalogue.relations_for("iehc/2024/20") if e["dst_id"]}
+
+
 def test_a_yearless_statute_title_never_becomes_a_corpus_wide_shorthand(catalogue):
     """"Data Protection Act" had been learned four ways over — as the GDPR (from a
     French CNIL page), as FOIA 2000, as an English judgment — and the GDPR reading was

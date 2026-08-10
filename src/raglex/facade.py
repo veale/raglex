@@ -5391,7 +5391,7 @@ class Facade:
         Where several renditions share the title the newest wins, which is the text the
         law currently is.
         """
-        from .citations.stage import _REVISED_TITLE_SUFFIX
+        from .citations.stage import _statutory_short_title
         from .citations.statute_gazetteer import normalise_title, reference_key
 
         want = reference_key(raw)
@@ -5399,7 +5399,7 @@ class Facade:
             return None
         best: str | None = None
         for row in self.list_documents(query=raw, doc_type="legislation", limit=60):
-            title = _REVISED_TITLE_SUFFIX.sub("", str(row.get("title") or "")).strip()
+            title = _statutory_short_title(str(row.get("title") or ""))
             if normalise_title(title) != want:
                 continue
             if self._doc_bucket(row.get("source", ""), row.get("court")) != bucket:

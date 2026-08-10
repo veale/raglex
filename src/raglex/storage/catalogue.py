@@ -4268,6 +4268,17 @@ class Catalogue:
             if was and (was[1] != self.VERSION_ALIAS_SOURCE or was[0] == sid):
                 continue
             self.put_alias(base, sid, source=self.VERSION_ALIAS_SOURCE, commit=False)
+            # Edges already RESOLVED against this base follow it. The base id means "the
+            # Act", so it means whichever consolidation is current — and an edge that
+            # resolved before this alias existed went wherever the raw title took it,
+            # which for Ireland's Data Protection Act 2018 was the UK Act of that name.
+            # Only the base id moves: a citation that named a dated expression asked for
+            # that expression and keeps it.
+            self.conn.execute(
+                "UPDATE relations SET dst_id = ?, resolution_status = 'resolved' "
+                "WHERE candidate_id = ? AND dst_id IS DISTINCT FROM ?",
+                (sid, base, sid),
+            )
             minted += 1
         if commit:
             self.conn.commit()

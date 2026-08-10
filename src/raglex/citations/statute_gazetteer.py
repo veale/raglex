@@ -117,9 +117,17 @@ def _load_short(path: Path, idx: dict) -> None:
 
 # A leading provision reference ("section 78 of the …", "Part II of …", "Schedule B1 to
 # …") sits in front of the Act title in a cited string; strip it so the title matches.
+# ``regulation``/``rule`` belong here as much as ``section`` does: an instrument made
+# under an Act is pinpointed by REGULATION, so "regulation 5 of the European Communities
+# (… Privacy and Electronic Communications) Regulations 2011" is how Ireland's ePrivacy
+# transposition is cited every time, and without the prefix stripped the reference never
+# matched the held title. It cannot swallow an EU instrument number: ``normalise_title``
+# has already reduced "Regulation (EU) 2016/679" to "regulation eu 2016 679", where the
+# token after the first is a year rather than "of".
 _PROVISION_PREFIX = re.compile(
     r"^(?:section|sections|s|ss|subsection|sub section|part|schedule|sch|paragraph|"
-    r"paragraphs|para|paras|article|articles|art|arts)\s+[0-9a-z()]+\s+(?:of|to)\s+(?:the\s+)?",
+    r"paragraphs|para|paras|article|articles|art|arts|regulation|regulations|reg|regs|"
+    r"rule|rules)\s+[0-9a-z()]+\s+(?:of|to)\s+(?:the\s+)?",
 )
 
 
