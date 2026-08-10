@@ -20,6 +20,9 @@ from .base import ParsedDoc, register
 _ARTICLE_RE = re.compile(r"^Article\s+\d+", re.IGNORECASE)
 # "ANNEX", "ANNEX I", "ANNEX 1" — its own heading, never part of the last article.
 _ANNEX_RE = re.compile(r"^ANNEXE?\s*(?:[IVXLC]{1,6}|\d{1,2})?\s*$", re.IGNORECASE)
+# "(ex Article 234 TEC)" / "(ex Article 1 TEU)" — the Lisbon renumbering note that sits
+# under a Treaty article's heading. A note about the provision, not its name.
+_EX_NUMBERING_RE = re.compile(r"^\(\s*ex\s+Article", re.IGNORECASE)
 
 # The <title> of an EUR-Lex page is frequently just "EUR-Lex - 31995L0046 - EN".
 # For older instruments served in the legacy "Avis juridique important" layout the
@@ -133,7 +136,15 @@ def parse_eurlex_html(data: bytes) -> ParsedDoc:
         text = p.get_text(" ", strip=True)
         if not text:
             continue
-        is_article = "ti-art" in classes or _ARTICLE_RE.match(text)
+        # ``sti-art`` is an article's SUB-title, and it contains "ti-art" as a
+        # substring — so the generic test claimed it as a new article heading, flushed
+        # the real one before it had a single line of body (and ``flush`` drops an empty
+        # block), and gave the article's text the sub-title as its name. Every TFEU
+        # article carries "(ex Article 234 TEC)" on that line: 178 of the Treaty's 358
+        # articles had no heading at all, so "Article 267 TFEU" — 2,422 citations —
+        # pointed into a document where no such provision existed.
+        is_subtitle = "sti-art" in classes
+        is_article = ("ti-art" in classes and not is_subtitle) or _ARTICLE_RE.match(text)
         is_annex = "ti-annexe" in classes or _ANNEX_RE.match(text)
         if is_annex and len(text) < 40:
             # Without this every annex was swallowed by the LAST ARTICLE: Directive
@@ -147,6 +158,18 @@ def parse_eurlex_html(data: bytes) -> ParsedDoc:
             flush()
             current_label, current_kind, current = text, "article", []
             want_annex_title = False
+        elif is_subtitle and current_label and current_kind == "article":
+            # The Treaties' sub-title is the old numbering — "(ex Article 234 TEC)" —
+            # which is a note ABOUT the article, not part of what it is called, and
+            # putting it in the label would leave two article numbers there for the
+            # anchor matcher to choose between. A real sub-title ("Subject matter and
+            # objectives") names the provision and belongs in the label.
+            if _EX_NUMBERING_RE.match(text):
+                current.append(text)
+            elif len(text) < 120:
+                current_label = f"{current_label} {text.strip()}".strip()
+            else:
+                current.append(text)
         elif want_annex_title and len(text) < 90 and text == text.upper():
             # An annex heading is two lines — "ANNEX" then its SHOUTED subject. Keep the
             # subject in the LABEL, so the segment is named the way it is cited.
