@@ -15,7 +15,7 @@ from raglex.adapters.uk_ehrc import (
     parse_sitemap,
     stable_id,
 )
-from raglex.core.errors import FetchError
+from raglex.core.errors import FetchError, RateLimitException
 from raglex.core.models import DocType
 
 SITEMAP = """<?xml version="1.0" encoding="UTF-8"?>
@@ -221,7 +221,7 @@ def test_http_retries_a_reset_connection_rather_than_losing_the_document():
             calls.append(url)
             if len(calls) < 3:
                 raise ConnectionError("Recv failure: Connection reset by peer")
-            return 200, b"ok"
+            return 200, b"ok", None
 
     http = _Flaky("test", min_interval=0, sleep=slept.append)
     assert http.get("https://example.invalid/x.pdf") == b"ok"
@@ -234,8 +234,55 @@ def test_http_does_not_retry_a_real_404():
     class _Missing(EHRCHTTP):
         def _request(self, url, **kwargs):
             calls.append(url)
-            return 404, b""
+            return 404, b"", None
 
     with pytest.raises(FetchError):
         _Missing("test", min_interval=0, sleep=lambda _s: None).get("https://x.invalid/y")
     assert len(calls) == 1
+
+
+def test_a_burst_429_is_waited_out_rather_than_ending_the_run():
+    """Cloudflare's burst limit is a wall the walk hits, not a standing quota: the
+    first backfill was 429'd once after 185 pages and the page served normally
+    afterwards. Raising it pauses the source and abandons the other 1,788."""
+    calls: list[str] = []
+    slept: list[float] = []
+
+    class _Bursty(EHRCHTTP):
+        def _request(self, url, **kwargs):
+            calls.append(url)
+            if len(calls) == 1:
+                return 429, b"", None
+            return 200, b"ok", None
+
+    http = _Bursty("test", min_interval=0, sleep=slept.append)
+    assert http.get("https://x.invalid/y") == b"ok"
+    assert slept == [EHRCHTTP.rate_limit_waits[0]]
+    # a 429 must not spend a transport attempt — those are for reset connections
+    assert len(calls) == 2
+
+
+def test_a_429_that_never_clears_still_reaches_the_pipeline():
+    slept: list[float] = []
+
+    class _Walled(EHRCHTTP):
+        def _request(self, url, **kwargs):
+            return 429, b"", None
+
+    with pytest.raises(RateLimitException):
+        _Walled("test", min_interval=0, sleep=slept.append).get("https://x.invalid/y")
+    assert slept == list(EHRCHTTP.rate_limit_waits)
+
+
+def test_a_retry_after_header_is_honoured_over_the_default_backoff():
+    slept: list[float] = []
+
+    class _Polite(EHRCHTTP):
+        def _request(self, url, **kwargs):
+            if not slept:
+                return 429, b"", 7.0
+            return 200, b"ok", None
+
+    assert _Polite("test", min_interval=0,
+                   sleep=slept.append).get("https://x.invalid/y") == b"ok"
+    assert slept == [7.0]

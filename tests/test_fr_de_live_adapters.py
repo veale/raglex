@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from raglex.adapters.de_neuris import DeNeurisAdapter, _members, _xml_content_url, parse_caselaw
 from raglex.adapters.fr_conseil_etat import parse_hit
 from raglex.core.models import DocType, RelationshipType
@@ -10,6 +12,11 @@ from raglex.formats.ldml_de import parse_ldml_de
 from raglex.formats.legifrance_json import parse_legifrance_obj
 
 REFS = Path(__file__).resolve().parent.parent / "raglex design docs" / "raglex-refs"
+
+# See test_fr_de_bulk_adapters: the reference archive is gitignored, so a real-data
+# test has to skip where it is absent rather than fail every clean checkout.
+needs_ldml_examples = pytest.mark.skipif(
+    not (REFS / "de-ldml").exists(), reason="LDML.de examples not present")
 
 
 # -- Légifrance JSON parser -------------------------------------------------
@@ -49,6 +56,7 @@ def test_legifrance_getarticle_versions():
 
 
 # -- LDML.de parser (real example) ------------------------------------------
+@needs_ldml_examples
 def test_ldml_de_parses_real_regelungstext():
     # a Stammform (consolidated) example → title, ELI, jurabk, and §/Abschnitt segments
     matches = sorted(REFS.glob(

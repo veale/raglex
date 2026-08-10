@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from raglex.adapters.de_gii import DeGiiAdapter, _slug
 from raglex.adapters.de_rii import DeRiiAdapter
 from raglex.adapters.fr_dila import FrDilaAdapter, _display_date
@@ -15,8 +17,18 @@ from xml.etree import ElementTree as ET
 REFS = Path(__file__).resolve().parent.parent / "raglex design docs" / "raglex-refs"
 GII_ARCHIVE = REFS / "de-legacy" / "gii-archive" / "gesetze"
 
+# ``raglex design docs/`` is gitignored — it is large third-party reference material,
+# not part of the app — so these two are real-data tests on a checkout that HAS the
+# archive, and must be skipped on one that does not. Unguarded they fail with a bare
+# FileNotFoundError in every clean checkout, which is exactly what CI is: it made the
+# weekly ``update-antibot`` suite step unable to pass, so a green anti-bot upgrade was
+# discarded every Monday for a reason that had nothing to do with the upgrade.
+needs_gii_archive = pytest.mark.skipif(
+    not GII_ARCHIVE.exists(), reason="gesetze-im-internet archive not present")
+
 
 # -- Germany: gii legislation (real data) -----------------------------------
+@needs_gii_archive
 def test_gii_parser_real_law():
     d = parse_gii((GII_ARCHIVE / "zappro" / "zappro.xml").read_bytes())
     assert d.title == "Approbationsordnung für Zahnärzte und Zahnärztinnen"
@@ -27,6 +39,7 @@ def test_gii_parser_real_law():
     assert len(d.segments) > 50
 
 
+@needs_gii_archive
 def test_de_gii_local_discover_and_fetch():
     adapter = DeGiiAdapter(path=str(GII_ARCHIVE), ids=["ZApprO"])
     stubs = list(adapter.discover(None))

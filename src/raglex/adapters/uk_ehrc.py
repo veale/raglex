@@ -136,6 +136,22 @@ def parse_date(value: str | None) -> date | None:
     return None
 
 
+def _retry_after(headers) -> float | None:
+    """``Retry-After`` in seconds, when the response carries a usable one."""
+    try:
+        value = {str(k).lower(): v for k, v in dict(headers or {}).items()}.get(
+            "retry-after")
+    except Exception:                           # noqa: BLE001 — odd header mapping
+        return None
+    try:
+        seconds = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None                             # an HTTP-date form: fall back to ours
+    # Cap it: an hour-long Retry-After would stall the source's whole queue, and the
+    # observed limit clears in seconds.
+    return min(seconds, 300.0) if seconds > 0 else None
+
+
 class EHRCHTTP:
     """A paced, browser-impersonating GET.
 
@@ -150,7 +166,16 @@ class EHRCHTTP:
     #: therefore retried with backoff instead of costing the document.
     max_retries = 3
 
-    def __init__(self, source: str, *, min_interval: float = 1.0,
+    #: Cloudflare also applies a BURST limit, and it is a wall the walk hits rather
+    #: than a standing quota: the first full backfill took 185 pages and their PDFs in
+    #: about four and a half minutes and was then 429'd once, on
+    #: ``/about-us/welsh-language-standards``, which serves normally on any later
+    #: request. Raising that one 429 straight to the pipeline pauses the source and
+    #: ends the run — so a transient burst limit cost the other 1,788 pages. It is
+    #: waited out here instead, and only a limit that survives every wait is escalated.
+    rate_limit_waits = (30.0, 60.0, 120.0, 300.0)
+
+    def __init__(self, source: str, *, min_interval: float = 1.5,
                  timeout: float = 90.0, sleep=time.sleep) -> None:
         self.source = source
         self.min_interval = min_interval
@@ -162,17 +187,28 @@ class EHRCHTTP:
 
     def get(self, url: str, **kwargs) -> bytes:
         last: Exception | None = None
-        for attempt in range(self.max_retries):
-            wait = self.min_interval - (time.monotonic() - self._last_request_at)
-            if wait > 0:
-                self._sleep(wait)
+        attempt = waited = 0
+        while attempt < self.max_retries:
+            pause = self.min_interval - (time.monotonic() - self._last_request_at)
+            if pause > 0:
+                self._sleep(pause)
             self._last_request_at = time.monotonic()
+            retry_after: float | None = None
             try:
-                status, body = self._request(url, **kwargs)
+                status, body, retry_after = self._request(url, **kwargs)
             except Exception as exc:            # noqa: BLE001 — see max_retries
                 last, status, body = exc, None, b""
             if status == 429:
-                raise RateLimitException(f"{self.source}: HTTP 429 for {url}")
+                # Wait it out rather than ending the source's run — see rate_limit_waits.
+                if waited >= len(self.rate_limit_waits):
+                    raise RateLimitException(
+                        f"{self.source}: HTTP 429 for {url} after "
+                        f"{waited} backoffs totalling "
+                        f"{sum(self.rate_limit_waits):.0f}s")
+                self._sleep(retry_after or self.rate_limit_waits[waited])
+                waited += 1
+                self._session = None
+                continue                        # a 429 costs no transport attempt
             if status is not None and status < 400:
                 return body
             if status is not None and status < 500:
@@ -183,10 +219,13 @@ class EHRCHTTP:
                                   transient=True)
             self._session = None                # a reset session is not reusable
             self._sleep(2 ** attempt)
+            attempt += 1
         raise FetchError(f"{self.source}: {url} failed after {self.max_retries} "
                          f"attempts ({last})", transient=True)
 
-    def _request(self, url: str, **kwargs) -> tuple[int, bytes]:
+    def _request(self, url: str, **kwargs) -> tuple[int, bytes, float | None]:
+        """``(status, body, Retry-After seconds)`` — the header when the edge sends
+        one, so a 429 is waited out for as long as it asks rather than a guess."""
         headers = {**_HEADERS, **(kwargs.pop("headers", None) or {})}
         try:
             from curl_cffi import requests as creq
@@ -195,7 +234,6 @@ class EHRCHTTP:
                 self._session = creq.Session(impersonate=_IMPERSONATE,
                                              timeout=self.timeout)
             response = self._session.get(url, headers=headers, **kwargs)
-            return response.status_code, response.content or b""
         except ImportError:
             import httpx
 
@@ -204,7 +242,8 @@ class EHRCHTTP:
                     timeout=self.timeout, follow_redirects=True,
                     headers={"User-Agent": "Mozilla/5.0 Firefox/135.0", **_HEADERS})
             response = self._fallback.get(url, **kwargs)
-            return response.status_code, response.content or b""
+        return (response.status_code, response.content or b"",
+                _retry_after(response.headers))
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,7 +347,11 @@ def slugify(value: str) -> str:
 
 class EHRCAdapter(BaseAdapter):
     source = "uk-ehrc"
-    min_interval = 1.0
+    #: 1.0s tripped Cloudflare's burst limit 185 pages into the first full walk (a page
+    #: and its multi-megabyte PDFs are several requests, so the effective rate is well
+    #: above one per second). 1.5s plus the 429 backoff in EHRCHTTP is what gets the
+    #: whole 1,973-page sitemap in one run.
+    min_interval = 1.5
     requires_js = False          # the TLS handshake clears Cloudflare; no browser
     requires_proxy = False
 
