@@ -4890,8 +4890,20 @@ class Catalogue:
             sql += f" AND d.doc_type IN ({','.join('?' * len(doc_types))})"
             params.extend(doc_types)
         if source:
-            sql += " AND d.source = ?"
-            params.append(source)
+            # One adapter, several ("ie-caselaw,ie-revised"), or a family ("ie-*"). A
+            # jurisdiction is not one source — Ireland is eight — and re-extracting it
+            # after a grammar lands should be one tracked job, not eight.
+            wanted = [s.strip() for s in str(source).split(",") if s.strip()]
+            exact_sources = [s for s in wanted if not s.endswith("*")]
+            prefixes = [s[:-1] for s in wanted if s.endswith("*")]
+            clauses = []
+            if exact_sources:
+                clauses.append(f"d.source IN ({','.join('?' * len(exact_sources))})")
+                params.extend(exact_sources)
+            for prefix in prefixes:
+                clauses.append("d.source LIKE ?")
+                params.append(f"{prefix}%")
+            sql += f" AND ({' OR '.join(clauses)})"
         if exclude_extraction_run_id:
             sql += " AND (d.last_extraction_run_id IS NULL OR d.last_extraction_run_id <> ?)"
             params.append(exclude_extraction_run_id)
@@ -5124,6 +5136,20 @@ class Catalogue:
         return self.conn.execute(
             f"SELECT alias, source FROM citation_aliases WHERE dst_id IN ({qs}) ORDER BY alias",
             targets).fetchall()
+
+    def alias_with_source(self, alias: str) -> tuple[str | None, str | None]:
+        """``(dst_id, source)`` for an alias — the same lookup as :meth:`get_alias`, plus
+        WHO minted it. Callers that must tell an identifier from a name need it: a
+        ``legislation-name`` row is a title, and a title is not a key."""
+        from ..core.text import fold_citation
+
+        for key in (alias, fold_citation(alias)):
+            row = self.conn.execute(
+                "SELECT dst_id, source FROM citation_aliases WHERE alias = ?", (key,)
+            ).fetchone()
+            if row:
+                return row["dst_id"], row["source"]
+        return None, None
 
     def get_alias(self, alias: str) -> str | None:
         row = self.conn.execute(

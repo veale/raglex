@@ -4090,10 +4090,15 @@ class Facade:
         from .core.text import fold
         ids: list[str] = []
         exact = False
-        dst = cat.get_alias(fold(q))            # a report/neutral form stored as an alias
+        dst, alias_source = cat.alias_with_source(fold(q))
         if dst:
             ids.append(dst)
-            exact = True
+            # An alias minted FROM A NAME is still a name. "data protection act 2018" is
+            # in the table pointing at the UK Act — which is right for a UK document and
+            # is why the alias exists — so believing it as an identifier hid Ireland's
+            # Act from a search for the words in its own title. A report citation or a
+            # retired id is an identifier and still short-circuits.
+            exact = not str(alias_source or "").endswith("-name")
         try:
             from .citations import extract_citations
             for c in extract_citations(q):
@@ -4107,6 +4112,35 @@ class Facade:
             pass
         return list(dict.fromkeys(i for i in ids if i)), exact
 
+    #: A COLLECTIVE citation — "the Data Protection Acts", "the Data Protection Acts 1988
+    #: to 2018", "the Companies Acts". Nothing is TITLED that, because it is the name of
+    #: a body of law rather than of an instrument: section 1(2) of Ireland's Data
+    #: Protection Act 2018 provides that it and the 1988 and 2003 Acts "may be cited
+    #: together as the Data Protection Acts 1988 to 2018". Typed into search it matched
+    #: nothing at all, not even as you typed — the plural noun is a substring of no
+    #: title, and the year range belongs to no single Act.
+    _COLLECTIVE_QUERY = re.compile(
+        r"(?i)^\s*(?:the\s+)?(?P<stem>.+?)\s+"
+        r"(?P<noun>Acts|Measures|Regulations|Orders|Rules)"
+        r"(?:\s+(?:1[6-9]|20)\d{2}\s*(?:to|and|-|–|—)\s*(?:1[6-9]|20)\d{2})?\s*$")
+
+    @classmethod
+    def _singularised_collective(cls, query: str | None) -> str | None:
+        """A collective citation reduced to the words its member Acts are titled with.
+
+        "the Data Protection Acts 1988 to 2018" → "Data Protection Act", which every
+        member's title contains. Returns None for anything that is not one, including
+        the plural instrument nouns that ARE real titles ("Rules of the Superior
+        Courts", "The Environmental Information Regulations 2004") — those keep a year
+        or trailing words and never reach the end-anchored pattern with a bare noun.
+        """
+        m = cls._COLLECTIVE_QUERY.match(query or "")
+        if not m or m.group("noun").lower() in ("regulations", "rules"):
+            # Only Acts/Measures/Orders are collectively cited this way; "Regulations"
+            # and "Rules" end far too many genuine instrument titles to be rewritten.
+            return None
+        return f"{m.group('stem').strip()} {m.group('noun')[:-1]}"
+
     def search_corpus(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
                       facets: bool = True, **filters) -> dict:
         """Unified metadata search: filtered, sortable results plus the facet distribution of
@@ -4119,6 +4153,9 @@ class Facade:
         when a document was published rather than by how well it matched what was typed.
         """
         f = {k: v for k, v in filters.items() if k in self._SEARCH_FILTERS and v not in (None, "")}
+        collective = self._singularised_collective(f.get("query"))
+        if collective:
+            f["query"] = collective
         if not sort:
             sort = "relevance" if str(f.get("query") or "").strip() else "date"
         boost: list[str] = []

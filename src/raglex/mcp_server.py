@@ -632,6 +632,31 @@ def build_server(config: Config | None = None) -> MCPServer:
             {"query": query, "exact": exact, "limit": limit})
 
     @admin
+    def rescan_source(source: str, stale_days: Optional[int] = None,
+                      limit: Optional[int] = None) -> dict:
+        """Re-extract every document of one or more SOURCES, as a job.
+
+        The companion to rescan_matching, for the scope that free-text search cannot
+        reach: only some sources are in the full-text index, so a citation fix that
+        affects a jurisdiction's legislation, its regulator's decisions and its guidance
+        can only be applied to the one of those that happens to be indexed. This selects
+        by source instead.
+
+        ``source`` takes one key, several comma-separated, or a family with a trailing
+        star — ``rescan_source('ie-*')`` re-reads all eight Irish sources in one tracked,
+        cancellable, resumable job. ``stale_days`` skips anything already re-extracted
+        within N days, which is what makes a re-launched run advance rather than restart.
+        """
+        from .jobs import JobManager
+        params: dict = {"source": source, "parallel": False}
+        if stale_days is not None:
+            params["stale_days"] = int(stale_days)
+        if limit is not None:
+            params["limit"] = int(limit)
+        return JobManager(facade, origin="mcp").start(
+            "rescan", f"re-extract {source} — citations", params)
+
+    @admin
     def refresh_statute_gazetteer(years: Optional[list[int]] = None) -> dict:
         """Top up the UK statute-title gazetteer from legislation.gov.uk.
 

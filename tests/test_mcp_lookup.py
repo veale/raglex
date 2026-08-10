@@ -431,3 +431,21 @@ def test_a_new_consolidation_takes_the_edges_that_named_the_base_act_with_it():
         cat.commit()
         assert cat.refresh_version_aliases() == 0        # nothing new to mint
         assert cat.relations_for("iehc/2024/9")[0]["dst_id"] == "ie/2018/act/7@2026-06-25"
+
+
+def test_the_collective_citation_finds_the_acts_it_collects():
+    """"the Data Protection Acts" is what Irish drafting and Irish judgments actually
+    say — section 1(2) of the 2018 Act creates the name — and nothing is TITLED that,
+    so search matched nothing at all, not even as the user typed."""
+    f = _two_data_protection_acts()
+
+    for typed in ("data protection acts", "the Data Protection Acts",
+                  "Data Protection Acts 1988 to 2018"):
+        hit = f.search_corpus(query=typed, doc_type="legislation")
+        assert {r["stable_id"] for r in hit["items"]} == {
+            "ukpga/2018/12", "ie/2018/act/7@2026-06-25"}, typed
+
+    # …without rewriting the plural nouns that end real instrument titles
+    assert Facade._singularised_collective("The Environmental Information "
+                                           "Regulations 2004") is None
+    assert Facade._singularised_collective("Rules of the Superior Courts") is None
