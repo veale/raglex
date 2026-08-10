@@ -447,9 +447,43 @@ def test_the_page_is_readable_without_running_its_script():
     assert "<h2>s. 1 Overview</h2>" in page
     assert "This Act makes provision about the processing" in page
     assert '<a href="#s-1"><span>s. 1 Overview</span></a>' in page
-    # …and the script empties both containers, or the reader gets the law twice
-    assert '$("law").textContent = "";' in _SCRIPT
+    # …and the script atomically replaces the law, or the reader gets either two copies
+    # or an empty/partial one while a large edition is still being rendered
+    assert 'const renderedLaw = document.createDocumentFragment();' in _SCRIPT
+    assert '$("law").replaceChildren(renderedLaw);' in _SCRIPT
     assert '$("contents-nav").textContent = "";' in _SCRIPT
+
+
+def test_each_prerendered_provision_says_its_mentions_are_loading():
+    """The visible law precedes the large JSON payload in a single-file export, so it
+    can reassure a reader at every provision while that payload is still arriving."""
+    from raglex.static_export import _HTML_TEMPLATE, _SCRIPT, _STYLE, render_static_page
+
+    data = json.loads(json.dumps(_SEO_DATA))
+    data["counts"]["s1"] = 1234
+    page = render_static_page(title=data["law"]["title"],
+                              data_json=json.dumps(data))
+    law_before_payload = page.split('<script id="raglex-data"', 1)[0]
+    assert '[ Loading 1,234 mentions<span class="loading-dots">...</span> ]' \
+        in law_before_payload
+    assert 'class="mentions-loading" role="status"' in law_before_payload
+    # No-JS readers see the ordinary prerendered law, not a status that never completes.
+    assert '.mentions-loading {\n  display: none;' in _STYLE
+    assert '.mentions-pending .mentions-loading' in _STYLE
+    assert 'document.documentElement.classList.add("mentions-pending")' in _HTML_TEMPLATE
+    # Successful rendering removes the opt-in class; a failed renderer gets an honest
+    # terminal message from the small, early head script.
+    assert 'document.documentElement.classList.remove("mentions-pending");' in _SCRIPT
+    assert 'Mentions could not be loaded.' in _HTML_TEMPLATE
+
+
+def test_a_provision_with_no_known_mentions_is_still_visibly_checked():
+    from raglex.static_export import render_static_page
+
+    data = json.loads(json.dumps(_SEO_DATA))
+    data["counts"] = {"all": 0}
+    page = render_static_page(title=data["law"]["title"], data_json=json.dumps(data))
+    assert '[ Checking for mentions<span class="loading-dots">...</span> ]' in page
 
 
 def test_the_head_says_what_the_page_is():

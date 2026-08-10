@@ -1550,6 +1550,24 @@ def _prerendered_law(data: dict) -> tuple[str, str]:
         sid = html.escape(str(section.get("id") or ""), quote=True)
         label = html.escape(str(section.get("label") or ""))
         level = min(2, int(section.get("level") or 0))
+        mention_count = int((data.get("counts") or {}).get(section.get("key")) or 0)
+        loading_label = (
+            f"Loading {mention_count:,} "
+            f"{'mention' if mention_count == 1 else 'mentions'}"
+            if mention_count else "Checking for mentions"
+        )
+        # This copy of the law is painted before the browser reaches the (potentially
+        # enormous) embedded JSON payload.  The interactive renderer atomically replaces
+        # it later, so this is the one place a useful per-provision loading state can be
+        # shown while a single-file edition is still downloading/parsing.  CSS only shows
+        # it when the tiny head script confirms that JavaScript is enabled.
+        loading = (
+            '<p class="mentions-loading" role="status" '
+            f'aria-label="{html.escape(loading_label, quote=True)}">'
+            '<span aria-hidden="true">[ '
+            f'{html.escape(loading_label)}<span class="loading-dots">...</span> ]'
+            '</span></p>'
+        )
         nav.append(f'<a href="#{sid}"><span>{label}</span></a>')
         paras = section.get("paragraphs") or [{"text": section.get("text") or "",
                                                "indent": 0}]
@@ -1560,7 +1578,7 @@ def _prerendered_law(data: dict) -> tuple[str, str]:
             for p in paras if str(p.get("text") or "").strip())
         body.append(
             f'<section id="{sid}" class="law-section level-{level}">'
-            f"<h2>{label}</h2>{lines}</section>")
+            f"<h2>{label}</h2>{loading}{lines}</section>")
     return "\n".join(nav), "\n".join(body)
 
 
@@ -1626,6 +1644,21 @@ _HTML_TEMPLATE = """<!doctype html>
   <meta name="color-scheme" content="light">
   <title>__PAGE_TITLE__</title>
 __SEO_HEAD__
+  <script>
+    // Opt in before the large inline payload arrives. With JavaScript disabled these
+    // markers stay hidden; if the renderer fails, load converts them from "loading" to
+    // an honest error instead of leaving an endless animation behind.
+    document.documentElement.classList.add("mentions-pending");
+    window.addEventListener("load", function () {
+      var root = document.documentElement;
+      if (!root.classList.contains("mentions-pending")) return;
+      root.classList.replace("mentions-pending", "mentions-failed");
+      document.querySelectorAll(".mentions-loading").forEach(function (marker) {
+        marker.setAttribute("aria-label", "Mentions could not be loaded");
+        marker.textContent = "[ Mentions could not be loaded. ]";
+      });
+    });
+  </script>
   <style>__STYLE__</style>
 </head>
 <body>
@@ -1881,6 +1914,33 @@ main { min-width: 0; padding-top: .9rem; }
   line-height: 1.45;
 }
 .mentions-line .via-line { display: inline; }
+/* The law itself is before the large JSON block in the file, so these are visible while
+   that block downloads and parses. They are deliberately plain text in the page's Times
+   face: a Word-like status line, not an application spinner. */
+.mentions-loading {
+  display: none;
+  max-width: 46rem;
+  margin: 0 0 .5rem;
+  color: var(--quiet);
+  font-size: .88rem;
+  line-height: 1.45;
+  font-style: italic;
+}
+.mentions-pending .mentions-loading,
+.mentions-failed .mentions-loading { display: block; }
+.mentions-failed .mentions-loading { color: #7d322a; font-style: normal; }
+.loading-dots {
+  display: inline-block;
+  width: 0;
+  overflow: hidden;
+  vertical-align: bottom;
+  white-space: nowrap;
+  animation: loading-dots 1.2s steps(3, end) infinite;
+}
+@keyframes loading-dots { to { width: .9em; } }
+@media (prefers-reduced-motion: reduce) {
+  .loading-dots { width: .9em; animation: none; }
+}
 .cite-link {
   color: var(--link);
   cursor: pointer;
@@ -2130,9 +2190,11 @@ _SCRIPT = r"""
   const number = (n) => Number(n || 0).toLocaleString();
 
   // The law and its contents list are ALSO rendered into the HTML server-side, so the
-  // page is readable and indexable without JavaScript. Clear them before building the
-  // interactive version, or the reader gets the whole instrument twice.
-  $("law").textContent = "";
+  // page is readable and indexable without JavaScript. Build the interactive copy away
+  // from the live DOM, then swap it in atomically: the per-provision loading messages
+  // remain visible throughout a large render, and a failed render leaves the readable
+  // law in place instead of a half-empty page.
+  const renderedLaw = document.createDocumentFragment();
   $("contents-nav").textContent = "";
 
   const sourceNote = document.createElement("p");
@@ -2158,7 +2220,7 @@ _SCRIPT = r"""
   sourceNote.innerHTML = lawLinks + currencyNote + (inheritedRecitals
     ? `<br><span class="muted">${esc(inheritedRecitals.note)} Source: ${recitalSource}</span>`
     : "");
-  $("law").appendChild(sourceNote);
+  renderedLaw.appendChild(sourceNote);
 
   // Each predecessor instrument this law inherits mentions from, named — "Directive
   // 95/46/EC", never "previous law". Routes are keyed by its stable id.
@@ -2375,8 +2437,10 @@ _SCRIPT = r"""
       }
       article.appendChild(body);
     }
-    $("law").appendChild(article);
+    renderedLaw.appendChild(article);
   }
+  $("law").replaceChildren(renderedLaw);
+  document.documentElement.classList.remove("mentions-pending");
 
   const kindNames = {
     cases: "case law", administrative: "admin decisions",
