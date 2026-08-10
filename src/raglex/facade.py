@@ -8619,20 +8619,24 @@ class Facade:
         import json as _json
         from concurrent.futures import ThreadPoolExecutor
 
+        from .formats import available as available_formats
         from .formats import parse as parse_format
-        # trusted stored ``meta.format`` values → used directly (skips re-sniffing every doc).
-        # "akoma-ntoso" is the UK/IE/DE-AKN registry name (uk_legislation stows it); without it
-        # a UK reparse fell through to _sniff_format on all 103k acts — still correct (it detects
-        # akomaNtoso), just wasteful.
-        # "eurlex-html" is the EUR-Lex HTML fallback — every EU act with no Formex
-        # rendition, 22,445 of them. It was missing here (though present in the
-        # single-document reparse), and an EUR-Lex page is HTML the byte sniffer cannot
-        # tell from any other, so those documents fell to _sniff_format → None → "skip".
-        # A whole-source reparse silently declined to touch a third of the source: in one
-        # 12,000-document sample, 5,178 were skipped for exactly this reason, and the
-        # parser fix the sweep existed to deliver never reached any of them.
-        hints = {"akn", "akoma-ntoso", "bwb", "formex-legislation", "rii-xml", "dila-xml",
-                 "eurlex-html"}
+        # Trusted stored ``meta.format`` values → used directly, instead of re-sniffing.
+        #
+        # Every name the registry knows, rather than a hand-kept list. The list was kept
+        # by hand twice and was wrong both times: "eurlex-html" had to be added after a
+        # whole-source reparse silently declined to touch a third of the source (5,178
+        # skipped in one 12,000-document sample), and it was still missing eisb-xml,
+        # eisb-html, nz-pco-xml, lims-xml, hklm-xml, hudoc-html, lawmaker-html,
+        # ep-ta-xml, formex-resolution, legislation-en-xml and frl-epub — about 45,000
+        # documents across Ireland, New Zealand, Canada, Hong Kong, Strasbourg and
+        # Australia that no parser fix has ever reached, because a sniffer cannot tell
+        # one XML or HTML dialect from another and answers None → "skip".
+        #
+        # The stored value came from the adapter that fetched the bytes, so it is better
+        # evidence than sniffing them; the only question is whether we still have a
+        # parser under that name, which is what the registry answers.
+        hints = set(available_formats())
 
         with self._open() as (cat, _rs, ts):
             # KEYSET pagination, not one fetchall: a source with millions of rows would
