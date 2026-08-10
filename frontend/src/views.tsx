@@ -1,5 +1,5 @@
 import { Component, createContext, Fragment, lazy, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { api, CanliiBudget, Hit, ImportBatchResult, ImportItem, ImportOptions, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleItem, StaticBundleWebhook, UsCaselawBudget } from "./api";
+import { api, CanliiBudget, Hit, ImportBatchResult, ImportItem, ImportOptions, LIIScope, LIITarget, Setting, StaticBundle, StaticBundleGroup, StaticBundleItem, StaticBundleWebhook, UsCaselawBudget } from "./api";
 import { AcMore, useAutosuggest } from "./autosuggest";
 import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
@@ -4203,13 +4203,48 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
     [next[i], next[to]] = [next[to], next[i]];
     patch({ items: next });
   };
+  // Themes: named subsections of the index, in the order they appear on the page. The
+  // order is an editorial judgement — "Data Protection and Privacy" before "Platform
+  // Regulation" — so it is arranged here rather than derived from the laws.
+  const groups = cfg?.groups || [];
+  const themeKey = (v: string) =>
+    (v || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const setGroup = (i: number, next: Partial<StaticBundleGroup>) =>
+    patch({ groups: groups.map((g, n) => (n === i ? { ...g, ...next } : g)) });
+  const moveGroup = (i: number, delta: number) => {
+    const to = i + delta;
+    if (to < 0 || to >= groups.length) return;
+    const next = groups.slice();
+    [next[i], next[to]] = [next[to], next[i]];
+    patch({ groups: next });
+  };
+  // Removing a theme takes its tag off every law with it, so nothing is left carrying a
+  // tag no subsection claims — which would silently move that law to "Other instruments".
+  const removeGroup = (i: number) => {
+    const gone = themeKey(groups[i].tag || groups[i].name);
+    patch({
+      groups: groups.filter((_g, n) => n !== i),
+      items: items.map((it) => ({
+        ...it, tags: (it.tags || []).filter((t) => themeKey(t) !== gone),
+      })),
+    });
+  };
+  const toggleTag = (i: number, group: StaticBundleGroup) => {
+    const key = themeKey(group.tag || group.name);
+    const has = (items[i].tags || []).some((t) => themeKey(t) === key);
+    setItem(i, {
+      tags: has ? (items[i].tags || []).filter((t) => themeKey(t) !== key)
+                : [...(items[i].tags || []), key],
+    });
+  };
 
   const save = async (): Promise<boolean> => {
     if (!cfg) return false;
     setMsg("");
     try {
       const saved = await api.saveBundleConfig({
-        items: cfg.items, index_title: cfg.index_title, index_text: cfg.index_text,
+        items: cfg.items, groups: cfg.groups || [],
+        index_title: cfg.index_title, index_text: cfg.index_text,
         max_snippets: cfg.max_snippets, output_dir: cfg.output_dir,
         index_wordart: cfg.index_wordart, webhook: cfg.webhook,
       });
@@ -4298,10 +4333,45 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
         Every entry in the index also states its own export date.
       </p>
 
+      <label style={{ marginTop: 14 }}>Themes <span className="muted">— subsections within each country, in this order</span></label>
+      <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+        On the index each country's laws are split under these headings, and within a heading the
+        most-cited law comes first. A law may sit under more than one. Untagged laws are listed last
+        under <i>Other instruments</i>; a country whose laws carry no theme at all is left as one plain list.
+      </p>
+      <table className="grid" style={{ marginTop: 4 }}>
+        <thead><tr>
+          <th style={{ width: "45%" }}>heading on the page</th>
+          <th>tag</th><th style={{ width: 78 }}></th>
+        </tr></thead>
+        <tbody>
+          {groups.map((g, i) => (
+            <tr key={`${g.tag}-${i}`}>
+              <td><input value={g.name} placeholder="Data Protection and Privacy"
+                onChange={(e) => setGroup(i, { name: e.target.value })} /></td>
+              <td title="What a law carries to be listed here. Left blank it follows the heading, which is usually what you want.">
+                <input value={g.tag} placeholder={themeKey(g.name) || "data-protection-and-privacy"}
+                  onChange={(e) => setGroup(i, { tag: e.target.value })} /></td>
+              <td style={{ whiteSpace: "nowrap" }}>
+                <button className="mini" title="move up" disabled={i === 0} onClick={() => moveGroup(i, -1)}>↑</button>{" "}
+                <button className="mini" title="move down" disabled={i === groups.length - 1} onClick={() => moveGroup(i, 1)}>↓</button>{" "}
+                <button className="mini" title="remove this theme, and untag every law from it"
+                  onClick={() => removeGroup(i)}>✕</button>
+              </td>
+            </tr>
+          ))}
+          {!groups.length && <tr><td colSpan={3} className="muted">No themes — every country stays one plain list.</td></tr>}
+        </tbody>
+      </table>
+      <div style={{ marginTop: 6 }}>
+        <button onClick={() => patch({ groups: [...groups, { name: "", tag: "" }] })}>+ Add a theme</button>
+      </div>
+
       <table className="grid break-cells" style={{ marginTop: 12 }}>
         <thead><tr>
-          <th style={{ width: "30%" }}>statute</th><th style={{ width: "15%" }}>saves as</th>
-          <th style={{ width: "12%" }}>short name</th>
+          <th style={{ width: "26%" }}>statute</th><th style={{ width: "13%" }}>saves as</th>
+          <th style={{ width: "10%" }}>short name</th>
+          {!!groups.length && <th style={{ width: "18%" }}>themes</th>}
           <th>its own line, under the shared text</th><th style={{ width: 78 }}></th>
         </tr></thead>
         <tbody>
@@ -4322,6 +4392,23 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
                 <input value={it.short || ""} placeholder="DSA" style={{ minWidth: 0 }}
                   onChange={(e) => setItem(i, { short: e.target.value })} />
               </td>
+              {!!groups.length && (
+                <td>
+                  <div className="row" style={{ gap: 3, flexWrap: "wrap" }}>
+                    {groups.map((g, gi) => {
+                      const on = (it.tags || []).some((t) => themeKey(t) === themeKey(g.tag || g.name));
+                      return (
+                        <button key={gi} className="mini" title={g.name || g.tag}
+                          style={{
+                            fontWeight: on ? 700 : 400, opacity: on ? 1 : 0.55,
+                            borderStyle: on ? "solid" : "dashed",
+                          }}
+                          onClick={() => toggleTag(i, g)}>{g.name || g.tag}</button>
+                      );
+                    })}
+                  </div>
+                </td>
+              )}
               <td>
                 <textarea rows={2} value={it.note} onChange={(e) => setItem(i, { note: e.target.value })}
                   placeholder="optional — appears on a new line below the shared text, in this file only" />
@@ -4334,7 +4421,7 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
               </td>
             </tr>
           ))}
-          {!items.length && <tr><td colSpan={5} className="muted">No statutes yet — add one below.</td></tr>}
+          {!items.length && <tr><td colSpan={groups.length ? 6 : 5} className="muted">No statutes yet — add one below.</td></tr>}
         </tbody>
       </table>
 

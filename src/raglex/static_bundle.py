@@ -58,6 +58,30 @@ DEFAULT_INDEX_TEXT = (
 )
 _SLUG_SAFE = re.compile(r"[^a-z0-9._-]+")
 _UNPLACED = "Other instruments"
+#: Where an instrument the operator has not put in any theme is listed. Named rather
+#: than hidden: a set that silently dropped a law from its index because nobody had
+#: tagged it would be worse than an honest last section, and tagging it makes this
+#: heading disappear on its own.
+_UNTHEMED = "Other instruments"
+
+#: The EU appends this to the formal title of every instrument that extends to the EEA.
+#: It is a legal note about territorial scope, not part of the name anyone cites the act
+#: by, and on an index page of forty laws it is forty repetitions of the same eight
+#: words. Dropped from the index only — inside an edition the instrument keeps the
+#: official title exactly as published.
+_EEA_RELEVANCE = re.compile(
+    r"\s*\(\s*Text\s+with\s+EEA\s+relevance\s*\)\s*\.?\s*$", re.IGNORECASE)
+
+
+def strip_eea_relevance(title: str) -> str:
+    """An instrument's title without the EEA-relevance note it ends with."""
+    return _EEA_RELEVANCE.sub("", str(title or "")).strip()
+
+
+def theme_key(value: str) -> str:
+    """Normalise a theme tag so what the operator typed on a law matches what they typed
+    on the theme — "Data Protection", "data-protection" and "data protection" are one."""
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").casefold()).strip("-")
 
 
 def _now() -> datetime:
@@ -173,6 +197,45 @@ def _clean_webhook(raw) -> dict:
     }
 
 
+def _clean_tags(raw) -> list[str]:
+    """An item's themes, de-duplicated and in the order given. A law may carry several —
+    the Data Protection Act belongs under privacy AND under law enforcement, and the
+    index should list it under both rather than making the operator choose."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    seen, out = set(), []
+    for tag in raw or []:
+        name = str(tag or "").strip()
+        key = theme_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _clean_groups(raw) -> list[dict]:
+    """The themed subsections, IN THE OPERATOR'S ORDER — which is the whole point of
+    storing them as a list rather than deriving them from the tags in use. A group with
+    no name is dropped; a group with no tag of its own is keyed on its name, so typing
+    only "Data Protection and Privacy" is enough to start using it."""
+    seen, out = set(), []
+    for entry in raw or []:
+        if isinstance(entry, str):
+            entry = {"name": entry}
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        key = theme_key(entry.get("tag") or name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append({"name": name, "tag": key})
+    return out
+
+
 def load_config(config: Config | None = None) -> dict:
     """The stored plan, normalised."""
     raw = _stored(CONFIG_KEY, config)
@@ -196,13 +259,16 @@ def load_config(config: Config | None = None) -> dict:
             "title": str(entry.get("title") or "").strip(),
             "short": str(entry.get("short") or "").strip(),
             "note": str(entry.get("note") or ""),
+            "tags": _clean_tags(entry.get("tags")),
         })
+    groups = _clean_groups(data.get("groups"))
     try:
         max_snippets = max(1, min(int(data.get("max_snippets") or 4), 12))
     except (TypeError, ValueError):
         max_snippets = 4
     out = {
         "items": items,
+        "groups": groups,
         "index_title": str(data.get("index_title") or DEFAULT_INDEX_TITLE),
         "index_text": str(data.get("index_text") if data.get("index_text") is not None
                           else DEFAULT_INDEX_TEXT),
@@ -221,8 +287,8 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
     time, so what the operator sees in the table is exactly what lands on disk."""
     current = load_config()
     merged = {**current, **{k: v for k, v in (patch or {}).items() if k in
-                            ("items", "index_title", "index_text", "max_snippets",
-                             "output_dir", "index_wordart", "webhook")}}
+                            ("items", "groups", "index_title", "index_text",
+                             "max_snippets", "output_dir", "index_wordart", "webhook")}}
     items, used = [], set()
     for entry in merged.get("items") or []:
         if not isinstance(entry, dict):
@@ -242,8 +308,10 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
             "title": str(entry.get("title") or "").strip(),
             "short": str(entry.get("short") or "").strip()[:40],
             "note": str(entry.get("note") or ""),
+            "tags": _clean_tags(entry.get("tags")),
         })
     merged["items"] = items
+    merged["groups"] = _clean_groups(merged.get("groups"))
     try:
         merged["max_snippets"] = max(1, min(int(merged.get("max_snippets") or 4), 12))
     except (TypeError, ValueError):
@@ -251,8 +319,8 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
     merged["webhook"] = _clean_webhook(merged.get("webhook"))
     merged["index_wordart"] = bool(merged.get("index_wordart"))
     stored = {k: merged[k] for k in
-              ("items", "index_title", "index_text", "max_snippets", "output_dir",
-               "index_wordart", "webhook")}
+              ("items", "groups", "index_title", "index_text", "max_snippets",
+               "output_dir", "index_wordart", "webhook")}
     settings.update({CONFIG_KEY: json.dumps(stored, ensure_ascii=False)})
     settings.apply_to_env()  # visible to this process (and this request) immediately
     return load_config(config)
@@ -365,6 +433,25 @@ _INDEX_TEMPLATE = """<!doctype html>
   font-weight: 500;
 }
 .export-group h2 .flag-icon { width: 1.1em; height: 1.1em; }
+/* A themed subsection inside a country: italic, the same size as the running text, and
+   with no rule of its own above it — the country's solid rule already opened the block,
+   and the first theme sits straight beneath it. */
+.export-group h3 {
+  margin: .85rem 0 0;
+  font-size: 1rem;
+  font-style: italic;
+  font-weight: 400;
+}
+.export-group h3:first-of-type { margin-top: .35rem; }
+/* The rule that CLOSES a subsection. Same width as the country rule above it, dotted
+   rather than solid, so the page reads as one document with a hierarchy rather than as
+   a stack of boxes. An empty <p> rather than <hr>: it carries no meaning, only the
+   spacing of the paragraph it replaces. */
+.export-rule {
+  margin: .55rem 0 0;
+  max-width: 52rem;
+  border-bottom: 1px dotted var(--ink);
+}
 .export-list { list-style: none; margin: 0; padding: 0; max-width: 52rem; }
 /* No rule between items: the bold short name already starts each one, and a ruled row
    per instrument turned a reading list into a table. */
@@ -393,18 +480,71 @@ __ITEMS__
 """
 
 
+def _themed_sections(group: list[dict], groups: list[dict]) -> list[tuple[str, list[dict]]]:
+    """One jurisdiction's editions split into ``(heading, entries)`` themed sections.
+
+    Three rules, all the operator's:
+
+    * the SECTIONS come in the order the themes were configured, not the order the laws
+      were added and not alphabetically — a reading list has a shape, and "Data
+      Protection and Privacy" before "Platform Regulation" is an editorial judgement;
+    * WITHIN a section the laws are ordered by how heavily cited they are, so the ones a
+      reader is most likely to want are at the top of each theme;
+    * a law may carry SEVERAL themes and is listed under each of them. The Data
+      Protection Act belongs under privacy and under law enforcement both, and making
+      the operator pick one would misrepresent the law to save a line.
+
+    Returns a single unheaded section when no theme applies, so a set that has never
+    been themed renders exactly as it always did.
+    """
+    if not groups:
+        return [("", list(group))]
+
+    def weight(entry: dict) -> tuple:
+        # Total citations, then citing documents, then the title — a deterministic order
+        # even between two laws nothing has cited yet.
+        return (-int(entry.get("mentions") or 0), -int(entry.get("documents") or 0),
+                str(entry.get("title") or ""))
+
+    keyed = [(entry, {theme_key(t) for t in entry.get("tags") or []}) for entry in group]
+    sections: list[tuple[str, list[dict]]] = []
+    placed: set[int] = set()
+    for theme in groups:
+        rows = []
+        for n, (entry, tags) in enumerate(keyed):
+            if theme["tag"] in tags:
+                rows.append(entry)
+                placed.add(n)
+        if rows:
+            sections.append((theme["name"], sorted(rows, key=weight)))
+    rest = [entry for n, (entry, _tags) in enumerate(keyed) if n not in placed]
+    if not sections:
+        # No theme reached this jurisdiction at all — render it exactly as an unthemed
+        # set always has, in the order the operator arranged.
+        return [("", list(group))]
+    if rest:
+        # Never silently dropped. An untagged law keeps its place in the index under an
+        # honest heading, and tagging it makes the heading disappear.
+        sections.append((_UNTHEMED, sorted(rest, key=weight)))
+    return sections
+
+
 def render_index_html(
     entries: list[dict], *, title: str, intro: str,
     generated_at: datetime | None = None, wordart: bool = False,
+    groups: list[dict] | None = None,
 ) -> str:
     """``entries`` are the built editions: filename, title, short name, jurisdiction,
-    last-updated date, both counts, note.
+    last-updated date, both counts, note, themes.
 
     Editions are grouped by the jurisdiction that made the instrument, in the order those
     jurisdictions first appear in the operator's own list — so the set stays arranged the
-    way it was configured, only sectioned.
+    way it was configured, only sectioned. ``groups`` subdivides each jurisdiction into
+    named themes; see :func:`_themed_sections`.
     """
     from html import escape
+
+    groups = _clean_groups(groups)
 
     generated_at = generated_at or _now()
     intro_paragraphs = editorial_paragraphs(
@@ -418,12 +558,9 @@ def render_index_html(
     for entry in entries:
         grouped.setdefault(str(entry.get("jurisdiction") or _UNPLACED), []).append(entry)
 
-    blocks = []
-    for jurisdiction, group in grouped.items():
-        flag = flags.get(jurisdiction)
-        icon = f'<img class="flag-icon" src="{escape(flag, quote=True)}" alt="">' if flag else ""
+    def render_rows(section: list[dict]) -> str:
         rows = []
-        for entry in group:
+        for entry in section:
             # One sentence, not a row of dotted fields: the same facts read as the
             # annotation they are.
             meta = [
@@ -447,11 +584,15 @@ def render_index_html(
                                    count=len(entries)),
                 "export-note")
             short = str(entry.get("short") or "").strip()
+            # The EEA-relevance note is a statement about territorial scope, not part of
+            # the name — and repeated down a page of EU instruments it is the same eight
+            # words over and over. The edition itself keeps the official title.
+            name = strip_eea_relevance(entry["title"])
             # "DSA: Regulation (EU) 2022/2065 …" — the operator's own shorthand, bold, and
             # only here: inside an edition the instrument speaks under its full name.
             label = (
-                f'<span class="export-short">{escape(short)}:</span> {escape(entry["title"])}'
-                if short else escape(entry["title"])
+                f'<span class="export-short">{escape(short)}:</span> {escape(name)}'
+                if short else escape(name)
             )
             rows.append(
                 "          <li>\n"
@@ -461,13 +602,29 @@ def render_index_html(
                           for paragraph in note_paragraphs)
                 + "          </li>"
             )
+        return "\n".join(rows)
+
+    blocks = []
+    for jurisdiction, group in grouped.items():
+        flag = flags.get(jurisdiction)
+        icon = f'<img class="flag-icon" src="{escape(flag, quote=True)}" alt="">' if flag else ""
+        sections = []
+        for heading, section in _themed_sections(group, groups):
+            # Italic, no rule of its own above it, and a dotted rule CLOSING it — the
+            # subsection shape of an ordinary Word document. The country keeps the one
+            # solid rule under its own name, so the first theme sits straight beneath it.
+            sections.append(
+                (f"        <h3>{escape(heading)}</h3>\n" if heading else "")
+                + '        <ul class="export-list">\n'
+                + render_rows(section) + "\n"
+                + "        </ul>\n"
+                + ('        <p class="export-rule"></p>\n' if heading else "")
+            )
         blocks.append(
             '      <section class="export-group">\n'
             f"        <h2>{icon}{escape(jurisdiction)}</h2>\n"
-            '        <ul class="export-list">\n'
-            + "\n".join(rows) + "\n"
-            "        </ul>\n"
-            "      </section>"
+            + "".join(sections)
+            + "      </section>"
         )
 
     # The WordArt is a decoration on the SAME <h1>, not a replacement for it — the
@@ -714,6 +871,7 @@ def build_bundle(
             "short": item.get("short") or "",
             "jurisdiction": status.get("jurisdiction") or "",
             "note": item.get("note") or "",
+            "tags": list(item.get("tags") or []),
             "documents": int(status.get("documents") or 0),
             "mentions": int(status.get("mentions") or 0),
             "pending": int(status.get("pending") or 0),
@@ -726,6 +884,7 @@ def build_bundle(
     index_html = render_index_html(
         entries, title=config["index_title"], intro=config["index_text"],
         generated_at=started, wordart=config["index_wordart"],
+        groups=config.get("groups"),
     ).encode("utf-8")
     files.append(("index.html", index_html))
 

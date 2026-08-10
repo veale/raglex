@@ -210,7 +210,14 @@ export interface StaticBundleItem {
   // Operator's own shorthand ("DSA"), shown bold before the full name on the index page
   // only — inside an edition the instrument keeps its full title.
   short?: string;
+  // Which themed subsections of the index this law is listed under. More than one is
+  // normal: the Law Enforcement Directive belongs under privacy AND under policing.
+  tags?: string[];
 }
+// A themed subsection of the index, within a country. The ORDER of this list is the
+// order the subsections appear in — it is an editorial judgement, so it is stored
+// rather than derived. `tag` is what a law carries; `name` is the italic heading.
+export interface StaticBundleGroup { name: string; tag: string }
 // One outbound request when a run finishes: an ntfy push, a Slack hook, or a listener
 // that kicks off an scp. Deliberately a raw URL + headers + body rather than a named
 // integration.
@@ -220,6 +227,7 @@ export interface StaticBundleWebhook {
 }
 export interface StaticBundle {
   items: StaticBundleItem[];
+  groups?: StaticBundleGroup[];
   index_title: string; index_text: string; max_snippets: number;
   output_dir: string; resolved_output_dir?: string;
   // The index title as nostalgic rainbow WordArt. Index page only — an edition's title

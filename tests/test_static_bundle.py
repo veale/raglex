@@ -313,3 +313,156 @@ def test_without_a_configured_address_no_sitemap_is_invented(tmp_path, monkeypat
     out = tmp_path / "exports" / "site"
     assert not (out / "sitemap.xml").exists()
     assert not (out / "robots.txt").exists()
+
+
+# --- themed subsections within a country ------------------------------------
+
+_THEMES = [
+    {"name": "Data Protection and Privacy", "tag": "data-protection-and-privacy"},
+    {"name": "Platform Regulation", "tag": "platform-regulation"},
+    {"name": "Policing and Security", "tag": "policing-and-security"},
+]
+
+
+def _themed_entries():
+    return [
+        {"filename": "dsa.html", "title": "Digital Services Act", "jurisdiction": "European Union",
+         "documents": 90, "mentions": 400, "tags": ["platform-regulation"]},
+        {"filename": "gdpr.html", "title": "General Data Protection Regulation",
+         "jurisdiction": "European Union", "documents": 5000, "mentions": 90000,
+         "tags": ["Data Protection and Privacy"]},          # matched case-insensitively
+        {"filename": "led.html", "title": "Law Enforcement Directive",
+         "jurisdiction": "European Union", "documents": 120, "mentions": 800,
+         "tags": ["data-protection-and-privacy", "policing-and-security"]},
+        {"filename": "eidas.html", "title": "eIDAS Regulation", "jurisdiction": "European Union",
+         "documents": 8, "mentions": 20, "tags": []},
+    ]
+
+
+def _headings(page: str) -> list[str]:
+    import re
+    return re.findall(r"<h3>(.*?)</h3>", page)
+
+
+def _order(page: str, *filenames: str) -> list[str]:
+    return sorted(filenames, key=lambda f: page.index(f'href="{f}"'))
+
+
+def test_themes_appear_in_the_operators_order_not_the_laws():
+    """The sequence of subsections is an editorial judgement, so it comes from the
+    configured list — not from the order the laws were added, and not alphabetically."""
+    page = render_index_html(_themed_entries(), title="Statutes", intro="",
+                             groups=_THEMES)
+
+    assert _headings(page) == ["Data Protection and Privacy", "Platform Regulation",
+                               "Policing and Security", "Other instruments"]
+    # …and reversing the configuration reverses the page
+    page = render_index_html(_themed_entries(), title="Statutes", intro="",
+                             groups=list(reversed(_THEMES)))
+    assert _headings(page)[:3] == ["Policing and Security", "Platform Regulation",
+                                   "Data Protection and Privacy"]
+
+
+def test_within_a_theme_the_most_cited_law_comes_first():
+    page = render_index_html(_themed_entries(), title="Statutes", intro="",
+                             groups=_THEMES)
+    # GDPR (90,000 citations) above the LED (800), whichever order they were configured in
+    assert _order(page, "gdpr.html", "led.html") == ["gdpr.html", "led.html"]
+
+
+def test_a_law_with_two_themes_is_listed_under_both():
+    """The Law Enforcement Directive is a privacy instrument and a policing instrument.
+    Making the operator pick one would misrepresent the law to save a line."""
+    page = render_index_html(_themed_entries(), title="Statutes", intro="",
+                             groups=_THEMES)
+    assert page.count('href="led.html"') == 2
+
+
+def test_an_untagged_law_is_listed_last_rather_than_dropped():
+    page = render_index_html(_themed_entries(), title="Statutes", intro="",
+                             groups=_THEMES)
+    assert _headings(page)[-1] == "Other instruments"
+    assert 'href="eidas.html"' in page
+    # tag it, and the catch-all heading disappears
+    tagged = [{**e, "tags": e["tags"] or ["platform-regulation"]} for e in _themed_entries()]
+    assert "Other instruments" not in "".join(_headings(
+        render_index_html(tagged, title="Statutes", intro="", groups=_THEMES)))
+
+
+def test_a_dotted_rule_closes_each_subsection_and_none_opens_the_first():
+    """MS Word's shape: the country keeps its one solid rule, each theme is closed by a
+    dotted one of the same width, and nothing sits between the country and its first
+    theme."""
+    page = render_index_html(_themed_entries(), title="Statutes", intro="",
+                             groups=_THEMES)
+    body = page.split("<main>")[1]
+    assert body.count('<p class="export-rule">') == 4          # one per subsection
+    # nothing between the country heading and the first italic subheading
+    between = body.split("</h2>")[1].split("<h3>")[0]
+    assert "export-rule" not in between
+    assert ".export-rule" in page and "1px dotted var(--ink)" in page
+    assert "max-width: 52rem" in page                          # the country rule's width
+    assert "font-style: italic" in page
+
+
+def test_an_unthemed_set_renders_exactly_as_it_always_did():
+    """A set that has never been themed must not grow headings or rules."""
+    page = render_index_html(_themed_entries(), title="Statutes", intro="", groups=[])
+    assert "<h3>" not in page and 'class="export-rule"' not in page
+    # …and the operator's own order is preserved, not re-sorted by citations
+    assert _order(page, "dsa.html", "gdpr.html") == ["dsa.html", "gdpr.html"]
+    assert page.index('href="dsa.html"') < page.index('href="gdpr.html"')
+
+
+def test_a_country_no_theme_reaches_stays_one_plain_list():
+    page = render_index_html(
+        [{"filename": "osa.html", "title": "Online Safety Act 2023",
+          "jurisdiction": "United Kingdom", "documents": 1, "mentions": 1, "tags": []},
+         {"filename": "dpa.html", "title": "Data Protection Act 2018",
+          "jurisdiction": "United Kingdom", "documents": 9, "mentions": 9, "tags": []}],
+        title="Statutes", intro="", groups=_THEMES)
+    assert "<h3>" not in page
+    assert page.index('href="osa.html"') < page.index('href="dpa.html"')
+
+
+def test_the_eea_relevance_note_is_dropped_from_the_index():
+    """A statement about territorial scope, not part of the name — and forty repetitions
+    of the same eight words down a page of EU instruments."""
+    from raglex.static_bundle import strip_eea_relevance
+
+    assert strip_eea_relevance(
+        "Regulation (EU) 2022/2065 … (Digital Services Act) (Text with EEA relevance)"
+    ) == "Regulation (EU) 2022/2065 … (Digital Services Act)"
+    assert strip_eea_relevance("Directive 2002/58/EC (Text with EEA relevance).") \
+        == "Directive 2002/58/EC"
+    assert strip_eea_relevance("Data Protection Act 2018") == "Data Protection Act 2018"
+
+    page = render_index_html(
+        [{"filename": "dsa.html", "jurisdiction": "European Union", "documents": 1,
+          "mentions": 1, "title": "Digital Services Act (Text with EEA relevance)"}],
+        title="Statutes", intro="")
+    assert "EEA relevance" not in page
+    assert ">Digital Services Act</a>" in page
+
+
+def test_themes_and_tags_survive_a_save_and_reload(tmp_path):
+    """The plan is one settings row; a theme the operator arranged has to come back in
+    the order they arranged it, and a law's tags have to come back with the law."""
+    config = _config(tmp_path)
+    settings = SettingsStore(config.settings_path)
+    saved = save_config(settings, {
+        "groups": [{"name": "Platform Regulation"},
+                   {"name": "Data Protection and Privacy", "tag": "Privacy"},
+                   {"name": ""},                                  # nameless → dropped
+                   {"name": "Duplicate", "tag": "privacy"}],      # same tag → dropped
+        "items": [{"stable_id": "32022R2065", "slug": "dsa",
+                   "tags": ["Platform Regulation", "platform-regulation", ""]}],
+    })
+    assert [g["name"] for g in saved["groups"]] == ["Platform Regulation",
+                                                    "Data Protection and Privacy"]
+    # a group with no tag of its own is keyed on its heading
+    assert saved["groups"][0]["tag"] == "platform-regulation"
+    assert saved["groups"][1]["tag"] == "privacy"
+    # a law's tags are de-duplicated by the same key, keeping what was typed
+    assert saved["items"][0]["tags"] == ["Platform Regulation"]
+    assert load_config(config)["groups"] == saved["groups"]
