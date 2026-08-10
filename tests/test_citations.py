@@ -736,7 +736,10 @@ def test_a_yearless_statute_title_never_becomes_a_corpus_wide_shorthand(catalogu
     assert is_statute_family_name("the Data Protection Acts")
     assert is_statute_family_name("Data Protection Act")
     assert not is_statute_family_name("Data Protection Act 2018")
+    assert not is_statute_family_name("the 2018 Act")
     assert not is_statute_family_name("Vienna Convention")
+    # An EU instrument's nickname is year-less too, but it names exactly one act.
+    assert not is_statute_family_name("the Dublin III Regulation")
 
     text = ('under Regulation (EU) 2016/679 ("the Data Protection Act") the '
             'controller must act')

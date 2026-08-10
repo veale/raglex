@@ -944,9 +944,12 @@ def _protected_shorthand_target(name: str | None) -> str | None:
 # Protection Act 1998 ('the Data Protection Act')" and then uses the short form for
 # forty pages has defined it, for itself, unambiguously. What may not travel is the
 # definition's escape into other documents.
-_YEARLESS_STATUTE_NOUN = re.compile(
-    r"(?i)\b(?:acts?|measures?|regulations?|rules?|orders?|codes?|"
-    r"schemes?|statutes?)$")
+#
+# Only ACT and MEASURE, the two nouns the statute grammar owns and where the year is
+# the identifier. "the Dublin III Regulation" and "the Rome I Regulation" also end in
+# an instrument noun and carry no year, but they are nicknames for one instrument
+# apiece and the store is right to carry them.
+_YEARLESS_STATUTE_NOUN = re.compile(r"(?i)\b(?:acts?|measures?)$")
 
 
 def is_statute_family_name(name: str | None) -> bool:
