@@ -38,6 +38,8 @@ from .sg_legislation import SGLegislationAdapter
 from .echr import ECHRAdapter
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
+from .eu_curia_observations import EUCuriaObservationsAdapter
+from .eu_euipo import EUIPOPublicationsAdapter
 from .fr_conseil_etat import FrConseilEtatAdapter
 from .fr_dila import FrDilaAdapter
 from .fr_judilibre import FrJudilibreAdapter
@@ -211,6 +213,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "it-agcm": AGCMBulletinAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
     "eu-cellar": EUCellarAdapter,
+    # Public party/Member State/Commission submissions in CJEU cases. These are
+    # published by InfoCuria only (not EUR-Lex), one PDF record per language rendition.
+    "eu-curia-observations": EUCuriaObservationsAdapter,
     # ECHR — HUDOC; resolves by ECLI (ECLI:CE:ECHR:…) OR application number (58170/13).
     "echr": ECHRAdapter,
     # House of Lords (1996–2009) — scraped from publications.parliament.uk. Resolves
@@ -347,6 +352,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "ie-dpc-guidance": IrishDPCGuidanceAdapter,
     "nl-ap": APDocumentsAdapter,
     "eu-berec": BERECAdapter,
+    # EUIPO Observatory publications — the site's own public Algolia index faceted
+    # to observatory-publications, then the study PDFs linked one level down.
+    "eu-euipo": EUIPOPublicationsAdapter,
     "dma-consultations": DMAConsultationsAdapter,
     "dma-annual-reports": DMAAnnualReportsAdapter,
     # national DPA guidance libraries (§ eu_dpa_guidance)
@@ -906,6 +914,22 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "category and stops at the cursor.",
         (), ("BoR document number", "BoR (26) 88_1"),
     ),
+    "eu-euipo": SourceInfo(
+        "eu-euipo", "EUIPO Observatory publications (EU intellectual property)",
+        "guidance", "EU", False,
+        "The European Observatory on Infringements of Intellectual Property Rights: the "
+        "IP Perception surveys, the IPR Infringement and Online Advertising series, the "
+        "sector-level economic-cost studies and the legal/case-law comparisons — the "
+        "evidence base the EU institutions cite when they legislate on counterfeiting "
+        "and enforcement. Discovery is the site's own public Algolia index faceted to "
+        "observatory-publications (nine pages, no crawl and no browser); the study "
+        "itself is the PDF linked from each landing page, and every linked PDF is "
+        "followed, extracted and inlined — so a report's executive summary, its press "
+        "release and its per-Member-State country notes are searchable as one "
+        "publication rather than lost behind a filename.",
+        (SourceOption("max_pdfs", "Linked PDFs to follow per publication", "60"),),
+        ("EUIPO publication slug", "euipn-trends-report-2025"),
+    ),
     "dma-consultations": SourceInfo(
         "dma-consultations", "DMA public consultations (European Commission)",
         "guidance", "EU", False,
@@ -938,6 +962,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("legislation_celex", "Legislation CELEX to follow", "e.g. 32004R0139"),
          SourceOption("cited_by_celex", "Find cases citing this case", "e.g. 62018CJ0311")),
         ("CJEU case CELEX (62018CJ0511)", "ECLI:EU:C:…"),
+    ),
+    "eu-curia-observations": SourceInfo(
+        "eu-curia-observations", "CJEU published written observations (InfoCuria)",
+        "preparatory", "EU", False,
+        "Statements of case and written observations which the Court has made public on "
+        "InfoCuria but which are not carried by EUR-Lex. The public CURIA search service "
+        "is filtered to OBSRP_PUB documents and each stable logical document is fetched "
+        "as an official PDF in every language CURIA offers. Discovery is a weekly full "
+        "walk so a filing published late is not missed; the default backfill is limited "
+        "to five years. Each filing is linked to the held CJEU judgment through its "
+        "decision CELEX alias, and its PDF text runs through the normal multilingual "
+        "citation grammars.",
+        (SourceOption("years", "Maximum filing age in years", "5"),),
+        ("InfoCuria logical document id", "CJEU case number"),
     ),
     "echr": SourceInfo(
         # keyword_search stays False: HUDOC's query language is Lucene-ish and a bare
@@ -1882,6 +1920,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
     "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
     "eu-cellar": "server", "eu-legislation": "server",
+    # CURIA can make an old filing public later, so a date cursor is unsafe. Six API
+    # pages currently cover the complete public observations register.
+    "eu-curia-observations": "full-walk",
     # client-side early-stop on a newest-first feed
     "uk-caselaw": "early-stop", "uk-grc": "early-stop", "uk-ftt-tax": "early-stop",
     "uk-utaac": "early-stop", "uk-iac": "early-stop", "uk-legislation": "early-stop",
@@ -1910,6 +1951,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
     "nl-ap": "early-stop",
     "eu-berec": "early-stop", "dma-consultations": "early-stop",
+    # Nine pages of JSON, not ordered by date, and a study's page is re-published
+    # when a language version or a country note is added. Walk it all.
+    "eu-euipo": "full-walk",
     "dma-annual-reports": "full-walk",
     "fr-cnil-guidance": "full-walk", "es-aepd-guias": "full-walk",
     "dk-datatilsynet": "full-walk", "de-dsk": "full-walk",

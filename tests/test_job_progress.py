@@ -135,3 +135,48 @@ def test_a_slow_discovery_keeps_reporting_while_it_blocks():
     assert [s.stable_id for s in pulsed] == ["a", "b"]
     assert beats, "a discovery that blocks reported nothing at all"
     assert all(b["stage"] == "discovering eu-cellar" for b in beats)
+
+
+def test_a_resumed_walk_reports_its_position_not_a_bare_zero():
+    """Discovery and fetching interleave, so the pulse lands between the harvest loop's
+    own reports. Carrying ``done=0`` made the Jobs panel flip between "harvesting
+    22,000 of 24,059" and "discovering 0" every ten seconds — a 94%-complete Ofgem
+    backfill reading as one that keeps going back to the start."""
+    import time
+
+    from raglex.core.models import Stub
+    from raglex.pipeline.runner import Pipeline
+
+    beats: list[dict] = []
+
+    def resumed_discover():
+        # the adapter reports the absolute offset of the page it resumed on
+        yield Stub(stable_id="a", hints={"resume_offset": 22750, "feed_total": 24059})
+        time.sleep(0.5)
+        yield Stub(stable_id="b", hints={"resume_offset": 22760, "feed_total": 24059})
+
+    pulsed = Pipeline._pulsed_stubs(
+        resumed_discover(), source="uk-ofgem-publications",
+        on_progress=lambda **p: beats.append(p), interval=0.15)
+    assert [s.stable_id for s in pulsed] == ["a", "b"]
+    # every beat after the first stub knows where in the register the walk is
+    assert beats and all(b["done"] >= 22750 for b in beats)
+    assert beats[-1]["discovered"] == 1
+
+
+def test_the_pulse_still_says_zero_before_the_first_stub_arrives():
+    """Zero is right for exactly one moment: nothing has a position yet."""
+    import time
+
+    from raglex.core.models import Stub
+    from raglex.pipeline.runner import Pipeline
+
+    beats: list[dict] = []
+
+    def slow_first():
+        time.sleep(0.5)
+        yield Stub(stable_id="a", hints={})
+
+    list(Pipeline._pulsed_stubs(slow_first(), source="s",
+                                on_progress=lambda **p: beats.append(p), interval=0.15))
+    assert beats and beats[0]["done"] == 0 and beats[0]["discovered"] == 0

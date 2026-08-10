@@ -159,6 +159,13 @@ class Pipeline:
         cancelled = False  # set when a cooperative cancel breaks the crawl early
         wm_frozen = False  # a transient fetch failure freezes the cursor at that stub
         last_emit = 0.0
+        # Where in the upstream register this RUN began. An interrupted backfill resumes
+        # at the cursor it checkpointed, but ``stats.discovered`` counts only this
+        # attempt — so a 74%-complete Ofgem walk that resumed at item 17,830 reported
+        # "4,921 of 24,059" and read, correctly enough, as having gone back to the
+        # beginning. The adapter already tells us the absolute offset of the page it is
+        # on; the first one it reports is where this attempt started.
+        run_offset0: int | None = None
 
         # An immediate heartbeat so the Jobs panel shows "discovering …" the moment the run
         # starts, not "starting…". The held-prefilter below buffers ~200 stubs before the
@@ -193,12 +200,17 @@ class Pipeline:
                 # item; a fast walk reports a few times a second. The resume-offset
                 # checkpoint rides these events, so at worst a restart replays the few
                 # hundred stubs since the last emit — all deduped.
+                offset = stub.hints.get("resume_offset")
+                if offset is not None and run_offset0 is None:
+                    run_offset0 = int(offset)
                 now = _time.monotonic()
                 if on_progress and now - last_emit >= 0.25:
                     last_emit = now
                     progress = {
                         "stage": f"harvesting {adapter.source}",
-                        "done": stats.discovered,
+                        # Absolute position in the register when this run resumed into
+                        # the middle of one, so the bar continues instead of restarting.
+                        "done": stats.discovered + (run_offset0 or 0),
                         "stored": stats.stored,
                         "item": stub.stable_id,
                     }
@@ -503,26 +515,38 @@ class Pipeline:
         is exactly as silent next time round. So the pulse runs on its own thread and says
         what is true: still discovering, this many found. The thread only reads the count;
         the generator below is its only writer.
+
+        It reports the walk's POSITION, never a bare zero. Discovery and fetching are
+        interleaved — the walk streams — so a pulse carrying ``done=0`` lands between two
+        of the loop's own reports and the panel flips between "harvesting 22,000 of
+        24,059" and "discovering 0" every ten seconds, which reads as a job repeatedly
+        going back to the start. Zero is right only before the first stub arrives, which
+        is the one moment nothing else has a position to report.
         """
         if not on_progress:
             yield from source_stubs
             return
         import threading
 
-        state = {"found": 0}
+        state = {"found": 0, "offset0": 0}
         stop = threading.Event()
 
         def _beat():
             while not stop.wait(interval):
                 try:
-                    on_progress(stage=f"discovering {source}", done=0,
-                                discovered=state["found"])
+                    found = state["found"]
+                    on_progress(stage=f"discovering {source}",
+                                done=(state["offset0"] + found) if found else 0,
+                                discovered=found)
                 except Exception:  # noqa: BLE001 — a heartbeat must never break the walk
                     return
 
         threading.Thread(target=_beat, name="discovery-pulse", daemon=True).start()
         try:
             for item in source_stubs:
+                if not state["found"]:
+                    # Where this attempt resumed into the register, if it did.
+                    state["offset0"] = int(item.hints.get("resume_offset") or 0)
                 state["found"] += 1
                 yield item
         finally:

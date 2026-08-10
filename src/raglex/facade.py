@@ -4061,19 +4061,39 @@ class Facade:
     # Search result counts stop here; the UI shows "N+" past it (see search_corpus).
     _SEARCH_COUNT_CAP = 1000
 
-    def _citation_query_ids(self, cat, query: str) -> list[str]:
-        """If the search text is itself a citation ("[2011] IESC 26", an ECLI, a report
-        citation), the document id(s) it resolves to — via the citation grammar's candidate
-        and the folded alias table — so search can match the exact document by id. Empty for
-        an ordinary keyword query, which then falls through to the substring search."""
+    #: Grammars that recognise an instrument by its NAME rather than by an identifier.
+    #: A name is not a key: Ireland and the UK both have a Data Protection Act 2018, and
+    #: the gazetteer behind these grammars only holds the UK one.
+    _NAME_GRAMMARS = frozenset({
+        "uk_statute_named", "uk_act_section", "uk_si_short_name", "uk_si_acronym",
+        "eu_named", "eu_named_full", "recital_eu_named", "recital_eu_named_full",
+    })
+
+    def _citation_query_ids(self, cat, query: str) -> tuple[list[str], bool]:
+        """``(ids, exact)`` — the document id(s) this search text resolves to as a
+        citation, and whether it did so by an IDENTIFIER rather than by a name.
+
+        "[2011] IESC 26", an ECLI and a report citation are identifiers: they name one
+        document, and matching it by primary key beats substring-scanning (the id slug
+        omits the brackets, so the trigram OR would miss it). A statute short title is
+        not. Searching "Data Protection Act 2018" resolved through the UK gazetteer to
+        ``ukpga/2018/12`` and REPLACED the query with that id — so the Irish Act of the
+        same name, held and titled with those exact words, could not be found at all.
+        With ``exact`` false the caller keeps the text search and merely ranks the
+        resolved document first.
+
+        Empty for an ordinary keyword query, which falls through to the title search.
+        """
         q = (query or "").strip()
         if not q:
-            return []
+            return [], False
         from .core.text import fold
         ids: list[str] = []
+        exact = False
         dst = cat.get_alias(fold(q))            # a report/neutral form stored as an alias
         if dst:
             ids.append(dst)
+            exact = True
         try:
             from .citations import extract_citations
             for c in extract_citations(q):
@@ -4082,9 +4102,10 @@ class Facade:
                     hit = cat.find_document_id(c.candidate_id)
                     if hit:
                         ids.append(hit)
+                    exact = exact or c.method not in self._NAME_GRAMMARS
         except Exception:  # noqa: BLE001 — never let citation parsing break search
             pass
-        return list(dict.fromkeys(i for i in ids if i))
+        return list(dict.fromkeys(i for i in ids if i)), exact
 
     def search_corpus(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
                       facets: bool = True, **filters) -> dict:
@@ -4107,10 +4128,16 @@ class Facade:
             # id slug omits the brackets, so the trigram OR would miss it). Ordinary keyword
             # queries resolve to nothing and fall through to the fast title/id/ECLI search.
             if f.get("query"):
-                ids = self._citation_query_ids(cat, f["query"])
-                if ids:
+                ids, exact = self._citation_query_ids(cat, f["query"])
+                if ids and exact:
                     f = {k: v for k, v in f.items() if k != "query"}
                     f["id_in"] = ids
+                elif ids:
+                    # A NAME, not a key. Keep the text search — every same-titled Act in
+                    # every jurisdiction has to stay reachable — and merely rank the
+                    # instrument the gazetteer knows first.
+                    f["id_or"] = ids
+                    boost = ids
                 else:
                     # …and a name the case is known by rather than titled with ("Dun &
                     # Bradstreet Austria") lives in the alias table: resolve it there and OR

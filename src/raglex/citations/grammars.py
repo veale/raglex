@@ -144,12 +144,60 @@ _NAME_TO_CELEX = {
     # blacklist (Annex I) is the part the case law is about — "Annex I, point 29 UCPD".
     # Without the name here that reference resolves to nothing at all.
     "unfair commercial practices directive": "32005L0029", "ucpd": "32005L0029",
+    # ── the EU intellectual-property acquis ─────────────────────────────────
+    # The instruments the EUIPO Observatory's studies, the Commission's IP enforcement
+    # work and the CJEU's trade-mark/copyright case law are ABOUT. Each is confirmed
+    # held in the corpus. Names only where the name identifies ONE instrument: a bare
+    # "the Designs Directive" meant 98/71/EC until 2024 and (EU) 2024/2823 after it, and
+    # "the Customs Regulation" is a different act in every field, so neither is here —
+    # the numeric grammar still resolves them when written out.
+    "european union trade mark regulation": "32017R1001",
+    "eu trade mark regulation": "32017R1001",
+    "community trade mark regulation": "32017R1001",
+    "trade mark directive": "32015L2436", "trade marks directive": "32015L2436",
+    "european union trade mark directive": "32015L2436",
+    "community design regulation": "32002R0006",
+    "community designs regulation": "32002R0006",
+    # Directive 2004/48/EC. "the Enforcement Directive" alone is used of other acts in
+    # other fields, so only the qualified names are mapped (plus IPRED, its universal
+    # acronym).
+    "ip enforcement directive": "32004L0048",
+    "ipr enforcement directive": "32004L0048",
+    "intellectual property rights enforcement directive": "32004L0048",
+    "trade secrets directive": "32016L0943",
+    "customs enforcement regulation": "32013R0608",
+    "ipr customs regulation": "32013R0608",
+    "infosoc directive": "32001L0029", "information society directive": "32001L0029",
+    "software directive": "32009L0024", "computer programs directive": "32009L0024",
+    "database directive": "31996L0009",
+    "rental and lending rights directive": "32006L0115",
+    "rental and lending directive": "32006L0115",
+    "term of protection directive": "32006L0116", "term directive": "32006L0116",
+    "orphan works directive": "32012L0028",
+    "marrakesh directive": "32017L1564",
+    "portability regulation": "32017R1128",
+    "satcab directive": "32019L0789",
+    "collective rights management directive": "32014L0026",
+    "crm directive": "32014L0026",
+    "supplementary protection certificate regulation": "32009R0469",
+    "spc regulation": "32009R0469",
+    "unitary patent regulation": "32012R1257",
+    "biotech directive": "31998L0044", "biotechnology directive": "31998L0044",
+    "biotechnological inventions directive": "31998L0044",
+    "geographical indications regulation": "32024R1143",
+    "craft and industrial geographical indications regulation": "32023R2411",
+    "community plant variety rights regulation": "31994R2100",
+    "plant variety rights regulation": "31994R2100",
     # The two courts' Rules of Procedure. Every OJ application notice ends by asking
     # for costs "pursuant to Articles 133 and 134 of the Rules of Procedure of the
     # General Court", and the reference resolved to nothing at all: the name is not a
     # Regulation/Directive, so no numeric grammar could reach it.
     "rules of procedure of the general court": "32015Q0423(01)",
     "rules of procedure of the court of justice": "32012Q0929(01)",
+    # The acronyms added to _EU_ACRONYMS need their own keys: the lookup is by the
+    # matched text, folded, and an acronym never reaches the full-name map.
+    "eutmr": "32017R1001", "eutmd": "32015L2436",
+    "ipred": "32004L0048", "cdsm": "32019L0790",
 }
 # Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
 # resolves to the Law Enforcement Directive; the spelled-out names match case-
@@ -161,7 +209,11 @@ _NAME_TO_CELEX = {
 # A bare uppercase "AIA"/"CRA"/"DGA"/"EAA" is likewise left out: those collide with
 # ordinary initialisms in other corpora (a Canadian "CRA" is the Canada Revenue
 # Agency), and the spelled-out names below carry them.
-_EU_ACRONYMS = r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|EMFA|AVMSD|EECC|UCPD"
+# EUTMR / EUTMD / IPRED / CDSM are the IP acquis's universal acronyms and collide with
+# nothing. CDR, TSD, SPC and UPC are deliberately absent: each is an ordinary
+# abbreviation somewhere else in this corpus, and their spelled-out names carry them.
+_EU_ACRONYMS = (r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|EMFA|AVMSD|EECC|UCPD"
+                r"|EUTMR|EUTMD|IPRED|CDSM")
 _EU_FULL_NAMES = "|".join(
     re.escape(k).replace(r"\ ", r"\s+")
     for k in sorted(_NAME_TO_CELEX, key=len, reverse=True) if " " in k)

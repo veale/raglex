@@ -379,3 +379,21 @@ def test_a_jurisdiction_scoped_find_does_not_answer_with_another_countrys_act():
 
     uk = f.find("Data Protection Act 2018", jurisdiction="United Kingdom")
     assert uk["citation_match"]["stable_id"] == "ukpga/2018/12"
+
+
+def test_a_statute_name_search_reaches_every_jurisdictions_act_of_that_name():
+    """Searching the corpus for "Data Protection Act 2018" resolved the words as a
+    CITATION through the UK gazetteer and then replaced the query with that one id — so
+    the Irish Act, held and titled with those exact words, could not be found at all.
+    A name is not a key; only an identifier may short-circuit the text search."""
+    f = _two_data_protection_acts()
+
+    hit = f.search_corpus(query="Data Protection Act 2018", doc_type="legislation")
+    assert {r["stable_id"] for r in hit["items"]} == {
+        "ukpga/2018/12", "ie/2018/act/7@2026-06-25"}
+    # …and the instrument the gazetteer knows by that name still ranks first
+    assert hit["items"][0]["stable_id"] == "ukpga/2018/12"
+
+    # An IDENTIFIER still matches by primary key, which is the whole point of the hop.
+    exact = f.search_corpus(query="ukpga/2018/12")
+    assert [r["stable_id"] for r in exact["items"]] == ["ukpga/2018/12"]
