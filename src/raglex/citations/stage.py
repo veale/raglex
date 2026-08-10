@@ -1080,6 +1080,60 @@ def _rebind_held_assimilated_regulations(
     return rebound
 
 
+# Ireland's Data Protection Act 2018, section 2(3), in terms: "Unless the context
+# otherwise requires, a reference in this Act (other than in Part 5) to a numbered
+# Article is a reference to the Article so numbered of the Data Protection Regulation."
+#
+# Written out for THIS Act only, not detected from the wording. The clause is a common
+# enough drafting device that a general reader for it looks tempting, and it is exactly
+# the kind of pattern that would misfire: the sentence has a dozen shapes, the excluded
+# Part is named differently each time, and being wrong means silently re-pointing a
+# statute's every cross-reference at the wrong instrument.
+#
+# Without it, the 96 bare Articles in this Act were scattered by carry-forward over
+# whatever EU instrument the text last happened to name: 28 to the air-services
+# Regulation, 15 to the Migration Pact — including the age of a child under Article 8 —
+# 13 to the repealed Directive 95/46, and only 38 to the Regulation the Act says they
+# all mean.
+_IE_DPA_2018_RE = re.compile(r"^ie/2018/act/7(?:@|$)")
+_IE_DPA_2018_GDPR = "32016R0679"
+# Part 5 is carved out because it implements the Law Enforcement Directive instead, and
+# it says so every time — "Article 50(8) of the Directive" — so nothing there needs a
+# convention. The carve-out only has to stop THIS rule reaching in.
+_IE_DPA_PART5_RE = re.compile(r"(?m)^PART\s*5\s+Processing of Personal Data")
+_IE_DPA_PART6_RE = re.compile(r"(?m)^PART\s*6\b")
+
+
+def _apply_irish_dpa_article_convention(doc, cites: list, text: str | None) -> list:
+    """Point this Act's bare "Article N" references at the GDPR, as section 2(3) says.
+
+    Only the GUESSED ones. A reference that names its own instrument ("Article 26(4) of
+    Directive 95/46/EC") is the context requiring otherwise, and section 2(3) defers to
+    it; carry-forward is the only method here that was guessing in the first place.
+    """
+    if not _IE_DPA_2018_RE.match(str(_doc_field(doc, "stable_id") or "")):
+        return cites
+    if not text:
+        return cites
+    start = _IE_DPA_PART5_RE.search(text)
+    if not start:
+        # The Part 5 boundary is what keeps this off the law-enforcement half. Without
+        # it the safe answer is to change nothing.
+        return cites
+    end = _IE_DPA_PART6_RE.search(text, start.end())
+    part5 = (start.start(), end.start() if end else len(text))
+    out = []
+    for cite in cites:
+        if (cite.method == "carry_forward"
+                and (cite.pinpoint or "").startswith("Article ")
+                and not (part5[0] <= (cite.char_start or 0) < part5[1])
+                and cite.candidate_id != _IE_DPA_2018_GDPR):
+            out.append(replace(cite, candidate_id=_IE_DPA_2018_GDPR, entity_kind="regulation"))
+        else:
+            out.append(cite)
+    return out
+
+
 def _is_irish_host(doc) -> bool:
     """Is this document IRISH — by any route, not just an Irish court?
 
@@ -1895,6 +1949,9 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str,
         if canonical:
             filtered = [replace(c, candidate_id=canonical.get(c.candidate_id, c.candidate_id))
                         for c in filtered]
+    # Last, so it overrides whatever carry-forward guessed: an Act that says what its
+    # own bare Articles mean outranks the heuristic that would otherwise infer it.
+    filtered = _apply_irish_dpa_article_convention(doc, filtered, text)
     return filtered
 
 

@@ -286,10 +286,26 @@ def _child_text(elem: ET.Element, name: str) -> str | None:
     child = _child(elem, name)
     if child is None:
         return None
+    # A container's <title> carries its heading TWICE: once as the element's own text, a
+    # plain-text convenience copy, and again as the typeset <p> rendering.
+    #
+    #   <title>PART 1 Preliminary and General
+    #     <p><font>PART 1</font></p>
+    #     <p><font>Preliminary and General</font></p></title>
+    #
+    # Reading the whole subtree gave "PART 1 Preliminary and General PART 1 Preliminary
+    # and General" — every Part and Chapter of every revised Irish Act named twice, and
+    # the convenience copy is not reliably spaced ("PART 2Data Protection Commission").
+    # Where the <p> rendering exists it is the better of the two, so take it alone.
+    # Restricted to <p> children on purpose: inline markup (<i>, <b>, <xref>) is part of
+    # the heading, not a second copy of it, and must still be read through.
+    paragraphs = [c for c in child if localname(c.tag).lower() == "p"]
+    source = paragraphs if paragraphs else [child]
     # Joined with a space, not concatenated: a container's <title> holds its number and
     # its heading as separate <p>s ("PART 1", "Preliminary"), which run together into
     # "PART 1Preliminary" if the element boundary isn't treated as a break.
-    return " ".join(" ".join(child.itertext()).split()) or None
+    joined = " ".join(" ".join(node.itertext()) for node in source)
+    return " ".join(joined.split()) or None
 
 
 def _label(elem: ET.Element, kind: str) -> str:
