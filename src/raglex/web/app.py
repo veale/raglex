@@ -572,14 +572,24 @@ def create_app(config: Config | None = None) -> FastAPI:
         The scope a citation fix needs: when a grammar, alias or shorthand changes, the
         documents to re-read are the ones that MENTION the thing — which is exactly what
         the edges do not yet record, so the graph cannot find them. Body:
-        ``{query, exact?, limit?}``; several queries joined by ``|||`` are unioned."""
+        ``{query, exact?, limit?, citers_of?}``; several queries joined by ``|||`` are
+        unioned, and ``citers_of`` adds every document holding a resolved edge into any
+        of those targets — the scope a grammar fix needs when the affected documents are
+        the ones already linked to a known set of instruments, which no phrase describes.
+        Either is enough on its own."""
         query = str((payload or {}).get("query") or "").strip()
-        if not query:
-            return JSONResponse({"error": "query is required"}, status_code=422)
+        citers_of = [str(t).strip() for t in ((payload or {}).get("citers_of") or [])
+                     if str(t or "").strip()]
+        if not query and not citers_of:
+            return JSONResponse({"error": "query or citers_of is required"},
+                                status_code=422)
+        label = (f"re-extract documents matching {query[:60]}" if query
+                 else f"re-extract everything citing {len(citers_of)} instruments")
         return _start_job(
-            "rescan-matching", f"re-extract documents matching {query[:60]}",
+            "rescan-matching", label,
             {"query": query, "exact": bool((payload or {}).get("exact", True)),
-             "limit": int((payload or {}).get("limit") or 20000)})
+             "limit": int((payload or {}).get("limit") or 20000),
+             "citers_of": citers_of})
 
     @app.post("/jobs/rescan")
     def job_rescan_full_ep(payload: dict = Body(default={})) -> dict:
