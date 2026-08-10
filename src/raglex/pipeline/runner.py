@@ -321,7 +321,7 @@ class Pipeline:
                 if on_progress:
                     fetch_progress = {
                         "stage": f"fetching {adapter.source}",
-                        "done": stats.discovered,
+                        "done": stats.discovered + (run_offset0 or 0),
                         "stored": stats.stored,
                         "item": stub.stable_id,
                     }
@@ -389,7 +389,7 @@ class Pipeline:
                 if on_progress:
                     store_progress = {
                         "stage": f"storing {adapter.source}",
-                        "done": stats.discovered,
+                        "done": stats.discovered + (run_offset0 or 0),
                         "stored": stats.stored,
                         "item": record.stable_id,
                     }

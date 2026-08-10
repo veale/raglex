@@ -180,3 +180,16 @@ def test_the_pulse_still_says_zero_before_the_first_stub_arrives():
     list(Pipeline._pulsed_stubs(slow_first(), source="s",
                                 on_progress=lambda **p: beats.append(p), interval=0.15))
     assert beats and beats[0]["done"] == 0 and beats[0]["discovered"] == 0
+
+
+def test_every_stage_of_a_resumed_harvest_reports_the_same_absolute_position():
+    """The harvest reports through three stages — harvesting, fetching, storing — and a
+    resumed run has to be consistent across all of them. Fixing only the first left the
+    Ofgem backfill still showing "106 of 24,061" while sitting at item 23,166."""
+    import inspect
+
+    from raglex.pipeline.runner import Pipeline
+
+    source = inspect.getsource(Pipeline.run)
+    assert source.count('"done": stats.discovered + (run_offset0 or 0)') == 3
+    assert '"done": stats.discovered,' not in source
