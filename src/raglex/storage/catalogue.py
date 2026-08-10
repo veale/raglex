@@ -4175,12 +4175,21 @@ class Catalogue:
           AND relations.candidate_id IS NOT NULL
           AND a.alias = lower(relations.candidate_id)
         """,
-        # 3. the raw string is a named alias ("UK GDPR" → the assimilated regulation)
+        # 3. the raw string is a named alias ("UK GDPR" → the assimilated regulation).
+        #    ONLY where extraction proposed no candidate of its own. A raw statute name
+        #    or party name is the weakest evidence the ladder has, and the alias table
+        #    is global while the meaning of a name is jurisdictional: letting it
+        #    override a stated candidate sent Ireland's Data Protection Act 2018 to the
+        #    UK Act, its Road Traffic Act 1961 to Singapore's, and Winterwerp v
+        #    Netherlands to a House of Lords appeal. A candidate the corpus does not
+        #    hold stays PENDING, which is the honest state and the documented contract —
+        #    it goes live the moment the target is harvested.
         """
         UPDATE relations SET dst_id = d.stable_id, resolution_status = 'resolved'
         FROM citation_aliases a JOIN documents d
           ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
         WHERE relations.resolution_status = 'pending'
+          AND relations.candidate_id IS NULL
           AND relations.raw_fold IS NOT NULL
           AND a.alias = relations.raw_fold
         """,
@@ -4206,10 +4215,69 @@ class Catalogue:
                     r"'\s+', ' ', 'g'))" % col)
         return f"replace({col}, '.', '')"
 
+    #: Alias rows this instance owns and may therefore rewrite as consolidations advance.
+    VERSION_ALIAS_SOURCE = "version-current"
+
+    def refresh_version_aliases(self, *, commit: bool = True) -> int:
+        """Point every UNHELD base act at the newest dated expression the corpus holds.
+
+        Some publishers issue no consolidated base text at all. Ireland is the clear
+        case: the Law Reform Commission publishes ``ie/2018/act/7@2026-06-25`` and the
+        Oireachtas publishes only the Act as enacted, so ``ie/2018/act/7`` — the id every
+        citation of the Data Protection Act 2018 resolves to, and the id the revised text
+        itself names as its base — was a node the corpus did not have. Each of those
+        citations then fell past the candidate passes to the raw-title alias, and
+        "data protection act 2018" is a global key held by the UK Act of the same name:
+        82 Irish edges landed on ``ukpga/2018/12``.
+
+        An alias is the right shape for this because it is what pass 2 and
+        :meth:`find_document_id` already consult, so one row fixes citation resolution
+        and ``lookup('ie/2018/act/7')`` together. Bases that ARE held are deliberately
+        skipped — a UK act must open its own current text, never an arbitrary
+        point-in-time snapshot that happens to have been fetched.
+        """
+        latest: dict[str, str] = {}
+        for row in self.conn.execute(
+            "SELECT stable_id FROM documents WHERE stable_id LIKE '%@%' AND has_text = 1"
+        ).fetchall():
+            sid = str(row["stable_id"])
+            base, _sep, stamp = sid.partition("@")
+            if base and stamp and (base not in latest or latest[base] < sid):
+                latest[base] = sid
+        if not latest:
+            return 0
+        held = self.find_existing(list(latest))
+        wanted = {base: sid for base, sid in latest.items() if not held.get(base)}
+        if not wanted:
+            return 0
+        existing: dict[str, tuple[str, str | None]] = {}
+        keys = list(wanted)
+        for i in range(0, len(keys), 800):
+            chunk = keys[i: i + 800]
+            qs = ",".join(["?"] * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT alias, dst_id, source FROM citation_aliases WHERE alias IN ({qs})",
+                tuple(chunk),
+            ).fetchall():
+                existing[str(row["alias"])] = (str(row["dst_id"]), row["source"])
+        minted = 0
+        for base, sid in wanted.items():
+            was = existing.get(base)
+            # Never overwrite a mapping somebody else owns — only our own, and only when
+            # a newer consolidation has actually superseded it.
+            if was and (was[1] != self.VERSION_ALIAS_SOURCE or was[0] == sid):
+                continue
+            self.put_alias(base, sid, source=self.VERSION_ALIAS_SOURCE, commit=False)
+            minted += 1
+        if commit:
+            self.conn.commit()
+        return minted
+
     def resolve_pending(self) -> int:
         """Flip every pending edge whose target is now a node. Returns the number
         resolved. Idempotent and safe to re-run after each ingest — that is how a
         citation to a freshly-harvested target becomes a live edge (§5b)."""
+        self.refresh_version_aliases(commit=False)
         total = 0
         # pass 4: the de-dotted report-citation match (fold vs fold_citation mismatch),
         # built per-backend so it can't live in the static _RESOLVE_PASSES tuple.
@@ -4218,6 +4286,7 @@ class Catalogue:
             FROM citation_aliases a JOIN documents d
               ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
             WHERE relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NULL
               AND relations.raw_fold IS NOT NULL
               AND a.alias = {self._dedot_sql('relations.raw_fold')}
               AND a.alias <> relations.raw_fold
@@ -4286,6 +4355,7 @@ class Catalogue:
               ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
             WHERE relations.relation_id >= ? AND relations.relation_id <= ?
               AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NULL
               AND relations.raw_fold IS NOT NULL
               AND a.alias = relations.raw_fold
             """,
@@ -4296,6 +4366,7 @@ class Catalogue:
               ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
             WHERE relations.relation_id >= ? AND relations.relation_id <= ?
               AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NULL
               AND relations.raw_fold IS NOT NULL
               AND a.alias = {self._dedot_sql('relations.raw_fold')}
               AND a.alias <> relations.raw_fold
@@ -4390,6 +4461,7 @@ class Catalogue:
               ON (d.stable_id = a.dst_id OR d.ecli = a.dst_id)
             WHERE relations.src_id = ?
               AND relations.resolution_status = 'pending'
+              AND relations.candidate_id IS NULL
               AND relations.raw_fold IS NOT NULL
               AND a.alias = relations.raw_fold
             """,

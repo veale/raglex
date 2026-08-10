@@ -835,7 +835,7 @@ def _def_rows(defs: dict[str, tuple[Citation, bool]]) -> list[dict]:
         # Established statutory abbreviations belong to deterministic grammars, not the
         # learned store.  Even a target-correct learned ``AVG -> GDPR`` is unsafe in an
         # Ontario judgment where AVG is a company's name.
-        if protected:
+        if protected or is_statute_family_name(name):
             continue
         rows.append({
             "shorthand": name, "candidate_id": host.candidate_id,
@@ -929,6 +929,34 @@ def _protected_shorthand_target(name: str | None) -> str | None:
     return _PROTECTED_SHORTHAND_TARGETS.get(key)
 
 
+# A statute short title MINUS its year is not a corpus-wide name — it is a name whose
+# meaning is fixed by the year and the jurisdiction the citing document is writing in.
+# "the Data Protection Act" is the 1984, 1998 or 2018 Act in the UK, the 1988 or 2018
+# Act in Ireland, and neither anywhere else; "the Data Protection Acts" is Ireland's
+# COLLECTIVE citation of all three of its own. The store had learned it four ways over
+# — from a French CNIL page (→ the GDPR), a GRC tribunal (→ FOIA 2000), an English
+# judgment (→ a case) — and then applied the GDPR reading to "section 117 of the Data
+# Protection Act" in 19 Irish judgments, where section 117 is the Oireachtas Act's data
+# protection action and the GDPR has no sections at all.
+#
+# Gated on WRITE and READ, so it retires the rows already in the store. It is
+# deliberately NOT applied to the in-document pass: a judgment that writes "the Data
+# Protection Act 1998 ('the Data Protection Act')" and then uses the short form for
+# forty pages has defined it, for itself, unambiguously. What may not travel is the
+# definition's escape into other documents.
+_YEARLESS_STATUTE_NOUN = re.compile(
+    r"(?i)\b(?:acts?|measures?|regulations?|rules?|orders?|codes?|"
+    r"schemes?|statutes?)$")
+
+
+def is_statute_family_name(name: str | None) -> bool:
+    """Is this a statute short title with the identifying YEAR left off?"""
+    n = " ".join((name or "").strip(" '\"“”’.,;:()[]").split())
+    if not n or re.search(r"\b(?:1[6-9]|20)\d{2}\b", n):
+        return False
+    return bool(_YEARLESS_STATUTE_NOUN.search(n))
+
+
 def attach_stored_shorthands(
     text: str, kept: list[Citation], stored: list[tuple[str, str, str | None, bool]],
     *, exclude: frozenset[str] | set[str] = frozenset(),
@@ -977,7 +1005,7 @@ def attach_stored_shorthands(
         if not name or not candidate_id or name in exclude:
             continue
         protected = _protected_shorthand_target(name)
-        if protected:
+        if protected or is_statute_family_name(name):
             continue
         # The store predates ``valid_shorthand`` and holds hundreds of thousands of
         # rows that would never be learned now. Gating on READ retires them the

@@ -252,6 +252,32 @@ def test_the_search_settings_are_registered(tmp_path):
     assert scope["note"] == "only the UK and EU"
 
 
+def test_harvest_delta_indexer_makes_new_judgment_searchable(catalogue, tmp_path):
+    """A selected source's watch must extend doc_fts, not just the documents table."""
+    from raglex.core.models import DocType, ExtractedVia, Record, Segment
+    from raglex.facade import Facade
+    from raglex.storage import TextStore
+
+    ts = TextStore(tmp_path / "text")
+    text = "1. The Data Protection Act 2018 applies to this Irish judgment."
+    rec = Record(source="ie-caselaw", stable_id="iehc/2026/1",
+                 doc_type=DocType.JUDGMENT, title="A v B", court="iehc",
+                 text=text, raw_bytes=b"pdf", extracted_via=ExtractedVia.STRUCTURED,
+                 segments=[Segment(label="[1]", char_start=0, char_end=len(text),
+                                   kind="paragraph")])
+    rec.ensure_payload_hash()
+    catalogue.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, text)))
+    ts.put_segments(rec.payload_hash, rec.segments)
+
+    out = Facade._index_freetext_ids_open(catalogue, ts, [rec.stable_id])
+
+    assert out["indexed"] == 1
+    assert rec.stable_id in catalogue.fts_body_indexed_ids()
+    assert catalogue.conn.execute(
+        "SELECT label FROM doc_headings WHERE doc_id=?", (rec.stable_id,)
+    ).fetchone()["label"] in ("A v B", "[1]")
+
+
 def test_the_candidate_set_is_resolved_in_one_query_not_one_each(catalogue, tmp_path):
     """The first real search took 34 seconds. Reading a document is 0.046 ms; asking
     Postgres where it lives, once per candidate, is not — and there were 4,000 of

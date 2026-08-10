@@ -1108,6 +1108,251 @@ def _is_irish_host(doc) -> bool:
 _is_irish_case = _is_irish_host
 
 
+_IRISH_LAW_KINDS = frozenset({"act", "regulation", "rules", "order", "measure"})
+_REVISED_TITLE_SUFFIX = re.compile(
+    r"\s*(?:\(repealed\)\s*)?\(revised\s+to\s+\d{4}-\d{2}-\d{2}\)\s*$",
+    re.IGNORECASE,
+)
+
+
+# The bracketed qualifiers that mark an Act as a MEMBER of an existing collective
+# rather than the head of a new one.  Ireland's collective citations are built this way:
+# section 1(2) of the Data Protection Act 2018 provides that it and "the Data Protection
+# Acts 1988 and 2003" — one of which is the Data Protection (Amendment) Act 2003 — "may
+# be cited together as the Data Protection Acts 1988 to 2018".  Only these two
+# qualifiers are stripped: an Act named "Criminal Law (Sexual Offences) Act 2017" is a
+# distinct subject, not an amendment of a "Criminal Law Act".
+_COLLECTIVE_MEMBER_QUALIFIER = re.compile(
+    r"\s*\((?:amendment|no\.?\s*\d+)\)", re.IGNORECASE)
+# "<stem> act <year>" as ``normalise_title`` leaves it.
+_TITLE_STEM_AND_YEAR = re.compile(r"^(?P<stem>.+?)\s+act\s+(?P<year>(?:1[6-9]|20)\d{2})$")
+
+
+def _irish_legislation_indexes(
+    catalogue: Catalogue,
+) -> tuple[dict[str, str | None], dict[str, dict[str, str]]]:
+    """``(titles, families)`` for held Oireachtas legislation, built in one scan.
+
+    ``titles`` maps an exact normalised short title to its held id (None where two held
+    documents share it).  ``families`` maps a title STEM to ``{year: id}`` — the members
+    of a collective citation, which Irish drafting cites as a body ("the Data Protection
+    Acts") far more often than it cites any one of them.
+    """
+    cached = getattr(catalogue, "_irish_legislation_indexes", None)
+    if cached is not None:
+        return cached
+
+    from .statute_gazetteer import normalise_title
+
+    index: dict[str, str | None] = {}
+    families: dict[str, dict[str, str]] = {}
+    for row in catalogue.held_legislation_titles():
+        sid = str(row["stable_id"] or "")
+        if not sid.lower().startswith("ie/"):
+            continue
+        title = _REVISED_TITLE_SUFFIX.sub("", str(row["title"] or "")).strip()
+        key = normalise_title(title)
+        if not key:
+            continue
+        stem_match = _TITLE_STEM_AND_YEAR.match(
+            normalise_title(_COLLECTIVE_MEMBER_QUALIFIER.sub("", title)))
+        if stem_match:
+            member = families.setdefault(stem_match.group("stem"), {})
+            year = stem_match.group("year")
+            # Latest held rendition of that year's Act, on the same rule as the titles.
+            if year not in member or member[year] < sid:
+                member[year] = sid
+        if key in index and index[key] != sid:
+            # Prefer the undated/canonical enactment when both it and a dated revised
+            # rendition are held.  Otherwise ambiguity is safer than guessing.
+            previous = index[key]
+            if previous and "@" in previous and "@" not in sid:
+                index[key] = sid
+            elif previous and "@" not in previous and "@" in sid:
+                pass
+            elif previous and "@" in previous and "@" in sid:
+                # ISO dates sort chronologically in the rendition suffix.  When only
+                # dated revised copies exist, an unqualified Act name means the latest
+                # held consolidation; point-in-time citations use an explicit version.
+                index[key] = max(previous, sid)
+            else:
+                index[key] = None
+        else:
+            index.setdefault(key, sid)
+    setattr(catalogue, "_irish_legislation_indexes", (index, families))
+    return index, families
+
+
+def _irish_legislation_title_index(catalogue: Catalogue) -> dict[str, str | None]:
+    """Held Oireachtas titles keyed for exact name-only citation matching.
+
+    This is deliberately separate from the corpus-wide legislation-name aliases.  The
+    same short title can identify both a UK and an Irish Act (most dangerously, both
+    jurisdictions have a ``Data Protection Act 2018``), so a global alias cannot encode
+    the citing document's jurisdiction.  Irish revised Acts also carry a display suffix
+    such as ``(revised to 2026-06-25)``; remove only that adapter-owned suffix before
+    indexing the statutory short title.
+
+    The catalogue object lives for a whole extraction batch, so the scan behind this is
+    cached on it: a courts.ie backfill does one legislation-table scan, not one per
+    judgment.
+    """
+    return _irish_legislation_indexes(catalogue)[0]
+
+
+def _rebind_irish_legislation(catalogue: Catalogue, doc, cites: list) -> list:
+    """Bind Irish statute-name observations to held Oireachtas legislation.
+
+    The generic English-language statute grammar first recognises ``<Title> Act <year>``.
+    :func:`_gate_domestic_statute_names` correctly removes its possible UK target inside
+    an Irish document.  This second, catalogue-backed step supplies the jurisdictionally
+    correct target when exactly one held Irish title matches.  It also restores following
+    bare sections that the grammar had carried from the same named Act before the UK
+    target was gated away.
+    """
+    if not _is_irish_host(doc):
+        return cites
+
+    from .statute_gazetteer import reference_key
+
+    index = _irish_legislation_title_index(catalogue)
+    if not index:
+        return cites
+
+    current_irish: str | None = None
+    rebound: list = []
+    for cite in cites:
+        kind = str(cite.entity_kind or "").lower()
+        if kind not in _IRISH_LAW_KINDS:
+            rebound.append(cite)
+            continue
+
+        if cite.method == "carry_forward":
+            if cite.candidate_id is None and current_irish:
+                cite = replace(cite, candidate_id=current_irish)
+            elif cite.candidate_id:
+                current_irish = (cite.candidate_id
+                                  if str(cite.candidate_id).lower().startswith("ie/")
+                                  else None)
+            rebound.append(cite)
+            continue
+
+        sid = index.get(reference_key(cite.raw)) if cite.candidate_id is None else None
+        if sid:
+            cite = replace(cite, candidate_id=sid)
+            current_irish = sid
+        elif cite.candidate_id and str(cite.candidate_id).lower().startswith("ie/"):
+            current_irish = cite.candidate_id
+        else:
+            # An unmatched or foreign named instrument ends the Irish carry-forward
+            # chain; a later bare section must not jump over it to an older Act.
+            current_irish = None
+        rebound.append(cite)
+    return rebound
+
+
+# A statute name with its YEAR left off — the plural collective ("the Data Protection
+# Acts", "the Data Protection Acts 1988 to 2018") and the singular short form ("section
+# 117 of the Data Protection Act"). Ireland uses both constantly: 59 mentions of "the
+# Data Protection Acts" and 117 pincited year-less singulars across the held courts.ie
+# judgments, against 231 of the full "the Data Protection Act 2018".
+#
+# Deliberately NOT a registered grammar. A grammar cannot see whose document it is
+# reading, and this shape ("the Companies Acts", "the Finance Acts", "the Housing
+# Acts") occurs in every common-law jurisdiction the corpus holds — minting a name-only
+# observation for each would add millions of unresolvable rows to answer an Irish
+# question. Run here instead, where the host is known to be Irish and the held
+# Oireachtas title index can bind the match in the same pass.
+_IRISH_STATUTE_FAMILY_RE = re.compile(
+    r"(?:(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
+    r"|Part\s+(?P<part>[IVXLC]+[A-Za-z]?|\d+[A-Za-z]?))\s+of\s+)?"
+    r"the\s+"
+    r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
+    r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\)))"
+    r"{0,7}?)"
+    r"\s+(?P<noun>Acts|Act)\b"
+    r"(?:\s+(?P<y1>(?:1[6-9]|20)\d{2})\s*(?:to|and|–|—|-)\s*(?P<y2>(?:1[6-9]|20)\d{2}))?"
+    # "the Data Protection Act 2018" belongs to the full-title grammar, which resolves
+    # it exactly; only the year-LESS forms are this function's business.
+    r"(?!\s+(?:1[6-9]|20)\d{2})"
+)
+
+
+def _members_in_force(family: dict[str, str], doc, y1: str | None,
+                      y2: str | None) -> list[str]:
+    """The family members a collective citation in ``doc`` can be referring to.
+
+    An explicit range fixes it. Otherwise the judgment's own date does: "the Data
+    Protection Acts" in a 2015 judgment is the 1988 and 2003 Acts and cannot be the
+    2018 one, and linking it there would put a case before the Act it supposedly cites.
+    """
+    years = sorted(family)
+    if y1 and y2:
+        low, high = sorted((y1, y2))
+        years = [y for y in years if low <= y <= high]
+    else:
+        decided = str(_doc_field(doc, "decision_date") or "")[:4]
+        if re.fullmatch(r"\d{4}", decided):
+            years = [y for y in years if y <= decided]
+    return [family[y] for y in years]
+
+
+def _attach_irish_statute_families(catalogue: Catalogue, doc, cites: list,
+                                   text: str | None) -> list:
+    """Link year-less Irish statute names — collective and singular — to held Acts.
+
+    A COLLECTIVE citation names a body of law, so it links to every held member the
+    citing document could have meant, and carries NO pinpoint: "section 4 of the Data
+    Protection Acts" is section 4 of whichever member enacted it, and the 1988 Act's
+    section 4 (right of access) is not the 2018 Act's section 4 (expenses). The mention
+    is what the reader wants — a false pinpoint on two Acts out of three is not.
+
+    A SINGULAR year-less name is an in-document short form, so it binds only to the
+    member this document has itself named in full, and then it does keep its pinpoint.
+    Where the document names none — or names several — the year is genuinely missing
+    and the observation stays name-only rather than guessing a year.
+    """
+    if not text or not _is_irish_host(doc):
+        return cites
+
+    from .extractor import Citation, _overlaps_any
+    from .statute_gazetteer import normalise_title
+
+    _titles, families = _irish_legislation_indexes(catalogue)
+    if not families:
+        return cites
+
+    named_here = {c.candidate_id for c in cites
+                  if c.candidate_id and str(c.candidate_id).lower().startswith("ie/")}
+    out = list(cites)
+    for m in _IRISH_STATUTE_FAMILY_RE.finditer(text):
+        family = families.get(normalise_title(m.group("title")))
+        if not family:
+            continue
+        collective = m.group("noun").lower() == "acts"
+        members = _members_in_force(family, doc, m.group("y1"), m.group("y2"))
+        if not collective:
+            # Only the member this document has already cited by its full name.
+            members = [sid for sid in members if sid in named_here]
+            if len(members) != 1:
+                continue
+        if not members:
+            continue
+        pinpoint = None
+        if not collective:
+            sec = re.sub(r"\s+", "", m.groupdict().get("sec") or "") or None
+            part = re.sub(r"\s+", "", m.groupdict().get("part") or "") or None
+            pinpoint = f"s. {sec}" if sec else f"Part {part}" if part else None
+        probe = Citation(raw=m.group(0).strip(), entity_kind="act", candidate_id=None,
+                         pinpoint=None, char_start=m.start(), char_end=m.end(),
+                         method="ie_statute_family")
+        if _overlaps_any(probe, out):
+            continue
+        out.extend(replace(probe, candidate_id=sid, pinpoint=pinpoint)
+                   for sid in members)
+    return out
+
+
 # EU regulatory guidance / DPA decisions (EDPB, Article 29 WP, the one-stop-shop
 # register). These link cleanly to EU legislation (CELEX), CJEU + ECHR case law (ECLI,
 # case numbers) and — usefully — English & Irish case-law neutral citations, all of
@@ -1523,6 +1768,8 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str,
     # all unambiguous and kept. Domestic (ICO etc.) guidance is deliberately NOT gated —
     # there a "Data Protection Act 2018" reference IS to the national statute.
     cites = _gate_domestic_statute_names(doc, cites, text)
+    cites = _rebind_irish_legislation(catalogue, doc, cites)
+    cites = _attach_irish_statute_families(catalogue, doc, cites, text)
     cites = _rebind_held_assimilated_regulations(catalogue, doc, cites, text)
 
     # Bare "the Charter" is EU-local shorthand: in a national text it may mean a
@@ -1659,6 +1906,17 @@ def _finish_writes(catalogue: Catalogue, doc, text: str, cites, *, stable_id: st
         # carry-forward edges are heuristic guesses → mark them 'inferred' so the
         # graph keeps them distinguishable (and the UI can flag them as uncertain).
         via = ExtractedVia.INFERRED if c.method == "carry_forward" else ExtractedVia.REGEX
+        # A domestic statute name in an Irish document that did not match held Irish
+        # legislation must not remain globally resolvable by raw text.  Global aliases
+        # cannot encode citing jurisdiction (the live alias for "Data Protection Act
+        # 2018" may legitimately target the UK Act for UK documents).  Keep the citation
+        # observation searchable, but freeze this edge until a later rescan can bind it
+        # against an Oireachtas title.
+        status = ResolutionStatus.PENDING
+        if (_is_irish_host(doc) and c.candidate_id is None
+                and str(c.entity_kind or "").lower() in _IRISH_LAW_KINDS
+                and (c.method in _UK_NAME_HEURISTICS or c.method == "carry_forward")):
+            status = ResolutionStatus.UNRESOLVABLE
         if key not in edges:
             edges[key] = TypedRelation(
                 relationship_type=RelationshipType.MENTIONS,
@@ -1666,7 +1924,7 @@ def _finish_writes(catalogue: Catalogue, doc, text: str, cites, *, stable_id: st
                 dst_id=c.candidate_id,
                 dst_anchor=c.pinpoint,
                 extracted_via=via,
-                resolution_status=ResolutionStatus.PENDING,
+                resolution_status=status,
                 context_start=c.char_start,  # representative span for §1.3a
                 context_end=c.char_end,
             )

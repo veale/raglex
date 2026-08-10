@@ -321,6 +321,7 @@ def test_overlapping_match_keeps_most_specific():
 def _doc(catalogue, ts, stable_id, text, **kw):
     rec = Record(source=kw.get("source", "x"), stable_id=stable_id,
                  ecli=kw.get("ecli"), doc_type=kw.get("doc_type", DocType.JUDGMENT),
+                 title=kw.get("title"),
                  decision_date=kw.get("decision_date", date(2024, 1, 1)),
                  text=text, raw_bytes=text.encode(),
                  relations=kw.get("relations", []),
@@ -575,11 +576,14 @@ def test_carry_forward_respects_cue_kind_section_not_eu_directive():
     assert cf.get("article 4") == "32003L0004"          # → the directive, not the Act
 
 
-def test_uk_statute_names_stay_name_only_inside_irish_judgments(catalogue, tmp_path):
+def test_statute_names_bind_to_held_irish_law_inside_irish_judgments(catalogue, tmp_path):
     # "<X> Act 2018" inside an IRISH judgment is an Act of the Oireachtas — the UK
-    # candidate must be dropped (name-only), while EU instruments and case citations
-    # of any jurisdiction resolve normally.
+    # candidate must be replaced by the held Oireachtas Act, while EU instruments and
+    # case citations of any jurisdiction resolve normally.
     ts = TextStore(tmp_path / "text")
+    _doc(catalogue, ts, "ie/2018/act/7@2024-01-01", "Number 7 of 2018",
+         source="ie-revised", doc_type=DocType.LEGISLATION,
+         title="Data Protection Act 2018 (revised to 2024-01-01)")
     t = ("Section 5 of the Data Protection Act 2018 applies; see Article 17 of "
          "Regulation (EU) 2016/679, Smith v Jones [2020] EWCA Civ 99 and [2019] IESC 4.")
     _doc(catalogue, ts, "iehc/2024/1", t, source="ie-caselaw")
@@ -587,9 +591,10 @@ def test_uk_statute_names_stay_name_only_inside_irish_judgments(catalogue, tmp_p
     by_method = {}
     for c in catalogue.citations_for("iehc/2024/1"):
         by_method.setdefault(c["method"], []).append(c["candidate_id"])
-    assert by_method["uk_act_section"] == [None]          # UK statute name suppressed
+    assert by_method["uk_act_section"] == ["ie/2018/act/7@2024-01-01"]
     dsts = {e["dst_id"] for e in catalogue.relations_for("iehc/2024/1") if e["dst_id"]}
-    assert {"32016R0679", "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
+    assert {"ie/2018/act/7@2024-01-01", "32016R0679",
+            "ewca/civ/2020/99", "iesc/2019/4"} <= dsts
 
 
 def test_a_learned_shorthand_cannot_smuggle_a_uk_act_into_an_irish_judgment(
@@ -620,6 +625,123 @@ def test_a_learned_shorthand_cannot_smuggle_a_uk_act_into_an_irish_judgment(
                 if c["candidate_id"] == "ukpga/2018/12"]
     # …and the citations that are unambiguous still resolve.
     assert {"32016R0679", "ewca/civ/2020/99"} <= dsts
+
+
+def test_global_uk_title_alias_cannot_rebind_unheld_irish_act(catalogue, tmp_path):
+    """Raw-title aliases are global, but the meaning of an Act name is jurisdictional."""
+    ts = TextStore(tmp_path / "text")
+    _doc(catalogue, ts, "ukpga/2018/12", "UK Act", source="uk-legislation",
+         doc_type=DocType.LEGISLATION, title="Data Protection Act 2018")
+    catalogue.put_alias("the data protection act 2018", "ukpga/2018/12",
+                        source="legislation-name")
+    _doc(catalogue, ts, "iehc/2024/3",
+         "The Data Protection Act 2018 applies.", source="ie-caselaw")
+
+    extract_document(catalogue, ts, "iehc/2024/3")
+    Resolver(catalogue).run()
+
+    edges = catalogue.relations_for("iehc/2024/3")
+    assert edges and all(e["dst_id"] != "ukpga/2018/12" for e in edges)
+    assert any(e["resolution_status"] == "unresolvable" for e in edges)
+
+
+def _irish_dp_acts(catalogue, ts):
+    """The three Acts of Ireland's "Data Protection Acts 1988 to 2018" collective."""
+    for sid, title in (
+        ("ie/1988/act/25@2025-11-10", "Data Protection Act 1988 (revised to 2025-11-10)"),
+        ("ie/2003/act/6@2018-05-25",
+         "Data Protection (Amendment) Act 2003 (revised to 2018-05-25)"),
+        ("ie/2018/act/7@2026-06-25", "Data Protection Act 2018 (revised to 2026-06-25)"),
+    ):
+        _doc(catalogue, ts, sid, title, source="ie-revised",
+             doc_type=DocType.LEGISLATION, title=title)
+
+
+def test_the_irish_collective_citation_links_every_member_act(catalogue, tmp_path):
+    """Section 1(2) of the 2018 Act makes "the Data Protection Acts" cite all three.
+
+    An Irish judgment says it far more often than it names any single Act, and the
+    (Amendment) Act 2003 is a member despite its bracketed qualifier.
+    """
+    ts = TextStore(tmp_path / "text")
+    _irish_dp_acts(catalogue, ts)
+    _doc(catalogue, ts, "iehc/2024/10",
+         "The plaintiff sues under the Data Protection Acts 1988 to 2018.",
+         source="ie-caselaw", decision_date=date(2024, 5, 1))
+
+    extract_document(catalogue, ts, "iehc/2024/10")
+
+    dsts = {e["dst_id"] for e in catalogue.relations_for("iehc/2024/10") if e["dst_id"]}
+    assert dsts == {"ie/1988/act/25@2025-11-10", "ie/2003/act/6@2018-05-25",
+                    "ie/2018/act/7@2026-06-25"}
+
+
+def test_a_collective_citation_carries_no_pinpoint_and_no_act_from_the_future(
+    catalogue, tmp_path
+):
+    """Two things the collective form must not invent.
+
+    Section 4 of "the Data Protection Acts" is the 1988 Act's right of access; the 2018
+    Act's section 4 is its expenses provision. The mention belongs on every member the
+    court could have meant — the PINPOINT belongs on none of them. And a 2015 judgment
+    cannot be citing an Act passed in 2018.
+    """
+    ts = TextStore(tmp_path / "text")
+    _irish_dp_acts(catalogue, ts)
+    _doc(catalogue, ts, "iehc/2015/11",
+         "The applicant relies on section 4 of the Data Protection Acts.",
+         source="ie-caselaw", decision_date=date(2015, 6, 1))
+
+    extract_document(catalogue, ts, "iehc/2015/11")
+
+    edges = [e for e in catalogue.relations_for("iehc/2015/11") if e["dst_id"]]
+    assert {e["dst_id"] for e in edges} == {"ie/1988/act/25@2025-11-10",
+                                            "ie/2003/act/6@2018-05-25"}
+    assert all(e["dst_anchor"] is None for e in edges)
+
+
+def test_a_yearless_act_name_binds_only_to_the_act_the_document_named(
+    catalogue, tmp_path
+):
+    """"section 117 of the Data Protection Act" keeps its pinpoint — but only because
+    this judgment named the 2018 Act in full. Where the year is genuinely ambiguous the
+    reference stays name-only rather than guessing one."""
+    ts = TextStore(tmp_path / "text")
+    _irish_dp_acts(catalogue, ts)
+    _doc(catalogue, ts, "iehc/2024/12",
+         "This is a claim under the Data Protection Act 2018. The plaintiff invokes "
+         "section 117 of the Data Protection Act.",
+         source="ie-caselaw", decision_date=date(2024, 5, 1))
+    _doc(catalogue, ts, "iehc/2024/13",
+         "The plaintiff invokes section 117 of the Data Protection Act.",
+         source="ie-caselaw", decision_date=date(2024, 5, 1))
+
+    extract_document(catalogue, ts, "iehc/2024/12")
+    extract_document(catalogue, ts, "iehc/2024/13")
+
+    named = [e for e in catalogue.relations_for("iehc/2024/12")
+             if e["dst_anchor"] == "s. 117"]
+    assert [e["dst_id"] for e in named] == ["ie/2018/act/7@2026-06-25"]
+    assert all(not e["dst_id"] for e in catalogue.relations_for("iehc/2024/13"))
+
+
+def test_a_yearless_statute_title_never_becomes_a_corpus_wide_shorthand(catalogue):
+    """"Data Protection Act" had been learned four ways over — as the GDPR (from a
+    French CNIL page), as FOIA 2000, as an English judgment — and the GDPR reading was
+    then applied to "section 117 of the Data Protection Act" in Irish judgments, where
+    the GDPR has no sections at all. The year is what identifies an Act; a title without
+    one is not a name the store may carry between documents."""
+    from raglex.citations.extractor import is_statute_family_name, shorthand_defs
+
+    assert is_statute_family_name("the Data Protection Acts")
+    assert is_statute_family_name("Data Protection Act")
+    assert not is_statute_family_name("Data Protection Act 2018")
+    assert not is_statute_family_name("Vienna Convention")
+
+    text = ('under Regulation (EU) 2016/679 ("the Data Protection Act") the '
+            'controller must act')
+    assert not [d for d in shorthand_defs(text, extract_citations(text))
+                if "Data Protection Act" in d["shorthand"]]
 
 
 def test_recitals_pinpoint_to_the_instrument():

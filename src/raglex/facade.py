@@ -3938,8 +3938,19 @@ class Facade:
             return {"query": q, "error": "empty query",
                     "hint": "give a case name, an act title, or a citation"}
         out: dict = {"query": q}
+        want_j = self._norm_jurisdiction(jurisdiction)
         # 1. citation pass — is this actually a citation? then resolution beats title match.
         held, cand = self._resolve_held_id(q)
+        # …but never across the jurisdiction the caller asked for. Scoped to Ireland,
+        # "Data Protection Act 2018" was still answered with a citation_match on the UK
+        # Act — the one document the filter existed to exclude — sitting above the Irish
+        # Act in the results below it.
+        if want_j:
+            scoped = self._held_instrument_titled(q, want_j)
+            if scoped:
+                held, cand = scoped, scoped
+            elif held and self._bucket_of_id(held) != want_j:
+                held = cand = None
         if cand:
             hit = {"candidate": cand, "held": held is not None}
             if held:
@@ -3951,7 +3962,6 @@ class Facade:
                 hit["next"] = f"lookup(citation={q!r}) — it will fetch the authority if it can"
             out["citation_match"] = hit
         # 2. title pass — tokenised title/id match, jurisdiction/kind applied to the pool
-        want_j = self._norm_jurisdiction(jurisdiction)
         want_kind = self._KIND_ALIASES.get((kind or "").strip().lower()) if kind else None
         pool = max(k * 6, 60)
         rows = self.list_documents(query=q, source=source, doc_type=doc_type, tag=tag,
@@ -4366,6 +4376,11 @@ class Facade:
         raw = (citation or "").strip()
         if not raw:
             return {"error": "empty citation"}
+        # 0. a jurisdiction the caller SPELLED OUT ("Data Protection Act 2018 (Ireland)",
+        # "the Irish Data Protection Act 2018") settles a statute-name collision that no
+        # grammar can. Strip it before reading the citation, and hold it to correct the
+        # answer if the grammar resolves the name somewhere else.
+        raw, want_bucket = self._jurisdiction_qualifier(raw)
         # 1. resolve to a candidate id — the citation as written, an ECLI/CELEX, or a slug
         cand: str | None = None
         hits = extract_citations(raw)
@@ -4401,6 +4416,17 @@ class Facade:
                 # came back "not held" while the corpus held it twice over.
                 probe = fold_citation(raw)
                 held_id = cat.find_document_id(probe) if probe else None
+        # 1b. the caller named a jurisdiction. Honour it: an Act title is not a global
+        # key, and resolving "Data Protection Act 2018 (Ireland)" to the Westminster Act
+        # is not a near miss, it is the wrong country's law. A held instrument of that
+        # title in the wanted jurisdiction beats whatever the grammar proposed.
+        if want_bucket:
+            in_jurisdiction = self._held_instrument_titled(raw, want_bucket)
+            if in_jurisdiction:
+                if in_jurisdiction != held_id:
+                    held_id, cand = in_jurisdiction, in_jurisdiction
+            elif held_id and self._bucket_of_id(held_id) != want_bucket:
+                held_id = None          # → the not-held answer, with its external links
         form = adapter = None
         if cand:
             form, _juris, adapter = _classify(cand, "case")
@@ -5280,6 +5306,81 @@ class Facade:
     # Irish DPC case studies) is canonicalised to `dpa-ie` at write time
     # (Catalogue._COURT_CANON), so this one label covers both intake paths.
     _DPA_PROPER_NAME = {"ie": "Data Protection Commission (Ireland)"}
+
+    # How a citation names the country whose law it means. Ireland and the United
+    # Kingdom re-enacted each other's statute book under the same short titles — both
+    # have a Data Protection Act 2018, commenced within a fortnight of each other, both
+    # implementing the GDPR — so "Data Protection Act 2018" alone cannot be resolved
+    # correctly by any grammar, and a caller who writes the country has answered the
+    # only question that matters.
+    # Tried in order: a trailing bracket wins over a leading adjective, or "Data" in
+    # "Data Protection Act 2018 (Ireland)" is read as the qualifier and Ireland is lost.
+    _JURISDICTION_QUALIFIERS = (
+        re.compile(r"(?i)\s*[(\[]\s*(?P<w>[A-Za-z. ]{2,30}?)\s*[)\]]\s*$"),  # "… (Ireland)"
+        re.compile(r"(?i)^\s*(?P<w>[A-Za-z.]{2,20})\s+(?=\S)"),        # "Irish … Act 2018"
+    )
+    #: Adjectives and codes a citation uses for a jurisdiction, → the display bucket.
+    _JURISDICTION_WORDS = {
+        "ireland": "Ireland", "irish": "Ireland", "ie": "Ireland", "irl": "Ireland",
+        "roi": "Ireland", "eire": "Ireland", "éire": "Ireland",
+        "uk": "United Kingdom", "u.k.": "United Kingdom", "gb": "United Kingdom",
+        "british": "United Kingdom", "england": "United Kingdom",
+        "english": "United Kingdom", "scotland": "United Kingdom",
+        "scottish": "United Kingdom", "westminster": "United Kingdom",
+        "eu": "European Union", "european": "European Union",
+        "australia": "Australia", "australian": "Australia", "au": "Australia",
+        "cth": "Australia", "canada": "Canada", "canadian": "Canada",
+        "ca": "Canada", "nz": "New Zealand", "singapore": "Singapore",
+        "sg": "Singapore", "india": "India", "indian": "India",
+    }
+
+    @classmethod
+    def _jurisdiction_qualifier(cls, raw: str) -> tuple[str, str | None]:
+        """``(citation without the country, the bucket it named)``.
+
+        Only strips a word it RECOGNISES as a jurisdiction, so "(Amendment)" in a short
+        title and "Roads Act 1993" keep their own words.
+        """
+        for pattern in cls._JURISDICTION_QUALIFIERS:
+            m = pattern.search(raw)
+            bucket = cls._JURISDICTION_WORDS.get(
+                m.group("w").strip().lower()) if m else None
+            if bucket:
+                return (raw[:m.start()] + raw[m.end():]).strip(" ,;"), bucket
+        return raw, None
+
+    def _bucket_of_id(self, stable_id: str) -> str | None:
+        doc = self.get_document(stable_id).get("document") or {}
+        if not doc:
+            return None
+        return self._doc_bucket(doc.get("source", ""), doc.get("court"))
+
+    def _held_instrument_titled(self, raw: str, bucket: str) -> str | None:
+        """The held legislation of THIS jurisdiction whose short title the caller wrote.
+
+        Matches the normalised short title exactly — a citation is a name, not a search
+        — after discarding any provision prefix ("section 117 of the …") and the
+        consolidation suffix an administrative revision carries ("(revised to …)").
+        Where several renditions share the title the newest wins, which is the text the
+        law currently is.
+        """
+        from .citations.stage import _REVISED_TITLE_SUFFIX
+        from .citations.statute_gazetteer import normalise_title, reference_key
+
+        want = reference_key(raw)
+        if not want:
+            return None
+        best: str | None = None
+        for row in self.list_documents(query=raw, doc_type="legislation", limit=60):
+            title = _REVISED_TITLE_SUFFIX.sub("", str(row.get("title") or "")).strip()
+            if normalise_title(title) != want:
+                continue
+            if self._doc_bucket(row.get("source", ""), row.get("court")) != bucket:
+                continue
+            sid = str(row["stable_id"])
+            if best is None or best < sid:
+                best = sid
+        return best
 
     def _doc_bucket(self, source: str, court: str | None) -> str:
         c = (court or "").lower()
@@ -15350,6 +15451,47 @@ class Facade:
             return fts.build(cat, ts, sources=targets, reindex=reindex, limit=limit,
                              on_progress=on_progress, cancel_check=cancel_check)
 
+    @staticmethod
+    def _index_freetext_ids_open(cat, ts, document_ids: list[str], *,
+                                 on_progress=None, cancel_check=None) -> dict:
+        """Index a known harvested delta using the caller's open stores.
+
+        ``fulltext.index.build`` discovers a whole source and is the right repair/backfill
+        operation. A harvest already knows its exact changed ids, so rescanning the source
+        after every weekly tick is unnecessary. Refreshed ids are intentionally included:
+        ``put_doc_fts`` replaces their old parts with vectors for the current text.
+        """
+        ids = list(dict.fromkeys(document_ids))
+        out = {"indexed": 0, "parts": 0, "unreadable": 0}
+        for n, sid in enumerate(ids, 1):
+            if cancel_check and cancel_check():
+                break
+            if n == 1 or n % 200 == 0 or n == len(ids):
+                _progress(on_progress, stage="indexing harvested full text",
+                          done=n, total=len(ids), item=sid)
+            doc = cat.get_document(sid)
+            if doc is None or not doc["payload_hash"] or doc["search_excluded"]:
+                continue
+            try:
+                text = ts.get(doc["payload_hash"])
+                segments = ts.get_segments(doc["payload_hash"])
+            except (OSError, TypeError):
+                out["unreadable"] += 1
+                continue
+            if not text.strip():
+                continue
+            labels = [(str(doc["title"] or sid), 0)]
+            labels.extend((segment.label, segment.char_start) for segment in segments
+                          if segment.label and segment.label != doc["title"])
+            out["parts"] += cat.put_doc_fts(
+                sid, text, headings=labels, commit=False,
+            )
+            out["indexed"] += 1
+            if out["indexed"] % 200 == 0:
+                cat.commit()
+        cat.commit()
+        return out
+
     def repair_freetext_positions(self, *, limit: int = 1_000_000,
                                   on_progress=None, cancel_check=None) -> dict:
         """Repartition only legacy FTS rows that exceed PostgreSQL's position budget."""
@@ -15957,6 +16099,17 @@ class Facade:
                 post_fn=lambda sid: classify_corpus(cat, ts, classifier=classifier,
                                                     stable_id=sid),
                 on_progress=_phase_progress, cancel_check=cancel_check)
+            # Free-text search is an explicitly gated derived layer. Once a source is
+            # selected, every later harvest must extend it immediately; otherwise a
+            # healthy keep-current watch grows the documents table while search silently
+            # remains frozen at the last manual full-index build. That was the apparent
+            # Irish recency gap: hundreds of 2026 judgments were held and extracted, but
+            # zero ie-caselaw rows existed in doc_fts.
+            if adapter.source in self._freetext_selected() and new_ids:
+                self._index_freetext_ids_open(
+                    cat, ts, new_ids, on_progress=_phase_progress,
+                    cancel_check=cancel_check,
+                )
             # Guidance classification (§1.9/§4a): every guidance-typed document — and
             # every EDPB publication regardless of doc_type (binding decisions and
             # opinions carry the same citable series numbers) — gets its issuer /

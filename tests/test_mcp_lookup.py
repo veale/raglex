@@ -320,3 +320,62 @@ def test_mentions_facets_describe_the_whole_set_not_the_loaded_page():
     assert fr["total"] == 1 and fr["has_more"] is False
     assert {(row["jurisdiction"], row["kind"]): row["documents"]
             for row in fr["facets"]["jurisdiction_kind"]} == crossed
+
+
+# -- lookup: two jurisdictions, one statute name -----------------------------
+
+def _two_data_protection_acts() -> Facade:
+    """The corpus as it really is: a UK Act held under its own id, and an Irish Act of
+    the same name and year held ONLY as the Law Reform Commission's revised text."""
+    f = _facade()
+    with f._open() as (cat, _rs, ts):
+        for sid, source, title in (
+            ("ukpga/2018/12", "uk-legislation", "Data Protection Act 2018"),
+            ("ie/2018/act/7@2026-06-25", "ie-revised",
+             "Data Protection Act 2018 (revised to 2026-06-25)"),
+        ):
+            body = f"{title}. Section 1. This Act may be cited as {title}."
+            rec = Record(source=source, stable_id=sid, doc_type=DocType.LEGISLATION,
+                         title=title, text=body, raw_bytes=body.encode(),
+                         extracted_via=ExtractedVia.STRUCTURED)
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, body)))
+    return f
+
+
+def test_a_named_jurisdiction_picks_the_right_countrys_act():
+    """Ireland and the UK both have a Data Protection Act 2018, both from May 2018,
+    both implementing the GDPR. The bare title belongs to the gazetteer's UK Act; a
+    caller who writes the country must get that country's law."""
+    f = _two_data_protection_acts()
+
+    assert f.lookup(citation="Data Protection Act 2018",
+                    autofetch=False)["stable_id"] == "ukpga/2018/12"
+    for spelling in ("Data Protection Act 2018 (Ireland)",
+                     "Data Protection Act 2018 (IE)",
+                     "Irish Data Protection Act 2018"):
+        r = f.lookup(citation=spelling, autofetch=False)
+        assert r["stable_id"] == "ie/2018/act/7@2026-06-25", spelling
+        assert r["jurisdiction"] == "Ireland"
+
+
+def test_an_unheld_base_act_opens_the_revised_text_that_stands_for_it():
+    """Ireland publishes no consolidated base text, so ``ie/2018/act/7`` — the id every
+    citation of the Act resolves to — is not itself a node. It must still open the Act."""
+    f = _two_data_protection_acts()
+    with f._open() as (cat, _rs, _ts):
+        cat.refresh_version_aliases()
+
+    r = f.lookup(citation="ie/2018/act/7", autofetch=False)
+    assert r["held"] is True and r["stable_id"] == "ie/2018/act/7@2026-06-25"
+
+
+def test_a_jurisdiction_scoped_find_does_not_answer_with_another_countrys_act():
+    f = _two_data_protection_acts()
+
+    ie = f.find("Data Protection Act 2018", jurisdiction="ie")
+    assert ie["citation_match"]["stable_id"] == "ie/2018/act/7@2026-06-25"
+    assert all(r["stable_id"] != "ukpga/2018/12" for r in ie["results"])
+
+    uk = f.find("Data Protection Act 2018", jurisdiction="United Kingdom")
+    assert uk["citation_match"]["stable_id"] == "ukpga/2018/12"
