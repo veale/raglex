@@ -295,6 +295,79 @@ def repair_anachronistic_eu_citation(cat) -> dict:
     return {"edges_deleted": edges, "citations_deleted": cites}
 
 
+# The anachronism probe above needs a citing DATE, so it only sees these through case
+# law. This one needs no date at all: a CELEX whose year has not happened cannot name an
+# instrument, whoever is citing it. The cause is one line of ``_eu_celex`` — a 4-digit
+# instrument NUMBER beginning 19 or 20 read as a year, so "Regulation (EEC) No 2092/91"
+# minted 32092R0091, "No 2042/2003" minted 32042R2003 and REACH ("No 1907/2006") minted
+# 31907R2006, each of them beside the real act and each one an empty stub. The stub then
+# became the antecedent the carry-forward pass hung the rest of the document's bare
+# Articles on, which is why the class is an order of magnitude larger than it looks.
+#
+# A year of headroom, like the grammar's own bound: an instrument adopted in December
+# and harvested in January is ordinary, and this must not start deleting real edges on
+# New Year's Day.
+def _future_celex_sql(cat) -> str:
+    from datetime import date
+
+    horizon = date.today().year + 1
+    digits = ("substr(r.dst_id, 2, 4) GLOB '[0-9][0-9][0-9][0-9]'" if cat.backend == "sqlite"
+              else "substr(r.dst_id, 2, 4) ~ '^[0-9]{4}$'")
+    return f"""
+    FROM relations r
+    WHERE r.dst_id LIKE '3%' AND LENGTH(r.dst_id) BETWEEN 9 AND 11 AND {digits}
+      AND CAST(substr(r.dst_id, 2, 4) AS INTEGER) > {horizon}
+    """
+
+
+def probe_future_celex_target(cat) -> ProbeResult:
+    sql = _future_celex_sql(cat)
+    n = _one(cat, f"SELECT COUNT(*) AS n {sql}")
+    samples = _rows(cat, f"SELECT r.dst_id, COUNT(*) AS edges, "
+                         f"MIN(r.raw_citation_string) AS example {sql} "
+                         f"GROUP BY r.dst_id ORDER BY edges DESC LIMIT {SAMPLE}")
+    return ProbeResult(
+        "future_celex_target",
+        "edges pointing at a CELEX whose year has not happened — no such instrument "
+        "exists; an instrument NUMBER misread as a year ('No 2092/91' → 32092R0091)",
+        "critical", n, samples, repairable=True)
+
+
+def repair_future_celex_target(cat) -> dict:
+    """Delete the edges, their citations rows, and the empty stub documents the bare-
+    CELEX path minted for them. Bounded by the probe's own predicate; re-runnable."""
+    from datetime import date
+
+    horizon = date.today().year + 1
+    digits_c = ("substr(c.candidate_id, 2, 4) GLOB '[0-9][0-9][0-9][0-9]'"
+                if cat.backend == "sqlite"
+                else "substr(c.candidate_id, 2, 4) ~ '^[0-9]{4}$'")
+    digits_d = ("substr(d.stable_id, 2, 4) GLOB '[0-9][0-9][0-9][0-9]'"
+                if cat.backend == "sqlite"
+                else "substr(d.stable_id, 2, 4) ~ '^[0-9]{4}$'")
+    with cat._atomic():
+        edges = cat.conn.execute(f"""
+            DELETE FROM relations WHERE relation_id IN (
+              SELECT r.relation_id {_future_celex_sql(cat)})""").rowcount
+        cites = cat.conn.execute(f"""
+            DELETE FROM citations WHERE citation_id IN (
+              SELECT c.citation_id FROM citations c
+              WHERE c.candidate_id LIKE '3%' AND LENGTH(c.candidate_id) BETWEEN 9 AND 11
+                AND {digits_c}
+                AND CAST(substr(c.candidate_id, 2, 4) AS INTEGER) > {horizon})""").rowcount
+        # Only the stubs: a phantom id never has text, and anything that somehow does is
+        # left alone rather than deleted on the strength of its name.
+        stubs = cat.conn.execute(f"""
+            DELETE FROM documents WHERE stable_id IN (
+              SELECT d.stable_id FROM documents d
+              WHERE d.stable_id LIKE '3%' AND LENGTH(d.stable_id) BETWEEN 9 AND 11
+                AND {digits_d}
+                AND CAST(substr(d.stable_id, 2, 4) AS INTEGER) > {horizon}
+                AND COALESCE(d.has_text, 0) = 0)""").rowcount
+    return {"edges_deleted": edges, "citations_deleted": cites,
+            "stub_documents_deleted": stubs}
+
+
 # A judgment can only cite BACKWARDS in time. Where a case is dated well before
 # the case it cites, the edge is proof of a defect — a misattributed citation, or
 # one of the two documents dated wrong. Unlike probe_anachronistic_eu_citation
@@ -579,6 +652,7 @@ PROBES = (
     probe_pending_but_held,
     probe_alias_dangling,
     probe_anachronistic_eu_citation,
+    probe_future_celex_target,
     probe_forward_citation,
     probe_misdated_case,
     probe_never_extracted,
@@ -742,6 +816,7 @@ REPAIRS = {
     "case_paragraph_carry_forward": repair_case_paragraph_carry_forward,
     "judgment_paragraph_carry_forward": repair_judgment_paragraph_carry_forward,
     "anachronistic_eu_citation": repair_anachronistic_eu_citation,
+    "future_celex_target": repair_future_celex_target,
     # the para-on-EU-instrument probe is the same disease seen from the other
     # side; the carry-forward repair clears the adjacent cases, and what remains
     # deserves eyes before deletion — so no blind repair for it.

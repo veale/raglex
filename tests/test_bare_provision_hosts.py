@@ -44,10 +44,42 @@ def test_more_of_the_digital_acquis_is_recognised():
         ("Article 20 of the Data Governance Act", "32022R0868"),
         ("Article 21 NIS2", "32022L2555"),
         ("Article 6 of the European Media Freedom Act", "32024R1083"),
-        ("Article 17 of the Copyright Directive", "32019L0790"),
+        # "the Copyright Directive" is 2001/29 — the Court's own usage, in Laserdisken,
+        # FAPL, Svensson and YouTube/Cyando. The DSM is "the DSM Directive"/"the CDSM
+        # Directive", and it keeps both of those names. Read as the DSM, this nickname
+        # gave that instrument 975 of somebody else's 1,252 name-matched citations.
+        ("Article 3(1) of the Copyright Directive", "32001L0029"),
+        ("Article 17 of the DSM Directive", "32019L0790"),
+        ("Article 17 of the CDSM Directive", "32019L0790"),
         ("Article 4 of the Cyber Resilience Act", "32024R2847"),
     ]:
         assert any(c.candidate_id == celex for c in extract_citations(text)), text
+
+
+def test_a_short_name_that_is_the_tail_of_a_longer_one_is_not_the_instrument():
+    # "Data Act" is a proper suffix of the Nordic Personal Data Acts, which the DPA
+    # decisions on gdprhub name constantly: 26% of the Data Act's whole citer graph.
+    for text in ["The Data Inspectorate applied the Personal Data Act.",
+                 "in breach of the Patient Data Act and section 4",
+                 "under the Police Data Act 2018"]:
+        assert not [c for c in extract_citations(text) if c.candidate_id], text
+    # …while the qualifiers that leave identity alone, and an acronym glossing the name
+    # in a heading, both still resolve.
+    for text, celex in [("under the EU Data Act", "32023R2854"),
+                        ("the Union's Digital Markets Act", "32022R1925"),
+                        ("DSA Digital Services Act", "32022R2065")]:
+        assert any(c.candidate_id == celex for c in extract_citations(text)), text
+
+
+def test_a_name_cannot_match_from_the_middle_of_a_word():
+    # _EU_PINPOINT is optional, so without a leading \b "nis 2" matched inside the Dutch
+    # and German words for judgment, obstacle and result — 48% of every NIS 2 citation.
+    for text in ["het kort geding vonnis 2 De cassatiedagvaarding",
+                 "BGHR StPO Abs. 3 Verfahrenshindernis 2).",
+                 "pursuant to Section 16(1)(b) of the FTAI Act."]:
+        assert not [c for c in extract_citations(text) if c.candidate_id], text
+    assert any(c.candidate_id == "32022L2555"
+               for c in extract_citations("Article 34 of the NIS 2 Directive"))
 
 
 # -- a provision that names its own host --------------------------------------

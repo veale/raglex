@@ -30,6 +30,7 @@ _SAFE_REPAIRS = (
     "self_citation",          # drop non-structured self-edges (noise)
     "misdated_case",          # correct dates contradicted by the neutral-cite slug
     "anachronistic_eu_citation",
+    "future_celex_target",    # a CELEX year that has not happened names nothing
     "case_paragraph_carry_forward",
     "judgment_paragraph_carry_forward",
 )

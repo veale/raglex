@@ -6592,8 +6592,16 @@ class Facade:
         return out
 
     def rescan_matching(self, *, query: str, exact: bool = True, limit: int = 20000,
+                        citers_of: list[str] | None = None,
                         on_progress=None, cancel_check=None) -> dict:
         """Re-extract every document whose TEXT matches a free-text query.
+
+        ``citers_of`` adds a GRAPH-derived scope on top: every document holding a
+        resolved edge into any of those targets. A text query cannot express "everything
+        that cites the static-export set" — the set is 57 instruments with dozens of
+        names between them, and the documents that matter are exactly the ones the graph
+        already knows about. Either scope may be given alone; together they are unioned
+        and each document is still re-read once.
 
         The scope a citation fix actually needs. When a grammar, alias or shorthand
         changes, the documents to re-read are the ones that MENTION the thing — which is
@@ -6616,10 +6624,40 @@ class Facade:
         from .citations import extract_documents_parallel
 
         queries = [q.strip() for q in str(query or "").split("|||") if q.strip()]
-        if not queries:
-            return {"error": "a query is required"}
+        targets = [t.strip() for t in (citers_of or []) if str(t or "").strip()]
+        if not queries and not targets:
+            return {"error": "a query or citers_of is required"}
         ids: dict[str, None] = {}
         per_query: dict[str, int] = {}
+        from_graph = 0
+        if targets:
+            with self._open() as (cat, _rs, _ts):
+                # The version FAMILY of each target, not the bare id: a citer of the
+                # GDPR's enacted text and a citer of a dated consolidation of it are the
+                # same citer of the same instrument, and re-reading only one of them
+                # leaves the other's edges standing.
+                family: dict[str, None] = {}
+                for target in targets:
+                    family[target] = None
+                    for row in cat.conn.execute(
+                            "SELECT src_id, dst_id FROM relations WHERE "
+                            "(src_id = ? OR dst_id = ?) AND relationship_type IN "
+                            "('consolidates', 'point_in_time_of')", (target, target)):
+                        for side in (row["src_id"], row["dst_id"]):
+                            if side:
+                                family[side] = None
+                members = list(family)
+                for start in range(0, len(members), 200):
+                    chunk = members[start:start + 200]
+                    marks = ",".join("?" * len(chunk))
+                    for row in cat.conn.execute(
+                            f"SELECT DISTINCT src_id FROM relations WHERE dst_id IN ({marks}) "
+                            "AND resolution_status = 'resolved'", tuple(chunk)):
+                        ids[row["src_id"]] = None
+                ids.pop(None, None)  # defensive: a null src_id is not a document
+                for target in members:
+                    ids.pop(target, None)  # an instrument citing itself is not a citer
+                from_graph = len(ids)
         for one in queries:
             # ``items`` is the row list; ``total`` is the match count before the limit.
             # Reading a key the search does not return is a silent empty scope — the
@@ -6638,6 +6676,7 @@ class Facade:
             # jurisdiction that isn't in the free-text index — never a reason to
             # report a successful pass over an empty corpus.
             return {"error": "no documents matched", "queries": per_query,
+                    "citers_of": targets,
                     "hint": "check the phrase and that its jurisdiction is indexed "
                             "(freetext_scope lists what is)"}
         with self._open() as (cat, _rs, ts):
@@ -6654,7 +6693,8 @@ class Facade:
                 # A rescan is watched, so report often enough to look alive.
                 report_every=25,
                 on_progress=on_progress, cancel_check=cancel_check)
-            base = {"queries": per_query, "documents": total,
+            base = {"queries": per_query, "citers_of": len(targets),
+                    "from_graph": from_graph, "documents": total,
                     "extractable": len(scope), "re_extracted": ex.processed,
                     "citations": ex.citations}
             if ex.cancelled:

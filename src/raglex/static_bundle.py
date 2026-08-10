@@ -197,6 +197,25 @@ def _clean_webhook(raw) -> dict:
     }
 
 
+def _clean_only(raw) -> list[str]:
+    """The provisions an item is cut down to, de-duplicated and in the order given.
+
+    Accepts a comma-separated string as well as a list, because that is what an operator
+    types into a settings field: ``Article 101, Article 102, Article 267``. Empty means
+    the whole instrument, which is what every item without this field gets."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    seen, out = set(), []
+    for label in raw or []:
+        name = re.sub(r"\s+", " ", str(label or "")).strip()
+        key = name.casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
 def _clean_tags(raw) -> list[str]:
     """An item's themes, de-duplicated and in the order given. A law may carry several —
     the Data Protection Act belongs under privacy AND under law enforcement, and the
@@ -260,6 +279,12 @@ def load_config(config: Config | None = None) -> dict:
             "short": str(entry.get("short") or "").strip(),
             "note": str(entry.get("note") or ""),
             "tags": _clean_tags(entry.get("tags")),
+            # Optional. A list of provision labels ("Article 101", "s. 5") builds a
+            # SUBSET edition of that instrument instead of the whole thing — the point
+            # being weight, not display: the TFEU's 191,183 incoming edges make a
+            # whole-instrument edition of it unusable, while its competition Articles
+            # alone are an ordinary page.
+            "only": _clean_only(entry.get("only")),
         })
     groups = _clean_groups(data.get("groups"))
     try:
@@ -309,6 +334,12 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
             "short": str(entry.get("short") or "").strip()[:40],
             "note": str(entry.get("note") or ""),
             "tags": _clean_tags(entry.get("tags")),
+            # Optional. A list of provision labels ("Article 101", "s. 5") builds a
+            # SUBSET edition of that instrument instead of the whole thing — the point
+            # being weight, not display: the TFEU's 191,183 incoming edges make a
+            # whole-instrument edition of it unusable, while its competition Articles
+            # alone are an ordinary page.
+            "only": _clean_only(entry.get("only")),
         })
     merged["items"] = items
     merged["groups"] = _clean_groups(merged.get("groups"))
@@ -829,17 +860,19 @@ def build_bundle(
             emit(_i, f"{_label} ({_pos}) — reading excerpts from {done:,} of "
                      f"{total:,} citing documents", sub_done=done, sub_total=total)
 
-        status = static_export_status(facade.config, stable_id, max_snippets=max_snippets)
+        only = list(item.get("only") or []) or None
+        status = static_export_status(
+            facade.config, stable_id, max_snippets=max_snippets, only=only)
         if refresh or not status.get("ready"):
             emit(index, f"{label} ({position}) — gathering the law and everything citing it")
             build_static_export_cache(
                 facade, stable_id, max_snippets=max_snippets,
                 on_progress=lambda **p: item_progress(
                     int(p.get("done") or 0), int(p.get("total") or 0)),
-                cancel_check=cancel_check,
+                cancel_check=cancel_check, only=only,
             )
             status = static_export_status(
-                facade.config, stable_id, max_snippets=max_snippets)
+                facade.config, stable_id, max_snippets=max_snippets, only=only)
         else:
             emit(index, f"{label} ({position}) — re-using the edition built "
                         f"{format_export_date(status.get('generated_at'))}")
@@ -872,6 +905,7 @@ def build_bundle(
             "jurisdiction": status.get("jurisdiction") or "",
             "note": item.get("note") or "",
             "tags": list(item.get("tags") or []),
+            "subset": list(status.get("subset") or []),
             "documents": int(status.get("documents") or 0),
             "mentions": int(status.get("mentions") or 0),
             "pending": int(status.get("pending") or 0),

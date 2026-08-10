@@ -366,7 +366,8 @@ RUNNERS: dict[str, Callable] = {
     # MENTION the thing, which is exactly what the edges do not yet record.
     "rescan-matching": lambda f, p, cb, cancel: f.rescan_matching(
         query=p.get("query") or "", exact=bool(p.get("exact", True)),
-        limit=int(p.get("limit") or 20000), on_progress=cb, cancel_check=cancel),
+        limit=int(p.get("limit") or 20000), citers_of=p.get("citers_of"),
+        on_progress=cb, cancel_check=cancel),
     "rescan-citations": lambda f, p, cb, cancel: f.apply_rules(
         source=p.get("source"), sources=p.get("sources"),
         source_prefix=p.get("source_prefix"), target_ids=p.get("target_ids"),

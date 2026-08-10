@@ -1280,17 +1280,24 @@ def _rebind_irish_legislation(catalogue: Catalogue, doc, cites: list) -> list:
 # question. Run here instead, where the host is known to be Irish and the held
 # Oireachtas title index can bind the match in the same pass.
 _IRISH_STATUTE_FAMILY_RE = re.compile(
-    r"(?:(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
+    # Case-insensitive on the pinpoint prefix only — see ``uk_statute_named``. "Section
+    # 2(1)(c) of the Data Protection Acts" is how the DPC writes it, and the capital was
+    # enough to drop the pinpoint.
+    r"(?i:(?:(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
     r"|Part\s+(?P<part>[IVXLC]+[A-Za-z]?|\d+[A-Za-z]?))\s+of\s+)?"
-    r"the\s+"
+    r"the\s+)"
     r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
     r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\)))"
     r"{0,7}?)"
     r"\s+(?P<noun>Acts|Act)\b"
     r"(?:\s+(?P<y1>(?:1[6-9]|20)\d{2})\s*(?:to|and|–|—|-)\s*(?P<y2>(?:1[6-9]|20)\d{2}))?"
     # "the Data Protection Act 2018" belongs to the full-title grammar, which resolves
-    # it exactly; only the year-LESS forms are this function's business.
-    r"(?!\s+(?:1[6-9]|20)\d{2})"
+    # it exactly; only the year-LESS forms are this function's business. The comma form
+    # counts as dated: Ireland writes "the Data Protection Act, 2018" as standard, and
+    # reading it as year-less sent it down the singular branch, which binds only to a
+    # member the document has already named WITHOUT the comma — which such a document
+    # never does. The pinpoint was dropped on the floor every time.
+    r"(?!,?\s+(?:1[6-9]|20)\d{2})"
 )
 
 

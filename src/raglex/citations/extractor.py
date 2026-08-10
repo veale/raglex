@@ -1077,6 +1077,38 @@ _ARTICLE_LIST_ANAPHOR = re.compile(
     r"(?P<kind>Regulation|Directive|Decision|Treaty|Convention|Charter)\b)",
     re.IGNORECASE)
 
+#: The run of capitalised words a list hands off to. ``_ARTICLE_LIST`` has already eaten
+#: the "of the", so this starts at the host itself.
+_LIST_HOST_RUN = re.compile(r"[A-ZÀ-Ý][\w'’\-]*(?:\s+[A-ZÀ-Ý][\w'’\-]*)*")
+#: Instrument nouns that, standing alone, are a BACK-reference rather than a name —
+#: "Articles 5 and 6 of the Regulation" means the one named a paragraph ago, which is
+#: exactly what the distance fallback is for.
+_LIST_HOST_ANAPHORIC = {
+    "regulation", "regulations", "directive", "directives", "decision", "decisions",
+    "act", "law", "code", "rules", "agreement", "order", "provision", "provisions",
+}
+#: …and the words that qualify such a noun without naming anything: "of the EU
+#: Regulation", "of the Council Regulation" are still back-references.
+_LIST_HOST_QUALIFIER = {
+    "eu", "ec", "eec", "european", "union", "council", "commission", "parliament",
+    "the", "of", "and", "no",
+}
+
+
+def _named_list_host(tail: str) -> bool:
+    """Does the text after an article list NAME the instrument the articles belong to?
+
+    True for "Berne Convention", "Charter", "Personal Data Act", "Montreal Convention",
+    "EC Treaty" — a distinctive proper noun. False for "Regulation", "EU Regulation",
+    "Council Regulation", which name nothing and point backwards.
+    """
+    match = _LIST_HOST_RUN.match(tail)
+    if not match:
+        return False
+    words = [w.lower() for w in match.group(0).split()]
+    return any(w not in _LIST_HOST_ANAPHORIC and w not in _LIST_HOST_QUALIFIER
+               for w in words)
+
 
 def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
     """Split "Articles 7, 8 and 11 … of the Charter" into one edge per article. The
@@ -1108,6 +1140,17 @@ def _attach_article_lists(text: str, kept: list[Citation]) -> list[Citation]:
         # tail, but the closest explicit instrument mention in that short section makes
         # its host clear.  3,000 chars covers a handful of judgment paragraphs, not an
         # unbounded document-wide carry-forward.
+        #
+        # …but only where the list does not say whose Articles these are. "Articles 1 to
+        # 21 of the Berne Convention", "Articles 20 and 21 of the Charter", "Sections 22
+        # and 25 of the Personal Data Act": the host is written down and simply is not an
+        # instrument this resolver knows. Reaching past that for the nearest EU act in
+        # the previous three paragraphs is not filling a gap, it is overruling the text —
+        # and it is how the Berne Convention's articles became the DSM Directive's and
+        # the Charter's became the DMA's. An unresolvable tail is a reason to leave the
+        # list alone; the anaphor branch above still handles "of that Directive".
+        if not cand and _named_list_host(text[m.end(): m.end() + 120]):
+            continue
         if not cand:
             prior = [c for c in kept if c.char_end <= m.start() and c.candidate_id
                      and (c.entity_kind in {"regulation", "directive", "eu_instrument", "treaty"}
@@ -1796,7 +1839,17 @@ def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:
 def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     """Keep the longest match at each location; drop spans contained in a kept one
     (so the article-scoped citation wins over the bare instrument number)."""
-    ordered = sorted(cites, key=lambda c: (c.char_start, -(c.char_end - c.char_start)))
+    # On an exact span TIE, the reading that names an act beats the one that names
+    # nothing. Two grammars often recognise the same words — a general statute grammar
+    # and a jurisdiction-specific one — and which of them arrived first in the list is
+    # not a reason to prefer it. "Section 135 of the Online Safety Act 2021" is read by
+    # both; only the Australian grammar knows which Act that is, and without this the
+    # generic reading won the span and contributed a name-only observation instead.
+    # Length still decides first, so a longer match that consumes a disqualifying
+    # jurisdiction tag ("Companies Act 2006 (Cth)") keeps its precedence.
+    ordered = sorted(cites, key=lambda c: (c.char_start,
+                                           -(c.char_end - c.char_start),
+                                           c.candidate_id is None))
     kept: list[Citation] = []
     occupied: list[tuple[int, int]] = []
     for c in ordered:

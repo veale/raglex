@@ -195,12 +195,34 @@ def _attribution_html() -> str:
         os.environ.get("RAGLEX_STATIC_EXPORT_ATTRIBUTION") or _DEFAULT_ATTRIBUTION)
 
 
-def _attribution_block(note: str | None = None) -> str:
+def _subset_sentence(subset: list | None) -> str:
+    """What a subset edition must say about itself, before anything else it says.
+
+    A page headed "Consolidated version of the Treaty on the Functioning of the European
+    Union" that contains four Articles is a trap unless it admits it. Named in full where
+    the list is short enough to read, counted where it is not."""
+    labels = [str(label).strip() for label in (subset or []) if str(label).strip()]
+    if not labels:
+        return ""
+    if len(labels) <= 8:
+        named = ", ".join(labels[:-1]) + (" and " if len(labels) > 1 else "") + labels[-1]
+        body = f"This edition contains {named} only"
+    else:
+        body = f"This edition contains {len(labels)} selected provisions only"
+    return (f'<p class="attribution subset-note"><strong>{html.escape(body)}</strong>'
+            " — not the whole instrument. Citing documents are those citing these"
+            " provisions.</p>")
+
+
+def _attribution_block(note: str | None = None, subset: list | None = None) -> str:
     """The attribution paragraph, plus — when this edition is one item of a bundle — its
     own line directly beneath, in the same style, under the title. The way back to the
     bundle's index is not here: it sits in the contents column, where a reader looks for
     navigation."""
     paragraphs = [f'<p class="attribution">{_attribution_html()}</p>']
+    subset_line = _subset_sentence(subset)
+    if subset_line:
+        paragraphs.append(subset_line)
     paragraphs.extend(editorial_paragraphs(note, "attribution"))
     return "\n      ".join(paragraphs)
 
@@ -547,11 +569,12 @@ class StaticLawExporter:
         max_snippets: int = 4,
         progress: Callable[[int, int], None] | None = None,
         note: str | None = None,
+        only: list[str] | None = None,
     ) -> StaticExport:
         """The finished page. ``note`` is the per-edition editorial line a bundle adds
-        beneath the shared attribution."""
+        beneath the shared attribution; ``only`` cuts it down to named provisions."""
         data = self.build_data(
-            stable_id, max_snippets=max_snippets, progress=progress)
+            stable_id, max_snippets=max_snippets, progress=progress, only=only)
         display_title = data["law"]["title"]
         return StaticExport(
             html=render_static_html(data, note=note).encode("utf-8"),
@@ -693,11 +716,21 @@ class StaticLawExporter:
         *,
         max_snippets: int = 4,
         progress: Callable[[int, int], None] | None = None,
+        only: list[str] | None = None,
     ) -> dict:
         """Everything the page shows, as data. Kept separate from rendering because it is
         the expensive half (thousands of source texts) and therefore the half worth
         caching: attribution, editorial notes and template changes then re-render for
-        free from a payload built hours ago."""
+        free from a payload built hours ago.
+
+        ``only`` is a list of provision labels ("Article 101", "s. 5") and makes a
+        SUBSET edition: those provisions, and only the mentions of those provisions. It
+        is a size decision, not a display one. The TFEU carries 191,183 incoming edges
+        and the TEU 47,968 — a whole-instrument edition of either is tens of megabytes
+        of excerpts, most of them about Articles nobody opened the page for. Filtering
+        in the browser would not help, because by then the bytes have already been
+        downloaded; the cut has to happen here, before the excerpts are ever read.
+        """
         max_snippets = max(1, min(int(max_snippets), 12))
         generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         # Computed BEFORE the catalogue is opened below: it opens its own connection,
@@ -743,6 +776,26 @@ class StaticLawExporter:
                     section["source_stable_id"] = \
                         inherited_recitals["source_stable_id"]
                 sections = [*recital_sections, *sections]
+
+            # The subset cut, taken BEFORE any citer is read: everything downstream —
+            # counts, groups, excerpts, comparisons — is derived from the relations left
+            # standing here, so a four-Article edition of the TFEU costs four Articles'
+            # worth of work and bytes rather than 358.
+            wanted_keys: set[str] | None = None
+            if only:
+                wanted_keys = {
+                    key for key in
+                    (_anchor_key(str(label)) or _slug(str(label)) for label in only
+                     if str(label or "").strip())
+                    if key
+                }
+                kept = [s for s in sections if s["key"] in wanted_keys]
+                if not kept:
+                    known = ", ".join(s["label"] for s in sections[:8])
+                    raise ValueError(
+                        f"none of {only!r} name a provision of {stable_id}; "
+                        f"it begins {known}")
+                sections = kept
 
             relations = [
                 dict(relation) for relation in cat.relations_to(stable_id)
@@ -796,6 +849,16 @@ class StaticLawExporter:
             comparisons = self._comparisons(
                 cat, textstore, provision_mappings, previous_laws, sections)
             relations = self.facade._collapse_version_citers(cat, relations)
+            if wanted_keys is not None:
+                # An anchorless mention cites the instrument, not a provision of it, so
+                # it has no place in an edition that IS a provision — and it is the bulk
+                # of the weight the subset exists to shed.
+                relations = [
+                    relation for relation in relations
+                    if relation["dst_anchor"]
+                    and (_anchor_key(relation["dst_anchor"])
+                         or _slug(relation["dst_anchor"])) in wanted_keys
+                ]
 
             def relation_keys(relation) -> list[str]:
                 anchor = relation["dst_anchor"]
@@ -1092,6 +1155,10 @@ class StaticLawExporter:
             },
             "flags": _flag_assets(jurisdictions),
         }
+        if wanted_keys is not None:
+            # Said out loud, and carried in the payload rather than inferred from a short
+            # section list: a reader must never take a subset edition for the instrument.
+            data["subset"] = [s["label"] for s in sections]
         return data
 
     def write(
@@ -1110,8 +1177,21 @@ class StaticLawExporter:
         return result
 
 
+def subset_token(only: list[str] | None) -> str:
+    """A stable, order-independent name for a subset selection, or "" for the whole
+    instrument. Part of the cache identity: a four-Article edition of the TFEU and the
+    whole TFEU are different documents, and without this the one written second would
+    silently serve as the other."""
+    labels = sorted({str(label).strip() for label in (only or []) if str(label).strip()})
+    if not labels:
+        return ""
+    return "-only-" + hashlib.sha256(
+        "\n".join(labels).encode("utf-8")).hexdigest()[:10]
+
+
 def static_export_cache_path(
-    config: Config, stable_id: str, *, max_snippets: int = 4
+    config: Config, stable_id: str, *, max_snippets: int = 4,
+    only: list[str] | None = None,
 ) -> Path:
     """Where the built PAYLOAD for one edition lives. It holds the expensive half \u2014 the
     law, its citing documents and their excerpts \u2014 and the page is rendered from it on
@@ -1121,7 +1201,8 @@ def static_export_cache_path(
         config.data_dir / "exports" / "cache"
         / (
             f"{_slug(stable_id)[:80]}-{identity}"
-            f"-v{_CACHE_VERSION}-snippets-{max(1, min(int(max_snippets), 12))}.data.json"
+            f"-v{_CACHE_VERSION}-snippets-{max(1, min(int(max_snippets), 12))}"
+            f"{subset_token(only)}.data.json"
         )
     )
 
@@ -1131,9 +1212,11 @@ def static_export_manifest_path(path: Path) -> Path:
 
 
 def static_export_status(
-    config: Config, stable_id: str, *, max_snippets: int = 4
+    config: Config, stable_id: str, *, max_snippets: int = 4,
+    only: list[str] | None = None,
 ) -> dict:
-    path = static_export_cache_path(config, stable_id, max_snippets=max_snippets)
+    path = static_export_cache_path(
+        config, stable_id, max_snippets=max_snippets, only=only)
     manifest_path = static_export_manifest_path(path)
     if not path.is_file() or not manifest_path.is_file():
         return {"ready": False, "stable_id": stable_id, "max_snippets": max_snippets}
@@ -1200,6 +1283,7 @@ def build_static_export_cache(
     max_snippets: int = 4,
     on_progress: Callable[..., None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    only: list[str] | None = None,
 ) -> dict:
     """Build and atomically publish the cached payload the download API renders from."""
     max_snippets = max(1, min(int(max_snippets), 12))
@@ -1214,11 +1298,11 @@ def build_static_export_cache(
             )
 
     data = StaticLawExporter(facade=facade).build_data(
-        stable_id, max_snippets=max_snippets, progress=progress)
+        stable_id, max_snippets=max_snippets, progress=progress, only=only)
     title = data["law"]["title"]
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     path = static_export_cache_path(
-        facade.config, stable_id, max_snippets=max_snippets)
+        facade.config, stable_id, max_snippets=max_snippets, only=only)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(payload, encoding="utf-8")
@@ -1240,6 +1324,9 @@ def build_static_export_cache(
         "pending": int((data.get("pending") or {}).get("total") or 0),
         "bytes": len(payload.encode("utf-8")),
         "generated_at": data["generated_at"],
+        # Present only on a subset edition, so the index page and the status line can
+        # say which provisions this one holds instead of implying the whole instrument.
+        **({"subset": data["subset"]} if data.get("subset") else {}),
     }
     manifest_path = static_export_manifest_path(path)
     manifest_temporary = manifest_path.with_suffix(".tmp")
@@ -1614,7 +1701,7 @@ def render_static_page(
         "__PRERENDER_LAW__": law_html,
         "__TITLE__": html.escape(_display_title(title)),
         "__SIDEBAR_HEAD__": _sidebar_head(short_title or title, index_link),
-        "__ATTRIBUTION_BLOCK__": _attribution_block(note),
+        "__ATTRIBUTION_BLOCK__": _attribution_block(note, parsed.get("subset")),
         "__STYLE__": _STYLE,
         "__SCRIPT__": _SCRIPT,
         "__DATA__": _escape_for_script(_slim_payload_json(data_json)),

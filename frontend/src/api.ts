@@ -213,6 +213,11 @@ export interface StaticBundleItem {
   // Which themed subsections of the index this law is listed under. More than one is
   // normal: the Law Enforcement Directive belongs under privacy AND under policing.
   tags?: string[];
+  // Optional. Provision labels ("Article 101", "s. 5") that cut this edition down to
+  // those provisions and only the documents citing THEM. A weight decision, not a
+  // display one: the TFEU's whole-instrument edition is unbuildably large, four of its
+  // Articles is an ordinary page. Empty means the whole instrument.
+  only?: string[];
 }
 // A themed subsection of the index, within a country. The ORDER of this list is the
 // order the subsections appear in — it is an editorial judgement, so it is stored

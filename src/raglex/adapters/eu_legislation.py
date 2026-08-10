@@ -22,6 +22,7 @@ cursor, no page cap) walks the whole series. ``types=`` picks the descriptors,
 from __future__ import annotations
 
 import re
+import time
 from datetime import date
 from typing import Iterator
 
@@ -406,7 +407,14 @@ LIMIT {self.page_size} OFFSET {offset}
             parsed = parse("formex-legislation", raw) if raw else None
             raw_ext = "zip"
             if not parsed or not parsed.text:
-                raw = self._fetch_html(stub.stable_id, language)
+                # A treaty is addressed by its CELEX STEM (12016E) but EUR-Lex only
+                # serves the text under the /TXT expression. The stem alone answers with
+                # the Official Journal's front matter — the C 202 table of contents —
+                # which extracts to the numerals 1 to 30 and nothing else. Both treaties
+                # sat like that under 239,151 incoming edges: every "Article 267 TFEU" in
+                # the corpus resolved to a document with no Article 267 in it.
+                raw = self._fetch_html(
+                    f"{stub.stable_id}/TXT" if primary else stub.stable_id, language)
                 parsed = parse("eurlex-html", raw) if raw else None
                 raw_ext = "html"
             if not parsed or not parsed.text:
@@ -517,12 +525,24 @@ LIMIT {self.page_size} OFFSET {offset}
         lang = language.upper()
         accept_language = {"en": "eng", "fr": "fra"}.get(language, language)
         url = f"https://eur-lex.europa.eu/legal-content/{lang}/TXT/HTML/?uri=CELEX:{celex}"
-        try:
-            r = self._client.get(url, headers={"Accept-Language": accept_language})
-            if getattr(r, "status_code", 200) == 200 and len(r.content or b"") > 500:
-                return r.content
-        except FetchError:
-            pass
+        # The 202 is not a refusal, it is CELLAR's content negotiation failing under
+        # load: the body says "None of the requests returned successfully a redirection
+        # … Invalid content type CONTENT_STREAM for WORK without language", and the same
+        # request with the same headers succeeds moments later. Treating the first one as
+        # final is what makes the failure look like a block; three tries, spaced, turns
+        # it back into an ordinary fetch. An explicit Accept goes with the
+        # Accept-Language, because the negotiation wants both.
+        headers = {"Accept": "text/html,application/xhtml+xml",
+                   "Accept-Language": f"{accept_language}, {language};q=0.9"}
+        for attempt in range(3):
+            try:
+                r = self._client.get(url, headers=headers)
+                if getattr(r, "status_code", 200) == 200 and len(r.content or b"") > 500:
+                    return r.content
+            except FetchError:
+                break
+            if attempt < 2:
+                time.sleep(2 + 3 * attempt)
         try:
             r = self._client.get(f"{CELEX_BASE}/{celex}",
                                  headers={"Accept": "text/html",

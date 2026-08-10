@@ -4165,6 +4165,47 @@ function parseHeaders(text: string): Record<string, string> {
   return out;
 }
 
+// A long text value that lives in a narrow table cell. The cell shows what is there and
+// nothing else; editing happens in a pop-out big enough to see the whole value.
+//
+// It replaces a two-row <textarea> wedged into a column of a six-column grid, which was
+// about twelve characters wide, could not be resized, and made an editorial line of any
+// length effectively unwritable. A table cell is a fine place to READ a short value and
+// a hopeless place to compose one.
+function CellText({ label, field, hint, value, onChange, placeholder, summary }: {
+  label: string; field: string; hint?: string; value: string;
+  onChange: (v: string) => void; placeholder?: string; summary?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const shown = summary !== undefined ? summary : value.replace(/\s+/g, " ").trim();
+  return (
+    <>
+      <button className="mini" style={{ display: "block", width: "100%", textAlign: "left",
+        whiteSpace: "normal", opacity: shown ? 1 : 0.6, marginBottom: 3 }}
+        title={value || `add ${field}`} onClick={() => setOpen(true)}>
+        {shown ? (shown.length > 64 ? shown.slice(0, 64) + "…" : shown) : `＋ ${field}`}
+      </button>
+      {open && (
+        <div className="palette-backdrop"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false); }}>
+          <div className="palette" role="dialog" aria-label={`${field} for ${label}`}
+            style={{ width: "min(680px, 92vw)" }}>
+            <div className="row" style={{ alignItems: "baseline", gap: 8 }}>
+              <b style={{ flex: 1 }}>{label} — {field}</b>
+              <button className="mini" onClick={() => setOpen(false)}>done</button>
+            </div>
+            {hint && <div className="muted" style={{ fontSize: 12, margin: "4px 0 6px" }}>{hint}</div>}
+            <textarea autoFocus rows={12} value={value} placeholder={placeholder}
+              style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
+              onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
+              onChange={(e) => onChange(e.target.value)} />
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // The whole publishing surface, on its own admin section: the set, the schedule that
 // republishes it, and the one request fired when a run lands (so a machine elsewhere can
 // scp the folder on, or a phone can be told it happened).
@@ -4410,8 +4451,29 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
                 </td>
               )}
               <td>
-                <textarea rows={2} value={it.note} onChange={(e) => setItem(i, { note: e.target.value })}
-                  placeholder="optional — appears on a new line below the shared text, in this file only" />
+                <CellText
+                  label={it.short || it.title || it.stable_id}
+                  field="editorial line"
+                  hint="Appears on its own line beneath the shared text, in this file only."
+                  placeholder="optional — appears on a new line below the shared text, in this file only"
+                  value={it.note || ""}
+                  onChange={(v) => setItem(i, { note: v })} />
+                <CellText
+                  label={it.short || it.title || it.stable_id}
+                  field="provisions"
+                  hint={"One per line, or comma-separated — Article 101, Article 102. "
+                    + "Leave empty for the whole instrument. Naming a few provisions "
+                    + "builds an edition of THOSE and only the documents citing them, "
+                    + "which is the only way an instrument with hundreds of thousands "
+                    + "of citations makes a usable page."}
+                  placeholder="Article 101&#10;Article 102"
+                  value={(it.only || []).join("\n")}
+                  summary={(it.only || []).length
+                    ? `${it.only!.length} provision${it.only!.length === 1 ? "" : "s"}`
+                    : ""}
+                  onChange={(v) => setItem(i, {
+                    only: v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
+                  })} />
               </td>
               <td style={{ whiteSpace: "nowrap" }}>
                 <button className="mini" title="move up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>{" "}

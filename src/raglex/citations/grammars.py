@@ -58,19 +58,46 @@ _DESCRIPTOR = {"regulation": "R", "directive": "L", "decision": "D",
                "framework decision": "F"}
 
 
+#: A 4-digit group is only a YEAR if the Union could have legislated in it. Four digits
+#: beginning 19 or 20 are also an ordinary instrument NUMBER — "Regulation (EEC) No
+#: 2092/91" (organic production), "No 2042/2003" (airworthiness), "No 1907/2006" (REACH)
+#: — and reading the number as the year minted a CELEX for a year that will never come:
+#: 32092R0091, 32042R2003, 31907R2006. Those ids name nothing, so every reference to the
+#: real act landed on an empty stub, and each stub then became the antecedent that the
+#: carry-forward pass attached the rest of the document's bare Articles to. 7,970 edges
+#: over 344 such phantoms. The upper bound moves with the calendar rather than being
+#: pinned, so next year's instruments still parse without an edit here.
+_EU_FIRST_YEAR = 1951  # ECSC Treaty; nothing in the corpus is numbered earlier
+
+
+def _plausible_eu_year(value: str) -> bool:
+    from datetime import date
+
+    return bool(re.fullmatch(r"(19|20)\d{2}", value)) and (
+        _EU_FIRST_YEAR <= int(value) <= date.today().year + 1)
+
+
 def _eu_celex(kind: str, a: str, b: str) -> str | None:
     """Build a CELEX from an EU instrument number. A 4-digit group is the year
-    ('2016/679', '45/2001'); for the old 2-digit forms ('Directive 95/46',
-    'Regulation 1612/68') the convention differs by instrument — **directives put
-    the year first**, regulations put it second — and a 2-digit year ≥31 is 19xx,
-    else 20xx."""
+    ('2016/679', '45/2001') **when it is a year the Union could have legislated in**;
+    for the old 2-digit forms ('Directive 95/46', 'Regulation 1612/68') the convention
+    differs by instrument — **directives put the year first**, regulations put it
+    second — and a 2-digit year ≥31 is 19xx, else 20xx."""
     desc = _DESCRIPTOR.get(re.sub(r"\s+", " ", kind).strip().lower())
     if not desc:
         return None
-    if re.fullmatch(r"(19|20)\d{2}", a):
+    if _plausible_eu_year(a) and _plausible_eu_year(b):
+        # Both readable as years — "2018/1999", "No 1980/2000". The numbering style
+        # decides: from 2015 the Union writes year/number, before that number/year.
+        year, num = (a, b) if int(a) >= 2015 else (b, a)
+    elif _plausible_eu_year(a):
         year, num = a, b
-    elif re.fullmatch(r"(19|20)\d{2}", b):
+    elif _plausible_eu_year(b):
         year, num = b, a
+    elif re.fullmatch(r"(19|20)\d{2}", a) and re.fullmatch(r"(19|20)\d{2}", b):
+        # Two four-digit groups and neither can be a year. Nothing here is a CELEX;
+        # returning one anyway is what created the phantoms.
+        return None
     else:
         # Old two-digit-year form. The *year* is the two-digit group, whichever side it's
         # on — "94/800" (Decision, year first) and "1831/81" (number first) both put the
@@ -135,7 +162,14 @@ _NAME_TO_CELEX = {
     "chips act": "32023R1781",
     "european accessibility act": "32019L0882",
     "open data directive": "32019L1024",
-    "dsm directive": "32019L0790", "copyright directive": "32019L0790",
+    "dsm directive": "32019L0790",
+    # "the Copyright Directive" is 2001/29, not the DSM Directive. That is settled usage
+    # in the Court's own judgments and its AGs' Opinions — Laserdisken, FAPL, Svensson,
+    # YouTube/Cyando all use it of 2001/29, and the DSM is always "the DSM Directive" or
+    # "the CDSM Directive". Mapped to the DSM it made 975 of that instrument's 1,252
+    # name-matched citations somebody else's, 261 of them from judgments handed down
+    # before the DSM existed, and each one then anchored the bare Articles around it.
+    "copyright directive": "32001L0029",
     "eecc": "32018L1972", "european electronic communications code": "32018L1972",
     "avmsd": "32010L0013",
     "interoperable europe act": "32024R0903",
@@ -947,6 +981,55 @@ def _eu_acronym(m: "re.Match[str]") -> Normalised:
     return _name_to_celex(name), _eu_pinpoint_of(m), None
 
 
+#: Words that may stand in front of an instrument's short name without changing WHICH
+#: instrument it is: "the EU Data Act", "the Union's Digital Markets Act".
+_NAME_PREFIX_OK = {
+    "eu", "eu's", "eu’s", "european", "union", "union's", "union’s", "the",
+    "new", "draft", "proposed", "said", "this", "that", "its",
+}
+#: A capitalised word sitting immediately in front of the name, with nothing but a single
+#: space between them — no punctuation, so a sentence boundary does not count.
+_NAME_PREFIX_RE = re.compile(r"([A-Za-zÀ-ÿ'’-]+) $")
+
+
+def _initials(name: str) -> str:
+    return "".join(w[0] for w in re.findall(r"[A-Za-zÀ-ÿ]+", name)).upper()
+
+
+def _eu_full_name(m: "re.Match[str]") -> Normalised:
+    """An instrument's spelled-out short name — unless it is the TAIL OF A LONGER NAME.
+
+    "Data Act" is a proper suffix of the Personal Data Act, the Patient Data Act and the
+    Police Data Act, which Nordic and Icelandic data-protection decisions name on almost
+    every page; 26% of the whole Data Act citer graph was those, and once one of them
+    landed the carry-forward pass re-pointed every bare "Article 32" and "Article 83" in
+    the decision from the GDPR onto the Data Act as well. Only 36% of that damage was
+    visible to the anachronism probe — the rest sits in documents decided after the Data
+    Act was adopted, where no date can contradict it.
+
+    A capitalised word in front of the name is the signal, with two exceptions: the
+    qualifiers that leave identity alone ("the EU Data Act"), and the instrument's own
+    acronym glossing it in a heading or a defined-terms line ("GDPR General Data
+    Protection Regulation", "DSA Digital Services Act").
+    """
+    name = m.group("name")
+    # Only for a BARE name. Where the optional pinpoint group matched, the words in front
+    # of the name are its own pinpoint — "Annex XII AI Act" would otherwise be read as a
+    # longer name beginning "XII". And a pinpoint cannot hide the real thing this guards
+    # against: in "section 32 of the Personal Data Act" the pinpoint has nowhere to
+    # attach (the map holds "data act", not "personal data act"), so the engine matches
+    # the bare name with "Personal" still sitting in front of it, and the guard fires.
+    before = (_NAME_PREFIX_RE.search(
+        m.string[max(0, m.start("name") - 40):m.start("name")])
+        if m.start() == m.start("name") else None)
+    if before:
+        word = before.group(1)
+        if (word[:1].isupper() and word.lower() not in _NAME_PREFIX_OK
+                and word.upper() != _initials(name)):
+            return None, None, DROP
+    return _name_to_celex(name), _eu_pinpoint_of(m), None
+
+
 register(Grammar(
     "eu_named", "regulation",
     # Case-sensitive so the acronym (GDPR/DMA/DSA/LED) stays uppercase-only, with
@@ -957,8 +1040,15 @@ register(Grammar(
 ))
 register(Grammar(
     "eu_named_full", "regulation",
-    re.compile(rf"{_EU_PINPOINT}(?P<name>{_EU_FULL_NAMES})\b", re.IGNORECASE),
-    lambda m: (_name_to_celex(m.group("name")), _eu_pinpoint_of(m), None),
+    # The leading \b matters as much here as in the acronym grammar above, and for
+    # longer: _EU_PINPOINT is entirely optional, so without it a name could match from
+    # the middle of a word. "nis 2" is a name in the map, and Dutch and German judgments
+    # are full of "vonnis 2", "tussenvonnis 2", "Verfahrenshindernis 2",
+    # "Wetsgeschiedenis 2" and "Ergebnis 2. Stufe" — 48% of every NIS 2 Directive
+    # citation in the corpus was one of those. "FSAI Act"/"FTAI Act" gave the AI Act the
+    # same treatment, and "CDSM Directive" matched the "DSM Directive" inside itself.
+    re.compile(rf"{_EU_PINPOINT}\b(?P<name>{_EU_FULL_NAMES})\b", re.IGNORECASE),
+    _eu_full_name,
 ))
 
 # ── UK GDPR (the assimilated / "retained" EU GDPR) ───────────────────────────
@@ -1281,12 +1371,25 @@ register(Grammar(
     # of names froze a rescan for hours (fca/2016/1034, 2026-07). No real short title has
     # more than ~8 tokens, so the bound only cuts the pathological scans.
     re.compile(
-        r"(?:(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
+        # The pinpoint prefix is case-INSENSITIVE; the title that follows is not, and
+        # cannot be (the title group is anchored on [A-Z]), which is why it is scoped
+        # with (?i:…) rather than a flag on the whole pattern. A capitalised "Section"
+        # opens a sentence constantly, and is the house style in Irish judgments and
+        # DPC decisions — "Section 113 of the Data Protection Act, 2018". Matching only
+        # the lowercase spelling did not lose the citation, it silently lost the
+        # PINPOINT, so the Act was cited and no provision of it ever was.
+        r"(?i:(?:(?:s(?:ection|\.)?\s*(?P<sec>\d+[A-Za-z]?(?:\s*\(\s*[A-Za-z0-9]+\s*\))*)"
         r"|Part\s+(?P<part>[IVXLC]+[A-Za-z]?|\d+[A-Za-z]?))\s+of\s+)?"
-        r"(?:the\s+)?"
+        r"(?:the\s+)?)"
         r"(?P<title>[A-Z][A-Za-z0-9'’.\-]*"
         r"(?:,?\s+(?:and|of|for|to|in|on|the|No\.?|[A-Z][A-Za-z0-9'’.\-]*|\([^()]{1,60}\))){0,11}?"
-        r"\s+(?:Act|Measure))\s+(?P<year>(?:1[6-9]|20)\d{2})\b"
+        # A comma before the YEAR as well as between title tokens. Irish drafting puts
+        # one there as a matter of course — "the Data Protection Act, 2018", "An Garda
+        # Síochána Act, 2005" — and without it the whole citation was invisible: not the
+        # wrong Act, no Act at all, so "Section 113 of the Data Protection Act, 2018" in
+        # the Meta judgments lost its pinpoint and survived only as a bare name-only
+        # mention of "the Data Protection Act".
+        r"\s+(?:Act|Measure)),?\s+(?P<year>(?:1[6-9]|20)\d{2})\b"
     ),
     _resolve_named_statute,
 ))
