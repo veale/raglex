@@ -449,3 +449,14 @@ def test_the_collective_citation_finds_the_acts_it_collects():
     assert Facade._singularised_collective("The Environmental Information "
                                            "Regulations 2004") is None
     assert Facade._singularised_collective("Rules of the Superior Courts") is None
+
+
+def test_find_answers_a_collective_citation_too_and_says_how():
+    """search()/find() is the MCP front door; it needed the same reading of a collective
+    as the Explore box, and has to say what it actually searched for."""
+    f = _two_data_protection_acts()
+
+    hit = f.find("the Data Protection Acts", kind="legislation")
+    assert hit["searched_as"] == "Data Protection Act"
+    assert {r["stable_id"] for r in hit["results"]} == {
+        "ukpga/2018/12", "ie/2018/act/7@2026-06-25"}

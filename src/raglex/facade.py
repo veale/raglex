@@ -3964,7 +3964,12 @@ class Facade:
         # 2. title pass — tokenised title/id match, jurisdiction/kind applied to the pool
         want_kind = self._KIND_ALIASES.get((kind or "").strip().lower()) if kind else None
         pool = max(k * 6, 60)
-        rows = self.list_documents(query=q, source=source, doc_type=doc_type, tag=tag,
+        # A collective citation names a body of law, so nothing is titled it — search for
+        # what its members ARE titled (see _singularised_collective).
+        titled = self._singularised_collective(q) or q
+        if titled != q:
+            out["searched_as"] = titled
+        rows = self.list_documents(query=titled, source=source, doc_type=doc_type, tag=tag,
                                    year_from=year_from, limit=pool)
         results = []
         for r in rows:
