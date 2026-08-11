@@ -110,6 +110,26 @@ def test_dip_delta_uses_updated_filter_and_cursor_stops_when_unchanged():
     assert client.calls[1][1]["params"]["cursor"] == "done"
 
 
+def test_dip_page_cap_applies_to_each_document_class_not_only_the_first():
+    def item(dip_id, number, kind):
+        return {"id": dip_id, "dokumentnummer": number, "titel": kind,
+                "datum": "2026-08-10", "aktualisiert": "2026-08-10T12:00:00+02:00",
+                "drucksachetyp": kind, "herausgeber": "BT", "pdf_hash": dip_id}
+
+    client = Client([
+        Response({"numFound": 2, "cursor": "bill-next",
+                  "documents": [item("1", "21/100", "Gesetzentwurf")]}),
+        Response({"numFound": 2, "cursor": "report-next",
+                  "documents": [item("2", "21/101", "Bericht")]}),
+    ])
+    adapter = BundestagDrucksachenAdapter(
+        api_key="secret", types="Gesetzentwurf,Bericht", client=client)
+    rows = list(adapter.discover(None, max_pages=1))
+    assert [row.stable_id for row in rows] == ["de/bt-drs/21/100", "de/bt-drs/21/101"]
+    assert [call[1]["params"]["f.drucksachetyp"] for call in client.calls] == [
+        "Gesetzentwurf", "Bericht"]
+
+
 def test_dip_fetch_emits_structural_rights_and_alias_metadata():
     item = {
         "id": "42", "dokumentnummer": "20/5548", "titel": "Entwurf eines Gesetzes",

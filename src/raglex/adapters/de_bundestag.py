@@ -354,8 +354,9 @@ class BundestagDrucksachenAdapter(BaseAdapter):
                         yield stub
             return
 
-        absolute = pages = 0
+        absolute = 0
         for drs_type in self.types:
+            pages = 0
             cursor: str | None = None
             while True:
                 params = {"f.drucksachetyp": drs_type}
@@ -380,7 +381,7 @@ class BundestagDrucksachenAdapter(BaseAdapter):
                 if not rows or not next_cursor or next_cursor == cursor:
                     break
                 if max_pages is not None and pages >= max_pages:
-                    return
+                    break
                 cursor = next_cursor
 
     def fetch(self, stub: Stub) -> Record | None:
