@@ -84,6 +84,7 @@ from .ie_revenue_tdm import IrishRevenueTDMAdapter
 from .ie_ccpc_mergers import IrishCCPCMergerAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
 from .ie_oireachtas import OireachtasLaidAdapter
+from .ie_oireachtas_committees import OireachtasCommitteeEvidenceAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nl_acm_guidance import ACMGuidanceAdapter
@@ -386,6 +387,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # The Oireachtas Library's catalogue of everything laid before the Houses —
     # committee reports, statutory annual reports and accounts, post-enactment reviews.
     "ie-oireachtas": OireachtasLaidAdapter,
+    # …and the evidence those committees heard, which is never laid and so is
+    # in no catalogue: opening statements, submissions, briefings.
+    "ie-oireachtas-committees": OireachtasCommitteeEvidenceAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -1370,6 +1374,30 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("max_kb", "Skip files larger than this many KB", "120000")),
         ("DL211160", "ie/oireachtas/opac/215643"),
     ),
+    "ie-oireachtas-committees": SourceInfo(
+        "ie-oireachtas-committees", "Oireachtas committee evidence — opening statements "
+        "and submissions", "preparatory", "IE", False,
+        "The evidence Oireachtas committees heard, which is never laid before the Houses "
+        "and so appears in no catalogue: opening statements, witness submissions and "
+        "briefings. This is where the legal argument is — sampled submissions cited "
+        "statutes where the minutes beside them cited nothing, so retrieval is gated on "
+        "the grammars finding a statute or an authority. Which committees exist comes "
+        "from the open-data API (232 across the 31st to 34th Dáil, against the 89 the "
+        "website's index shows); the documents come from each committee's own page. "
+        "Coverage is the recent tail per committee and accumulates as it is re-run: the "
+        "complete index is behind the site's captcha AND disallowed by its robots.txt, "
+        "so no backfill can reach further. Reports are excluded by default because "
+        "ie-oireachtas already holds them with their date laid and enabling provision.",
+        (SourceOption("include_reports",
+                      "Also take committee reports (duplicates ie-oireachtas)", "false"),
+         SourceOption("families", "Document families — \"*\" for all",
+                      "submissions,reports"),
+         SourceOption("houses", "Dáil numbers to sweep (comma-separated)", "33,34"),
+         SourceOption("first_house", "Oldest Dáil to try (the site starts at the 32nd)",
+                      "32")),
+        ("ie/oireachtas/committee/dail/33/joint_committee_on_justice/submissions/"
+         "2024-10-08_opening-statement-dr-sharon-lambert",),
+    ),
     "au-cth": SourceInfo(
         "au-cth", "Australian Commonwealth legislation (Federal Register, OData API)",
         "legislation", "AU", True,
@@ -2039,6 +2067,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     # Each month of the laid register is a server-side date filter, so an incremental
     # run asks for the current month and stops there.
     "ie-oireachtas": "server",
+    # Committee pages carry no date filter and no paging — each run re-reads the
+    # same recent rows and the pipeline skips what is already held.
+    "ie-oireachtas-committees": "full-walk",
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
