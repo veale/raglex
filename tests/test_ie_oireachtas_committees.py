@@ -15,10 +15,11 @@ import pytest
 
 from raglex.adapters.registry import ADAPTERS, INCREMENTAL_MODE, SOURCE_INFO
 from raglex.adapters.ie_oireachtas_committees import (
-    BROWSER_UA, PAGE_HEADERS, REPORTS, SUBMISSIONS,
+    BROWSER_UA, CANARY, PAGE_HEADERS, REPORTS, SUBMISSIONS,
     OireachtasCommitteeEvidenceAdapter, committee_pages, committee_slugs, file_family,
     parse_documents_page, parse_file_date, stable_id,
 )
+from raglex.core.errors import RateLimitException
 from raglex.core.models import DocType
 
 
@@ -59,6 +60,10 @@ class FakeSite:
         self.asked: list[str] = []
         self.headers: list[dict] = []
 
+    #: This site answers an unknown committee slug and a blocked client with the same
+    #: 403, which is the whole reason the adapter needs a canary.
+    missing_status = 403
+
     def get(self, url, *, params=None, headers=None, raise_for_4xx=True, **_kw):
         self.asked.append(url)
         self.headers.append(headers or {})
@@ -66,7 +71,7 @@ class FakeSite:
             return _Response(200, json_body=self.api)
         if url in self.pages:
             return _Response(200, text=self.pages[url])
-        return _Response(404, text="not found")
+        return _Response(self.missing_status, text="forbidden")
 
 
 class _Response:
@@ -154,6 +159,42 @@ def test_the_committee_list_comes_from_the_api_not_the_website_index():
     assert any(u.startswith("https://api.oireachtas.ie") for u in site.asked)
 
 
+def test_a_block_stops_the_sweep_instead_of_recording_the_rest_as_empty():
+    """A missing committee and a rate-limited client are the SAME 403 on this site. A
+    sweep of every committee at 0.6s got the whole IP blocked two-thirds of the way
+    through — and without the canary the run would have finished "successfully" with the
+    remaining committees recorded as having no documents."""
+    api = {"results": [{"debateRecord": {"house": {
+        "houseCode": "dail", "houseNo": "33", "committeeCode": f"joint_committee_on_c{i}"}}}
+        for i in range(20)]}
+    site = FakeSite({}, api=api)          # every page 403s, canary included
+    adapter = _adapter(site, houses="33")
+    with pytest.raises(RateLimitException):
+        list(adapter.discover(None))
+    assert CANARY in site.asked
+    # It stopped early rather than walking all twenty committees.
+    assert len([u for u in site.asked if "/committees/33/" in u]) < 20
+
+
+def test_an_ordinary_missing_slug_does_not_stop_the_sweep():
+    """Each committee is tried under two spellings, so misses are routine — only a RUN of
+    them is evidence of a block, and the canary is what settles it."""
+    api = {"results": [
+        {"debateRecord": {"house": {"houseCode": "dail", "houseNo": "33",
+                                    "committeeCode": "joint_committee_on_justice"}}},
+        {"debateRecord": {"house": {"houseCode": "dail", "houseNo": "33",
+                                    "committeeCode": "joint_committee_on_health"}}}]}
+    site = FakeSite({committee_pages("33", "justice")[0]: PAGE,
+                     CANARY: "<html>the index</html>"}, api=api)
+    stubs = list(_adapter(site, houses="33").discover(None))
+    assert len(stubs) == 1                      # justice resolved, health did not
+    assert any("/committees/33/health/" in u for u in site.asked)
+
+
+def test_it_is_paced_slowly_enough_not_to_earn_the_block_again():
+    assert OireachtasCommitteeEvidenceAdapter.min_interval >= 2.0
+
+
 # --- reading a page -----------------------------------------------------------------
 
 def test_rows_are_split_on_their_opening_marker():
@@ -162,6 +203,14 @@ def test_rows_are_split_on_their_opening_marker():
     rows = parse_documents_page(PAGE)
     assert [r["family"] for r in rows] == [SUBMISSIONS, REPORTS]
     assert rows[0]["title"] == "Opening statement, Dr. Sharon Lambert"
+
+
+def test_titles_are_unescaped():
+    """The page writes names as "O&#039;Sullivan"; the entity would otherwise end up in
+    the title, the search index and every citation of the document."""
+    page = "<html>" + _row(SUBMISSION_URL, "Correspondence, Mr Doncha O&#039;Sullivan &amp; co")
+    assert parse_documents_page(page)[0]["title"] == \
+        "Correspondence, Mr Doncha O'Sullivan & co"
 
 
 def test_the_date_comes_from_the_filename_not_the_row():

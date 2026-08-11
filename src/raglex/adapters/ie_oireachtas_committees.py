@@ -38,10 +38,11 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime
+from html import unescape
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter, option_flag
-from ..core.errors import FetchError
+from ..core.errors import FetchError, RateLimitException
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 
@@ -50,6 +51,14 @@ log = logging.getLogger("raglex.adapters.ie_oireachtas_committees")
 API = "https://api.oireachtas.ie/v1/debates"
 SITE = "https://www.oireachtas.ie"
 DATA = "https://data.oireachtas.ie"
+
+#: A page that certainly exists, used to tell "no such committee" from "we have been
+#: blocked". Both answer 403 on this site, so nothing about a single response can
+#: distinguish them — see :meth:`_page`.
+CANARY = f"{SITE}/en/committees/"
+#: How many committee pages may 403 in a row before the canary is consulted. A derived
+#: slug being the other spelling is ordinary and happens twice per committee.
+_MISSES_BEFORE_CANARY = 6
 
 #: The API's own page size for the committee-meeting sweep. Discovery only needs the
 #: distinct committees out of a year of meetings, so one request per year is enough.
@@ -190,7 +199,10 @@ def parse_documents_page(html: str) -> list[dict]:
         out.append({
             "url": url,
             "ext": (link.group("ext") or "").lower(),
-            "title": " ".join(re.sub(r"<[^>]+>", " ", title.group("title")).split())
+            # Unescape after stripping tags, not before: the page writes names as
+            # "O&#039;Sullivan", and storing the entity would put it in the title, the
+            # search index and every citation of the document.
+            "title": " ".join(unescape(re.sub(r"<[^>]+>", " ", title.group("title"))).split())
                      if title else None,
             "family": file_family(url),
             "date": parse_file_date(url),
@@ -200,7 +212,12 @@ def parse_documents_page(html: str) -> list[dict]:
 
 class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
     source = "ie-oireachtas-committees"
-    min_interval = 0.6
+    #: Deliberately slow. At 0.6s a sweep of every committee got the whole IP blocked
+    #: two-thirds of the way through — and because a block and a missing page are the
+    #: same 403 here, the run would have finished "successfully" with the last eighty
+    #: committees recorded as empty. Full sweeps are ~400 pages; at this pace that is
+    #: twenty minutes, which is the correct trade for a source re-read on every run.
+    min_interval = 3.0
 
     def __init__(self, *, client: RateLimitedClient | None = None,
                  families: str | None = None, include_reports=None,
@@ -217,6 +234,7 @@ class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
         self.houses: tuple[str, ...] = tuple(
             h.strip() for h in str(houses or "").split(",") if h.strip())
         self._walled: set[str] = set()
+        self._misses = 0
 
     # ---- which committees exist --------------------------------------------------
 
@@ -291,17 +309,47 @@ class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
             else:
                 log.info("%s: no page for %s (%s Dáil)", self.source, code, house_no)
 
+    def _note_miss(self) -> None:
+        """Count a 403, and once there have been several in a row ask the canary whether
+        we are still being served at all. Raising stops the sweep; the pipeline keeps
+        everything already yielded and does not advance a cursor past what was read."""
+        self._misses += 1
+        if self._misses < _MISSES_BEFORE_CANARY:
+            return
+        self._misses = 0
+        try:
+            canary = self._client.get(CANARY, headers=PAGE_HEADERS, raise_for_4xx=False)
+        except FetchError:
+            canary = None
+        if canary is None or canary.status_code >= 400:
+            log.warning(
+                "%s: www.oireachtas.ie has stopped serving this client — a page known to "
+                "exist answers %s. Stopping the sweep rather than recording the remaining "
+                "committees as empty. The block is on the IP and clears on its own; if it "
+                "recurs, raise min_interval (currently %.1fs).",
+                self.source, getattr(canary, "status_code", "no response"),
+                self.min_interval)
+            # The orchestrator's own vocabulary for "the source is pushing back": it
+            # pauses this source's queue, leaves the cursor un-advanced, and does not
+            # fail the whole run — which is exactly right for a block that clears itself.
+            raise RateLimitException(self.source)
+
     def _house_wanted(self, house_no: str) -> bool:
         if self.houses:
             return house_no in self.houses
         return _int_or(house_no, 0) >= self.first_house
 
     def _page(self, url: str) -> str | None:
-        """A committee page, or None if it does not exist or is walled.
+        """A committee page, or None if it does not exist.
 
-        A 404 is an ordinary answer here — the derived slug was the other spelling, or
-        the committee predates the website. A 405 is the WAF, which is worth saying once
-        and never retrying: it means this path joined the walled set."""
+        **A missing committee and a blocked client are the same 403 here** — this site
+        answers an unknown slug and a rate-limited caller identically, so no single
+        response can tell them apart. A derived slug being the other spelling is
+        ordinary, so misses are counted rather than acted on, and only a run of them
+        asks the canary. Without that, a sweep that got blocked two-thirds through would
+        finish "successfully" having recorded every remaining committee as empty.
+
+        A 405 is the captcha — a different wall, worth saying once and never retrying."""
         try:
             response = self._client.get(url, headers=PAGE_HEADERS, raise_for_4xx=False)
         except FetchError as exc:
@@ -315,7 +363,10 @@ class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
                             "read by any plain client", self.source, url)
             return None
         if response.status_code >= 400 or "data.oireachtas.ie" not in response.text:
+            if response.status_code == 403:
+                self._note_miss()
             return None
+        self._misses = 0
         return response.text
 
     def _stub(self, row: dict, house_no: str, code: str, floor: date | None,
