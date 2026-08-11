@@ -88,9 +88,21 @@ def _label(elem: ET.Element, kind: str, ctx: dict | None = None,
         if num:
             pin += f" para {num.strip()}"
         return f"{pin} {heading}".strip() if heading else pin
-    if kind == "section" and num and not num.lower().startswith(("s", "art", "reg", "r.")):
+    # A ``num`` that already carries its own unit marker must not be given a second one.
+    # Finland numbers a section "1 §" and Sweden "3 §"; prefixing the OSCOLA "s." produced
+    # "s. 1 §", which is not how either jurisdiction writes a pinpoint and therefore never
+    # matched the anchor their citation grammars mint ("5 §"). Everything the UK publishes
+    # numbers a section with digits alone, so this changes nothing there.
+    if (kind == "section" and num
+            and not num.lower().startswith(("s", "art", "reg", "r."))
+            and not _NATIVE_UNIT_RE.search(num)):
         label = f"{unit} {label}"
     return label or kind
+
+
+#: A unit marker the source's own numbering already states. ``§`` covers the Nordic and
+#: German-tradition systems; ``art.``/``kap.`` cover the ones that write the word.
+_NATIVE_UNIT_RE = re.compile(r"§|(?i:\b(?:art|kap|luku|kohta|mom)\b)")
 
 
 def _schedule_of(elem: ET.Element) -> str | None:

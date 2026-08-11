@@ -90,6 +90,34 @@ returns zero, `dtDateFrom`/`dtDateTo` alone are accepted and ignored (returning 
 unfiltered set that looks filtered), and the archive-wide preset's value changes daily
 because its label ends at today. Read the option list off the form on every run.
 
+## Two jurisdictions, one citation
+
+Some legal systems share a language and a notation with a neighbour and mean different
+statutes by the same words. Austria and Germany are the worst case in the corpus: `KSchG`
+is consumer protection in Vienna and dismissal protection in Berlin, `MSchG` is trade
+marks in one and maternity leave in the other, and the `ABGB` has no German counterpart
+at all. No pattern can separate them, because the text is identical.
+
+Where that happens, the grammar must **not** choose. Produce both readings, name the
+domestic methods in a per-jurisdiction set (`AUSTRIAN_DOMESTIC_METHODS`, `SLOVAK_METHODS`,
+…), and let `stage._gate_national_grammars` keep the one belonging to the citing
+document's own system, read from its source key, its identifier or its ECLI.
+
+Two rules make that work and both have already been got wrong once:
+
+- The dedupe must let parallel readings of the same span survive
+  (`extractor.NATIONAL_PARALLEL_METHODS`). Without it the overlap dedupe picks by list
+  order and the gate then deletes the survivor — the citation is *lost*, not merely
+  mis-attributed.
+- The **EU** reading is right in every document and must be excluded from the domestic
+  set. An Austrian court citing Article 6 GDPR means the same instrument a Finnish one
+  does; only the domestic candidate is jurisdiction-bound.
+
+A bare acronym for an EU instrument needs a determiner or a context word **of its own
+language** before it counts (`de_laws._NEEDS_DETERMINER_LEN`, and `_needs_context` in the
+four newer modules). This pass runs over the whole corpus: "DSA" is a duty solicitor
+advice scheme in an English judgment and "DMA" a French marketing syndicate.
+
 ## Scanned PDFs
 
 `raglex.extraction.ocr` is the OCR tier: `text_or_ocr` returns

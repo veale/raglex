@@ -1162,6 +1162,112 @@ def _is_irish_host(doc) -> bool:
 _is_irish_case = _is_irish_host
 
 
+# --- the national grammars, and which document each one is allowed to speak in ------
+#: Source prefix / id prefix / ECLI country → the jurisdiction whose grammar owns the
+#: document. Only the systems with a grammar of their own are listed; anything else is
+#: ungated, because a grammar that claims nothing cannot mis-claim anything.
+_GRAMMAR_JURISDICTIONS: tuple[tuple[str, str, str], ...] = (
+    ("at-", "at/", "ECLI:AT:"),
+    ("sk-", "sk/", "ECLI:SK:"),
+    ("fi-", "fi/", "ECLI:FI:"),
+    ("se-", "se/", "ECLI:SE:"),
+    ("ee-", "ee/", "ECLI:EE:"),
+    ("de-", "de/", "ECLI:DE:"),
+)
+
+
+def _grammar_host(doc) -> str | None:
+    """Which of the gated legal systems this document belongs to, or None.
+
+    Read from the source key first, then from the document's own identifier, then from
+    its ECLI. A document with no signal is ungated: the alternative is to guess, and a
+    wrong guess deletes real citations.
+    """
+    if doc is None:
+        return None
+    source = str(_doc_field(doc, "source") or "").lower()
+    stable_id = str(_doc_field(doc, "stable_id") or "")
+    for source_prefix, id_prefix, ecli_prefix in _GRAMMAR_JURISDICTIONS:
+        code = source_prefix.rstrip("-")
+        if (source.startswith(source_prefix)
+                or stable_id.lower().startswith(id_prefix)
+                or stable_id.upper().startswith(ecli_prefix)):
+            return code
+    return None
+
+
+def _gate_national_grammars(doc, cites: list) -> list:
+    """Keep each national grammar's DOMESTIC readings inside its own jurisdiction.
+
+    Austria is the reason this exists. An Austrian judgment writes "§ 6 Abs 1 Z 9 KSchG"
+    and a German one writes "§ 1 Abs 2 KSchG", and the two KSchGs are different acts —
+    consumer protection in Vienna, dismissal protection in Berlin. The same is true of
+    MSchG (trade marks / maternity leave), UrhG, GewO, ZPO and StGB, and Austria's ABGB
+    has no German counterpart at all, so an ungated German reading of an Austrian
+    judgment invents ``de/gesetz/abgb`` and files half of Austrian private law under
+    Germany. The text cannot tell the two apart; only the document can.
+
+    So: inside a gated document, a domestic reading from ANOTHER gated system is dropped.
+    Outside all of them, every gated system's domestic readings are dropped — a Dutch or
+    English document containing "§ 5" is not making an Austrian statutory reference.
+
+    Three things deliberately survive the gate:
+
+    * **EU readings.** ``at_law_reference_eu``, ``sk_eu_article``, ``fi_eu_article``… all
+      mint a CELEX, and an Austrian court citing Article 6 GDPR means the same instrument
+      a Finnish one does. Those are correct in any document.
+    * **ECLI readings.** An ECLI names its own jurisdiction; a German judgment citing
+      ``ECLI:AT:OGH0002:2021:RS0133477`` means exactly that decision.
+    * **Everything outside these six systems** — the UK, Irish, French, Dutch, Italian,
+      Spanish, Danish and US grammars are not touched here, because they do not collide
+      with each other the way these do.
+    """
+    host = _grammar_host(doc)
+    keep_prefix = f"{host}_" if host else None
+    out = [c for c in cites
+           if c.method not in _ALL_DOMESTIC_METHODS
+           or (keep_prefix is not None and c.method.startswith(keep_prefix))]
+    if host in (None, "de"):
+        return out
+    # …and the same rule pointed the other way. The German grammar predates the per-
+    # jurisdiction method naming, so its domestic readings are identified by the
+    # ``de/`` candidate they mint rather than by a method list — ``de_law_reference``
+    # also produces CELEX candidates for "Art 6 DSGVO", and those are right everywhere.
+    return [c for c in out
+            if not (c.method in _GERMAN_METHODS
+                    and str(c.candidate_id or "").startswith(("de/", "de:")))]
+
+
+def _domestic_methods() -> frozenset[str]:
+    """The per-jurisdiction methods that name a DOMESTIC authority.
+
+    Imported lazily and unioned here rather than listed by hand: a grammar that adds a
+    method and forgets to add it to this set would silently start leaking into every
+    other jurisdiction's documents, which is the failure this gate exists to prevent.
+    """
+    from .austrian import AUSTRIAN_DOMESTIC_METHODS
+    from .estonian import ESTONIAN_METHODS
+    from .finnish import FINNISH_METHODS
+    from .slovak import SLOVAK_METHODS
+    from .swedish import SWEDISH_METHODS
+
+    eu_or_ecli = {"sk_eu_article", "sk_eu_instrument", "sk_ecli",
+                  "fi_eu_article", "fi_ecli",
+                  "se_eu_article", "se_eu_instrument",
+                  "ee_eu_article", "ee_eu_instrument"}
+    return frozenset(
+        (AUSTRIAN_DOMESTIC_METHODS | SLOVAK_METHODS | FINNISH_METHODS
+         | SWEDISH_METHODS | ESTONIAN_METHODS) - eu_or_ecli)
+
+
+_ALL_DOMESTIC_METHODS = _domestic_methods()
+#: The German grammar predates the gate and names its methods ``de_*``; its domestic
+#: readings are the ones that mint a ``de/`` candidate, which is what
+#: ``_gate_german_in_gated_host`` below tests rather than a method list.
+_GERMAN_METHODS = frozenset({"de_law_reference", "de_case_reference",
+                             "de_instrument_abbrev", "de_instrument_name"})
+
+
 _IRISH_LAW_KINDS = frozenset({"act", "regulation", "rules", "order", "measure"})
 _REVISED_TITLE_SUFFIX = re.compile(
     r"\s*(?:\(repealed\)\s*)?\(revised\s+to\s+\d{4}-\d{2}-\d{2}\)\s*$",
@@ -1662,7 +1768,8 @@ def _candidate_jurisdiction(candidate_id: str | None) -> str | None:
     if "/" not in cid:
         return None
     head = cid.split("/", 1)[0].lower()
-    if head in ("ca", "us", "au", "nz", "ie", "sg", "hk", "in", "za"):
+    if head in ("ca", "us", "au", "nz", "ie", "sg", "hk", "in", "za",
+                "at", "sk", "fi", "se", "ee", "de"):
         return head.upper()
     # The court registry only, and only for a genuinely COURT-SHAPED head. ``classify``
     # falls back to prefix matching, which happily reads "mystery-source-id" as Malaysia
@@ -1687,7 +1794,8 @@ def _host_jurisdiction(doc) -> str | None:
     if own:
         return own
     src = (doc["source"] or "").lower() if doc is not None else ""
-    for code in ("uk", "ie", "ca", "au", "nz", "sg", "hk", "in", "za", "us"):
+    for code in ("uk", "ie", "ca", "au", "nz", "sg", "hk", "in", "za", "us",
+                 "at", "sk", "fi", "se", "ee", "de"):
         if src.startswith(f"{code}-"):
             return "GB" if code == "uk" else code.upper()
     return None
@@ -1901,6 +2009,10 @@ def _guard_cites(catalogue: Catalogue, doc, cites: list, *, stable_id: str,
     # all unambiguous and kept. Domestic (ICO etc.) guidance is deliberately NOT gated —
     # there a "Data Protection Act 2018" reference IS to the national statute.
     cites = _gate_domestic_statute_names(doc, cites, text)
+    # Austria and Germany write the SAME citation and mean different statutes; the four
+    # newer national grammars each read a form the others' documents also contain. The
+    # document decides which reading survives — see ``_gate_national_grammars``.
+    cites = _gate_national_grammars(doc, cites)
     cites = _rebind_irish_legislation(catalogue, doc, cites)
     cites = _attach_irish_statute_families(catalogue, doc, cites, text)
     cites = _attach_irish_named_instruments(catalogue, doc, cites, text)

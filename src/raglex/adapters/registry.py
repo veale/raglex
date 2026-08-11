@@ -52,6 +52,11 @@ from .de_bundestag import BundestagDrucksachenAdapter, BundestagWDAdapter
 from .de_openlegaldata import DeOpenLegalDataAdapter
 from .de_neuris import DeNeurisAdapter
 from .de_rii import DeRiiAdapter
+from .at_ris import APPLICATIONS as RIS_APPLICATIONS, AustrianRISAdapter
+from .sk_ress import SlovakRESSAdapter
+from .fi_finlex import SERIES as FINLEX_SERIES, FinlexAdapter
+from .se_domstol import SwedishCaseLawAdapter
+from .ee_lahend import EstonianLahendAdapter
 from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
@@ -424,6 +429,35 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # (424k decisions, 918 courts). Bulk-seeded from the parquet dump (`path`), then kept
     # current off the same project's REST API. ECLI-keyed, so it dedups against de-rii.
     "de-openlegaldata": DeOpenLegalDataAdapter,
+    # ---- Austria: one RIS Applikation per key ------------------------------
+    # The API partitions its 985,000 documents by deciding body, and the bodies are not
+    # comparable — OGH civil judgments, the constitutional court, and the data-protection
+    # authority's decisions are three different corpora behind one endpoint. Each is its
+    # own source so a user can harvest the DPA without pulling 357,000 VwGH documents,
+    # and so the catalogue can say which is case law and which is administrative.
+    "at-justiz": lambda **kw: AustrianRISAdapter(application="Justiz",
+                                                 source_key="at-justiz", **kw),
+    "at-vwgh": lambda **kw: AustrianRISAdapter(application="Vwgh",
+                                               source_key="at-vwgh", **kw),
+    "at-vfgh": lambda **kw: AustrianRISAdapter(application="Vfgh",
+                                               source_key="at-vfgh", **kw),
+    "at-bvwg": lambda **kw: AustrianRISAdapter(application="Bvwg",
+                                               source_key="at-bvwg", **kw),
+    "at-lvwg": lambda **kw: AustrianRISAdapter(application="Lvwg",
+                                               source_key="at-lvwg", **kw),
+    "at-dsb": lambda **kw: AustrianRISAdapter(application="Dsk", source_key="at-dsb", **kw),
+    "at-gbk": lambda **kw: AustrianRISAdapter(application="Gbk", source_key="at-gbk", **kw),
+    "at-verg": lambda **kw: AustrianRISAdapter(application="Verg",
+                                               source_key="at-verg", **kw),
+    # …and one generic key for the remaining bodies (Dok, Pvak, Uvs, AsylGH, Ubas, Umse,
+    # Bks), which are historical or small enough not to warrant a key each.
+    "at-ris": lambda **kw: AustrianRISAdapter(source_key="at-ris", **kw),
+    "sk-ress": SlovakRESSAdapter,
+    # ---- Finland: one Finlex series per key --------------------------------
+    **{key: (lambda series: lambda **kw: FinlexAdapter(series=series, **kw))(key)
+       for key in FINLEX_SERIES},
+    "se-domstol": SwedishCaseLawAdapter,
+    "ee-lahend": EstonianLahendAdapter,
     # France bulk seed (no auth): the DILA OPENDATA archives read from local disk. One
     # adapter across funds; the PISTE/Conseil-d'État live adapters handle increments.
     "fr-dila": FrDilaAdapter,  # CASS (Cour de cassation) by default
@@ -468,6 +502,8 @@ JURISDICTION_LABELS: dict[str, str] = {
     "IT": "Italy", "AU": "Australia", "CA": "Canada", "NZ": "New Zealand",
     "ES": "Spain", "DK": "Denmark", "BE": "Belgium",
     "SG": "Singapore", "HK": "Hong Kong", "IN": "India", "US": "United States",
+    "AT": "Austria", "SK": "Slovakia", "FI": "Finland", "SE": "Sweden",
+    "EE": "Estonia",
     "": "Other",
 }
 KIND_LABELS: dict[str, str] = {
@@ -1871,6 +1907,645 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("ids", "Limit to abbreviations", "BGB,BDSG,SGB V")),
         ("Jurabk (BGB)", "de/gesetz/bgb"),
     ),
+    "at-justiz": SourceInfo(
+        "at-justiz", "Austria — OGH, OLG, LG, BG (ordentliche Gerichtsbarkeit)", "caselaw", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. This is "
+        "the civil and criminal side (~138,000 documents, 1954 onward) and the home "
+        "of the Rechtssatz corpus: each proposition carries its own permanent "
+        "number, its own ECLI, and the full list of decisions that have applied it, "
+        "typed by the documentation office's own shorthand — applied, cf., "
+        "contrary, and 'Ablehnung von <docket>', an express rejection naming the "
+        "decision rejected. Those become typed citator edges rather than something "
+        "a classifier has to guess from prose. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-vwgh": SourceInfo(
+        "at-vwgh", "Austria — Verwaltungsgerichtshof", "caselaw", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The "
+        "supreme administrative court, ~357,000 documents. Its Rechtssätze carry a "
+        "Stammrechtssatznummer — the parent proposition this one restates — which "
+        "is recorded as a derivation edge between the two. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-vfgh": SourceInfo(
+        "at-vfgh", "Austria — Verfassungsgerichtshof", "caselaw", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The "
+        "constitutional court, ~24,000 documents, with the court's own Leitsatz and "
+        "its official collection number (VfSlg), registered as an alias so a 'VfSlg "
+        "19.632/2012' citation resolves. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-bvwg": SourceInfo(
+        "at-bvwg", "Austria — Bundesverwaltungsgericht", "caselaw", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The "
+        "federal administrative court, ~288,000 documents, 2014 onward. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-lvwg": SourceInfo(
+        "at-lvwg", "Austria — Landesverwaltungsgerichte", "caselaw", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The nine "
+        "state administrative courts, ~77,000 documents, each record carrying its "
+        "Bundesland — which is what distinguishes the nine different Bauordnungen "
+        "and Raumplanungsgesetze that share one abbreviation. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-dsb": SourceInfo(
+        "at-dsb", "Datenschutzbehörde decisions (Austria — DPA)", "administrative", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The "
+        "Austrian data-protection authority's decisions (~1,900), modelled in RIS "
+        "alongside the courts. Each carries its Anfechtung note — whether it is "
+        "final or still open to appeal to the Bundesverwaltungsgericht — which is "
+        "the only statement RIS makes about a decision's standing. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-gbk": SourceInfo(
+        "at-gbk", "Gleichbehandlungskommission (Austria — equal treatment)", "administrative", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The "
+        "equal-treatment commission's opinions, recorded with the senate, the "
+        "discrimination ground and the form of discrimination alleged. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-verg": SourceInfo(
+        "at-verg", "Austria — procurement review (Vergabekontrolle)", "administrative", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. "
+        "Public-procurement review decisions from the federal and state review "
+        "bodies. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "at-ris": SourceInfo(
+        "at-ris", "Austria — RIS Judikatur (any application)", "caselaw", "AT", True,
+        "Austria's RIS OGD API — no key, native ECLI (including on Rechtssätze), "
+        "and RIS's own structured Normen index, which writes EU instruments under "
+        "their German abbreviations (DSGVO Art15) and so joins straight onto the "
+        "CELEX the corpus already holds. The RIS house XML is parsed into the "
+        "decision's own zones (Kopf, Spruch, Text, Begründung) with its bracketed "
+        "paragraph numbers kept as citable labels. Statutory references resolve to "
+        "at/gesetz/…, never to the German act of the same abbreviation: KSchG is "
+        "consumer protection in Vienna and dismissal protection in Berlin. The "
+        "generic key: set application to any of the fifteen RIS bodies, including "
+        "the historical ones with no key of their own — Dok (disciplinary "
+        "commissions), Pvak, Uvs (independent administrative senates, to 2013), "
+        "AsylGH (2008–2013), Ubas, Umse and Bks. ",
+        (SourceOption("document_type", "Only one document type",
+                      "Rechtssatz | Entscheidungstext"),
+         SourceOption("query", "Keyword query", "free text, searched in the RIS API"),
+         SourceOption("norm", "Only decisions on one norm", "e.g. DSGVO"),
+         SourceOption("earliest_year", "Backfill from", "default 1945"),
+         SourceOption("start_date", "Backfill from a date", "YYYY-MM-DD"),
+         SourceOption("lookback_days", "Keep-current window", "default 120"),
+         SourceOption("ids", "RIS document numbers / ECLIs / Geschaeftszahlen",
+                      "JJT_20260130_OGH0002_… , ECLI:AT:OGH0002:2026:RS0142730"),
+         SourceOption("application", "RIS Applikation",
+                      "Justiz | Vwgh | Vfgh | Bvwg | Lvwg | Dsk | Dok | Pvak | Gbk | "
+                      "Uvs | AsylGH | Ubas | Umse | Bks | Verg")),
+        ("RIS document number", "ECLI:AT:…", "Geschäftszahl (6 Ob 127/20z)"),
+    ),
+    "sk-ress": SourceInfo(
+        "sk-ress", "Slovakia — all courts (Ministry of Justice RESS)", "caselaw", "SK", True,
+        "The only genuinely all-instance case-law source in the corpus: 4.68 "
+        "million decisions from the district courts up, published by the Ministry "
+        "of Justice with an OpenAPI description and no key. Each detail record "
+        "carries the ECLI, the legal area, the decision's PDF, and two things that "
+        "are otherwise inferred — odkazovanePredpisy, Slov-Lex ELI references with "
+        "the section, odsek and písmeno in the fragment, which become structured "
+        "statutory edges; and povodnySud plus povodnaSpisovaZnacka, the court below "
+        "and its file mark, which is a stated appellate edge typed by the povaha "
+        "outcome vocabulary (affirming / annulling / varying). Note the publisher's "
+        "asymmetry: judges are named in the clear, parties are pseudonymised. The "
+        "date filters obey ISO dates only — given the DD.MM.YYYY form the API "
+        "itself prints, they are silently ignored and the whole register is "
+        "returned. ",
+        (SourceOption("query", "Full-text query", "searched in the ministry API"),
+         SourceOption("court_type", "Court type",
+                      "Okresný súd | Krajský súd | Mestský súd | Správny súd | "
+                      "Najvyšší súd SR"),
+         SourceOption("court", "One court", "court GUID from /v1/sud"),
+         SourceOption("area", "Legal area", "e.g. Trestné právo"),
+         SourceOption("outcome", "Nature of decision",
+                      "Potvrdzujúce | Zrušujúce | Zmeňujúce | …"),
+         SourceOption("legislation", "Only decisions citing one act",
+                      "Slov-Lex ELI, e.g. /SK/ZZ/2018/18"),
+         SourceOption("start_date", "Issued from", "YYYY-MM-DD (default 2015-01-01)"),
+         SourceOption("end_date", "Issued to", "YYYY-MM-DD"),
+         SourceOption("include_text", "Download the decision PDF", "true/false"),
+         SourceOption("start_page", "Resume at page", "1-based"),
+         SourceOption("ids", "Composite guids / ECLIs / spisové značky",
+                      "ECLI:SK:NSSR:2025:6322010282.1")),
+        ("ECLI:SK:…", "spisová značka (6S/74/2018)", "composite guid"),
+    ),
+    "fi-kko": SourceInfo(
+        "fi-kko", "Finland — Supreme Court precedents (KKO)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. KKO's published "
+        "precedents, 1979 onward, cited as KKO:2024:1 — which is registered as an "
+        "alias so that citation resolves. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("ECLI:FI:KKO:…", "KKO:2024:1", "diary number (S2022/290)"),
+    ),
+    "fi-kho": SourceInfo(
+        "fi-kho", "Finland — Supreme Administrative Court precedents (KHO)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. KHO's published "
+        "precedents, in Finnish and Swedish. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("ECLI:FI:KHO:…", "KHO:2023:45", "diary number"),
+    ),
+    "fi-hovioikeus": SourceInfo(
+        "fi-hovioikeus", "Finland — Courts of Appeal (hovioikeudet)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The five appellate "
+        "courts' published decisions. The court is read from the document's own "
+        "TLCOrganization registry rather than from a table, so a court Finlex adds "
+        "arrives correctly named. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("HelHO:2024:12", "diary number (S 24/65)", "year/number"),
+    ),
+    "fi-hao": SourceInfo(
+        "fi-hao", "Finland — Administrative Courts (hallinto-oikeudet)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The regional "
+        "administrative courts' published decisions. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("diary number", "year/number"),
+    ),
+    "fi-mao": SourceInfo(
+        "fi-mao", "Finland — Market Court (markkinaoikeus)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. Competition, procurement, "
+        "IP and marketing decisions. Its numbering carries a two-digit year "
+        "(MAO:123/24) which is expanded before it is stored. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("MAO:123/24", "diary number"),
+    ),
+    "fi-tt": SourceInfo(
+        "fi-tt", "Finland — Labour Court (työtuomioistuin)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. Collective-agreement "
+        "decisions, cited as TT 2024:61. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("TT 2024:61", "diary number"),
+    ),
+    "fi-vako": SourceInfo(
+        "fi-vako", "Finland — Insurance Court (vakuutusoikeus)", "caselaw", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. Social-insurance appeals. "
+        "Its numbers are not integers (890-2023), so the field is never typed as "
+        "one. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("890-2023", "diary number"),
+    ),
+    "fi-tsv": SourceInfo(
+        "fi-tsv", "Data Protection Ombudsman decisions (Finland — DPA)", "administrative", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The Finnish "
+        "data-protection authority's decisions, modelled as judgments by Finlex. "
+        "Each states its legal basis as an ontology concept, which is what "
+        "distinguishes a GDPR decision from a national-law one — machine-stated "
+        "rather than inferred from the text. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("diary number (TSV/5875/2024)", "year/number"),
+    ),
+    "fi-oka": SourceInfo(
+        "fi-oka", "Chancellor of Justice decisions (Finland)", "administrative", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The Oikeuskansleri's "
+        "decisions on the legality of official action. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("diary number", "year/number"),
+    ),
+    "fi-saadokset": SourceInfo(
+        "fi-saadokset", "Finland — statutes as enacted (säädökset)", "legislation", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The statute book as "
+        "published in the Säädöskokoelma, keyed on the säädösnumero (1050/2018 → "
+        "fi/act/2018/1050) that Finnish citation practice uses, with the act's ELI "
+        "recorded alongside. Sections are labelled the way Finland numbers them ('5 "
+        "§'), not with an OSCOLA prefix, so a citation's anchor matches. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("1050/2018", "year/number"),
+    ),
+    "fi-saadokset-ajantasa": SourceInfo(
+        "fi-saadokset-ajantasa", "Finland — consolidated statutes (ajantasainen)", "legislation", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The consolidated statute "
+        "book. Each dated expression is its own document rather than an overwrite "
+        "of the base act. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("1050/2018", "year/number"),
+    ),
+    "fi-he": SourceInfo(
+        "fi-he", "Finland — government proposals (hallituksen esitykset)", "preparatory", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. The travaux préparatoires "
+        "Finnish courts cite constantly. The AKN is a metadata wrapper for most of "
+        "these, so the proposal itself is taken from main.pdf and the wrapper "
+        "supplies its identifiers. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("HE 153/2024", "year/number"),
+    ),
+    "fi-viranomaismaaraykset": SourceInfo(
+        "fi-viranomaismaaraykset", "Finland — authority regulations", "guidance", "FI", True,
+        "Finland's Finlex open data — Akoma Ntoso end to end, with ECLI and ELI "
+        "aliases, the court's own keyword classification, and publishedSince "
+        "returning a per-document NEW/MODIFIED status, which is a cleaner "
+        "incremental key than a bare timestamp. The AKN body is parsed into the "
+        "judgment's own outline (Johdanto / tausta / Perustelut / Ratkaisu and the "
+        "nested tblock headings beneath them). Two routing quirks are handled here: "
+        "the whole /judgment/ tree 404s, so the akn_uri the listing returns has to "
+        "be rewritten to /doc/, and the court segment must be dropped from it — the "
+        "retrieved document's own FRBRWork URI is then checked against the one "
+        "requested. The list endpoint caps at ten results a page, so a historical "
+        "backfill is a long, polite crawl sliced by year. Binding regulations "
+        "issued by Finnish authorities (Traficom, Finanssivalvonta and others) "
+        "under statutory powers. ",
+        (SourceOption("language", "Expression language", "fin (default) | swe"),
+         SourceOption("keyword", "Finlex keyword", "searched in the API"),
+         SourceOption("title_contains", "Title contains", "free text"),
+         SourceOption("start_year", "Backfill from year", "e.g. 1979"),
+         SourceOption("end_year", "Backfill to year", ""),
+         SourceOption("include_swedish", "Also keep swe@ expressions", "true/false"),
+         SourceOption("ids", "ECLIs, diary numbers or year/number",
+                      "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
+        ("authority/year/number",),
+    ),
+    "se-domstol": SourceInfo(
+        "se-domstol", "Sweden — superior courts (Sök rättspraxis)", "caselaw", "SE", True,
+        "Domstolsverket's own case-law service: 17,321 publications from the "
+        "superior courts, selected for what guides other courts. Case reports run "
+        "from 1981; full judgments only from 3 March 2025, so this is a precedent "
+        "layer rather than a corpus. Three fields do work that would otherwise be "
+        "inferred: typ, a native precedential-weight taxonomy (prejudikat / guiding "
+        "but not precedent-setting / not guiding); lagrumLista, statutory citations "
+        "already parsed with the SFS number split out; and "
+        "hanvisadePubliceringarLista, the authorities cited — including CJEU "
+        "judgments whose ECLIs are printed in the free text, which is a clean join "
+        "into the EU corpus. It also publishes the Supreme Court's own quoted case "
+        "names ('Sökordslistan', 'Pärmen'), which is what Swedish practitioners "
+        "actually cite by and which no other source carries. Sweden mints no ECLI, "
+        "so identity is the service's record id with the report citation (NJA 2020 "
+        "s. 123) and the målnummer registered as aliases. Page is zero-based; the "
+        "sort parameters are accepted but do not order the paged result set, so "
+        "they are never sent and the watch is a full walk of 174 pages. ",
+        (SourceOption("court", "One court", "domstolKod, e.g. HDO, HFD, MMOD, ADO"),
+         SourceOption("weight", "Precedential weight",
+                      "PREJUDIKAT | VAGLEDANDE_MEN_EJ_PREJUDICERANDE | EJ_VAGLEDANDE | "
+                      "PROVNINGSTILLSTAND"),
+         SourceOption("publication_form", "Publication form",
+                      "DOM_ELLER_BESLUT | REFERAT | NOTIS"),
+         SourceOption("case_number", "Målnummer", "e.g. Ö 4337-25"),
+         SourceOption("include_documents", "Download the PDF", "true/false"),
+         SourceOption("start_page", "Resume at page", "0-based"),
+         SourceOption("ids", "Record UUIDs or målnummer", "Ö 4337-25")),
+        ("NJA 2020 s. 123", "målnummer (Ö 4337-25)", "record UUID"),
+    ),
+    "ee-lahend": SourceInfo(
+        "ee-lahend", "Estonia — court decisions (lahend.ee)", "caselaw", "EE", True,
+        "Estonia publishes its court decisions in Riigi Teataja under a statutory "
+        "duty but offers no API or bulk download for them. lahend.ee, a non-profit "
+        "open-data service, has extracted 3.05 million citations from 346,000 "
+        "decisions and joined them to the Riigi Teataja statute book and to "
+        "EUR-Lex, and exposes the result free through a Model Context Protocol "
+        "endpoint — which is the only public interface there is. Per decision it "
+        "returns the full text as Markdown, the provisions relied on resolved to an "
+        "act abbreviation and a § with its lõiked, and the EU instruments cited as "
+        "CELEX numbers with articles: an Estonian judgment therefore joins the EU "
+        "corpus without a grammar pass. Coverage is a statutory SELECTION, not a "
+        "census — the judgment must have entered into force and must carry no "
+        "sensitive personal data — and natural persons are anonymised by the court "
+        "while company names are not. ",
+        (SourceOption("query", "Full-text query", "searched at lahend.ee"),
+         SourceOption("court", "Exact court name",
+                      "e.g. Riigikohus, Harju Maakohus Tallinna kohtumaja"),
+         SourceOption("case_type", "Case type", "civil | administrative | criminal"),
+         SourceOption("category", "Area of law", "e.g. Võlaõigus"),
+         SourceOption("start_date", "Decided from", "YYYY-MM-DD"),
+         SourceOption("end_date", "Decided to", "YYYY-MM-DD"),
+         SourceOption("include_citations", "Fetch the citation graph per decision",
+                      "true (default) — statutory and EU-law edges"),
+         SourceOption("lookback_days", "Keep-current window", "default 90"),
+         SourceOption("ids", "Case numbers or lahend ids", "3-25-3458/5, ruling:1589986")),
+        ("case number (3-25-3458/5)", "lahend ruling id"),
+    ),
     "de-openlegaldata": SourceInfo(
         "de-openlegaldata", "Germany — Länder + federal case law (Open Legal Data)",
         "caselaw", "DE", False,
@@ -2030,6 +2705,29 @@ GAP_SCAN_SOURCES = frozenset({"uk-caselaw"})
 #   closed     — a closed archive; no new items ever exist.
 # Unlisted caselaw sources default to early-stop (a newest-first feed crawl).
 INCREMENTAL_MODE: dict[str, str] = {
+    # ---- the five European sources added in 2026-08 ------------------------
+    # Austria: the RIS date filter is applied server-side and the run keeps whatever
+    # Allgemein.Geaendert says has changed since the cursor, over a trailing window —
+    # RIS publishes late and revises old documents, so a point cursor strands both.
+    "at-justiz": "server", "at-vwgh": "server", "at-vfgh": "server",
+    "at-bvwg": "server", "at-lvwg": "server", "at-dsb": "server",
+    "at-gbk": "server", "at-verg": "server", "at-ris": "server",
+    # Slovakia: indexDatumOd is the register's own indexing date — the only monotonic key
+    # it has, since a 2018 judgment can be published in 2026.
+    "sk-ress": "server",
+    # Finland: publishedSince, which also reports NEW vs MODIFIED per document.
+    "fi-kko": "server", "fi-kho": "server", "fi-hovioikeus": "server",
+    "fi-hao": "server", "fi-mao": "server", "fi-tt": "server", "fi-vako": "server",
+    "fi-tsv": "server", "fi-oka": "server", "fi-saadokset": "server",
+    "fi-saadokset-ajantasa": "server", "fi-he": "server",
+    "fi-viranomaismaaraykset": "server",
+    # Sweden: neither the publication-date filter nor the sort parameters agree with the
+    # paged result set, and publication lags the decision by up to twelve years — so the
+    # watch walks all 174 pages and filters on publiceringstid itself.
+    "se-domstol": "full-walk",
+    # Estonia: search_rulings filters on the DECISION date and publication lags it, so a
+    # watch re-walks a trailing window rather than cutting at the cursor.
+    "ee-lahend": "server",
     # server-side incremental
     "us-caselaw": "server", "nl-rechtspraak": "server", "nl-legislation": "server",
     "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server", "fr-judilibre-ca": "server",

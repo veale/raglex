@@ -1725,16 +1725,24 @@ def all_grammar_citations(text: str) -> list[Citation]:
     regulator sources are gated on exactly that question, so they need the full set.
     Overlaps are not resolved here: the callers count, they don't link.
     """
+    from .austrian import austrian_citations
     from .danish import danish_citations
     from .dutch import dutch_citations
+    from .estonian import estonian_citations
+    from .finnish import finnish_citations
     from .french import french_citations
     from .german import german_citations
     from .italian import italian_citations
+    from .slovak import slovak_citations
     from .spanish import spanish_citations
+    from .swedish import swedish_citations
 
     return (grammar_citations(text) + french_citations(text) + dutch_citations(text)
             + italian_citations(text) + spanish_citations(text)
-            + danish_citations(text) + german_citations(text))
+            + danish_citations(text) + german_citations(text)
+            + austrian_citations(text) + slovak_citations(text)
+            + finnish_citations(text) + swedish_citations(text)
+            + estonian_citations(text))
 
 
 # The provision an alias mention pins to. "section 16 of RIPA" is a citation OF s.16,
@@ -1929,6 +1937,26 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     # grammar interface cannot represent.
     from .german import german_citations
     cites += german_citations(text)
+    # Austrian references have the SAME surface form as German ones and a different
+    # meaning (KSchG is consumer protection in Vienna and dismissal protection in
+    # Berlin), so both readings are produced here and the document decides between them
+    # — see ``stage._gate_austrian_statutes``. Added after German so a span tie in a
+    # document that is neither keeps the older, broader reading.
+    from .austrian import austrian_citations
+    cites += austrian_citations(text)
+    # The four remaining national vocabularies. Each is anchored on a marker its own
+    # language owns — the Slovak "Z. z." collection reference, the Finnish pykälä with a
+    # case ending, the Swedish SFS number in brackets, the Estonian abbreviation-first
+    # form — so they do not compete with one another for spans, and the document-level
+    # gates in ``stage`` keep a domestic reading out of a foreign document.
+    from .slovak import slovak_citations
+    cites += slovak_citations(text)
+    from .finnish import finnish_citations
+    cites += finnish_citations(text)
+    from .swedish import swedish_citations
+    cites += swedish_citations(text)
+    from .estonian import estonian_citations
+    cites += estonian_citations(text)
     # US reporter citations (self-contained matcher), gated to text that looks American — recognises
     # "135 S. Ct. 2401" so it clusters as a case instead of being misread as statutory
     # material. Added before the dedupe so a genuine overlap resolves by span.
@@ -1958,6 +1986,37 @@ def _overlaps_any(c: Citation, kept: list[Citation]) -> bool:
     return any(c.char_start < k.char_end and k.char_start < c.char_end for k in kept)
 
 
+#: Methods that read the SAME words as a domestic reference of DIFFERENT jurisdictions.
+#: "§ 6 Abs 1 KSchG" is one span with two honest readings — Austria's consumer-protection
+#: act and Germany's dismissal-protection act — and the text cannot choose between them.
+#: The document can, so both survive the overlap dedupe and ``stage._gate_national_grammars``
+#: keeps whichever belongs to the citing document's own system. Without this exemption the
+#: dedupe silently picked by list order, and the gate then deleted the survivor: the
+#: citation was lost entirely rather than merely mis-attributed.
+#:
+#: EU readings are deliberately NOT here. ``at_law_reference_eu`` and ``de_eu_article``
+#: mint the same CELEX from the same words, so keeping both would double-count one
+#: reference; ordinary dedupe is right for them.
+def _national_parallel_methods() -> frozenset[str]:
+    from .austrian import AUSTRIAN_DOMESTIC_METHODS
+    from .estonian import ESTONIAN_METHODS
+    from .finnish import FINNISH_METHODS
+    from .slovak import SLOVAK_METHODS
+    from .swedish import SWEDISH_METHODS
+
+    eu_or_ecli = {"sk_eu_article", "sk_eu_instrument", "sk_ecli", "fi_eu_article",
+                  "fi_ecli", "se_eu_article", "se_eu_instrument", "ee_eu_article",
+                  "ee_eu_instrument"}
+    german = {"de_law_reference", "de_case_reference", "de_instrument_abbrev",
+              "de_instrument_name"}
+    return frozenset(
+        (AUSTRIAN_DOMESTIC_METHODS | SLOVAK_METHODS | FINNISH_METHODS | SWEDISH_METHODS
+         | ESTONIAN_METHODS | german) - eu_or_ecli)
+
+
+NATIONAL_PARALLEL_METHODS: frozenset[str] = _national_parallel_methods()
+
+
 def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     """Keep the longest match at each location; drop spans contained in a kept one
     (so the article-scoped citation wins over the bare instrument number)."""
@@ -1981,7 +2040,14 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
                                    "uk_cpr_rule_list", "uk_cpr_pd_paragraph_list") and any(
             k.char_start == c.char_start and k.char_end == c.char_end
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)
-        if not exact_multi and any(s <= c.char_start and c.char_end <= e for s, e in occupied):
+        # A second national reading of the same words is not a duplicate — it is the
+        # other jurisdiction's reading of an ambiguous citation, and the document, not
+        # the extractor, decides which is right (see NATIONAL_PARALLEL_METHODS).
+        parallel = c.method in NATIONAL_PARALLEL_METHODS and any(
+            k.method != c.method and k.method in NATIONAL_PARALLEL_METHODS
+            and c.char_start < k.char_end and k.char_start < c.char_end for k in kept)
+        if not (exact_multi or parallel) and any(
+                s <= c.char_start and c.char_end <= e for s, e in occupied):
             continue
         # Two grammars can recognise the SAME instrument in spans that merely overlap,
         # neither containing the other — "…(EC Directive) Regulations 2003" from the
@@ -1989,7 +2055,7 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
         # series-number one. Containment alone lets both through, and one reference is
         # then counted twice. Same target + overlapping text = one citation; a genuinely
         # different pinpoint still survives, because that IS a second reference.
-        if not exact_multi and c.candidate_id and any(
+        if not (exact_multi or parallel) and c.candidate_id and any(
             k.candidate_id == c.candidate_id
             and c.char_start < k.char_end and k.char_start < c.char_end
             and (c.pinpoint is None or c.pinpoint == k.pinpoint)

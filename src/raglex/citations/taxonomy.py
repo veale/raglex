@@ -52,6 +52,12 @@ CATEGORY_LABELS: dict[str, str] = {
     "de-legislation": "German legislation",
     "nl-caselaw": "Dutch case-law",
     "nl-legislation": "Dutch legislation",
+    "at-caselaw": "Austrian case-law",
+    "sk-caselaw": "Slovak case-law",
+    "fi-caselaw": "Finnish case-law",
+    "fi-legislation": "Finnish legislation",
+    "se-caselaw": "Swedish case-law",
+    "ee-caselaw": "Estonian case-law",
     "sg-caselaw": "Singapore case-law",
     "hk-caselaw": "Hong Kong case-law",
     "za-caselaw": "South African case-law",
@@ -91,6 +97,8 @@ JURISDICTION_CATEGORY: dict[str, str] = {
     "FR": "fr-caselaw",
     "DE": "de-caselaw",
     "NL": "nl-caselaw",
+    "AT": "at-caselaw", "SK": "sk-caselaw", "FI": "fi-caselaw",
+    "SE": "se-caselaw", "EE": "ee-caselaw",
     # The wider Commonwealth. The big single jurisdictions get their own row; the long
     # tail is grouped by region, because ~30 one-case rows would bury the map while
     # "African case-law: 214 pending" is a signal worth acting on.
@@ -264,6 +272,25 @@ def classify_document(*, source: str, doc_type: str | None = None, court: str | 
         subtype = "federal" if legislation else (court or source).casefold()
         return Tax(category, CATEGORY_LABELS[category], subtype,
                    "Federal legislation" if legislation else (court or source),
+                   {"source": source, **({"doc_type": doc_type} if doc_type else {})})
+    # Austria, Slovakia, Sweden and Estonia hold case law and administrative decisions
+    # only; Finland also holds the statute book and the government proposals, so it is the
+    # one of the five whose bucket depends on the document type. The court/body is the
+    # sub-type in every case, because that is the division a reader of these corpora
+    # actually navigates by — OGH vs Datenschutzbehörde, Riigikohus vs Harju Maakohus.
+    for _prefix, _category in (("at-", "at-caselaw"), ("sk-", "sk-caselaw"),
+                               ("se-", "se-caselaw"), ("ee-", "ee-caselaw")):
+        if source.startswith(_prefix):
+            return Tax(_category, CATEGORY_LABELS[_category],
+                       (court or source).casefold(), court or source,
+                       {"source": source,
+                        **({"doc_type": doc_type} if doc_type else {})})
+    if source.startswith("fi-"):
+        legislation = doc_type == "legislation"
+        category = "fi-legislation" if legislation else "fi-caselaw"
+        return Tax(category, CATEGORY_LABELS[category],
+                   "saadokset" if legislation else (court or source).casefold(),
+                   "Säädöskokoelma" if legislation else (court or source),
                    {"source": source, **({"doc_type": doc_type} if doc_type else {})})
     if source.startswith("nl-"):
         legislation = doc_type == "legislation" or source == "nl-legislation"

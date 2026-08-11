@@ -474,6 +474,52 @@ COURTS: tuple[Court, ...] = (
     Court("EACJ", "East African Court of Justice", "EAC"),
     Court("AfCHPR", "African Court on Human and Peoples' Rights", "AFRICA"),
     Court("ACtHPR", "African Court on Human and Peoples' Rights (variant)", "AFRICA"),
+
+    # ---- Austria, Slovakia, Finland, Sweden, Estonia ----------------------
+    # None of these five uses a bracketed neutral citation, so nothing here is matched by
+    # the neutral-citation shape. They are registered because the registry is also what
+    # gives a court token a JURISDICTION and a display name: without a row, an Austrian
+    # "OGH" or a Finnish "KKO" appearing as a document's court is prettified from its
+    # slug, and ``stage._candidate_jurisdiction`` cannot place an id whose head is a
+    # court code.
+    Court("OGH", "Oberster Gerichtshof", "AT", adapter="at-justiz"),
+    Court("VwGH", "Verwaltungsgerichtshof", "AT", adapter="at-vwgh"),
+    Court("VfGH", "Verfassungsgerichtshof", "AT", adapter="at-vfgh"),
+    Court("BVwG", "Bundesverwaltungsgericht", "AT", adapter="at-bvwg"),
+    Court("LVwG", "Landesverwaltungsgericht", "AT", adapter="at-lvwg"),
+    Court("OLG", "Oberlandesgericht (Austria)", "AT", adapter="at-justiz"),
+    Court("DSB", "Datenschutzbehörde", "AT", adapter="at-dsb"),
+    Court("BFG", "Bundesfinanzgericht", "AT"),  # findok.bmf.gv.at — not in the RIS API
+    Court("NSSR", "Najvyšší súd Slovenskej republiky", "SK", adapter="sk-ress"),
+    Court("NSSSR", "Najvyšší správny súd Slovenskej republiky", "SK", adapter="sk-ress"),
+    Court("USSR", "Ústavný súd Slovenskej republiky", "SK"),
+    Court("KKO", "Korkein oikeus", "FI", adapter="fi-kko"),
+    Court("KHO", "Korkein hallinto-oikeus", "FI", adapter="fi-kho"),
+    Court("HelHO", "Helsingin hovioikeus", "FI", adapter="fi-hovioikeus"),
+    Court("THO", "Turun hovioikeus", "FI", adapter="fi-hovioikeus"),
+    Court("VHO", "Vaasan hovioikeus", "FI", adapter="fi-hovioikeus"),
+    Court("IHO", "Itä-Suomen hovioikeus", "FI", adapter="fi-hovioikeus"),
+    Court("RHO", "Rovaniemen hovioikeus", "FI", adapter="fi-hovioikeus"),
+    Court("MAO", "Markkinaoikeus", "FI", adapter="fi-mao"),
+    Court("TT", "Työtuomioistuin", "FI", adapter="fi-tt"),
+    Court("VakO", "Vakuutusoikeus", "FI", adapter="fi-vako"),
+    Court("TSV", "Tietosuojavaltuutetun toimisto", "FI", adapter="fi-tsv"),
+    # The Swedish "court" tokens practice cites by are REPORT SERIES, not courts — NJA is
+    # the Supreme Court's reports, HFD the Supreme Administrative Court's. They are
+    # registered under the reporting court because that is what a reader is being told,
+    # and because Sweden mints no other identifier.
+    Court("NJA", "Högsta domstolen (Nytt juridiskt arkiv)", "SE", adapter="se-domstol"),
+    Court("HD", "Högsta domstolen", "SE", adapter="se-domstol"),
+    Court("HFD", "Högsta förvaltningsdomstolen", "SE", adapter="se-domstol"),
+    Court("RÅ", "Regeringsrätten (Regeringsrättens årsbok)", "SE", adapter="se-domstol"),
+    Court("AD", "Arbetsdomstolen", "SE", adapter="se-domstol"),
+    Court("MÖD", "Mark- och miljööverdomstolen", "SE", adapter="se-domstol"),
+    Court("MIG", "Migrationsöverdomstolen", "SE", adapter="se-domstol"),
+    Court("PMÖD", "Patent- och marknadsöverdomstolen", "SE", adapter="se-domstol"),
+    Court("RH", "Hovrätterna (Rättsfall från hovrätterna)", "SE", adapter="se-domstol"),
+    Court("MD", "Marknadsdomstolen", "SE", adapter="se-domstol"),
+    Court("RK", "Riigikohus", "EE", adapter="ee-lahend"),
+    Court("Riigikohus", "Riigikohus", "EE", adapter="ee-lahend"),
 )
 
 
