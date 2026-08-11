@@ -315,6 +315,47 @@ def case_citations(text: str) -> list[Citation]:
     ) for m in CASE_REFERENCE_RE.finditer(text)]
 
 
+# Parliamentary document numbers are legal citations in their own right.  They must
+# resolve to the same ids the Bundestag adapters mint, otherwise a judgment's
+# ``BT-Drs. 20/5548`` remains a title-like string with no graph edge to the explanatory
+# memorandum it is invoking.
+_BT_DRS_RE = re.compile(
+    r"\b(?P<raw>(?:BT\s*-?\s*(?:Drs\.?|Drucksache)|BTDrs|Bundestagsdrucksache|"
+    r"Drucksache)\s*(?P<wp>\d{1,2})\s*/\s*(?P<number>\d{1,5}))\b",
+    re.IGNORECASE,
+)
+_BT_WD_RE = re.compile(
+    r"\b(?P<raw>(?P<series>WD|PE|EU)\s*(?P<section>\d{1,2})\s*-\s*"
+    r"(?:(?P<office>3000|30000)\s*-\s*)?(?P<number>\d{1,4})\s*/\s*"
+    r"(?P<year>\d{2,4}))\b",
+    re.IGNORECASE,
+)
+
+
+def parliamentary_citations(text: str) -> list[Citation]:
+    found: list[Citation] = []
+    for match in _BT_DRS_RE.finditer(text or ""):
+        found.append(Citation(
+            raw=match.group("raw"), entity_kind="preparatory",
+            candidate_id=f"de/bt-drs/{int(match.group('wp'))}/{int(match.group('number'))}",
+            pinpoint=None, char_start=match.start(), char_end=match.end(),
+            method="de_bt_drucksache", confidence=1.0,
+        ))
+    for match in _BT_WD_RE.finditer(text or ""):
+        series = match.group("series").casefold()
+        section = str(int(match.group("section")))
+        number = str(int(match.group("number"))).zfill(3)
+        year = match.group("year")[-2:]
+        office = "-3000" if match.group("office") else ""
+        found.append(Citation(
+            raw=match.group("raw"), entity_kind="guidance",
+            candidate_id=f"de/bt-wd/{series}-{section}{office}-{number}-{year}",
+            pinpoint=None, char_start=match.start(), char_end=match.end(),
+            method="de_bt_wd", confidence=1.0,
+        ))
+    return found
+
+
 def german_citations(text: str) -> list[Citation]:
     """Every German citation in ``text``: §-anchored statutory references, decisions, and
     the instruments the judgment merely NAMES.
@@ -325,4 +366,6 @@ def german_citations(text: str) -> list[Citation]:
     laws = law_citations(text)
     cases = case_citations(text)
     occupied = [(c.char_start, c.char_end) for c in laws + cases]
-    return laws + cases + de_laws.instrument_citations(text, occupied=occupied)
+    parliament = parliamentary_citations(text)
+    occupied.extend((c.char_start, c.char_end) for c in parliament)
+    return laws + cases + parliament + de_laws.instrument_citations(text, occupied=occupied)

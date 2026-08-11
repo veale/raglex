@@ -31,6 +31,8 @@ services:
       PISTE_API_SECRET: ${PISTE_API_SECRET:-}
       PISTE_CLIENT_ID: ${PISTE_CLIENT_ID:-}
       PISTE_CLIENT_SECRET: ${PISTE_CLIENT_SECRET:-}
+      # Bundestag DIP (Drucksachen / legislative history). WD papers need no key.
+      BUNDESTAG_DIP_API_KEY: ${BUNDESTAG_DIP_API_KEY:-}
       # OPENROUTER_API_KEY: ...  # optional: env overrides the settings file
 
   # The MCP server is served by raglex-api at http://localhost:8000/mcp (same origin) —
@@ -58,6 +60,7 @@ services:
       PISTE_API_SECRET: ${PISTE_API_SECRET:-}
       PISTE_CLIENT_ID: ${PISTE_CLIENT_ID:-}
       PISTE_CLIENT_SECRET: ${PISTE_CLIENT_SECRET:-}
+      BUNDESTAG_DIP_API_KEY: ${BUNDESTAG_DIP_API_KEY:-}
       PYTHONUNBUFFERED: "1"      # so scheduler tick logs stream to `docker compose logs`
     restart: unless-stopped
 

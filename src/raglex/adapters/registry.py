@@ -48,6 +48,7 @@ from .gdprhub import GDPRhubAdapter
 from .uk_ipa_codes import UKIPACodesAdapter
 from .uk_ipt import UKIPTAdapter
 from .de_gii import DeGiiAdapter
+from .de_bundestag import BundestagDrucksachenAdapter, BundestagWDAdapter
 from .de_openlegaldata import DeOpenLegalDataAdapter
 from .de_neuris import DeNeurisAdapter
 from .de_rii import DeRiiAdapter
@@ -408,6 +409,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # statutes (gesetze-im-internet, local clone or gii-toc.xml); de-rii = federal
     # case law (rechtsprechung-im-internet, rii-toc.xml). NeuRIS is the live increment.
     "de-gii": DeGiiAdapter,
+    "de-bt-drucksachen": BundestagDrucksachenAdapter,
+    "de-bt-wd": BundestagWDAdapter,
     "de-rii": DeRiiAdapter,
     # Germany — Open Legal Data: the LÄNDER case law the federal portals never publish
     # (424k decisions, 918 courts). Bulk-seeded from the parquet dump (`path`), then kept
@@ -1750,6 +1753,36 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "defensively; verify live before a backfill.",
         (), ("ECLI:FR:CE:…", "numéro de dossier"),
     ),
+    "de-bt-drucksachen": SourceInfo(
+        "de-bt-drucksachen", "Bundestagsdrucksachen — legislative history",
+        "preparatory", "DE", False,
+        "Official Bundestag bills, explanatory memoranda, committee reports and "
+        "government answers from the DIP API. Discovery uses the last-modified cursor; "
+        "the flat text's Besonderer Teil is recovered into nested Artikel/Nummer/"
+        "Buchstabe segments, and headings that explicitly name an amended statute emit "
+        "provision-level interprets edges. Drucksachen are tagged as official works "
+        "under § 5(1) UrhG. Requires a Bundestag DIP API key.",
+        (SourceOption("api_key", "DIP API key", "or BUNDESTAG_DIP_API_KEY"),
+         SourceOption("document_numbers", "Drucksache numbers", "20/5548,19/28444"),
+         SourceOption("types", "Drucksache types",
+                      "Gesetzentwurf,Beschlussempfehlung und Bericht,Antwort"),
+         SourceOption("prefer_pdf_tables", "Use PDF for transposition bills",
+                      "true (default) — preserves correlation-table layout")),
+        ("BT-Drs 20/5548", "Drucksache 20/5548", "DIP document id"),
+    ),
+    "de-bt-wd": SourceInfo(
+        "de-bt-wd", "Wissenschaftliche Dienste and Fachbereich Europa papers",
+        "guidance", "DE", False,
+        "Bundestag research-service memoranda from the public Analysen listing. The "
+        "adapter preserves each PDF, extracts its numbered outline, registers WD/PE/EU "
+        "document-number aliases, and marks the Bundestag's reserved publication and "
+        "distribution rights per document (attributed excerpts only). The listing is "
+        "newest-first and is safe for a recurring watch.",
+        (SourceOption("ids", "Exact Bundestag PDF URLs", "https://www.bundestag.de/resource/blob/…/paper.pdf"),
+         SourceOption("start_offset", "Resume listing offset", "0"),
+         SourceOption("limit", "Rows per fragment request", "50")),
+        ("WD 3 - 3000 - 045/21", "WD3/045/21", "Bundestag resource PDF URL"),
+    ),
     "de-neuris": SourceInfo(
         "de-neuris", "Germany — federal case law (NeuRIS, beta)", "caselaw", "DE", False,
         "Federal court decisions (BVerfG, BGH, BAG, BFH, BSG, BVerwG, BPatG) from the "
@@ -1941,6 +1974,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     # server-side incremental
     "us-caselaw": "server", "nl-rechtspraak": "server", "nl-legislation": "server",
     "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server", "fr-judilibre-ca": "server",
+    "de-bt-drucksachen": "server",
     "fr-judilibre-tj": "server",
     "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
     "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
@@ -1992,6 +2026,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     # stops within a page or two. It is early-stop rather than server-side: the feed
     # takes no date parameter, only ?paged=N.
     "uk-commons-library": "early-stop", "uk-lords-library": "early-stop",
+    "de-bt-wd": "early-stop",
     # The SPICe listing sorts newest-first and reports an authoritative result count.
     "scot-spice": "early-stop",
     # One sitemap / one page for the whole archive, then filtered — cheap, and there is

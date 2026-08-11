@@ -515,6 +515,20 @@ _TREATMENT_CUE_PATTERNS: tuple[tuple[re.Pattern, str], ...] = tuple(
         (r"\b(?:is|am|are)\s+(?:therefore\s+)?bound to follow\b", "positive"),
         (r"\bfollowing (?:the (?:decision|reasoning|approach) (?:in|of)|that approach)\b",
          "positive"),
+        # German treatment and interpretive-method vocabulary.  These remain verbatim
+        # cues, not holdings: a reader sees the phrase and decides what it means in its
+        # sentence, exactly as for the English patterns above.
+        (r"\b(?:entgegen der Auffassung|abweichend von|nicht zu folgen|"
+         r"Aufgabe der bisherigen Rechtsprechung)\b", "negative"),
+        (r"\b(?:offengelassen|dahinstehen)\b", "uncertain"),
+        (r"\b(?:in Fortführung|Anschluss an)\b", "positive"),
+        (r"\bVorlage an den EuGH\b", "reference"),
+        (r"\b(?:nach der Gesetzesbegründung|der Gesetzgeber wollte|"
+         r"dem Willen des Gesetzgebers|ausweislich der Begründung|Regelungsabsicht)\b",
+         "legislative-intent"),
+        (r"\b(?:verfassungskonforme Auslegung|unionsrechtskonforme Auslegung|"
+         r"teleologische Reduktion|analoge Anwendung|Wortlaut|Systematik)\b",
+         "interpretive-method"),
         # SUBSEQUENT HISTORY. There is no appellate edge in the graph — no source the
         # corpus harvests publishes one — but where the appeal IS held, the appellate
         # judgment says so in the passage where it cites the decision below. That is the
