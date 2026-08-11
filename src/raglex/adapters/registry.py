@@ -83,6 +83,7 @@ from .ie_tax_appeals import IrishTaxAppealsAdapter
 from .ie_revenue_tdm import IrishRevenueTDMAdapter
 from .ie_ccpc_mergers import IrishCCPCMergerAdapter
 from .ie_legislation import IrishRevisedActsAdapter, IrishStatuteBookAdapter
+from .ie_oireachtas import OireachtasLaidAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nl_acm_guidance import ACMGuidanceAdapter
@@ -382,6 +383,9 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "ie-tax-appeals": IrishTaxAppealsAdapter,
     "ie-revenue-tdm": IrishRevenueTDMAdapter,
     "ie-ccpc-mergers": IrishCCPCMergerAdapter,
+    # The Oireachtas Library's catalogue of everything laid before the Houses —
+    # committee reports, statutory annual reports and accounts, post-enactment reviews.
+    "ie-oireachtas": OireachtasLaidAdapter,
     # Hong Kong — the e-Legislation bulk XML drop (HKLM schema). Content is local-only
     # by necessity: elegislation.gov.hk robots.txt disallows everything but /sitemap.
     "hk-legislation": HKLegislationAdapter,
@@ -1341,6 +1345,31 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "remain with the normal grammar resolver.",
         (), ("M/26/044", "M.26.044"),
     ),
+    "ie-oireachtas": SourceInfo(
+        "ie-oireachtas", "Oireachtas documents laid — committee reports and statutory "
+        "reports", "preparatory", "IE", True,
+        "Everything laid before the Dáil and the Seanad, from the Oireachtas Library's "
+        "catalogue: committee reports, the annual reports and accounts a statute obliges "
+        "a body to lay, post-enactment reviews, EU scrutiny notes and treaty texts. Each "
+        "record names the provision that obliged it to be laid, which is recorded as a "
+        "citation edge — most annual reports name their enabling section nowhere in the "
+        "PDF. The Oireachtas's own publications search is behind a captcha; this "
+        "catalogue is not, and reaches back to 1922. Statutory instruments are excluded "
+        "by default (their text is already held from the Statute Book) and the sweep "
+        "starts at 1996; both are options. PDFs are OCR'd when the scan has no text.",
+        (SourceOption("since_year", "Earliest year to sweep (Date Laid)", "1996"),
+         SourceOption("subcollections",
+                      "Subcollections to sweep — \"*\" for all, or a comma-separated "
+                      "list", "Committee Report,Ombudsman Report"),
+         SourceOption("include_statutory_instruments",
+                      "Also hold the 40,643 laid statutory instruments", "false"),
+         SourceOption("collections",
+                      "Catalogue collections to sweep", "Documents Laid,L&RS Publications"),
+         SourceOption("query", "Catalogue keyword search (searched at the source)",
+                      "data protection"),
+         SourceOption("max_kb", "Skip files larger than this many KB", "120000")),
+        ("DL211160", "ie/oireachtas/opac/215643"),
+    ),
     "au-cth": SourceInfo(
         "au-cth", "Australian Commonwealth legislation (Federal Register, OData API)",
         "legislation", "AU", True,
@@ -2007,6 +2036,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "ie-tax-appeals": "early-stop", "nz-caselaw": "early-stop",
     "ie-revenue-tdm": "full-walk",
     "ie-ccpc-mergers": "full-walk",
+    # Each month of the laid register is a server-side date filter, so an incremental
+    # run asks for the current month and stops there.
+    "ie-oireachtas": "server",
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
