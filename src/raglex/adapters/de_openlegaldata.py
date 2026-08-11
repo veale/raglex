@@ -368,8 +368,14 @@ class DeOpenLegalDataAdapter(BaseAdapter):
         if not row:
             return None
         # The list endpoint omits the body; the bulk shard carries it. Only pay for the
-        # detail request when the body is actually missing.
+        # detail request when the body is actually missing FROM AN API STUB. A handful
+        # of parquet rows have neither content rendition; falling back to REST for those
+        # turned an offline 424k-row seed into a rate-limited network crawl and parked
+        # the whole worker inside a long Retry-After sleep. Bodyless bulk rows are not
+        # ingestible documents and must be skipped locally.
         if not _clean(row.get("content")) and not _clean(row.get("markdown_content")):
+            if self.path:
+                return None
             detail = self._get(f"{API}/cases/{row.get('id')}/") if row.get("id") else None
             if detail:
                 row.update(detail)

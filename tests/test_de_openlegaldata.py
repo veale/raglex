@@ -353,3 +353,16 @@ def test_an_interrupted_walk_resumes_in_the_same_filtered_cursor_space(monkeypat
     assert [stub.stable_id for stub in adapter.discover(None)] == [
         "de/openlegaldata/two", "de/openlegaldata/three"]
     assert [stub.hints["resume_offset"] for stub in adapter.discover(None)] == [1, 2]
+
+
+def test_a_bodyless_bulk_row_never_falls_back_to_the_rate_limited_api():
+    class NoNetwork:
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("an offline parquet seed made a REST request")
+
+    adapter = DeOpenLegalDataAdapter(path="dump.parquet", client=NoNetwork())
+    row = {"id": 97196, "slug": "bodyless", "content": None,
+           "markdown_content": None, "court": {}}
+    stub = adapter._stub(row, "")
+    assert stub is not None
+    assert adapter.fetch(stub) is None
