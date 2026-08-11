@@ -130,6 +130,25 @@ def test_dip_page_cap_applies_to_each_document_class_not_only_the_first():
         "Gesetzentwurf", "Bericht"]
 
 
+def test_dip_resume_offset_spans_every_document_class():
+    def item(dip_id, number, kind):
+        return {"id": dip_id, "dokumentnummer": number, "titel": kind,
+                "datum": "2026-08-10", "aktualisiert": "2026-08-10T12:00:00+02:00",
+                "drucksachetyp": kind, "herausgeber": "BT", "pdf_hash": dip_id}
+
+    client = Client([
+        Response({"numFound": 1, "cursor": None,
+                  "documents": [item("1", "21/100", "Gesetzentwurf")]}),
+        Response({"numFound": 1, "cursor": None,
+                  "documents": [item("2", "21/101", "Bericht")]}),
+    ])
+    adapter = BundestagDrucksachenAdapter(
+        api_key="secret", types="Gesetzentwurf,Bericht", start_offset=1, client=client)
+    rows = list(adapter.discover(None))
+    assert [row.stable_id for row in rows] == ["de/bt-drs/21/101"]
+    assert rows[0].hints["resume_offset"] == 1
+
+
 def test_dip_fetch_emits_structural_rights_and_alias_metadata():
     item = {
         "id": "42", "dokumentnummer": "20/5548", "titel": "Entwurf eines Gesetzes",

@@ -298,6 +298,7 @@ class BundestagDrucksachenAdapter(BaseAdapter):
     def __init__(self, *, api_key: str | None = None, ids: str | None = None,
                  document_numbers: str | None = None, types: str | None = None,
                  prefer_pdf_tables: object = None,
+                 start_offset: int = 0,
                  client: RateLimitedClient | None = None) -> None:
         self.api_key = api_key or os.environ.get("BUNDESTAG_DIP_API_KEY")
         requested = document_numbers or ids
@@ -308,6 +309,11 @@ class BundestagDrucksachenAdapter(BaseAdapter):
             item.strip() for item in str(types).split(",") if item.strip()
         ) if types else DEFAULT_DRUCKSACHE_TYPES
         self.prefer_pdf_tables = option_flag(prefer_pdf_tables, True)
+        # Discovery checkpoints use one absolute cursor across all requested document
+        # classes. Deploys restore it as start_offset; replaying the short prefix is
+        # harmless and keeps the cursor correct even when the per-class API cursors are
+        # opaque. The held prefilter still makes that replay download-free.
+        self.start_offset = max(0, option_int(start_offset, 0))
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval,
                                                    timeout=120)
 
@@ -374,7 +380,7 @@ class BundestagDrucksachenAdapter(BaseAdapter):
                 for item in rows:
                     stub = self._stub(item, resume_offset=absolute, total=total)
                     absolute += 1
-                    if stub:
+                    if stub and absolute > self.start_offset:
                         yield stub
                 pages += 1
                 next_cursor = payload.get("cursor")
