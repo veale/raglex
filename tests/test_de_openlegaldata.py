@@ -319,3 +319,37 @@ def test_the_bulk_walk_does_not_write_the_api_cursor():
     api_row = dict(row, created_date="2025-06-20T03:15:03Z")
     assert adapter._stub(api_row, "", watermark="2025-06-20T03:15:03")\
         .hints["watermark"] == "2025-06-20T03:15:03"
+
+
+def test_an_interrupted_walk_resumes_in_the_same_filtered_cursor_space(monkeypatch):
+    """The checkpoint counts accepted German decisions, not raw parquet rows."""
+    rows = [
+        {"slug": "one", "ecli": "", "date": "2020-01-01", "court": {}},
+        {"slug": "eu", "ecli": "ECLI:EU:C:2020:1", "date": "2020-01-02", "court": {}},
+        {"slug": "two", "ecli": "", "date": "2020-01-03", "court": {}},
+        {"slug": "three", "ecli": "", "date": "2020-01-04", "court": {}},
+    ]
+
+    class Batch:
+        def to_pylist(self):
+            return rows
+
+    class Metadata:
+        num_rows = len(rows)
+
+    class Parquet:
+        metadata = Metadata()
+
+        def __init__(self, _path):
+            pass
+
+        def iter_batches(self, **_kwargs):
+            yield Batch()
+
+    import pyarrow.parquet as pq
+    monkeypatch.setattr(pq, "ParquetFile", Parquet)
+    adapter = DeOpenLegalDataAdapter(path="dump.parquet", start_offset=1)
+    monkeypatch.setattr(adapter, "_shards", lambda: [adapter.path])
+    assert [stub.stable_id for stub in adapter.discover(None)] == [
+        "de/openlegaldata/two", "de/openlegaldata/three"]
+    assert [stub.hints["resume_offset"] for stub in adapter.discover(None)] == [1, 2]

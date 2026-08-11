@@ -205,6 +205,7 @@ class DeOpenLegalDataAdapter(BaseAdapter):
         min_year: int | str | None = None,
         include_eu: bool | str | None = None,
         page_size: int | str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.path = Path(path) if path else None
@@ -217,6 +218,10 @@ class DeOpenLegalDataAdapter(BaseAdapter):
         self.min_year = option_int(min_year, 0)
         self.include_eu = option_flag(include_eu, False)
         self.page_size = max(1, min(100, option_int(page_size, 100)))
+        # Every emitted stub carries resume_offset, so interrupted bulk jobs restore
+        # it as start_offset. Keep the cursor in the adapter's filtered-stub space
+        # (after EU/court/year exclusions), exactly matching the emitted offsets.
+        self.start_offset = max(0, option_int(start_offset, 0))
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     # -- discovery -----------------------------------------------------------
@@ -242,6 +247,7 @@ class DeOpenLegalDataAdapter(BaseAdapter):
 
         cutoff = (since or "")[:10]
         seen = 0
+        emitted = 0
         shards = self._shards()
         total = None
         for shard in shards:
@@ -256,9 +262,13 @@ class DeOpenLegalDataAdapter(BaseAdapter):
                     stub = self._stub(row, cutoff, feed_total=total, offset=seen)
                     if stub is None:
                         continue
+                    if seen < self.start_offset:
+                        seen += 1
+                        continue
                     yield stub
                     seen += 1
-                    if max_pages is not None and seen >= max_pages * 500:
+                    emitted += 1
+                    if max_pages is not None and emitted >= max_pages * 500:
                         return
 
     def _discover_api(self, since: str | None, *, max_pages: int | None) -> Iterator[Stub]:
@@ -285,6 +295,9 @@ class DeOpenLegalDataAdapter(BaseAdapter):
                 stub = self._stub(row, "", feed_total=(payload or {}).get("count"),
                                   offset=seen, watermark=created)
                 if stub is not None:
+                    if seen < self.start_offset:
+                        seen += 1
+                        continue
                     yield stub
                     seen += 1
             if not (payload or {}).get("next"):

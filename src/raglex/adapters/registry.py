@@ -1830,7 +1830,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("ids", "Case ids / slugs / ECLIs", "521203,ECLI:DE:VGK:2025:0617.1L1930.22.00"),
          SourceOption("courts", "Limit to court slugs", "ovgnrw,vg-koln,lg-bonn"),
          SourceOption("min_year", "Earliest decision year", "2000"),
-         SourceOption("include_eu", "Include mirrored EU decisions", "false (default)")),
+         SourceOption("include_eu", "Include mirrored EU decisions", "false (default)"),
+         SourceOption("start_offset", "Resume listing offset", "0")),
         ("ECLI:DE:…", "de/openlegaldata/<slug>", "openlegaldata case id"),
     ),
     "de-rii": SourceInfo(

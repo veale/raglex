@@ -528,15 +528,25 @@ class Pipeline:
             return
         import threading
 
-        state = {"found": 0, "offset0": 0}
+        state = {"found": 0, "offset0": 0, "last_pulsed": None}
         stop = threading.Event()
 
         def _beat():
             while not stop.wait(interval):
                 try:
                     found = state["found"]
+                    # Report each discovery position once. Repeating an unchanged
+                    # counter forever refreshes the job's *progress* heartbeat and
+                    # makes a genuinely wedged generator indistinguishable from a
+                    # slow one. The JobManager has a separate lease pulse for process
+                    # liveness; when discovery stops advancing, heartbeat_at must be
+                    # allowed to age so reap_wedged_jobs can do its job.
+                    position = (state["offset0"] + found) if found else 0
+                    if position == state["last_pulsed"]:
+                        continue
+                    state["last_pulsed"] = position
                     on_progress(stage=f"discovering {source}",
-                                done=(state["offset0"] + found) if found else 0,
+                                done=position,
                                 discovered=found)
                 except Exception:  # noqa: BLE001 — a heartbeat must never break the walk
                     return

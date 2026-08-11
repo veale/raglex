@@ -135,6 +135,7 @@ def test_a_slow_discovery_keeps_reporting_while_it_blocks():
     assert [s.stable_id for s in pulsed] == ["a", "b"]
     assert beats, "a discovery that blocks reported nothing at all"
     assert all(b["stage"] == "discovering eu-cellar" for b in beats)
+    assert len(beats) == 1, "an unchanged position must not mask a wedged worker forever"
 
 
 def test_a_resumed_walk_reports_its_position_not_a_bare_zero():
