@@ -325,7 +325,14 @@ class DeOpenLegalDataAdapter(BaseAdapter):
         slug = _clean(row.get("slug"))
         if not slug and not ecli:
             return None
-        hints = {"row": row, "watermark": watermark or stamp}
+        # ONE cursor space per source, and it is the API's ``created_date`` — when the
+        # register ingested the decision, which is what ``_discover_api`` compares
+        # against. The bulk path deliberately reports NO watermark: its stamp would be a
+        # DECISION date, and leaving that as the source cursor would have the weekly
+        # watch comparing a date against a datetime from a different clock. A local walk
+        # does not need a date cursor anyway — the pipeline's backfill frontier resumes
+        # it, and the held-prefilter skips what it already stored.
+        hints = {"row": row, "watermark": watermark}
         if feed_total:
             hints["feed_total"] = int(feed_total)
         if offset is not None:

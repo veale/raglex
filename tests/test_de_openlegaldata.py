@@ -304,3 +304,18 @@ def test_the_landing_url_is_minted_locally_because_ecli_resolvers_do_not_answer(
                                                              "Nordrhein-Westfalen"},
                           "date": "2024-01-15", "file_number": "13 A 1234/20"}, "")
     assert stub.landing_url == "https://de.openlegaldata.io/case/ovg-nrw-2024-01-15-13-a-123420"
+
+
+def test_the_bulk_walk_does_not_write_the_api_cursor():
+    # One cursor space per source. The API path's cursor is created_date — when the
+    # register ingested the decision — and the bulk path's stamp would be a DECISION
+    # date, so letting the local walk set it would leave the weekly watch comparing a
+    # date against a datetime from a different clock.
+    adapter = DeOpenLegalDataAdapter(path="/nonexistent")
+    row = {"slug": "vg-koln-2025-06-17-1-l-193022", "ecli": "", "date": "2025-06-17",
+           "court": {"slug": "vg-koln", "name": "Verwaltungsgericht Köln"},
+           "file_number": "1 L 1930/22"}
+    assert adapter._stub(row, "").hints["watermark"] is None
+    api_row = dict(row, created_date="2025-06-20T03:15:03Z")
+    assert adapter._stub(api_row, "", watermark="2025-06-20T03:15:03")\
+        .hints["watermark"] == "2025-06-20T03:15:03"
