@@ -48,6 +48,7 @@ from .gdprhub import GDPRhubAdapter
 from .uk_ipa_codes import UKIPACodesAdapter
 from .uk_ipt import UKIPTAdapter
 from .de_gii import DeGiiAdapter
+from .de_openlegaldata import DeOpenLegalDataAdapter
 from .de_neuris import DeNeurisAdapter
 from .de_rii import DeRiiAdapter
 from .ofcom import OfcomOSAAdapter
@@ -408,6 +409,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # case law (rechtsprechung-im-internet, rii-toc.xml). NeuRIS is the live increment.
     "de-gii": DeGiiAdapter,
     "de-rii": DeRiiAdapter,
+    # Germany — Open Legal Data: the LÄNDER case law the federal portals never publish
+    # (424k decisions, 918 courts). Bulk-seeded from the parquet dump (`path`), then kept
+    # current off the same project's REST API. ECLI-keyed, so it dedups against de-rii.
+    "de-openlegaldata": DeOpenLegalDataAdapter,
     # France bulk seed (no auth): the DILA OPENDATA archives read from local disk. One
     # adapter across funds; the PISTE/Conseil-d'État live adapters handle increments.
     "fr-dila": FrDilaAdapter,  # CASS (Cour de cassation) by default
@@ -1775,6 +1780,26 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("ids", "Limit to abbreviations", "BGB,BDSG,SGB V")),
         ("Jurabk (BGB)", "de/gesetz/bgb"),
     ),
+    "de-openlegaldata": SourceInfo(
+        "de-openlegaldata", "Germany — Länder + federal case law (Open Legal Data)",
+        "caselaw", "DE", False,
+        "The Länder case law the federal portals do not publish: 424k decisions from 918 "
+        "courts — Oberverwaltungs-, Landes-, Verwaltungs-, Landesarbeits- and "
+        "Landessozialgerichte down to the Amtsgerichte — from openlegaldata.io. Point "
+        "`path` at the parquet bulk dump (HuggingFace openlegaldata/court-decisions-"
+        "germany) to seed offline; leave it blank to run the REST API newest-first as a "
+        "watch. Keyed by ECLI where one exists, so decisions already held from de-rii / "
+        "de-neuris dedup instead of duplicating; the rest key on their slug and mint the "
+        "court+Aktenzeichen alias a German citation resolves through. The upstream law "
+        "markers (§ + book) arrive as structured edges. Luxembourg decisions the register "
+        "mirrors are skipped — the corpus holds those from CELLAR (`include_eu` opts in).",
+        (SourceOption("path", "Local parquet dump", "/data/corpora/de-openlegaldata/dump-20260520"),
+         SourceOption("ids", "Case ids / slugs / ECLIs", "521203,ECLI:DE:VGK:2025:0617.1L1930.22.00"),
+         SourceOption("courts", "Limit to court slugs", "ovgnrw,vg-koln,lg-bonn"),
+         SourceOption("min_year", "Earliest decision year", "2000"),
+         SourceOption("include_eu", "Include mirrored EU decisions", "false (default)")),
+        ("ECLI:DE:…", "de/openlegaldata/<slug>", "openlegaldata case id"),
+    ),
     "de-rii": SourceInfo(
         "de-rii", "Germany — federal case law bulk (rechtsprechung-im-internet)",
         "caselaw", "DE", False,
@@ -1984,6 +2009,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     "sg-legislation": "full-walk", "sg-sl": "full-walk", "ca-federal": "full-walk",
     "hk-legislation": "full-walk", "nz-legislation": "full-walk", "gdprhub": "full-walk",
     "de-gii": "full-walk", "eu-preparatory": "full-walk", "au-qld": "full-walk",
+    # /api/cases/?ordering=-created_date is newest-first on the register's own ingest
+    # date, so a watch stops within a page or two; the parquet bulk path is a local walk.
+    "de-openlegaldata": "early-stop",
     # CELLAR enumeration is newest-first on work_date_document, so an incremental
     # run stops at its cursor; the Parliament’s external-documents register offers
     # neither a date filter nor a sort, so that one is honestly a full walk.

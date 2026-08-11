@@ -156,10 +156,17 @@ def test_report_series_is_not_read_as_a_docket():
 
 def test_docket_of_the_court_below_is_not_attributed_to_the_court_above():
     """A judgment's header lists the courts below it; the 100-character window stepped
-    over "vorgehend KG Berlin" and gave the BGH the Kammergericht's docket."""
+    over "vorgehend KG Berlin" and gave the BGH the Kammergericht's docket.
+
+    The prior instance is now a citation IN ITS OWN RIGHT — the court table knows the
+    Kammergericht, and the corpus holds Länder decisions for it to resolve to, so
+    "vorgehend KG Berlin … Az: 10 U 54/19" is a real edge to the decision below rather
+    than noise. What must never happen is the two being confused, which is what this
+    asserts: each docket belongs to the court that issued it."""
     cites = _de("BGH, 15. September 2022, Az: VI ZA 19/22, Beschluss vorgehend "
                 "KG Berlin, 7. Juli 2022, Az: 10 U 54/19", "de_case_reference")
-    assert [c.candidate_id for c in cites] == ["de:case:BGH:VIZA19/22"]
+    assert [c.candidate_id for c in cites] == ["de:case:BGH:VIZA19/22",
+                                               "de:case:KG:10U54/19"]
 
 
 def test_repair_drops_the_phantoms_the_grammar_no_longer_mints(tmp_path, monkeypatch):

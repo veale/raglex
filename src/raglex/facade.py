@@ -5284,6 +5284,17 @@ class Facade:
             name = us_court_name(low)
             if name:
                 return name
+        # German courts are stored under their full German name, which the prettifier at
+        # the bottom of this method mangles: it splits on hyphens, so every court of a
+        # hyphenated Land came out as "Oberverwaltungsgericht Nordrhein Westfalen". The
+        # table also canonicalises an ECLI court token and the register's own slug, so a
+        # decision stored under either shows the court's name (see citations/de_courts).
+        if (source or "").lower().startswith("de-") or _re.search(r"[gG]ericht|[gG]erichtshof", code or ""):
+            from .citations.de_courts import court_name as _de_court_name
+
+            de_name = _de_court_name(code)
+            if de_name:
+                return de_name
         # bracketless-citation jurisdictions (Canada, US) vs bracketed (AU, NZ, UK)
         src = (source or "").lower()
         hint = False if src.startswith(("ca-", "ca/")) else True if src.startswith(

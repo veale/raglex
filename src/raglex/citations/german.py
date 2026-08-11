@@ -13,6 +13,7 @@ import unicodedata
 
 from bundesrecht import normalise
 
+from . import de_courts, de_laws
 from .models import Citation
 
 
@@ -32,30 +33,21 @@ from .models import Citation
 # land on ONE node.  ``EG``/``EGV`` is the pre-Lisbon EC Treaty, whose articles were
 # renumbered in 2009 — it therefore maps to its OWN Work (12002E), never to the TFEU,
 # so "Art. 81 EG" cannot be silently read as today's Article 81.
-_EU_LAW_IDS = {
-    # secondary law — the digital acquis German courts cite by acronym
-    "DSGVO": "32016R0679",
-    "DSA": "32022R2065",
-    "DMA": "32022R1925",
-    "NIS2": "32022L2555",
-    "KIVO": "32024R1689",
-    "DGA": "32022R0868",
-    "DSRL": "31995L0046",
-    # primary law + the Convention
-    "AEUV": "12016E",
-    "EUV": "12016M",
-    "EGV": "12002E",
-    "EG": "12002E",
-    "GRC": "12012P",
-    "GRCH": "12012P",
-    "GRCHARTA": "12012P",
-    "EUGRCHARTA": "12012P",
-    "EUGRCH": "12012P",
-    "EMRK": "echr/convention",
-}
+_EU_LAW_IDS = {abbrev: inst.candidate_id
+               for abbrev, inst in de_laws._BY_ABBREV.items()
+               if not inst.candidate_id.startswith("de/")}
 # Which of those are treaties rather than regulations/directives — the entity_kind the
 # rest of the pipeline keys treatment and the relevance gate off.
-_EU_TREATY_IDS = frozenset({"12016E", "12016M", "12002E", "12012P", "echr/convention"})
+_EU_TREATY_IDS = frozenset(inst.candidate_id for inst in de_laws.INSTRUMENTS
+                           if inst.kind == "treaty")
+
+
+def _eu_law_id(law: str) -> str | None:
+    """The CELEX an abbreviation names, or None for a German (or unknown) statute."""
+    inst = de_laws.resolve(law)
+    if inst is None or inst.candidate_id.startswith("de/"):
+        return None
+    return inst.candidate_id
 
 
 def law_id(abbreviation: str) -> str:
@@ -68,16 +60,20 @@ def normalise_docket(value: str) -> str:
 
 
 def case_alias(court: str, docket: str) -> str:
+    """The key a German decision is cited by when it has no ECLI: court + Aktenzeichen.
+
+    The court half must survive every spelling a citation uses, or the alias a judgment
+    mints and the one the harvested decision registers never meet. ``de_courts.court_key``
+    folds the full name, the abbreviation + seat and the ECLI court token onto one code —
+    "OVG Münster", "OVG Nordrhein-Westfalen" and "Oberverwaltungsgericht
+    Nordrhein-Westfalen" all key on ``OVGNRW``. A court the table does not know (a
+    foreign court, a body named in prose) falls back to its stripped upper-case form,
+    which is what this did for every court before the table existed.
+    """
+    from .de_courts import court_key as _court_key
+
     court_raw = re.sub(r"[^A-ZÄÖÜ0-9]+", "", (court or "").upper())
-    court_key = {
-        "BUNDESVERFASSUNGSGERICHT": "BVERFG",
-        "BUNDESGERICHTSHOF": "BGH",
-        "BUNDESARBEITSGERICHT": "BAG",
-        "BUNDESFINANZHOF": "BFH",
-        "BUNDESSOZIALGERICHT": "BSG",
-        "BUNDESVERWALTUNGSGERICHT": "BVERWG",
-        "BUNDESPATENTGERICHT": "BPATG",
-    }.get(court_raw, court_raw)
+    court_key = _court_key(court) or court_raw
     docket_key = re.sub(r"[^A-Z0-9/.-]+", "", normalise_docket(docket))
     return f"de:case:{court_key}:{docket_key}"
 
@@ -136,6 +132,20 @@ LAW_REFERENCE_RE = re.compile(
 #      AEUV, EMRK); a German noun and the structural vocabulary carry exactly one;
 #   2. an explicit stop-list for the apparatus that passes (1) — the Halbsatz "HS",
 #      "aaO", and the law-report series a citation trails off into (NJW, BGHZ, SozR…).
+# The German (and Austrian) law-report series. Shared, because the same tokens cause two
+# different problems at two ends of the pipeline: a §-reference can trail INTO one and
+# read it as the law ("§ 5 … NJW" → de/gesetz/njw), and a series citation has the same
+# shape as a bracketless neutral citation and reads as a court ("BGHZ 174, 101" →
+# bghz/2007/174 — see ``grammars._neutral_bracketless``). A report series is not a law
+# and not a court.
+LAW_REPORT_SERIES = frozenset({
+    "njw", "njw-rr", "nza", "nza-rr", "nvwz", "nvwz-rr", "njoz", "nzs", "nzm", "nzi",
+    "nstz", "nstz-rr", "grur", "grur-rr", "mdr", "wm", "zip", "dstr", "dstre",
+    "bghz", "bghst", "bghr", "bverfge", "bage", "bfhe", "bsge", "bverwge", "sozr",
+    "euzw", "eugrz", "versr", "dvbl", "bb", "db", "jz", "jr", "mmr", "cr", "k&r",
+    "zd", "zum", "afp", "wrp", "gewarch", "npa", "efg", "dstrk", "rk", "beckrs",
+})
+
 _LAW_STOPWORDS = {
     # structural / pinpoint vocabulary
     "rn", "rn.", "rdn", "rdnr", "rdnrn", "rz", "ziff", "ziffer", "satz", "saetze",
@@ -147,9 +157,7 @@ _LAW_STOPWORDS = {
     # citation apparatus
     "aao", "mwn", "vgl", "rspr", "juris", "beckrs", "az",
     # law-report series a reference can trail into
-    "njw", "nza", "nvwz", "njoz", "nzs", "nzm", "nzi", "grur", "mdr", "wm", "zip",
-    "dstr", "bghz", "bghst", "bverfge", "bage", "bfhe", "bsge", "bverwge", "sozr",
-    "euzw", "eugrz", "versr", "dvbl", "bb", "db",
+    *LAW_REPORT_SERIES,
 }
 
 
@@ -246,7 +254,7 @@ def law_citations(text: str) -> list[Citation]:
             law, pinpoint = parts
             # DS-GVO / DSGVO / DS-GVO are one instrument; fold the separators away
             # before the lookup so the spelling doesn't decide whether it resolves.
-            eu_id = _EU_LAW_IDS.get(re.sub(r"[\s.-]+", "", law).upper())
+            eu_id = _eu_law_id(law)
             kind = "act"
             if eu_id:
                 kind = "treaty" if eu_id in _EU_TREATY_IDS else "regulation"
@@ -261,10 +269,24 @@ def law_citations(text: str) -> list[Citation]:
     return found
 
 
-_COURT = r"BVerfG|BGH|BAG|BFH|BSG|BVerwG|BPatG|EuGH|OLG\s+[A-ZÄÖÜ][\wÄÖÜäöüß-]+|LG\s+[A-ZÄÖÜ][\wÄÖÜäöüß-]+"
+# Every German court, from the registry — the seven federal courts plus the Länder
+# courts a citation names by abbreviation and seat ("OVG Münster", "VG Köln", "LAG
+# Hamm", "AG Hünfeld"). The hand-kept list this replaced knew nine forms, so a
+# Land court's decisions were invisible to the case grammar: the corpus's German case
+# law was federal, and every citation of the courts BELOW them dangled.
+_COURT = de_courts.COURT_RE_SOURCE
 # Registers longest-first, so "StB" isn't cut short to "B" and "AnwZ" to "AR".
-_REGISTER = (r"AnwZ|NotZ|EnZR|EnVR|BvR|BvL|BvF|BvQ|BVR|AZR|ABR|KZR|KVR|StR|StB|"
-             r"ZR|ZB|ZA|AR|CN|R|C|B|W|U|L|K|O")
+#
+# The administrative, social and labour registers are as load-bearing as the civil ones
+# now that the corpus holds those courts: a Verwaltungsgericht's main proceedings are
+# "K", its interim relief "L", an appeal to the OVG "A" ("13 A 1234/20") and its interim
+# relief "B"; the Sozialgerichte use "KR"/"AS"/"SO"/"AL"/"R"; the Arbeitsgerichte "Ca"
+# (first instance), "Sa" (appeal), "BV"/"TaBV" (works-council proceedings); the criminal
+# registers are "Ls", "KLs", "Ds", "Ns", "Qs", "Ss", "Ws", "OWi". Without them the
+# docket half of a Länder citation matched nothing at all.
+_REGISTER = (r"AnwZ|NotZ|EnZR|EnVR|TaBV|BvR|BvL|BvF|BvQ|BVR|AZR|ABR|KZR|KVR|StR|StB|"
+             r"KLs|OWi|Sa|Ca|BV|Ns|Ds|Ls|Qs|Ss|Ws|KR|AS|SO|AL|VG|"
+             r"ZR|ZB|ZA|AR|CN|R|C|B|W|U|L|K|O|A|F|S|T")
 # The senate prefix is a number or a Roman numeral, and the Roman one may carry a
 # lower-case letter — the BGH's VIa, IVa and XIa senates. Without it "BGH VIa ZR 335/21"
 # lost its senate and became de:case:BGH:ZR335/21, merging VIa and IVa ZR 335/21 into one
@@ -276,8 +298,9 @@ _DOCKET = (rf"(?<![A-Za-zÄÖÜäöüß])(?:(?:\d+|[IVX]+[a-z]?)\s+)?(?:{_REGIST
 # What may NOT appear between the court and the docket. A German judgment's header lists
 # the courts below it ("BGH … Beschluss vorgehend KG Berlin, … Az: 10 U 54/19"), so a
 # window that steps over another court's name attributes ITS docket to the first court.
-_OTHER_COURT = (r"\b(?:OLG|LG|AG|KG|OVG|VG|VGH|LSG|LAG|SG|FG|ArbG|BVerfG|BGH|BAG|BFH|"
-                r"BSG|BVerwG|BPatG|EuGH|EGMR)\b|vorgehend|nachgehend|Vorinstanz")
+_OTHER_COURT = (r"\b(?:OLG|LG|AG|KG|OVG|VG|VGH|LSG|LAG|SG|FG|ArbG|ArbGG|BayObLG|BayVGH|"
+                r"VerfGH|StGH|AnwGH|BVerfG|BGH|BAG|BFH|"
+                r"BSG|BVerwG|BPatG|EuGH|EuG|EGMR)\b|vorgehend|nachgehend|Vorinstanz")
 CASE_REFERENCE_RE = re.compile(
     rf"\b(?P<court>{_COURT})\b(?:(?!{_OTHER_COURT})[^;\n]){{0,80}}?(?P<docket>{_DOCKET})\b"
     rf"(?:\s*,?\s*[Rr]n\.?\s*(?P<rn>\d+(?:\s*(?:ff?\.|[-–,])\s*\d*)?))?")
@@ -293,4 +316,13 @@ def case_citations(text: str) -> list[Citation]:
 
 
 def german_citations(text: str) -> list[Citation]:
-    return law_citations(text) + case_citations(text)
+    """Every German citation in ``text``: §-anchored statutory references, decisions, and
+    the instruments the judgment merely NAMES.
+
+    The named-instrument pass runs last and is handed the spans the first two already
+    claimed, so an instrument that was cited with a provision ("Art. 6 DSGVO") is not
+    also reported as a bare mention of itself."""
+    laws = law_citations(text)
+    cases = case_citations(text)
+    occupied = [(c.char_start, c.char_end) for c in laws + cases]
+    return laws + cases + de_laws.instrument_citations(text, occupied=occupied)

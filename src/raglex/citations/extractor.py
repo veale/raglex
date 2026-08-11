@@ -106,6 +106,55 @@ def _disambiguate_online_safety_act(cites: list[Citation]) -> list[Citation]:
 # A BARE (unquoted, no cue) name is only trusted in SQUARE brackets — the OSCOLA
 # convention — because a round "(…)" is far more often a year/court-tag/aside; a
 # quoted or cued name is trusted in any bracket.
+# --- the German form of the same thing ----------------------------------------
+# German drafting defines a short name exactly as English drafting does, but with its own
+# cue vocabulary and — this is what actually broke it — with the instrument's FULL
+# OFFICIAL TITLE standing between the citation and the definition:
+#
+#   "…der damit umgesetzten Richtlinie (EU) 2018/1972 des Europäischen Parlaments und des
+#    Rates vom 11. Dezember 2018 über den europäischen Kodex für die elektronische
+#    Kommunikation (fortan: EKEK)"                    (VG Köln, ECLI:DE:VGK:2025:0617…)
+#
+# The generic rule looks 90 characters past the citation and refuses any gap containing a
+# 12-letter word. A German EU citation's title is 120 characters of "Europäischen",
+# "Kommunikation", "Parlaments" — so BOTH guards fire, and the judgment's own name for the
+# instrument it is about, plus every later "der EKEK", was lost. The same happens with a
+# German statute: "Gesetz über die Durchsetzung der Rechte in sozialen Netzwerken
+# (Netzwerkdurchsetzungsgesetz — NetzDG)".
+#
+# The gate is not removed, it is TRADED. Where the definition carries an EXPLICIT German
+# cue — fortan, im Folgenden, nachfolgend, kurz, sog. — the author has said in terms that
+# this is a naming, which is exactly the evidence the quote marks provide in the generic
+# rule; so a cued definition is trusted across a long title, and an UNCUED one is not
+# trusted any further than English drafting's is. The antecedent rule
+# (``_antecedent_owns_definition``) still applies unchanged, so a named body standing in
+# the gap still owns its own abbreviation.
+#
+# German quotation marks are listed alongside the English ones throughout: „…“ is the
+# German house style and »…« the alternative, and neither appeared anywhere in this
+# module, so a German definition written the ordinary way matched nothing at all.
+_DE_CUES = (r"(?:fortan|im\s+Folgenden|im\s+Weiteren|nachfolgend|nachstehend|künftig|"
+            r"kurz|zusammen(?:fassend)?|insgesamt|jeweils|sogenannte?[nrs]?|sog\.?|"
+            r"abgekürzt|abk\.?)")
+#: How far past a citation a CUED German definition may sit — long enough for an EU
+#: instrument's full official title, which is the whole point.
+DE_SHORTHAND_WINDOW = 420
+_DE_SHORTHAND_DEF = re.compile(
+    # "(fortan: EKEK)" / "(im Folgenden: „DSGVO“)" / "(nachfolgend EKEK)" — the cue,
+    # an optional colon, then the name, quoted or bare.
+    rf"[\[({{]\s*(?:{_DE_CUES}\s*:?\s*)"
+    r"(?:(?:der|die|das|den|dem)\s+)?"
+    r"[\"“„«»‘'’]?\s*(?P<dq>[A-Za-zÄÖÜäöüß][\wÄÖÜäöüß'’&.\- ]{1,45}?)\s*[\"”“„«»’'‘]?"
+    r"\s*[\])}]"
+    # the dash-delimited form German legislation uses for its own short title:
+    # "Netzwerkdurchsetzungsgesetz — NetzDG" inside the bracket
+    rf"|[\[({{][^)\]}}\n]{{0,80}}?[-–—]\s*(?P<dd>[A-ZÄÖÜ][\wÄÖÜäöüß'’&.\-]{{1,30}})\s*[\])}}]"
+    # …and outside it, set off by dashes: "– im Folgenden: EKEK –"
+    rf"|[-–—]\s*{_DE_CUES}\s*:?\s*[\"“„«»']?(?P<dn>[A-Za-zÄÖÜäöüß][\wÄÖÜäöüß'’&.\- ]{{1,45}}?)"
+    r"[\"”“„«»']?\s*[-–—]",
+    re.IGNORECASE,
+)
+
 _SHORTHAND_DEF = re.compile(
     # quoted or cued name, any bracket
     # Both curly single quotes are listed. Without ‘…’ the Home Office's own house
@@ -114,7 +163,7 @@ _SHORTHAND_DEF = re.compile(
     # nothing, while their six sibling codes — identical but for the quote character —
     # defined "the Act" and resolved their provisions.
     r"[\[({]\s*(?:(?:herein)?after\s+|hereafter\s+|henceforth\s+|collectively\s+|or\s+)?"
-    r"(?:the\s+)?[\"“‘']\s*(?P<q>[A-Za-z][\w'’&.\- ]{1,45}?)\s*[\"”’']\s*[\])}]"
+    r"(?:the\s+)?[\"“‘'„«»]\s*(?P<q>[A-Za-z][\w'’&.\- ]{1,45}?)\s*[\"”’'“„«»]\s*[\])}]"
     r"|[\[({]\s*(?:(?:herein)?after|hereafter|henceforth)\s+(?:the\s+)?"
     r"(?P<cue>[A-Z][\w'’&.\- ]{1,45}?)\s*[\])}]"
     # bare name, square brackets only (OSCOLA short-title convention)
@@ -508,6 +557,20 @@ def _derives_from(name: str, phrase: str) -> bool:
     return bool(words) and all(w in haystack for w in words)
 
 
+#: A German EU instrument's OWN official title, which is what stands between its number
+#: and its short name: "Richtlinie (EU) 2018/1972 **des Europäischen Parlaments und des
+#: Rates vom 11. Dezember 2018 über den europäischen Kodex…** (fortan: EKEK)". The
+#: antecedent rule below exists to catch a NEW SUBJECT introduced in that gap ("…against
+#: the respondent, the Bar Standards Board ("the BSB")") — but a title is not a new
+#: subject, it is the citation continuing, and reading it as one refused every German EU
+#: definition. The genitive opening is what distinguishes them: a title continues the
+#: instrument's name grammatically, a new subject starts a new clause.
+_DE_TITLE_GAP = re.compile(
+    r"^[\s,]*(?:des|der|vom|von\s+der)\s+"
+    r"(?:Europäischen\s+Parlaments|Rates|Kommission|Europäischen\s+Zentralbank|\d)",
+    re.IGNORECASE)
+
+
 def _antecedent_owns_definition(gap: str, name: str, cited_raw: str) -> bool:
     """Whether the bracketed ``name`` defines a NAMED BODY standing in ``gap`` rather
     than the citation the gap follows — in which case there is no id to file it under
@@ -530,6 +593,8 @@ def _antecedent_owns_definition(gap: str, name: str, cited_raw: str) -> bool:
         return False
     if _derives_from(name, cited_raw):
         return False                     # the short name is the authority's own
+    if _DE_TITLE_GAP.match(gap):
+        return False                     # the gap is the instrument's own title
     return any(_SEPARATES.search(gap[:at]) for _phrase, at in phrases)
 
 
@@ -629,13 +694,26 @@ def _collect_shorthand_defs(
         m = _SHORTHAND_DEF.search(window)
         if m and not re.search(r"[A-Za-z]{12,}", window[:m.start()]):
             name = (m.group("q") or m.group("cue") or m.group("br")
-                    or m.group("hf") or "").strip(" '\"“”’")
+                    or m.group("hf") or "").strip(" '\"“”’„«»")
             # …but only if the citation is what the bracket names. A body standing
             # between the two owns its own abbreviation (see
             # _antecedent_owns_definition), and there is no id to file that under.
             if len(name) >= 3 and not _antecedent_owns_definition(
                     window[:m.start()], name, c.raw):
                 _register(name, c, abbrev=is_statute or _is_abbrev(name))
+        elif not m:
+            # The German cued form, across the instrument's full official title — see
+            # _DE_SHORTHAND_DEF. The long-word guard is deliberately NOT applied (the
+            # title is what it would trip on); the explicit cue is what earns that, and
+            # the antecedent rule is unchanged.
+            de_window = text[c.char_end: c.char_end + DE_SHORTHAND_WINDOW]
+            dm = _DE_SHORTHAND_DEF.search(de_window)
+            if dm:
+                name = (dm.group("dq") or dm.group("dd") or dm.group("dn")
+                        or "").strip(" '\"“”’„«»")
+                if len(name) >= 3 and not _antecedent_owns_definition(
+                        de_window[:dm.start()], name, c.raw):
+                    _register(name, c, abbrev=is_statute or _is_abbrev(name))
         # Formal chapter citations are commonly introduced by the short title:
         # "Citizenship Act, R.S.C. 1985, c. C-29". Learn that title for later
         # "s. 3(2)(a) of the Citizenship Act" uses in the same judgment.
@@ -794,6 +872,49 @@ def shorthand_name_from_use(raw: str) -> str:
     return s.strip(" ,.")
 
 
+def _repoint_german_law_abbrevs(
+    kept: list[Citation], defs: dict[str, tuple[Citation, bool]],
+) -> list[Citation]:
+    """Send a §/Art. reference to the instrument the DOCUMENT said the abbreviation means.
+
+    ``german.law_citations`` mints ``de/gesetz/<abk>`` for any abbreviation a reference
+    ends on, which is right for the open set of German statutes and wrong the moment the
+    judgment has defined the abbreviation itself:
+
+        "…Verordnung (EU) 2023/1114 … (im Folgenden: „MiCAR“) … Nach Art. 4 MiCAR gilt…"
+
+    left "Art. 4 MiCAR" pointing at ``de/gesetz/micar`` — a German statute that does not
+    exist — beside a correctly-resolved regulation the same document had just named. The
+    shorthand pass could not fix it either, because the §-reference already occupies that
+    span, so its use-pattern skips it.
+
+    Only a ``de/gesetz/…`` candidate is re-pointed, and only onto a host that resolved to
+    something else; a reference to a real German act whose abbreviation the document also
+    happens to define keeps its own id (the host would be that same act anyway).
+    """
+    if not defs:
+        return kept
+    from .german import law_id
+
+    targets = {law_id(name): host for name, (host, _abbrev) in defs.items()
+               if host.candidate_id and not str(host.candidate_id).startswith("de/gesetz/")}
+    if not targets:
+        return kept
+    out: list[Citation] = []
+    for c in kept:
+        host = targets.get(c.candidate_id or "") if c.method == "de_law_reference" else None
+        if host is None:
+            out.append(c)
+            continue
+        from .german import _eu_pinpoint
+
+        out.append(replace(
+            c, candidate_id=host.candidate_id, entity_kind=host.entity_kind,
+            pinpoint=_eu_pinpoint(c.pinpoint) if c.pinpoint else None,
+            method="de_shorthand_law"))
+    return out
+
+
 def _attach_shorthands(text: str, kept: list[Citation],
                        defs: dict[str, tuple[Citation, bool]] | None = None,
                        hosts: dict[str, tuple[Citation, bool]] | None = None,
@@ -803,6 +924,7 @@ def _attach_shorthands(text: str, kept: list[Citation],
         defs = _collect_shorthand_defs(text, kept, hosts)
     if not defs and not hosts:
         return kept
+    kept = _repoint_german_law_abbrevs(kept, defs)
     out = list(kept)
     occupied = [(c.char_start, c.char_end) for c in kept]
     for name in sorted(defs, key=len, reverse=True):

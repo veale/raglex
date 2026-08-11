@@ -494,8 +494,16 @@ def _neutral_bracketless(m: "re.Match[str]") -> Normalised:
     bracketed token must retain its ordinary meaning.
     """
     from .courts import CANADIAN_FRENCH_COURT_EQUIVALENTS
+    from .german import LAW_REPORT_SERIES
 
     court = m.group("court")
+    # A continental law-report series has the same shape as a bracketless neutral
+    # citation and is not one: "BGH vom 8.11.2007 BGHZ 174, 101" reads as year 2007,
+    # court BGHZ, number 174 — a "case" that is really the official BGH civil reports,
+    # and the Austrian "RK 24.3.2006" (Rechtskraft, the date a conviction became final)
+    # reads the same way. Neither names a court, so neither can mint a case node.
+    if court.casefold() in LAW_REPORT_SERIES:
+        return None, None, DROP
     canonical = CANADIAN_FRENCH_COURT_EQUIVALENTS.get(court.upper(), court)
     return _neutral(m, court_override=canonical)
 
@@ -1457,6 +1465,117 @@ register(Grammar(
 # neutral citation and AIR, Canada's CanLII slot, the South African SA-report shape,
 # Nigeria's NWLR part format, Kenya's eKLR database id, and Hong Kong registry case
 # numbers. Imported last so its (longer, more specific) patterns are registered
+# -- German-language EU and Strasbourg citation -------------------------------
+# A German judgment cites an EU instrument in German — "Verordnung (EU) 2016/679",
+# "Richtlinie 2002/58/EG", "Art. 15 Abs. 1 der Richtlinie (EU) 2018/1972". The numeric
+# grammar above is English-only ("Regulation"/"Directive"/"Decision"), so every one of
+# those references was invisible: a German court's EU-law reasoning reached the corpus
+# only where it happened to use an acronym the German gazetteer lists. This is the same
+# grammar in German, sharing ``_eu_celex`` so a German and an English citation of one
+# instrument mint one CELEX.
+#
+# ``Beschluss`` and ``Entscheidung`` are BOTH the German for "Decision" (the Lisbon
+# renaming), and ``Durchführungs-``/``Delegierte`` are the implementing/delegated
+# qualifiers, which do not change the descriptor.
+_DE_KIND = {
+    "verordnung": "regulation", "richtlinie": "directive",
+    "beschluss": "decision", "entscheidung": "decision",
+    "rahmenbeschluss": "framework decision",
+}
+_DE_KIND_RE = "|".join(sorted(_DE_KIND, key=len, reverse=True))
+#: The German pinpoint that may precede the instrument: "Art. 15 Abs. 1 lit. f der …".
+#: Only the article and its paragraph/point become the anchor — the same Formex
+#: vocabulary ``german._eu_pinpoint`` produces, so the two routes agree on the anchor a
+#: citation carries.
+_DE_EU_PINPOINT = (
+    r"(?:Art(?:ikel|\.)?\s*(?P<dart>\d+[a-z]?)"
+    r"(?:\s*Abs(?:atz|\.)?\s*(?P<dabs>\d+[a-z]?))?"
+    r"(?:\s*(?:Unter)?Abs(?:atz|\.)?\s*\d+[a-z]?)?"
+    r"(?:\s*S(?:atz|\.)?\s*\d+)?"
+    r"(?:\s*(?:lit(?:t(?:era)?)?\.?|Buchst(?:abe)?\.?)\s*(?P<dlit>[a-z])\b)?"
+    r"(?:\s*(?:Nr\.?|Nummer)\s*(?P<dnr>\d+[a-z]?))?"
+    r"\s*,?\s+(?:der|des|dem|zur|zum|in|nach|gemäß|i\.?S\.?d\.?)\s+)?"
+)
+
+
+def _de_eu_pinpoint_of(m: "re.Match[str]") -> str | None:
+    g = m.groupdict()
+    if not g.get("dart"):
+        return None
+    out = f"Article {g['dart']}"
+    if g.get("dabs"):
+        out += f"({g['dabs']})"
+    elif g.get("dnr"):
+        out += f"({g['dnr']})"
+    if g.get("dlit"):
+        out += f"({g['dlit'].casefold()})"
+    return out
+
+
+def _de_eu_numeric(m: "re.Match[str]") -> Normalised:
+    kind = _DE_KIND.get(m.group("dekind").casefold())
+    if not kind:
+        return None, None, DROP
+    return (_eu_celex(kind, m.group("da"), m.group("db")),
+            _de_eu_pinpoint_of(m), kind)
+
+
+register(Grammar(
+    "eu_instrument_numeric_de", "regulation",
+    re.compile(
+        _DE_EU_PINPOINT
+        + r"(?:(?:Delegierte[nrs]?|Durchführungs)[- ]?)?"
+        r"(?P<dekind>" + _DE_KIND_RE + r")\s*"
+        r"(?:\((?:EU|EG|EWG|Euratom)\)\s*)?"
+        r"(?:Nr\.?\s*)?(?P<da>\d{1,4})/(?P<db>\d{1,4})"
+        r"(?:/(?:EU|EG|EWG|JI|GASP|Euratom))?\b",
+        re.IGNORECASE,
+    ),
+    _de_eu_numeric,
+))
+
+# The Strasbourg court as a German judgment cites it: "EGMR, Urteil vom 4.12.2008,
+# Nr. 30562/04" / "Beschwerde-Nr. 30562/04". The application number IS the identifier a
+# held ECtHR judgment is aliased by (see pipeline ``_mint_aliases``), so this resolves
+# straight onto the case. The "EGMR"/"Beschwerde" cue is required: a bare "30562/04" in
+# German text is far more often an Aktenzeichen or a file reference.
+register(Grammar(
+    "echr_appno_de", "case",
+    re.compile(
+        r"(?:EGMR|Europäischer\s+Gerichtshof\s+für\s+Menschenrechte|Beschwerde)"
+        r"[^;.\n]{0,120}?"
+        r"(?:Beschwerde[- ]?)?(?:Nr\.?|Nummer|Individualbeschwerde)\s*"
+        r"(?P<appno>\d{1,5}/\d{2})\b",
+        re.IGNORECASE,
+    ),
+    lambda m: (m.group("appno"), None, "case"),
+))
+
+# A CJEU case as a German judgment cites it: "EuGH, Urteil vom 16.7.2020 – C-311/18".
+# The bare "C-311/18" is already matched by ``cjeu_case_number``; this exists for the
+# ``Rs.``/``verb. Rs.`` (Rechtssache / verbundene Rechtssachen) forms, where the case
+# number is preceded by vocabulary the English grammar does not know, and for the
+# ``Slg.``-era spellings.
+register(Grammar(
+    "cjeu_case_de", "case",
+    re.compile(
+        r"(?:verb(?:\.|undene)?\s+)?Rs\.?\s*"
+        r"(?P<letter>[CT])[-‐‑‒–—―−]?(?P<num>\d{1,4})/(?P<yy>\d{2})\b",
+        re.IGNORECASE,
+    ),
+    lambda m: (_cjeu_case_celex_parts(m.group("letter"), m.group("num"), m.group("yy")),
+               None, "case"),
+))
+
+
+def _cjeu_case_celex_parts(letter: str, num: str, yy: str) -> str | None:
+    """``C-311/18`` → ``62018CJ0311`` — the same construction ``_cjeu_case_celex`` does,
+    reached from the German ``Rs.`` form's own groups."""
+    year = ("19" if int(yy) >= 50 else "20") + f"{int(yy):02d}"
+    court = "CJ" if letter.upper() == "C" else "TJ"
+    return f"6{year}{court}{int(num):04d}"
+
+
 # alongside the generic ones; the extractor's longest-match dedupe does the rest.
 from . import commonwealth as _commonwealth  # noqa: E402,F401  (registers on import)
 
