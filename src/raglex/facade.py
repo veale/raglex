@@ -16201,7 +16201,8 @@ class Facade:
             # rebuilt from durable state on restart (see below).
             primary_bulk_sources = {
                 "fr-dila", "fr-dila-legi", "de-rii", "de-gii", "de-gesetze",
-                "de-gesetze-im-internet", "nl-rechtspraak", "nl-legislation",
+                "de-gesetze-im-internet", "de-openlegaldata",
+                "nl-rechtspraak", "nl-legislation",
             }
             # Rebuild the extraction worklist from durable state instead of an in-memory
             # list two ways of losing it:

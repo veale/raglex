@@ -192,7 +192,10 @@ def _law_relations(markers: str | None, *, text_len: int) -> list[TypedRelation]
 
 class DeOpenLegalDataAdapter(BaseAdapter):
     source = "de-openlegaldata"
-    min_interval = 0.4
+    # The public API starts returning 429s during a few hundred detail fetches at
+    # 2.5 requests/second. A weekly watch can afford the conservative public-service
+    # rate; its steady-state delta is small, and the historical path is local parquet.
+    min_interval = 1.0
     requires_js = False
     requires_proxy = False
 
