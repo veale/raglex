@@ -79,6 +79,22 @@ ISC's Transcripts accordions are single years ("2015"); read as section headings
 than as periods, the previous Parliament stayed in force beneath them and sixty
 transcripts were filed under a Parliament that ended in 1997.
 
+**A complete-looking enumeration can still be a partial view.** Domstolsverket's paged
+list is deterministic — two full walks of its 174 pages returned identical id sets, and
+its own facet counts agree with them — and it still withholds 391 publications, because
+it returns one member per *publication group*. A case is published twice, as the court's
+signed judgment and as the edited law report, and only one of the pair is listed. The
+others answer perfectly on `/publiceringar/{id}`; nothing the service reports reveals
+that they exist.
+
+Neither repetition nor totals can detect that. What detects it is an **independent
+inventory** — here an archived third-party snapshot of the same service — reconciled id
+by id against a live walk. Do that once when adopting a register whose publisher offers
+no manifest, and classify every difference before acting on it: of 432 ids the snapshot
+held and the list did not, 391 were reachable by another route (fix the adapter) and 41
+were genuinely gone (import the archive). Importing all 432 would have filled the corpus
+with cleaned copies of documents whose originals were a group-expansion away.
+
 A `SourceOption` arrives as whatever the form sent, including `None` for anything the
 user never touched. `bool(None)` is `False`, which turns a default-on option off for
 everybody who left it alone; use `core.adapter.option_flag` / `option_int`, which treat
@@ -117,6 +133,25 @@ A bare acronym for an EU instrument needs a determiner or a context word **of it
 language** before it counts (`de_laws._NEEDS_DETERMINER_LEN`, and `_needs_context` in the
 four newer modules). This pass runs over the whole corpus: "DSA" is a duty solicitor
 advice scheme in an English judgment and "DMA" a French marketing syndicate.
+
+## A bulk snapshot is not automatically an upgrade
+
+Before importing an offline dump of a source already harvested live, **compare them
+record by record**. Storing a differing payload under a held `stable_id` archives the old
+version and advances to a new one, so a wholesale import of a cleaned corpus puts worse
+text in front of better and calls it progress. The Swedish snapshot's text was comparable
+or longer in ours across all 400 sampled shared publications and never shorter, because
+the live adapter reads the publisher's own HTML and PDF.
+
+Scope the import to what the live source cannot supply, and make that test cheap: the
+paged list settles 16,800 of 17,228 ids for free, leaving ~430 to probe individually.
+Where the test needs the network, a failure to reach it must **raise**, never fall
+through to importing everything — "the network is down" and "the publisher withdrew it"
+must not produce the same import.
+
+Withdrawn material is the real prize in an archive. Sweden's `PROVNINGSTILLSTAND` notice
+states the question the Supreme Court has agreed to hear and is taken down once the court
+answers it, so it is evidence that stops existing exactly when it becomes citable.
 
 ## Scanned PDFs
 
