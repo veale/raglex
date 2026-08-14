@@ -70,8 +70,9 @@ from ..core.models import (
 from ..formats.se_dom_pdf import parse_se_judgment_pdf
 from .se_domstol import BASE, SITE, _WEIGHT, _clean, _iso, _listify
 
-#: Where the corpus is mounted in the container.
-DEFAULT_PATH = "/data/corpora/se"
+#: Where the corpus is mounted in the container (``/corpora``, not
+#: ``/data/corpora`` — ``/data`` is the app's own store).
+DEFAULT_PATH = "/corpora/se"
 #: The rendition to read, best first. ``structured`` carries the section map as well as
 #: the text; ``pretrain`` carries the text alone and is the fallback.
 _RENDITIONS = ("structured", "pretrain")

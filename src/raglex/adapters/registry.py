@@ -2512,7 +2512,7 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "rather than importing everything — a network failure and a withdrawal must not "
         "produce the same import. `mode=all` is for a cold start with no network and "
         "should not be run against a corpus already harvested live.",
-        (SourceOption("path", "Local corpus directory", "/data/corpora/se"),
+        (SourceOption("path", "Local corpus directory", "/corpora/se"),
          SourceOption("mode", "What to import",
                       "withdrawn (default) — only what the live service no longer "
                       "serves | all"),
