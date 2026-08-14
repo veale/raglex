@@ -121,6 +121,10 @@ def test_sources_summary_is_full_text_only_verbose_and_caps_future_years(tmp_pat
          court="bcca", url="https://www.canlii.org/en/bc/bcca/doc/2024/1.html")
     hold("eu-cellar", "eu/ag/1", DocType.OPINION, "Opinion", date(2032, 1, 1),
          court="Advocate General", url="https://curia.europa.eu/juris/document/document.jsf")
+    hold("fr-dila", "fr/ce/1", DocType.JUDGMENT, "Decision", date(201, 1, 1),
+         court="Conseil d'État", url="https://legifrance.gouv.fr/ceta/id/1")
+    hold("fr-dila", "fr/ce/2", DocType.JUDGMENT, "Décision", date(2025, 1, 1),
+         court="Conseil d’État", url="https://legifrance.gouv.fr/ceta/id/2")
     # Metadata-only India must affect the whole-corpus number but appear nowhere on the
     # sources page, including its source list.
     hold("in-caselaw", "insc/2025/1", DocType.JUDGMENT, "No text", date(2025, 1, 1),
@@ -130,13 +134,18 @@ def test_sources_summary_is_full_text_only_verbose_and_caps_future_years(tmp_pat
 
     facade = Facade(config)
     summary = build_sources_summary(facade, current_year=2026)
-    assert summary["corpus_total"] == 3
-    assert summary["full_text_total"] == 2
-    assert [j["name"] for j in summary["jurisdictions"]] == ["Canada", "European Union"]
-    canada = summary["jurisdictions"][0]["entries"][0]
+    assert summary["corpus_total"] == 5
+    assert summary["full_text_total"] == 4
+    assert [j["name"] for j in summary["jurisdictions"]] == [
+        "France", "Canada", "European Union"]
+    france = summary["jurisdictions"][0]["entries"][0]
+    assert france["label"] == "Conseil d’État"
+    assert france["count"] == 2
+    assert france["year_from"] == france["year_to"] == 2025
+    canada = summary["jurisdictions"][1]["entries"][0]
     assert canada["label"] == "British Columbia Court of Appeal"
     assert canada["domains"] == ["canlii.org"]
-    ag = summary["jurisdictions"][1]["entries"][0]
+    ag = summary["jurisdictions"][2]["entries"][0]
     assert ag["section"] == "Opinions of the Advocates General"
     assert ag["year_to"] == 2026
 

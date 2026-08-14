@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from html import escape
@@ -552,6 +553,13 @@ _FRENCH_ADMIN_RE = re.compile(
 )
 
 
+def _name_key(value: str) -> str:
+    """Accent-, punctuation- and typography-insensitive key for display-name merging."""
+    decomposed = unicodedata.normalize("NFKD", value.replace("’", "'").casefold())
+    return " ".join("".join(
+        char for char in decomposed if not unicodedata.combining(char)).split())
+
+
 def _verbose_body_name(facade: Facade, court: str | None, source: str) -> str:
     """A publication-grade court/body name, never a storage slug.
 
@@ -569,7 +577,7 @@ def _verbose_body_name(facade: Facade, court: str | None, source: str) -> str:
     if match:
         place = match.group(1).strip().lower().title()
         return f"Cour administrative d’appel de {place}"
-    if raw.casefold() in {"conseil d'etat", "conseil d’état"}:
+    if _name_key(raw) == "conseil d'etat":
         return "Conseil d’État"
     label = str(facade.court_label(raw, source) or "").strip()
     # A registry miss prettifies "nswcatod" as "Nswcatod". That is still a slug, and
@@ -673,7 +681,7 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
 
         # Label is part of the key: equivalent DILA spellings merge after normalisation,
         # while genuinely distinct courts remain separate entries.
-        key = (section, label.casefold())
+        key = (section, _name_key(label))
         item = country["groups"].setdefault(key, {
             "section": section, "label": label, "count": 0,
             "years": set(), "sources": set(), "domains": set(), "manual": False,
@@ -684,7 +692,12 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
         item["manual"] = item["manual"] or _manual_source(source)
         year = str(row["yr"] or "")
         if year.isdigit():
-            item["years"].add(min(int(year), current_year))
+            parsed_year = int(year)
+            # Ancient legislation is real; a modern court recorded in year 201 is not.
+            # DILA contains a handful of truncated 201x dates, which must not make a
+            # court's published coverage claim read "201–2022".
+            if kind == "legislation" or parsed_year >= 1000:
+                item["years"].add(min(parsed_year, current_year))
 
     section_order = {
         "Legislation": 0, "Case law": 1, "Opinions of the Advocates General": 2,
