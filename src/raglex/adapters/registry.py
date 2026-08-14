@@ -99,8 +99,15 @@ from .ie_oireachtas import OireachtasLaidAdapter
 from .ie_oireachtas_committees import OireachtasCommitteeEvidenceAdapter
 from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
-from .nl_acm_guidance import ACMGuidanceAdapter
+from .nl_rdi import RDIDocumentsAdapter
+from .nl_acm_guidance import ACMGuidanceAdapter, ACMLegalPublicationsAdapter
 from .be_gba_decisions import GBADecisionsAdapter
+from .be_regulatory import (
+    BIPTDecisionsAdapter,
+    BIPTJudgmentsAdapter,
+    BIPTOpinionsAdapter,
+    GBAMarketCourtAdapter,
+)
 from .be_caselaw import BelgianConstitutionalCourtAdapter, BelgianCouncilOfStateAdapter
 from .uk_parl_committees import UKCommitteePublicationsAdapter
 from .uk_parl_written_questions import UKWrittenQuestionsAdapter
@@ -233,6 +240,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # Netherlands — Rechtspraak Open Data, ECLI-native, citation graph included.
     "nl-rechtspraak": NLRechtspraakAdapter,
     "nl-acm-guidance": ACMGuidanceAdapter,
+    "nl-acm-publications": ACMLegalPublicationsAdapter,
     "it-agcm": AGCMBulletinAdapter,
     # EU — CELLAR SPARQL + Formex; CJEU case law relative to a named instrument/case.
     "eu-cellar": EUCellarAdapter,
@@ -384,6 +392,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "ie-dpc": IrishDPCAdapter,
     "ie-dpc-guidance": IrishDPCGuidanceAdapter,
     "nl-ap": APDocumentsAdapter,
+    "nl-rdi": RDIDocumentsAdapter,
     "eu-berec": BERECAdapter,
     # EUIPO Observatory publications — the site's own public Algolia index faceted
     # to observatory-publications, then the study PDFs linked one level down.
@@ -398,6 +407,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "be-gba": GBAGuidanceAdapter,
     # the Dispute Chamber's own rulings — enforcement, not guidance
     "be-gba-decisions": GBADecisionsAdapter,
+    "be-market-court-gba": GBAMarketCourtAdapter,
+    "be-bipt-judgments": BIPTJudgmentsAdapter,
+    "be-bipt-decisions": BIPTDecisionsAdapter,
+    "be-bipt-opinions": BIPTOpinionsAdapter,
     "be-rvsce": BelgianCouncilOfStateAdapter,
     "be-const-court": BelgianConstitutionalCourtAdapter,
     # UK Parliament — committee output and the written Q&A record
@@ -781,6 +794,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "and official PDF attachments are combined; the small catalogue is fully "
         "rechecked so revisions retaining their original publication date are caught.",
     ),
+    "nl-acm-publications": SourceInfo(
+        "nl-acm-publications", "ACM decisions, opinions and court publications",
+        "administrative", "NL", False,
+        "The complete ACM legal-publications register: besluiten, decisions on objection, "
+        "views/opinions and court-ruling publications. A resumable 666-page Drupal AJAX "
+        "walk supplies the backfill; ACM's official four-type RSS selection supplies the "
+        "lightweight watch. Each attached PDF is retained separately. Court announcements "
+        "without a republished PDF preserve the ACM narrative and Rechtspraak ECLI link, "
+        "without overwriting the authoritative nl-rechtspraak judgment.",
+        (SourceOption("watch_mode", "Use the official recent-publications RSS", "false"),),
+        ("ACM publication URL", "ECLI on an ACM court publication"),
+    ),
     "nl-ap": SourceInfo(
         "nl-ap", "Dutch DPA (Autoriteit Persoonsgegevens) documents",
         "guidance", "NL", False,
@@ -852,6 +877,40 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "than one way for the same ruling.",
         (), ("decision number", "102/2026"),
     ),
+    "be-market-court-gba": SourceInfo(
+        "be-market-court-gba", "Belgian Market Court judgments (GBA/APD)",
+        "caselaw", "BE", False,
+        "Market Court judgments published by the Belgian Data Protection Authority. "
+        "The complete two-page register is deduplicated by docket and judgment date, "
+        "so interim and final judgments in the same case remain distinct. Every PDF is "
+        "re-OCR'd at 300 dpi with Dutch and French models: many scans have a misleading "
+        "small text layer on page one but image-only reasons on the remaining pages.",
+        (), ("ECLI:BE:…", "Market Court docket (2025/AR/1736)"),
+    ),
+    "be-bipt-judgments": SourceInfo(
+        "be-bipt-judgments", "Belgian court judgments published by BIPT",
+        "caselaw", "BE", False,
+        "Judgments in BIPT's disputes register, following each result to its publication "
+        "page and original French or Dutch PDF. Court typology distinguishes the Market "
+        "Court/Brussels Court of Appeal, Court of Cassation, Council of State, Brussels "
+        "Court of First Instance and CJEU. Court scans are forcibly re-OCR'd at 300 dpi.",
+        (), ("ECLI:BE:…", "Belgian court docket"),
+    ),
+    "be-bipt-decisions": SourceInfo(
+        "be-bipt-decisions", "BIPT administrative decisions", "administrative", "BE", False,
+        "French and Dutch PDFs from BIPT's decisions register plus decision-titled items "
+        "inside its dossier register. Dossier containers are followed one level to the "
+        "actual publication and deduplicated against the main decisions register. Native "
+        "PDF text is retained, with ordinary OCR fallback only for genuinely scanned files.",
+        (), ("bipt.be decision publication URL",),
+    ),
+    "be-bipt-opinions": SourceInfo(
+        "be-bipt-opinions", "BIPT opinions", "guidance", "BE", False,
+        "French and Dutch PDFs from BIPT's complete opinions register. Separate language "
+        "expressions retain their official wording and are tied by a translation-group "
+        "identifier; born-digital text is preferred with ordinary scan fallback.",
+        (), ("bipt.be opinion publication URL",),
+    ),
     "be-rvsce": SourceInfo(
         "be-rvsce", "Belgian Council of State case law", "caselaw", "BE", False,
         "Official Conseil d'État / Raad van State judgments. Historical runs enumerate "
@@ -876,6 +935,17 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("end_year", "Last judgment year", "current year"),
          SourceOption("watch_mode", "Check only this and last year", "false")),
         ("ECLI:BE:GHCC:…", "Constitutional Court judgment number (1/2026)"),
+    ),
+    "nl-rdi": SourceInfo(
+        "nl-rdi", "RDI documents (Netherlands)", "guidance", "NL", False,
+        "PDF-bearing publications of the Rijksinspectie Digitale Infrastructuur. The "
+        "public RSS feed is limited to 20 recent items and cannot paginate, so the "
+        "bounded JSON register drives a resumable 37-page backfill and newest-first "
+        "watch. Landing pages are followed to every PDF; multi-decision register pages "
+        "produce stable child records rather than one changing aggregate document. "
+        "Besluiten and beschikkingen are typed as administrative decisions, adviezen as "
+        "opinions, regelingen as legislation, and remaining reports/material as guidance.",
+        (), ("RDI document id", "rdi.nl document URL"),
     ),
     "uk-parl-committees": SourceInfo(
         "uk-parl-committees", "UK parliamentary committee publications",
@@ -2966,7 +3036,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     # full-walk-then-filter (correct but re-reads the whole source each run)
     "edpb": "full-walk", "edpb-oss": "full-walk", "de-rii": "full-walk",
     "eu-consumer-guidance": "full-walk", "nl-acm-guidance": "full-walk",
+    "nl-acm-publications": "early-stop",
     "nl-ap": "early-stop",
+    "nl-rdi": "early-stop",
     "eu-berec": "early-stop", "dma-consultations": "early-stop",
     # Nine pages of JSON, not ordered by date, and a study's page is re-published
     # when a language version or a country note is added. Walk it all.
@@ -2978,6 +3050,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     # newest-first search view with its own result total, so an incremental
     # run stops at the cursor within a page or two
     "be-gba-decisions": "early-stop",
+    "be-market-court-gba": "early-stop",
+    "be-bipt-judgments": "early-stop", "be-bipt-decisions": "early-stop",
+    "be-bipt-opinions": "early-stop",
     # The Council of State watch uses the official rolling month pages; the
     # Constitutional Court filters its authoritative manifest by year.
     "be-rvsce": "server", "be-const-court": "server",

@@ -87,6 +87,27 @@ def test_fallback_to_stable_id():
     assert out["text"] == "misc/thing"
 
 
+def test_belgian_market_court_citation_degrades_with_available_metadata():
+    full = cite(
+        {"stable_id": "be/market/1", "source": "be-market-court-gba",
+         "doc_type": "judgment", "court": "be-market-court",
+         "decision_date": "2025-03-19", "ecli": "ECLI:BE:CABRL:2025:1"},
+        {"citation_number": "2024/AR/1690"},
+    )["text"]
+    assert full == ("Cour des marchés / Marktenhof, rôle 2024/AR/1690 "
+                    "(19 March 2025) ECLI:BE:CABRL:2025:1")
+    number_only = cite(
+        {"stable_id": "be/market/2", "source": "be-bipt-judgments",
+         "doc_type": "judgment", "court": "be-market-court"},
+        {"citation_number": "2025/AR/1736"},
+    )["text"]
+    assert number_only == "Cour des marchés / Marktenhof, rôle 2025/AR/1736"
+    assert cite(
+        {"stable_id": "be/market/3", "source": "be-market-court-gba",
+         "doc_type": "judgment", "court": "be-market-court", "title": "Arrest Marktenhof"}
+    )["text"] == "Arrest Marktenhof"
+
+
 # -- neutral-citation jurisdictions beyond the UK ----------------------------
 
 def test_canadian_neutral_citations_are_not_bracketed():

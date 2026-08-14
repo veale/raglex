@@ -328,6 +328,10 @@ def _echr_case(doc: Mapping, meta: Mapping) -> dict | None:
 _BELGIAN_COURTS = {
     "be-rvsce": ("Conseil d’État", "arrêt no"),
     "be-const-court": ("Cour constitutionnelle", "arrêt no"),
+    "be-market-court": ("Cour des marchés / Marktenhof", "rôle"),
+    "be-brussels-court-of-appeal": ("Cour d’appel de Bruxelles", "rôle"),
+    "be-brussels-first-instance": ("Tribunal de première instance de Bruxelles", "rôle"),
+    "be-cassation": ("Cour de cassation", "rôle"),
 }
 
 
@@ -376,7 +380,8 @@ def cite(doc: Mapping, meta: Mapping | None = None) -> dict:
         out = _uk_case(doc)
     elif source == "echr":
         out = _echr_case(doc, meta)
-    elif source in ("be-rvsce", "be-const-court"):
+    elif source in ("be-rvsce", "be-const-court", "be-market-court-gba",
+                    "be-bipt-judgments"):
         out = _belgian_case(doc, meta)
     elif doc_type in ("judgment", "opinion", "decision", "case"):
         # Every other case-law corpus (Canadian A2AJ, Australian, NZ, Indian, the

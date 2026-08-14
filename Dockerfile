@@ -13,10 +13,10 @@ RUN npm run build           # → /ui/dist
 FROM python:3.12-slim
 WORKDIR /app
 
-# tesseract: OCR fallback for scanned PDFs (the EDPB one-stop-shop register holds
-# decision scans with no text layer). eng only — the register PDFs are English.
+# tesseract: OCR fallback for scanned PDFs. Belgian court scans need Dutch + French;
+# some carry only a tiny born-digital cover layer, so those adapters force a full pass.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr tesseract-ocr-eng \
+    tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-nld \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
