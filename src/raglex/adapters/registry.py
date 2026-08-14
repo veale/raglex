@@ -902,7 +902,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "inside its dossier register. Dossier containers are followed one level to the "
         "actual publication and deduplicated against the main decisions register. Native "
         "PDF text is retained, with ordinary OCR fallback only for genuinely scanned files.",
-        (), ("bipt.be decision publication URL",),
+        (SourceOption("watch_mode", "Read newest page of both decision feeds", "false"),),
+        ("bipt.be decision publication URL",),
     ),
     "be-bipt-opinions": SourceInfo(
         "be-bipt-opinions", "BIPT opinions", "guidance", "BE", False,

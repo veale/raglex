@@ -115,3 +115,4 @@ def test_judgments_force_bilingual_ocr_but_decisions_do_not(monkeypatch):
 def test_every_resumable_constructor_accepts_a_cursor():
     assert GBAMarketCourtAdapter(client=_Client(), start_offset="50").start_offset == 0
     assert BIPTJudgmentsAdapter(client=_Client(), start_offset="30").start_offset == 20
+    assert BIPTDecisionsAdapter(client=_Client(), watch_mode="true").watch_mode is True

@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
-from ..core.adapter import BaseAdapter, option_int, resume_floor
+from ..core.adapter import BaseAdapter, option_flag, option_int, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
@@ -284,12 +284,13 @@ class BIPTPublicationsAdapter(BaseAdapter):
     min_interval = 1.0
 
     def __init__(self, *, kind: str, source: str, client: RateLimitedClient | None = None,
-                 start_offset: int | str | None = None):
+                 start_offset: int | str | None = None, watch_mode=None):
         if kind not in ("judgments", "decisions", "opinions"):
             raise ValueError("kind must be judgments, decisions, or opinions")
         self.kind, self.source = kind, source
         self._client = client or RateLimitedClient(source, min_interval=self.min_interval, timeout=180)
         self.start_offset = resume_floor(option_int(start_offset, 0), PAGE_SIZE_BIPT)
+        self.watch_mode = option_flag(watch_mode, False)
 
     def _queries(self):
         if self.kind == "judgments":
@@ -317,6 +318,7 @@ class BIPTPublicationsAdapter(BaseAdapter):
         emitted_pages = 0
         seen_publications: set[str] = set()
         for facet, decisions_only in self._queries():
+            facet_pages = 0
             first = self._search(facet, 0)
             total = bipt_total(first)
             if total is None:
@@ -326,7 +328,14 @@ class BIPTPublicationsAdapter(BaseAdapter):
                 if global_page < self.start_offset // PAGE_SIZE_BIPT:
                     global_page += 1
                     continue
-                if max_pages is not None and emitted_pages >= max_pages:
+                # A decisions watch must read BOTH newest pages: the ordinary register
+                # and decision-titled dossier containers. Applying one global page cap
+                # returned after the first register and made every dossier-only decision
+                # permanently invisible. Backfills still use one global cursor/cap.
+                cap_count = facet_pages if self.watch_mode else emitted_pages
+                if max_pages is not None and cap_count >= max_pages:
+                    if self.watch_mode:
+                        break
                     return
                 html = first if page == 0 else self._search(facet, page)
                 links = bipt_listing_links(html, decisions_only=decisions_only)
@@ -356,6 +365,7 @@ class BIPTPublicationsAdapter(BaseAdapter):
                             )
                 global_page += 1
                 emitted_pages += 1
+                facet_pages += 1
 
     def fetch(self, stub: Stub) -> Record | None:
         blob = self._client.get(stub.raw_url).content
