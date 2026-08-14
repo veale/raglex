@@ -34,6 +34,19 @@ log = logging.getLogger("raglex.scraping.fetcher")
 _BLOCK_STATUSES = frozenset({403, 429, 503})
 
 
+def _is_browser_challenge(html: str) -> bool:
+    """A Cloudflare browser-check page, not merely a site that loads CF analytics.
+
+    ``domcontentloaded`` fires before the challenge is solved. Capturing at that event
+    made a healthy Camoufox session return the interstitial about eight seconds before
+    Cloudflare replaced it with the real PACE page.
+    """
+    folded = (html or "")[:30000].casefold()
+    return ("<title>just a moment" in folded
+            or "challenges.cloudflare.com" in folded
+            or "cf-chl-" in folded)
+
+
 @dataclass(slots=True)
 class FetchedPage:
     url: str
@@ -262,6 +275,8 @@ class BrowserBytesFetcher:
         return self._run("fetch_html", url, lambda: self._fetch_html(url))
 
     def _fetch_html(self, url: str) -> str | None:
+        import time
+
         try:
             browser = self._ensure()
             page = browser.new_page()
@@ -273,7 +288,14 @@ class BrowserBytesFetcher:
             return None
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-            return page.content()
+            deadline = time.monotonic() + self.timeout_ms / 1000
+            while True:
+                html = page.content()
+                if not _is_browser_challenge(html) or time.monotonic() >= deadline:
+                    return html
+                # A normal CF managed challenge takes roughly 5–10 seconds. This loop is
+                # bounded by the existing per-page timeout and the outer hard deadline.
+                page.wait_for_timeout(1000)
         except Exception:  # noqa: BLE001
             log.warning("browser-bytes: html navigation failed for %s", url)
             return None

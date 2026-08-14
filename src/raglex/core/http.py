@@ -68,6 +68,7 @@ class RateLimitedClient:
         user_agent: str = DEFAULT_USER_AGENT,
         timeout: float = 30.0,
         proxy: str | None = None,
+        verify=True,
         client: httpx.Client | None = None,
         sleep=time.sleep,
     ) -> None:
@@ -88,6 +89,7 @@ class RateLimitedClient:
             timeout=timeout,
             follow_redirects=True,
             proxy=proxy if proxy is not None else get_proxy(),
+            verify=verify,
         )
 
     def __enter__(self) -> "RateLimitedClient":

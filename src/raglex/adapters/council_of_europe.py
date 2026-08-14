@@ -19,6 +19,7 @@ browser tier. A 200 Cloudflare interstitial is never accepted as an empty regist
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 from datetime import date
@@ -512,6 +513,66 @@ def parse_treaty_detail(html: str | bytes, number: str) -> dict:
             "summary": fields.get("summary"), "pdf_url": english}
 
 
+def treaty_api_config(html: str | bytes) -> tuple[str, str]:
+    """Public JSON endpoint and token embedded in the Treaty Office React shell."""
+    text = html.decode("utf-8", "ignore") if isinstance(html, bytes) else html
+    url = re.search(r'window\.conventions_api_url\s*=\s*["\']([^"\']+)', text or "")
+    key = re.search(r'window\.conventions_api_key\s*=\s*["\']([^"\']+)', text or "")
+    if not url or not key:
+        raise ValueError("Treaty Office shell has no API configuration")
+    return url.group(1).rstrip("/") + "/", key.group(1)
+
+
+def _api_date(value) -> date | None:
+    match = re.match(r"((?:19|20)\d{2})-(\d{2})-(\d{2})", str(value or ""))
+    if not match:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def parse_treaty_api_rows(payload) -> list[dict]:
+    """Normalise the Treaty Office API's bilingual full-list objects."""
+    if not isinstance(payload, list):
+        raise ValueError("Treaty Office API response was not a list")
+    out: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        number = str(item.get("Numero_traite") or "").strip().upper().zfill(3)
+        title = str(item.get("Libelle_titre_ENG") or item.get("Libelle_titre") or "").strip()
+        pdf_url = str(item.get("Lien_pdf_traite_ENG") or "").strip()
+        if not number or not title or not pdf_url:
+            continue
+        mention = str(item.get("Mention") or ("ETS" if int(number[:3]) <= 194 else "CETS"))
+        reference = f"{mention} No. {number}"
+        clean_title = re.sub(
+            r"\s*\((?:C?ETS)(?:\s+No\.?)?\s*\d+[A-Z]?\)\s*$", "", title,
+            flags=re.I).strip()
+        opened = _api_date(item.get("Date_ste"))
+        place = item.get("Code_lieu_ste")
+        if isinstance(place, dict):
+            place = place.get("Value")
+        opening = " ".join(x for x in (str(place or "").strip(),
+                                        opened.isoformat() if opened else "") if x)
+        in_force = _api_date(item.get("Date_vigueur_ste"))
+        detail = {
+            "title": title, "reference": reference,
+            "short_title": str(item.get("Nom_commun_ENG") or item.get("Nom_commun") or "").strip() or None,
+            "opening": opening or None, "opened": opened,
+            "entry_into_force": in_force.isoformat() if in_force else None,
+            "summary": None, "summary_url": item.get("Lien_html_resume_ENG"),
+            "pdf_url": pdf_url,
+        }
+        out.append({
+            "number": number, "title": clean_title or title,
+            "url": treaty_url(number), "opened": opened, "detail": detail,
+        })
+    return out
+
+
 def treaty_aliases(number: str, detail: dict) -> list[str]:
     """Publisher identifiers and useful official-name variants for one treaty."""
     candidates = [detail.get("reference"), f"CETS {number}", f"CETS No. {number}",
@@ -568,17 +629,32 @@ class CouncilOfEuropeTreatiesAdapter(BaseAdapter):
     requires_js = True
 
     def __init__(self, *, numbers: str | None = None, fetcher=None, bytes_fetcher=None,
-                 client: RateLimitedClient | None = None,
+                 client: RateLimitedClient | None = None, api_client=None,
                  start_offset: int | str | None = None) -> None:
         self.numbers = tuple(x.strip().upper().zfill(3)
                              for x in str(numbers or "").split(",") if x.strip())
         self._fetcher = fetcher
         self._bytes_fetcher = bytes_fetcher
+        self._api_client = api_client
         # The rendered full list is one response, not a pageable cursor. Accept the
         # shared resume keyword because another adapter in this module reports one.
         self.start_offset = option_int(start_offset, 0)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=180)
+
+    def _treaty_api_client(self):
+        if self._api_client is None:
+            import ssl
+
+            context = ssl.create_default_context()
+            # conventions-ws.coe.int currently serves a legacy DH key rejected at
+            # OpenSSL's default security level. Confine the compatibility setting to
+            # this public, read-only API; document/PDF clients keep normal TLS policy.
+            context.set_ciphers("DEFAULT@SECLEVEL=1")
+            self._api_client = RateLimitedClient(
+                f"{self.source}-api", min_interval=self.min_interval,
+                timeout=180, verify=context)
+        return self._api_client
 
     def _html(self, url: str) -> str:
         if self._fetcher is not None:
@@ -590,20 +666,50 @@ class CouncilOfEuropeTreatiesAdapter(BaseAdapter):
             if not browser.available():
                 raise FetchError(f"{self.source}: browser tier is not installed", transient=True)
             html = browser.fetch_html(url) or ""
-        if "just a moment" in html[:6000].casefold() or "enable javascript" in html.casefold():
+        if "just a moment" in html[:6000].casefold():
             raise FetchError(f"{self.source}: Treaty Office was blocked or did not render",
                              transient=True)
         return html
 
-    def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+    def _api_rows(self) -> list[dict]:
+        """Read the public API used by the official React register.
+
+        The HTML is now deliberately only a shell containing a ``noscript`` warning;
+        waiting for table rows can never succeed. Its runtime API URL and public token
+        are read afresh so a publisher-side rotation does not silently freeze the feed.
+        """
+        try:
+            api_url, api_key = treaty_api_config(self._html(TREATIES))
+        except ValueError as exc:
+            raise FetchError(f"{self.source}: Treaty Office API configuration missing",
+                             transient=True) from exc
+        headers = {"Accept": "application/json", "Content-Type": "application/json",
+                   "token": api_key}
         if self.numbers:
-            rows = [{"number": n, "title": f"Council of Europe Treaty {n}",
-                     "url": treaty_url(n), "opened": None} for n in self.numbers]
+            params = [("numero", number) for number in self.numbers]
+            params.append(("langue", "ENG"))
+            response = self._treaty_api_client().get(
+                urljoin(api_url, "api/traites/GetByNumeros"),
+                params=params, headers=headers)
         else:
-            rows = parse_treaty_list(self._html(TREATIES))
+            response = self._treaty_api_client().request(
+                "POST", urljoin(api_url, "api/traites/search"), headers=headers,
+                json={"CodePays": None, "NumsSte": [], "AnneeOuverture": None,
+                      "AnneeVigueur": None, "CodeLieuSTE": None,
+                      "CodeMatieres": [], "TitleKeywords": [], "langue": "ENG"})
+        try:
+            payload = response.json()
+            rows = parse_treaty_api_rows(payload)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise FetchError(f"{self.source}: Treaty Office API returned unreadable data",
+                             transient=True) from exc
         if not rows:
-            raise FetchError(f"{self.source}: rendered register contained no treaties",
+            raise FetchError(f"{self.source}: Treaty Office API returned no treaties",
                              transient=True)
+        return rows
+
+    def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        rows = self._api_rows()
         for row in rows:
             stable_id = "echr/convention" if row["number"] == "005" else f"coe/treaty/{row['number']}"
             yield Stub(stable_id=stable_id, landing_url=row["url"], raw_url=row["url"],
@@ -625,7 +731,10 @@ class CouncilOfEuropeTreatiesAdapter(BaseAdapter):
 
     def fetch(self, stub: Stub) -> Record | None:
         number = stub.hints.get("number") or stub.stable_id.rsplit("/", 1)[-1]
-        detail = parse_treaty_detail(self._html(stub.landing_url), number)
+        detail = stub.hints.get("detail")
+        if not isinstance(detail, dict):
+            raise FetchError(f"{self.source}: treaty {number} has no API metadata",
+                             transient=True)
         pdf = self._pdf(detail["pdf_url"], stub.landing_url)
         text, needs_ocr, spans, engine = text_or_ocr(pdf, max_pages=220)
         structured = treaty_segments(text)
@@ -654,10 +763,10 @@ class CouncilOfEuropeTreatiesAdapter(BaseAdapter):
 
 
 _PACE_REFERENCE = re.compile(
-    r"\b(?:AS\s*/\s*(?:Jur|Pol|Rul|Pro|Mon|Ega|Cult|Mig)|PPSD)"
-    r"\s*\((?:19|20)\d{2}\)\s*[\w.-]+"
-    r"(?:\s+(?:rev(?:ised)?\.?|add(?:endum)?\.?)\s*\d*)*",
-    re.I,
+    r"^\s*(?:AS\s*/\s*(?:Jur|Pol|Rul|Pro|Mon|Ega|Cult|Mig)"
+    r"(?:\s*/\s*[A-Za-z][\w.-]*)*|PPSD)"
+    r"\s*\((?:19|20)\d{2}\)\s*[A-Za-z0-9][\w./ -]*\s*$",
+    re.I | re.M,
 )
 _HUDOC_ITEMID = re.compile(
     r'''["']?itemid["']?\s*:\s*\[\s*["'](001-\d+)["']''', re.I
@@ -692,7 +801,12 @@ def parse_pace_committee_documents(html: str | bytes, committee: str) -> list[di
     out, seen = [], set()
     for anchor in soup.select("a[href]"):
         label = _clean(anchor)
-        reference_match = _PACE_REFERENCE.search(label)
+        # Several legacy links put "reference / document kind" in one anchor. The
+        # slash is presentation, not part of the identifier; retaining it made titles
+        # such as "Information note" part of the stable id and changed that id when the
+        # publisher edited a caption.
+        reference_label = re.split(r"\s+(?:/|[-–—])\s+", label, maxsplit=1)[0]
+        reference_match = _PACE_REFERENCE.fullmatch(reference_label)
         if not reference_match:
             continue
         published, date_text = _nearby_date(anchor)
@@ -827,7 +941,7 @@ class PACECommitteeDocumentsAdapter(BaseAdapter):
                 raise FetchError(f"{self.source}: browser tier is not installed", transient=True)
             html = browser.fetch_html(url) or ""
         folded = html[:8000].casefold()
-        if "just a moment" in folded or "cloudflare" in folded or not _PACE_REFERENCE.search(html):
+        if "just a moment" in folded or "challenges.cloudflare.com" in folded or not html.strip():
             raise FetchError(f"{self.source}: PACE committee page was blocked or empty",
                              transient=True)
         return html

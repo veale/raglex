@@ -15,7 +15,9 @@ from raglex.adapters.council_of_europe import (
     parse_pace_committee_documents,
     pdf_hudoc_links,
     parse_treaty_detail,
+    parse_treaty_api_rows,
     parse_treaty_list,
+    treaty_api_config,
     treaty_aliases,
     treaty_segments,
 )
@@ -168,6 +170,28 @@ def test_treaty_list_and_detail_choose_the_english_official_text():
     assert parsed["reference"] == "CETS No. 229"
 
 
+def test_treaty_react_shell_exposes_api_and_api_rows_are_complete_metadata():
+    shell = """<script>
+      window.conventions_api_url="https://conventions.example/WS/";
+      window.conventions_api_key="public-token";
+    </script><noscript>You need to enable JavaScript to run this app.</noscript>"""
+    assert treaty_api_config(shell) == (
+        "https://conventions.example/WS/", "public-token")
+    rows = parse_treaty_api_rows([{
+        "Numero_traite": "229", "Mention": "CETS",
+        "Libelle_titre_ENG": "Claims Convention (CETS No. 229)",
+        "Nom_commun_ENG": "Claims Convention", "Date_ste": "2025-12-16T00:00:00",
+        "Date_vigueur_ste": None, "Code_lieu_ste": 11,
+        "Lien_pdf_traite_ENG": "https://rm.coe.int/english/229",
+        "Lien_html_resume_ENG": "/Treaty/en/Summaries/Html/229.htm",
+    }])
+    assert rows[0]["number"] == "229"
+    assert rows[0]["title"] == "Claims Convention"
+    assert rows[0]["detail"]["reference"] == "CETS No. 229"
+    assert rows[0]["detail"]["short_title"] == "Claims Convention"
+    assert rows[0]["detail"]["pdf_url"] == "https://rm.coe.int/english/229"
+
+
 def test_old_and_new_treaty_layouts_become_articles_and_paragraphs():
     text = """PREAMBLE
 Article 1 – Purpose
@@ -211,6 +235,12 @@ PACE_HTML = """
 </div></main>
 """
 
+PACE_VARIANTS_HTML = """
+<span>30/04/2026</span><a href="https://rm.coe.int/a">AS/JUR/Inf (2026) 01 rev.3</a>
+<span>07/12/2021</span><a href="https://rm.coe.int/b">AS/Jur (2021) PV 10 / Minutes</a>
+<span>21/06/2023</span><a href="https://rm.coe.int/c">AS/Jur (2023) 19 Appendix 3</a>
+"""
+
 
 def test_pace_committee_archive_uses_reference_as_identity():
     rows = parse_pace_committee_documents(PACE_HTML, "asjur")
@@ -221,6 +251,15 @@ def test_pace_committee_archive_uses_reference_as_identity():
         "published": __import__("datetime").date(2026, 2, 4),
         "committee": "asjur",
     }]
+
+
+def test_pace_reference_keeps_inf_minutes_appendices_and_revisions_distinct():
+    rows = parse_pace_committee_documents(PACE_VARIANTS_HTML, "asjur")
+    assert [row["reference"] for row in rows] == [
+        "AS/JUR/Inf (2026) 01 rev.3",
+        "AS/Jur (2021) PV 10",
+        "AS/Jur (2023) 19 Appendix 3",
+    ]
 
 
 class _PaceFetcher:

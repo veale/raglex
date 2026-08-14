@@ -323,6 +323,41 @@ def _echr_case(doc: Mapping, meta: Mapping) -> dict | None:
     return _pack(parts)
 
 
+# ── Belgium (Council of State / Constitutional Court) ───────────────────────
+
+_BELGIAN_COURTS = {
+    "be-rvsce": ("Conseil d’État", "arrêt no"),
+    "be-const-court": ("Cour constitutionnelle", "arrêt no"),
+}
+
+
+def _belgian_case(doc: Mapping, meta: Mapping) -> dict | None:
+    """The official Belgian form, with a deliberate metadata fallback ladder.
+
+    New judgments have an ECLI, old ones commonly do not.  The court's own judgment
+    number therefore remains visible even when an ECLI exists, and each optional part
+    is independently omitted: court + number + date + ECLI; court + number + date;
+    court + number; court + ECLI.  Only a record missing both identifiers falls through
+    to the generic title/stable-id formatter.
+    """
+    court = str(_get(doc, "court") or "")
+    court_label, number_label = _BELGIAN_COURTS.get(court, ("", ""))
+    number = str(meta.get("citation_number") or meta.get("judgment_number")
+                 or meta.get("decision_number") or "").strip()
+    ecli = str(_get(doc, "ecli") or "").strip()
+    decided = _fmt_date(_get(doc, "decision_date"))
+    if not court_label or not (number or ecli):
+        return None
+    parts = [_run(court_label)]
+    if number:
+        parts.append(_run(f", {number_label} {number}"))
+    if decided:
+        parts.append(_run(f" ({decided})"))
+    if ecli:
+        parts.append(_run(f" {ecli}"))
+    return _pack(parts)
+
+
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 def cite(doc: Mapping, meta: Mapping | None = None) -> dict:
@@ -341,6 +376,8 @@ def cite(doc: Mapping, meta: Mapping | None = None) -> dict:
         out = _uk_case(doc)
     elif source == "echr":
         out = _echr_case(doc, meta)
+    elif source in ("be-rvsce", "be-const-court"):
+        out = _belgian_case(doc, meta)
     elif doc_type in ("judgment", "opinion", "decision", "case"):
         # Every other case-law corpus (Canadian A2AJ, Australian, NZ, Indian, the
         # BAILII long tail) keys documents by neutral citation, so they can all be

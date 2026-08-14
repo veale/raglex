@@ -101,6 +101,7 @@ from .nl_legislation import NLLegislationAdapter
 from .nl_rechtspraak import NLRechtspraakAdapter
 from .nl_acm_guidance import ACMGuidanceAdapter
 from .be_gba_decisions import GBADecisionsAdapter
+from .be_caselaw import BelgianConstitutionalCourtAdapter, BelgianCouncilOfStateAdapter
 from .uk_parl_committees import UKCommitteePublicationsAdapter
 from .uk_parl_written_questions import UKWrittenQuestionsAdapter
 from .nl_ap import APDocumentsAdapter
@@ -397,6 +398,8 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "be-gba": GBAGuidanceAdapter,
     # the Dispute Chamber's own rulings — enforcement, not guidance
     "be-gba-decisions": GBADecisionsAdapter,
+    "be-rvsce": BelgianCouncilOfStateAdapter,
+    "be-const-court": BelgianConstitutionalCourtAdapter,
     # UK Parliament — committee output and the written Q&A record
     "uk-parl-committees": UKCommitteePublicationsAdapter,
     "uk-parl-written-questions": UKWrittenQuestionsAdapter,
@@ -848,6 +851,29 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "cite it (102/2026), not on the PDF filename, which the register has spelt more "
         "than one way for the same ruling.",
         (), ("decision number", "102/2026"),
+    ),
+    "be-rvsce": SourceInfo(
+        "be-rvsce", "Belgian Council of State case law", "caselaw", "BE", False,
+        "Official Conseil d'État / Raad van State judgments. Historical runs enumerate "
+        "the numbered PDF archive from 10,000 and tolerate the archive's HTTP-200 HTML "
+        "holes; keep-current runs walk the rolling monthly decisions register, where "
+        "rows repeated under subject headings are deduplicated by decision number. "
+        "French and Dutch judgments are detected from their text and newer ECLIs are "
+        "used as canonical identities without losing the court's printed number.",
+        (SourceOption("first_number", "First archive decision number", "10000"),
+         SourceOption("end_number", "Last archive decision number",
+                      "optional; otherwise inferred from the recent register")),
+        ("ECLI:BE:RVSCE:…", "Conseil d'État / Raad van State decision number"),
+    ),
+    "be-const-court": SourceInfo(
+        "be-const-court", "Belgian Constitutional Court judgments", "caselaw", "BE", False,
+        "French official judgment PDFs discovered from the Court's authoritative yearly "
+        "metadata pages, not from guessed PDF ranges. The manifest supplies the judgment "
+        "number, date, procedure, docket and subject; newer ECLIs are read from the PDF "
+        "and older judgments remain citable by number and year.",
+        (SourceOption("start_year", "First judgment year", "2000"),
+         SourceOption("end_year", "Last judgment year", "current year")),
+        ("ECLI:BE:GHCC:…", "Constitutional Court judgment number (1/2026)"),
     ),
     "uk-parl-committees": SourceInfo(
         "uk-parl-committees", "UK parliamentary committee publications",
@@ -2950,6 +2976,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     # newest-first search view with its own result total, so an incremental
     # run stops at the cursor within a page or two
     "be-gba-decisions": "early-stop",
+    # The Council of State watch uses the official rolling month pages; the
+    # Constitutional Court filters its authoritative manifest by year.
+    "be-rvsce": "server", "be-const-court": "server",
     # both filter server-side on a date and sort newest-first
     "uk-parl-committees": "server", "uk-parl-written-questions": "server",
     "fr-senat-reports": "early-stop", "fr-senat-lc": "full-walk",

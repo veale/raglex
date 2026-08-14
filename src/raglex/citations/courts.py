@@ -475,6 +475,13 @@ COURTS: tuple[Court, ...] = (
     Court("AfCHPR", "African Court on Human and Peoples' Rights", "AFRICA"),
     Court("ACtHPR", "African Court on Human and Peoples' Rights (variant)", "AFRICA"),
 
+    # ---- Belgium ----------------------------------------------------------
+    # These stored court slugs are not neutral-citation tokens, but this registry is
+    # also the single source for UI court names and jurisdiction routing.
+    Court("BE-RVSCE", "Council of State (Belgium)", "BE", adapter="be-rvsce"),
+    Court("BE-CONST-COURT", "Constitutional Court (Belgium)", "BE",
+          adapter="be-const-court"),
+
     # ---- Austria, Slovakia, Finland, Sweden, Estonia ----------------------
     # None of these five uses a bracketed neutral citation, so nothing here is matched by
     # the neutral-citation shape. They are registered because the registry is also what
