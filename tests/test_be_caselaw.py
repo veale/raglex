@@ -71,6 +71,13 @@ def test_council_archive_is_sequential_and_resumes_one_block_early():
     assert rows[-1].hints["resume_offset"] == 10105
 
 
+def test_council_watch_mode_uses_the_rolling_register(monkeypatch):
+    adapter = BelgianCouncilOfStateAdapter(client=Client({}), watch_mode="true")
+    expected = [Stub(stable_id="be/rvsce/262672", landing_url="x")]
+    monkeypatch.setattr(adapter, "_recent", lambda: expected)
+    assert list(adapter.discover(None, max_pages=None)) == expected
+
+
 def test_archive_html_is_a_hole_but_advertised_html_is_an_error():
     client = Client({"https://example.test/arr": b"<html>not found</html>"})
     adapter = BelgianCouncilOfStateAdapter(client=client)
@@ -116,6 +123,20 @@ def test_constitutional_discovery_reads_the_year_manifest():
         client=client, start_year=2026, end_year=2026).discover(None))
     assert [row.raw_url for row in rows] == ["https://fr.const-court.be/1/2026.pdf"]
     assert rows[0].hints["resume_offset"] == 0
+
+
+def test_constitutional_watch_mode_revisits_this_and_last_year():
+    current = date.today().year
+    previous_html = CONST_YEAR.replace(b"2026", str(current - 1).encode())
+    current_html = CONST_YEAR.replace(b"2026", str(current).encode())
+    client = Client({
+        (mod.CONST_INDEX, (("year", current - 1),)): previous_html,
+        (mod.CONST_INDEX, (("year", current),)): current_html,
+    })
+    rows = list(BelgianConstitutionalCourtAdapter(
+        client=client, watch_mode=True).discover(None, max_pages=None))
+    assert [row.stable_id for row in rows] == [
+        f"be/const-court/{current - 1}/1", f"be/const-court/{current}/1"]
 
 
 def test_belgian_citations_degrade_without_dangling_punctuation():

@@ -862,7 +862,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "used as canonical identities without losing the court's printed number.",
         (SourceOption("first_number", "First archive decision number", "10000"),
          SourceOption("end_number", "Last archive decision number",
-                      "optional; otherwise inferred from the recent register")),
+                      "optional; otherwise inferred from the recent register"),
+         SourceOption("watch_mode", "Use the rolling monthly register", "false")),
         ("ECLI:BE:RVSCE:…", "Conseil d'État / Raad van State decision number"),
     ),
     "be-const-court": SourceInfo(
@@ -872,7 +873,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "number, date, procedure, docket and subject; newer ECLIs are read from the PDF "
         "and older judgments remain citable by number and year.",
         (SourceOption("start_year", "First judgment year", "2000"),
-         SourceOption("end_year", "Last judgment year", "current year")),
+         SourceOption("end_year", "Last judgment year", "current year"),
+         SourceOption("watch_mode", "Check only this and last year", "false")),
         ("ECLI:BE:GHCC:…", "Constitutional Court judgment number (1/2026)"),
     ),
     "uk-parl-committees": SourceInfo(

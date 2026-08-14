@@ -58,6 +58,10 @@ def _clean(value: str | None) -> str:
     return " ".join((value or "").split())
 
 
+def _option_bool(value: bool | str | None) -> bool:
+    return value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _normalise_ecli(value: str | None) -> str | None:
     match = _ECLI_RE.search(value or "")
     if not match:
@@ -159,11 +163,13 @@ class BelgianCouncilOfStateAdapter(BaseAdapter):
         first_number: int | str | None = 10000,
         end_number: int | str | None = None,
         start_offset: int | str | None = None,
+        watch_mode: bool | str | None = False,
     ) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=180)
         self.first_number = max(1, option_int(first_number, 10000))
         self.end_number = option_int(end_number, 0) or None
+        self.watch_mode = _option_bool(watch_mode)
         cursor = option_int(start_offset, 0)
         self.resume_number = max(
             self.first_number,
@@ -194,7 +200,7 @@ class BelgianCouncilOfStateAdapter(BaseAdapter):
         return max(numbers)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        if since:
+        if self.watch_mode or since:
             yield from self._recent()
             return
 
@@ -302,22 +308,30 @@ class BelgianConstitutionalCourtAdapter(BaseAdapter):
         start_year: int | str | None = 2000,
         end_year: int | str | None = None,
         start_offset: int | str | None = None,
+        watch_mode: bool | str | None = False,
     ) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=180)
         self.start_year = max(2000, option_int(start_year, 2000))
         self.end_year = max(self.start_year, option_int(end_year, date.today().year))
         self.start_offset = resume_floor(option_int(start_offset, 0), self.PAGE_SIZE)
+        self.watch_mode = _option_bool(watch_mode)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         first_year = self.start_year
-        if since:
+        end_year = self.end_year
+        if self.watch_mode:
+            # Revisit last year too: a judgment dated in December can be posted after
+            # the January watch has rolled into a new calendar year.
+            first_year = max(first_year, date.today().year - 1)
+            end_year = min(end_year, date.today().year)
+        elif since:
             match = re.match(r"((?:19|20)\d{2})", since)
             if match:
                 first_year = max(first_year, int(match.group(1)))
-        years = range(first_year, self.end_year + 1)
+        years = range(first_year, end_year + 1)
         if max_pages is not None:
-            years = range(first_year, min(self.end_year + 1, first_year + max(0, max_pages)))
+            years = range(first_year, min(end_year + 1, first_year + max(0, max_pages)))
         offset = 0
         for year in years:
             response = self._client.get(CONST_INDEX, params={"year": year})
