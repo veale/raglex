@@ -267,6 +267,16 @@ class _PaceFetcher:
         return SimpleNamespace(html=PACE_HTML)
 
 
+class _TransitionalPaceFetcher:
+    def __init__(self):
+        self.calls = 0
+
+    def fetch(self, url):
+        self.calls += 1
+        return SimpleNamespace(html="<html><body></body></html>" if self.calls == 1
+                               else PACE_HTML)
+
+
 def test_pace_full_walk_dedupes_across_committee_indexes_before_download():
     adapter = PACECommitteeDocumentsAdapter(
         committees="asjur,aspol", fetcher=_PaceFetcher())
@@ -275,6 +285,13 @@ def test_pace_full_walk_dedupes_across_committee_indexes_before_download():
     assert stubs[0].stable_id == "coe/pace/committee/as-jur-2026-01"
     assert stubs[0].hints["committees"] == ["asjur", "aspol"]
     assert stubs[0].hints["resume_offset"] == 1
+
+
+def test_pace_retries_a_blank_cloudflare_transition_document():
+    fetcher = _TransitionalPaceFetcher()
+    adapter = PACECommitteeDocumentsAdapter(committees="asmig", fetcher=fetcher)
+    assert len(list(adapter.discover(None))) == 1
+    assert fetcher.calls == 2
 
 
 def test_pdf_hudoc_annotation_recovers_itemid_when_visible_text_is_only_case_name():

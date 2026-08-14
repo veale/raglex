@@ -953,7 +953,14 @@ class PACECommitteeDocumentsAdapter(BaseAdapter):
         offset = 0
         for code in self.committees:
             page_url = self._url(code)
-            rows = parse_pace_committee_documents(self._html(page_url), code)
+            rows: list[dict] = []
+            # A solved Cloudflare challenge can briefly expose its redirect document:
+            # non-empty HTML with no challenge marker and no committee content. Retry
+            # the rendered page rather than accepting a silently incomplete committee.
+            for _attempt in range(3):
+                rows = parse_pace_committee_documents(self._html(page_url), code)
+                if rows:
+                    break
             if not rows:
                 raise FetchError(f"{self.source}: {code} contained no committee documents",
                                  transient=True)
