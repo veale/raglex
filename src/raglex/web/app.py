@@ -1423,7 +1423,8 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/search-corpus")
     def search_corpus_ep(
-        query: str | None = None, source: str | None = None, doc_type: str | None = None,
+        query: str | None = None, source: str | None = None, jurisdiction: str | None = None,
+        doc_type: str | None = None,
         court: str | None = None, tag: str | None = None, year_from: str | None = None,
         year_to: str | None = None, cites: str | None = None, cited_by: str | None = None,
         cites_pinpoint: str | None = None, id_prefix: str | None = None,
@@ -1432,7 +1433,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Unified metadata search: filtered + sorted results plus the facet distribution of
         the whole match set (for the refine sidebar + histograms)."""
         return facade.search_corpus(
-            query=query, source=source, doc_type=doc_type, court=court, tag=tag,
+            query=query, source=source, jurisdiction=jurisdiction, doc_type=doc_type, court=court, tag=tag,
             year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by,
             cites_pinpoint=cites_pinpoint, id_prefix=id_prefix,
             sort=sort, limit=limit, offset=offset, facets=facets)

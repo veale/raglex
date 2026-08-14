@@ -4287,7 +4287,8 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
         items: cfg.items, groups: cfg.groups || [],
         index_title: cfg.index_title, index_text: cfg.index_text,
         max_snippets: cfg.max_snippets, output_dir: cfg.output_dir,
-        index_wordart: cfg.index_wordart, webhook: cfg.webhook,
+        index_wordart: cfg.index_wordart, sources_page: cfg.sources_page,
+        sources_intro: cfg.sources_intro, webhook: cfg.webhook,
       });
       if (attrib !== null && attribution && attribution.source !== "env") {
         await api.saveSettings({ RAGLEX_STATIC_EXPORT_ATTRIBUTION: attrib });
@@ -4373,6 +4374,19 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
         e.g. <span className="kbd">&lt;dateexported&gt;</span> becomes <b>{new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</b>.
         Every entry in the index also states its own export date.
       </p>
+
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, marginTop: 12 }}
+        title="Builds sources.html from the full-text corpus roll-up and links it from the index before the statutes.">
+        <input type="checkbox" checked={!!cfg.sources_page}
+          onChange={(e) => patch({ sources_page: e.target.checked })} />
+        <span>Generate a corpus sources page <span className="muted">— full-text holdings only, ordered by jurisdiction size</span></span>
+      </label>
+      {cfg.sources_page && <>
+        <label>Sources page introduction <span className="muted">— optional</span></label>
+        <textarea rows={4} value={cfg.sources_intro || ""}
+          onChange={(e) => patch({ sources_intro: e.target.value })}
+          placeholder="Shown before the country-by-country inventory. Same simple HTML and placeholders as the index." />
+      </>}
 
       <label style={{ marginTop: 14 }}>Themes <span className="muted">— subsections within each country, in this order</span></label>
       <p className="muted" style={{ fontSize: 11, marginTop: 2 }}>

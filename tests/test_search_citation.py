@@ -146,6 +146,48 @@ def test_search_finds_a_case_by_the_name_it_is_known_by_not_titled_with(tmp_path
     assert f.search_corpus(query="Bradstreet Norway")["items"] == []
 
 
+def test_autocomplete_prefixes_a_learned_shorthand_and_explains_the_hit(tmp_path):
+    """A person sees CPIA while typing CPI, even though those letters are absent from
+    the Act's title; stored grammatical "the CPIA" forms are equivalent too."""
+    from raglex.citations.extractor import SHORTHAND_MIN_DOCS
+
+    f = Facade(_config(tmp_path))
+    with f._open() as (cat, _rs, _ts):
+        cat.upsert_document(Record(
+            source="uk-legislation", stable_id="ukpga/1996/25",
+            doc_type=DocType.LEGISLATION,
+            title="Criminal Procedure and Investigations Act 1996",
+            extracted_via=ExtractedVia.STRUCTURED))
+        for i in range(SHORTHAND_MIN_DOCS):
+            cat.add_learned_shorthands([
+                {"shorthand": "the CPIA", "candidate_id": "ukpga/1996/25",
+                 "entity_kind": "act", "is_abbrev": True}], doc_id=f"case/{i}")
+        cat.commit()
+
+    hit = f.search_corpus(query="CPI", facets=False)
+    assert [r["stable_id"] for r in hit["items"]] == ["ukpga/1996/25"]
+    assert hit["items"][0]["matched_shorthand"] == "the CPIA"
+
+
+def test_search_corpus_jurisdiction_filter_uses_explore_buckets(tmp_path):
+    """OSS decisions inherit their country from dpa-xx, not their EU source."""
+    f = Facade(_config(tmp_path))
+    with f._open() as (cat, _rs, _ts):
+        cat.upsert_document(Record(
+            source="eu-dpa", stable_id="eu/ordinary", doc_type=DocType.DECISION,
+            title="Common register decision", extracted_via=ExtractedVia.STRUCTURED))
+        cat.upsert_document(Record(
+            source="eu-dpa", stable_id="fr/oss", court="dpa-fr",
+            doc_type=DocType.DECISION, title="Common register decision",
+            extracted_via=ExtractedVia.STRUCTURED))
+        cat.commit()
+
+    france = f.search_corpus(query="common register", jurisdiction="France", facets=False)
+    eu = f.search_corpus(query="common register", jurisdiction="European Union", facets=False)
+    assert [r["stable_id"] for r in france["items"]] == ["fr/oss"]
+    assert [r["stable_id"] for r in eu["items"]] == ["eu/ordinary"]
+
+
 # -- relevance: how well the title matches, before how recent it is ----------
 def _seed_ranking(facade):
     """One corpus, four documents whose titles all satisfy the query "code of practice",
@@ -199,6 +241,26 @@ def test_citation_count_breaks_a_relevance_tie(tmp_path):
     ids = [i["stable_id"] for i in
            facade.search_corpus(query="code of practice", facets=False)["items"]]
     assert ids == ["code/1", "code/2"]
+
+
+def test_primary_authority_beats_commentary_with_the_same_title_match(tmp_path):
+    f = Facade(_config(tmp_path))
+    with f._open() as (cat, _rs, _ts):
+        for sid, kind in (("act/original", DocType.LEGISLATION),
+                          ("note/commentary", DocType.COMMENTARY)):
+            cat.upsert_document(Record(
+                source="uk-user-import", stable_id=sid, doc_type=kind,
+                title="Example Act 2025 — overview", decision_date=date(2025, 1, 1),
+                extracted_via=ExtractedVia.MANUAL))
+        # Popularity helps within a class, but should not let derivative material crowd
+        # the authority itself out of a short suggestion list.
+        cat.conn.execute(
+            "INSERT INTO citation_counts (candidate_id, occurrences, rebuilt_at) "
+            "VALUES (?, ?, ?)", ("note/commentary", 1000, "2026-01-01T00:00:00"))
+        cat.commit()
+    ids = [r["stable_id"] for r in
+           f.search_corpus(query="Example Act", facets=False)["items"]]
+    assert ids == ["act/original", "note/commentary"]
 
 
 def test_a_bare_browse_is_still_newest_first(tmp_path):

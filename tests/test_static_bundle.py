@@ -11,10 +11,12 @@ from raglex.facade import Facade
 from raglex.settings import SettingsStore
 from raglex.static_bundle import (
     apply_placeholders,
+    build_sources_summary,
     build_bundle,
     format_export_date,
     load_config,
     render_index_html,
+    render_sources_html,
     save_config,
     slugify_filename,
 )
@@ -89,6 +91,63 @@ def test_placeholders_substitute_before_sanitising():
     assert text == "Exported 27 May 2026 · 3 items"
 
 
+def test_sources_config_is_optional_and_round_trips(tmp_path):
+    config = _config(tmp_path)
+    settings = SettingsStore(config.settings_path)
+    assert load_config(config)["sources_page"] is False
+    saved = save_config(settings, {
+        "sources_page": True,
+        "sources_intro": "An operator-written introduction.",
+    }, config)
+    assert saved["sources_page"] is True
+    assert saved["sources_intro"] == "An operator-written introduction."
+
+
+def test_sources_summary_is_full_text_only_verbose_and_caps_future_years(tmp_path):
+    config = _config(tmp_path)
+    cat = Catalogue(config.catalogue_path)
+    textstore = TextStore(config.text_dir)
+
+    def hold(source, stable_id, kind, title, when, *, court=None, url=None, text="full text"):
+        record = Record(source=source, stable_id=stable_id, doc_type=kind, title=title,
+                        court=court, decision_date=when, landing_url=url, text=text or None,
+                        raw_bytes=(text or "").encode(), extracted_via=ExtractedVia.STRUCTURED)
+        record.ensure_payload_hash()
+        path = str(textstore.put(record.payload_hash, record.text)) if record.text else None
+        cat.upsert_document(record, text_path=path)
+
+    from datetime import date
+    hold("ca-caselaw", "bcca/2024/1", DocType.JUDGMENT, "A v B", date(2024, 1, 1),
+         court="bcca", url="https://www.canlii.org/en/bc/bcca/doc/2024/1.html")
+    hold("eu-cellar", "eu/ag/1", DocType.OPINION, "Opinion", date(2032, 1, 1),
+         court="Advocate General", url="https://curia.europa.eu/juris/document/document.jsf")
+    # Metadata-only India must affect the whole-corpus number but appear nowhere on the
+    # sources page, including its source list.
+    hold("in-caselaw", "insc/2025/1", DocType.JUDGMENT, "No text", date(2025, 1, 1),
+         court="insc", url="https://example.in/1", text="")
+    cat.refresh_corpus_shape_stats()
+    cat.close()
+
+    facade = Facade(config)
+    summary = build_sources_summary(facade, current_year=2026)
+    assert summary["corpus_total"] == 3
+    assert summary["full_text_total"] == 2
+    assert [j["name"] for j in summary["jurisdictions"]] == ["Canada", "European Union"]
+    canada = summary["jurisdictions"][0]["entries"][0]
+    assert canada["label"] == "British Columbia Court of Appeal"
+    assert canada["domains"] == ["canlii.org"]
+    ag = summary["jurisdictions"][1]["entries"][0]
+    assert ag["section"] == "Opinions of the Advocates General"
+    assert ag["year_to"] == 2026
+
+    page = render_sources_html(summary, intro="How these were collected.", facade=facade)
+    assert "How these were collected." in page
+    assert "British Columbia Court of Appeal (1 document, 2024)" in page
+    assert 'href="https://canlii.org/"' in page
+    assert "third-party bulk download, not scraped" in page
+    assert "India" not in page and "example.in" not in page
+
+
 def test_index_groups_by_jurisdiction_and_states_both_counts():
     page = render_index_html(
         [
@@ -118,6 +177,17 @@ def test_index_groups_by_jurisdiction_and_states_both_counts():
     assert 'href="https://example.test"' in page
     assert "<script>alert(1)</script>" not in page          # sanitised like the attribution
     assert "<dateexported>" not in page                     # placeholder was substituted
+
+
+def test_index_sources_link_sits_between_intro_and_statutes():
+    page = render_index_html(
+        [{"filename": "x.html", "title": "Act", "jurisdiction": "United Kingdom",
+          "documents": 1, "mentions": 1, "exported": "27 May 2026"}],
+        title="Statutes", intro="The description.", corpus_total=6_000_000,
+        sources_page=True)
+    assert "6,000,000 documents analysed" in page
+    assert 'href="sources.html"' in page
+    assert page.index("The description.") < page.index("sources.html") < page.index("x.html")
 
 
 def test_index_falls_back_when_an_edition_has_no_jurisdiction():
@@ -159,6 +229,8 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
         ],
         "index_title": "Statutes",
         "index_text": "Exported <dateexported>.",
+        "sources_page": True,
+        "sources_intro": "The full-text corpus behind these editions.",
     }, config)
 
     facade = Facade(config)
@@ -167,7 +239,8 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
 
     out = tmp_path / "exports" / "site"
     assert result["documents"] == 2
-    assert sorted(p.name for p in out.glob("*.html")) == ["dpa.html", "index.html", "osa.html"]
+    assert sorted(p.name for p in out.glob("*.html")) == [
+        "dpa.html", "index.html", "osa.html", "sources.html"]
 
     osa = (out / "osa.html").read_text(encoding="utf-8")
     dpa = (out / "dpa.html").read_text(encoding="utf-8")
@@ -190,10 +263,16 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
 
     index = (out / "index.html").read_text(encoding="utf-8")
     assert '<a href="osa.html">' in index and '<a href="dpa.html">' in index
+    assert '<a href="sources.html">' in index
+    assert "2 documents analysed to make this system" in index
     assert "<title>Statutes</title>" in index
+    sources = (out / "sources.html").read_text(encoding="utf-8")
+    assert "The full-text corpus behind these editions." in sources
+    assert "United Kingdom (2 full-text documents)" in sources
 
     with zipfile.ZipFile(result["zip"]) as archive:
-        assert sorted(archive.namelist()) == ["dpa.html", "index.html", "osa.html"]
+        assert sorted(archive.namelist()) == [
+            "dpa.html", "index.html", "osa.html", "sources.html"]
 
     # progress is descriptive: which edition, its position, and what is happening
     messages = [p.get("item", "") for p in seen]

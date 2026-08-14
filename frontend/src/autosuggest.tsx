@@ -37,9 +37,9 @@ export interface Autosuggest<T> {
 export function useAutosuggest<T>(
   query: string,
   fetchPage: (limit: number) => Promise<T[]>,
-  opts: { minChars?: number; batch?: number; delay?: number; enabled?: boolean } = {},
+  opts: { minChars?: number; batch?: number; delay?: number; enabled?: boolean; requestKey?: string } = {},
 ): Autosuggest<T> {
-  const { minChars = 2, batch = 8, delay = 130, enabled = true } = opts;
+  const { minChars = 2, batch = 8, delay = 130, enabled = true, requestKey = "" } = opts;
   const [items, setItems] = useState<T[]>([]);
   const [limit, setLimit] = useState(batch);
   const [loading, setLoading] = useState(false);
@@ -51,7 +51,10 @@ export function useAutosuggest<T>(
 
   // a NEW query is a new batch — otherwise typing one more letter would keep whatever
   // enlarged limit the previous query had been expanded to
-  useEffect(() => { setLimit(batch); setHi(-1); }, [query, batch, enabled]);
+  useEffect(() => { setLimit(batch); setHi(-1); }, [query, batch, enabled, requestKey]);
+  // A changed constraint is different from another character being typed: until its
+  // response arrives, old rows violate the visible filter and must not remain clickable.
+  useEffect(() => { setItems([]); }, [requestKey]);
 
   useEffect(() => {
     let live = true;
@@ -65,7 +68,7 @@ export function useAutosuggest<T>(
       finally { if (live) setLoading(false); }
     }, delay);
     return () => { live = false; clearTimeout(t); };
-  }, [query, limit, minChars, delay, enabled]);
+  }, [query, limit, minChars, delay, enabled, requestKey]);
 
   const hasMore = items.length >= limit;
   const rows = items.length + (hasMore ? 1 : 0);

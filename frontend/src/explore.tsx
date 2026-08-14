@@ -476,6 +476,7 @@ export function ExploreView({ open, goSearch }:
   const [shape, setShape] = useState<any | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  const [jurisdiction, setJurisdiction] = useState("");
   useEffect(() => {
     let live = true;
     const load = () => api.corpusShape().then((s) => {
@@ -489,9 +490,10 @@ export function ExploreView({ open, goSearch }:
   // instant find-a-document autocomplete on the hero search
   const ac = useAutosuggest<any>(
     q,
-    (limit) => api.searchCorpus({ query: q.trim(), limit: String(limit), facets: "false" })
+    (limit) => api.searchCorpus({ query: q.trim(), limit: String(limit), facets: "false",
+      ...(jurisdiction ? { jurisdiction } : {}) })
       .then((r: any) => r.items || []),
-    { batch: 6, delay: 120 });
+    { batch: 6, delay: 120, requestKey: jurisdiction });
   const sugg = ac.items;
 
   const rows: ShapeRow[] = shape?.jurisdictions || [];
@@ -503,6 +505,8 @@ export function ExploreView({ open, goSearch }:
           <span className="muted hero-sub"> — find an authority by name or citation</span></h2>
         <div className="hero-search ac">
           <input value={q} autoFocus placeholder="Find a case, act or concept…  (⌘K jumps straight to a citation)"
+            role="combobox" aria-autocomplete="list" aria-expanded={sugg.length > 0}
+            aria-controls="explore-suggestions"
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
               if (ac.onNavKey(e)) return;
@@ -514,16 +518,27 @@ export function ExploreView({ open, goSearch }:
                 else goSearch(q);
               }
             }} />
+          <select className="hero-jurisdiction" value={jurisdiction}
+            aria-label="Limit suggestions to a jurisdiction"
+            title="Optionally limit document suggestions to one jurisdiction"
+            onChange={(e) => setJurisdiction(e.target.value)}>
+            <option value="">All jurisdictions</option>
+            {(shape?.jurisdictions || []).map((r: ShapeRow) =>
+              <option key={r.jurisdiction} value={r.jurisdiction}>{r.jurisdiction}</option>)}
+          </select>
           <button className="primary" onClick={() => goSearch(q)}>Search</button>
           {sugg.length > 0 && (
-            <div className="ac-list">
+            <div className="ac-list" id="explore-suggestions" role="listbox">
               {sugg.map((o, i) => (
                 <div key={o.stable_id} className={`ac-opt${i === ac.hi ? " hi" : ""}`}
+                  role="option" aria-selected={i === ac.hi}
                   onMouseEnter={() => ac.setHi(i)} onMouseDown={(e) => { e.preventDefault(); open(o.stable_id); }}>
                   <FlagIcon jurisdiction={o.jurisdiction} opacity={0.85} />
                   <span className="ac-opt-text">
                     <b><Oscola c={o.oscola} fallback={o.title || o.stable_id} /></b>
-                    <span className="muted"> · {o.doc_type}{o.court ? ` · ${o.court}` : ""}</span>
+                    <span className="muted"> · {o.doc_type}{o.court ? ` · ${o.court}` : ""}
+                      {o.cited_by > 0 ? ` · cited ${Number(o.cited_by).toLocaleString()}×` : ""}</span>
+                    {o.matched_shorthand && <span className="ac-why">known as {o.matched_shorthand}</span>}
                   </span>
                 </div>
               ))}

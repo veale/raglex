@@ -234,6 +234,8 @@ export interface StaticBundle {
   items: StaticBundleItem[];
   groups?: StaticBundleGroup[];
   index_title: string; index_text: string; max_snippets: number;
+  // Optional corpus-wide provenance page, linked before the statutes on the index.
+  sources_page?: boolean; sources_intro?: string;
   output_dir: string; resolved_output_dir?: string;
   // The index title as nostalgic rainbow WordArt. Index page only — an edition's title
   // is the name of a legal instrument.

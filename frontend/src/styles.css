@@ -970,6 +970,16 @@ table { width: 100%; }
 .hero-search input:focus { outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 .hero-search .ac-list { top: 100%; }
+.hero-search .hero-jurisdiction { flex: 0 0 10.5rem; min-width: 0; font-size: .82rem;
+  padding-left: var(--sp-3); padding-right: var(--sp-3); }
+.ac-why { display: block; margin-top: 2px; color: var(--accent); font-size: .72rem;
+  font-weight: 600; }
+
+@media (max-width: 620px) {
+  .hero-search { flex-wrap: wrap; }
+  .hero-search input { flex-basis: 100%; }
+  .hero-search .hero-jurisdiction { flex: 1 1 auto; }
+}
 
 .shape { padding: 0; overflow: hidden; }
 /* full panel width so a highlighted (expanded) jurisdiction row and its drop-down

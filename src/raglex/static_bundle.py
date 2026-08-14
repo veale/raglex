@@ -24,8 +24,10 @@ import os
 import re
 import zipfile
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .config import Config
 from .facade import Facade
@@ -300,6 +302,8 @@ def load_config(config: Config | None = None) -> dict:
         "max_snippets": max_snippets,
         "output_dir": str(data.get("output_dir") or ""),
         "index_wordart": bool(data.get("index_wordart")),
+        "sources_page": bool(data.get("sources_page")),
+        "sources_intro": str(data.get("sources_intro") or ""),
         "webhook": _clean_webhook(data.get("webhook")),
     }
     if config is not None:
@@ -313,7 +317,8 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
     current = load_config()
     merged = {**current, **{k: v for k, v in (patch or {}).items() if k in
                             ("items", "groups", "index_title", "index_text",
-                             "max_snippets", "output_dir", "index_wordart", "webhook")}}
+                             "max_snippets", "output_dir", "index_wordart", "sources_page",
+                             "sources_intro", "webhook")}}
     items, used = [], set()
     for entry in merged.get("items") or []:
         if not isinstance(entry, dict):
@@ -349,9 +354,10 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
         merged["max_snippets"] = 4
     merged["webhook"] = _clean_webhook(merged.get("webhook"))
     merged["index_wordart"] = bool(merged.get("index_wordart"))
+    merged["sources_page"] = bool(merged.get("sources_page"))
     stored = {k: merged[k] for k in
               ("items", "groups", "index_title", "index_text", "max_snippets",
-               "output_dir", "index_wordart", "webhook")}
+               "output_dir", "index_wordart", "sources_page", "sources_intro", "webhook")}
     settings.update({CONFIG_KEY: json.dumps(stored, ensure_ascii=False)})
     settings.apply_to_env()  # visible to this process (and this request) immediately
     return load_config(config)
@@ -499,6 +505,7 @@ _INDEX_TEMPLATE = """<!doctype html>
     <div>
       <h1>__TITLE__</h1>
       __INTRO__
+      __SOURCES_LINK__
     </div>
   </header>
   <div class="page">
@@ -509,6 +516,249 @@ __ITEMS__
 </body>
 </html>
 """
+
+_SOURCES_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Sources</title>
+  <style>
+html { color: #111; background: #fff; font-family: "Times New Roman", Times, serif; }
+body { max-width: 56rem; margin: 2rem auto; padding: 0 1.25rem 3rem; font-size: 12pt; line-height: 1.35; }
+h1 { font-size: 24pt; margin: 0 0 .5rem; }
+h2 { font-size: 16pt; margin: 1.5rem 0 .25rem; border-bottom: 1px solid #111; }
+h3 { font-size: 12pt; margin: .8rem 0 .15rem; font-style: italic; font-weight: normal; }
+p { margin: .45rem 0; }
+ul { margin: .15rem 0 .7rem 1.35rem; padding: 0; }
+li { margin: .18rem 0; }
+a { color: #0000ee; text-decoration: underline; }
+.back { margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <p class="back"><a href="index.html">Back to the statute index</a></p>
+  <h1>Sources</h1>
+__INTRO__
+__JURISDICTIONS__
+</body>
+</html>
+"""
+
+_FRENCH_ADMIN_RE = re.compile(
+    r"^(?:CAA|Cour\s+Administrative\s+d['’]Appel|Cour\s+administrative\s+d['’]appel)\s+de\s+(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _verbose_body_name(facade: Facade, court: str | None, source: str) -> str:
+    """A publication-grade court/body name, never a storage slug.
+
+    Most names come from the same court registry as Explore. French DILA has several
+    capitalisation and abbreviation variants for each administrative appeal court; they
+    are normalised here so their counts merge. GDPRhub's ``court-xx`` is a country marker,
+    not the identity of a court, so it is described honestly instead of printed as a slug.
+    """
+    raw = str(court or "").strip()
+    if not raw:
+        return ""
+    if raw.casefold().startswith("court-"):
+        return "Courts and tribunals (GDPRhub collection)"
+    match = _FRENCH_ADMIN_RE.match(raw)
+    if match:
+        place = match.group(1).strip().lower().title()
+        return f"Cour administrative d’appel de {place}"
+    if raw.casefold() in {"conseil d'etat", "conseil d’état"}:
+        return "Conseil d’État"
+    label = str(facade.court_label(raw, source) or "").strip()
+    # A registry miss prettifies "nswcatod" as "Nswcatod". That is still a slug, and
+    # publishing it would imply a name we do not know. Keep the rows separate but make
+    # the limitation explicit and readable rather than presenting the token as a body.
+    if re.fullmatch(r"[A-Za-z0-9_-]{2,20}", raw) and re.sub(
+            r"[^a-z0-9]", "", label.casefold()) == re.sub(
+                r"[^a-z0-9]", "", raw.casefold()):
+        return f"Other court or tribunal ({raw.upper()} collection)"
+    return label or facade.source_label(source)
+
+
+def _source_domains(cat) -> dict[str, set[str]]:
+    """Root hosts represented by full-text records, keyed by source.
+
+    PostgreSQL extracts and groups hosts in the database, returning only a few hundred
+    rows instead of shipping millions of URLs into Python. SQLite is the small/dev path
+    and can parse its rows locally. Only records with text participate, matching the
+    counts on the page.
+    """
+    out: dict[str, set[str]] = {}
+    if cat.backend == "postgres":
+        rows = cat.conn.execute(
+            "SELECT source, lower(substring(landing_url from "
+            "'^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:?#]+)')) AS host "
+            "FROM documents WHERE has_text = 1 AND landing_url IS NOT NULL "
+            "GROUP BY source, host").fetchall()
+        pairs = ((r["source"], r["host"]) for r in rows)
+    else:
+        rows = cat.conn.execute(
+            "SELECT source, landing_url FROM documents "
+            "WHERE has_text = 1 AND landing_url IS NOT NULL").fetchall()
+        pairs = ((r["source"], urlsplit(r["landing_url"] or "").hostname) for r in rows)
+    for source, host in pairs:
+        host = str(host or "").casefold().removeprefix("www.").strip(".")
+        if host:
+            out.setdefault(str(source or ""), set()).add(host)
+    return out
+
+
+def _manual_source(source: str) -> bool:
+    value = (source or "").casefold()
+    return ("user-import" in value or value.startswith(("manual", "westlaw"))
+            or value in {"user", "import"})
+
+
+def build_sources_summary(facade: Facade, *, current_year: int | None = None) -> dict:
+    """Full-text corpus inventory for the optional sources page.
+
+    It reads the Explore roll-up, so the country totals and material classification are
+    exactly the ones a reader sees in the application and no multi-million-row recount is
+    introduced. Future-dated records count as held but cannot push a displayed year range
+    beyond the year in which the page is generated.
+    """
+    current_year = int(current_year or _now().year)
+    with facade._open() as (cat, _rs, _ts):
+        rows = cat.corpus_shape_stats()
+        if not rows:
+            cat.refresh_corpus_shape_stats()
+            rows = cat.corpus_shape_stats()
+        domains = _source_domains(cat)
+
+    jurisdictions: dict[str, dict] = {}
+    corpus_total = 0
+    for row in rows:
+        corpus_total += int(row["n"] or 0)
+        count = int(row["with_text"] or 0)
+        if count <= 0:
+            continue
+        source = str(row["source"] or "")
+        court = str(row["court"] or "")
+        doc_type = str(row["doc_type"] or "other")
+        jurisdiction = facade._doc_bucket(source, court)
+        country = jurisdictions.setdefault(
+            jurisdiction, {"name": jurisdiction, "total": 0, "groups": {}})
+        country["total"] += count
+
+        kind = facade._doc_kind(source, doc_type, court)
+        if (jurisdiction == "European Union"
+                and (doc_type == "opinion" or court.casefold() == "advocate general")):
+            section, label = "Opinions of the Advocates General", "Opinions of the Advocates General"
+        elif kind == "legislation":
+            section, label = "Legislation", "Legislation"
+        elif kind == "cases":
+            section = "Case law"
+            label = _verbose_body_name(facade, court, source) or "Other case law"
+        elif kind == "administrative":
+            section = "Administrative decisions"
+            label = _verbose_body_name(facade, court, source) or "Administrative decisions"
+        elif kind == "guidance":
+            section = "Guidance, reports and commentary"
+            label = (_verbose_body_name(facade, court, source)
+                     or "Guidance, reports and commentary")
+        elif kind == "preparatory":
+            section, label = "Legislative and preparatory materials", "Legislative and preparatory materials"
+        elif kind == "explanatory":
+            section, label = "Explanatory materials", "Explanatory materials"
+        else:
+            section = "Other materials"
+            label = doc_type.replace("_", " ").capitalize()
+
+        # Label is part of the key: equivalent DILA spellings merge after normalisation,
+        # while genuinely distinct courts remain separate entries.
+        key = (section, label.casefold())
+        item = country["groups"].setdefault(key, {
+            "section": section, "label": label, "count": 0,
+            "years": set(), "sources": set(), "domains": set(), "manual": False,
+        })
+        item["count"] += count
+        item["sources"].add(source)
+        item["domains"].update(domains.get(source, set()))
+        item["manual"] = item["manual"] or _manual_source(source)
+        year = str(row["yr"] or "")
+        if year.isdigit():
+            item["years"].add(min(int(year), current_year))
+
+    section_order = {
+        "Legislation": 0, "Case law": 1, "Opinions of the Advocates General": 2,
+        "Administrative decisions": 3, "Guidance, reports and commentary": 4,
+        "Legislative and preparatory materials": 5, "Explanatory materials": 6,
+        "Other materials": 7,
+    }
+    countries = []
+    for country in jurisdictions.values():
+        entries = []
+        for item in country.pop("groups").values():
+            years = sorted(item.pop("years"))
+            item["year_from"] = years[0] if years else None
+            item["year_to"] = years[-1] if years else None
+            item["domains"] = sorted(item["domains"])
+            item["sources"] = sorted(item["sources"])
+            entries.append(item)
+        entries.sort(key=lambda item: (
+            section_order.get(item["section"], 99), -item["count"], item["label"]))
+        country["entries"] = entries
+        countries.append(country)
+    countries.sort(key=lambda country: (-country["total"], country["name"]))
+    return {"corpus_total": corpus_total, "full_text_total": sum(c["total"] for c in countries),
+            "jurisdictions": countries, "current_year": current_year}
+
+
+def _source_links(item: dict, facade: Facade) -> str:
+    values = []
+    for host in item.get("domains") or []:
+        note = (" (third-party bulk download, not scraped)"
+                if host in {"bailii.org", "canlii.org"} else "")
+        values.append(f'<a href="https://{escape(host, quote=True)}/">{escape(host)}</a>{note}')
+    if item.get("manual"):
+        values.append("manual uploads")
+    if not values:
+        values.extend(escape(facade.source_label(source))
+                      for source in item.get("sources") or [])
+    return ", ".join(dict.fromkeys(values))
+
+
+def render_sources_html(summary: dict, *, intro: str, facade: Facade,
+                        generated_at: datetime | None = None) -> str:
+    generated_at = generated_at or _now()
+    intro_html = editorial_paragraphs(
+        apply_placeholders(intro, when=generated_at,
+                           count=int(summary.get("full_text_total") or 0)), "attribution")
+    blocks = []
+    for country in summary.get("jurisdictions") or []:
+        parts = [f'  <section>\n    <h2>{escape(country["name"])} '
+                 f'({int(country["total"]):,} full-text documents)</h2>']
+        current_section = None
+        for index, item in enumerate(country["entries"]):
+            if item["section"] != current_section:
+                current_section = item["section"]
+                parts.append(f"    <h3>{escape(current_section)}</h3>\n    <ul>")
+            years = ""
+            if item.get("year_from") is not None:
+                years = (f", {item['year_from']}–{item['year_to']}"
+                         if item["year_from"] != item["year_to"] else f", {item['year_from']}")
+            sources = _source_links(item, facade)
+            count = int(item["count"])
+            noun = "document" if count == 1 else "documents"
+            parts.append(
+                f"      <li>{escape(item['label'])} ({count:,} {noun}"
+                f"{years})" + (f" from {sources}" if sources else "") + "</li>")
+            # Close before the next heading (or after the final item).
+            next_index = index + 1
+            if (next_index == len(country["entries"])
+                    or country["entries"][next_index]["section"] != current_section):
+                parts.append("    </ul>")
+        parts.append("  </section>")
+        blocks.append("\n".join(parts))
+    return (_SOURCES_TEMPLATE.replace("__INTRO__", "\n".join(f"  {p}" for p in intro_html))
+            .replace("__JURISDICTIONS__", "\n".join(blocks)))
 
 
 def _themed_sections(group: list[dict], groups: list[dict]) -> list[tuple[str, list[dict]]]:
@@ -564,6 +814,7 @@ def render_index_html(
     entries: list[dict], *, title: str, intro: str,
     generated_at: datetime | None = None, wordart: bool = False,
     groups: list[dict] | None = None,
+    corpus_total: int | None = None, sources_page: bool = False,
 ) -> str:
     """``entries`` are the built editions: filename, title, short name, jurisdiction,
     last-updated date, both counts, note, themes.
@@ -666,11 +917,18 @@ def render_index_html(
         f'data-text="{escape(title, quote=True)}">{escape(title)}</span></span>'
         if wordart else escape(title)
     )
+    sources_link = ""
+    if sources_page:
+        sources_link = (
+            f'<p class="attribution">{int(corpus_total or 0):,} documents analysed '
+            'to make this system — <a href="sources.html">information about the '
+            'sources here</a>.</p>')
     page = _INDEX_TEMPLATE
     for token, value in {
         "__PAGE_TITLE__": escape(title, quote=True),
         "__TITLE__": heading,
         "__INTRO__": "\n      ".join(intro_paragraphs),
+        "__SOURCES_LINK__": sources_link,
         "__STYLE__": _STYLE,
         "__WORDART_STYLE__": _WORDART_STYLE if wordart else "",
         "__ITEMS__": "\n".join(blocks),
@@ -915,10 +1173,19 @@ def build_bundle(
 
     check_cancelled()
     emit(len(items), f"writing index.html for {len(entries)} editions")
+    sources_summary = None
+    if config.get("sources_page"):
+        emit(len(items), "summarising the full-text corpus for sources.html")
+        sources_summary = build_sources_summary(facade, current_year=started.year)
+        files.append(("sources.html", render_sources_html(
+            sources_summary, intro=config.get("sources_intro") or "", facade=facade,
+            generated_at=started).encode("utf-8")))
     index_html = render_index_html(
         entries, title=config["index_title"], intro=config["index_text"],
         generated_at=started, wordart=config["index_wordart"],
         groups=config.get("groups"),
+        corpus_total=(sources_summary or {}).get("corpus_total"),
+        sources_page=bool(sources_summary),
     ).encode("utf-8")
     files.append(("index.html", index_html))
 
@@ -931,7 +1198,10 @@ def build_bundle(
         # ``started`` is a datetime (_now()), not the ISO string this once assumed —
         # slicing it raised at the very end of a build, after every page was written.
         today = started.date().isoformat() if started else ""
-        urls = [("index.html", "1.0")] + [(e["filename"], "0.8") for e in entries]
+        urls = [("index.html", "1.0")]
+        if sources_summary:
+            urls.append(("sources.html", "0.7"))
+        urls += [(e["filename"], "0.8") for e in entries]
         sitemap = ['<?xml version="1.0" encoding="UTF-8"?>',
                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
         for filename, priority in urls:
@@ -951,6 +1221,10 @@ def build_bundle(
     # The folder is written every run — scheduled or manual — and same-named files are
     # replaced outright. It is a mirror of the current corpus, not an archive.
     out_dir.mkdir(parents=True, exist_ok=True)
+    if not sources_summary:
+        # Turning the optional page off must turn it off on disk too. Leaving the prior
+        # file behind would keep publishing stale corpus claims at a known URL.
+        (out_dir / "sources.html").unlink(missing_ok=True)
     for filename, payload in files:
         temporary = out_dir / f".{filename}.tmp"
         temporary.write_bytes(payload)

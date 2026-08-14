@@ -4190,7 +4190,19 @@ class Facade:
         goes newest-first. Date was the default for both, which meant a search ranked by
         when a document was published rather than by how well it matched what was typed.
         """
+        jurisdiction = str(filters.pop("jurisdiction", "") or "").strip()
         f = {k: v for k, v in filters.items() if k in self._SEARCH_FILTERS and v not in (None, "")}
+        if jurisdiction:
+            # Use the same source/court bucketing as Explore itself. In particular, EU
+            # one-stop-shop decisions live under an EU source but their dpa-xx court
+            # token belongs to the named country. This remains an indexed IN filter and
+            # avoids fetching a broad pool merely to discard it in Python.
+            sources = [s for s in self._all_sources()
+                       if self._jurisdiction_of(s).casefold() == jurisdiction.casefold()]
+            court_codes = [c for c, name in self._DPA_COUNTRY.items()
+                           if name.casefold() == jurisdiction.casefold()]
+            courts = [f"{prefix}-{c}" for c in court_codes for prefix in ("dpa", "court")]
+            f["source_or_court"] = (sources, courts)
         collective = self._singularised_collective(f.get("query"))
         if collective:
             f["query"] = collective
@@ -4202,17 +4214,16 @@ class Facade:
             # the exact document id(s) and match by PK, instead of substring-scanning (the
             # id slug omits the brackets, so the trigram OR would miss it). Ordinary keyword
             # queries resolve to nothing and fall through to the fast title/id/ECLI search.
+            shorthand_for: dict[str, str] = {}
             if f.get("query"):
+                short = cat.shorthand_matches(f["query"])
+                short_ids = list(dict.fromkeys(r["candidate_id"] for r in short))
+                for match in short:
+                    shorthand_for.setdefault(match["candidate_id"], match["shorthand"])
                 ids, exact = self._citation_query_ids(cat, f["query"])
                 if ids and exact:
                     f = {k: v for k, v in f.items() if k != "query"}
                     f["id_in"] = ids
-                elif ids:
-                    # A NAME, not a key. Keep the text search — every same-titled Act in
-                    # every jurisdiction has to stay reachable — and merely rank the
-                    # instrument the gazetteer knows first.
-                    f["id_or"] = ids
-                    boost = ids
                 else:
                     # …and a name the case is known by rather than titled with ("Dun &
                     # Bradstreet Austria") lives in the alias table: resolve it there and OR
@@ -4225,10 +4236,11 @@ class Facade:
                     # several documents having independently agreed on each — so a typed
                     # abbreviation resolves to what practitioners mean by it, ranked
                     # ahead of the documents that merely contain the letters.
-                    short_ids = cat.documents_by_shorthand(f["query"])
-                    if alias_ids or short_ids:
-                        f["id_or"] = list(dict.fromkeys([*short_ids, *alias_ids]))
-                    boost = short_ids
+                    if short_ids or ids or alias_ids:
+                        f["id_or"] = list(dict.fromkeys([*short_ids, *ids, *alias_ids]))
+                    # Shorthand matches are intentional names and lead inferred title-name
+                    # grammar hits; both lead ordinary substring results.
+                    boost = list(dict.fromkeys([*short_ids, *ids]))
             rows = cat.search_documents(sort=sort, limit=limit, offset=offset,
                                         id_boost=boost, **f)
             items = []
@@ -4238,6 +4250,8 @@ class Facade:
                 # the retrieval-jurisdiction bucket, so result rows (and the hero
                 # autocomplete) can show the same circular flag the explorer uses
                 d["jurisdiction"] = self._doc_bucket(r["source"], r["court"])
+                if r["stable_id"] in shorthand_for:
+                    d["matched_shorthand"] = shorthand_for[r["stable_id"]]
                 items.append(d)
             # Cap the exact total (a common-word match set is millions of rows; counting all
             # is the only slow part of an otherwise sub-second search). Beyond the cap the UI
@@ -5383,6 +5397,7 @@ class Facade:
         "BVerwG": "Bundesverwaltungsgericht (Federal Administrative Court)",
         "BSG": "Bundessozialgericht (Federal Social Court)",
         "BVerfG": "Bundesverfassungsgericht (Federal Constitutional Court)",
+        "BE-MARKET-COURT": "Marktenhof / Cour des marchés",
     }
 
     # National regulators' decisions (EDPB one-stop-shop, court = dpa-xx) belong to

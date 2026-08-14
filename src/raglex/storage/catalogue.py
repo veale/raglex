@@ -5852,7 +5852,7 @@ class Catalogue:
                 "pairs_at_threshold": popular, "threshold": SHORTHAND_MIN_DOCS,
                 "updated": 0 if dry_run else len(counted), "dry_run": dry_run}
 
-    def documents_by_shorthand(self, query: str, *, limit: int = 20) -> list[str]:
+    def shorthand_matches(self, query: str, *, limit: int = 20) -> list[dict]:
         """The authorities a corpus-wide shorthand stands for — "CPIA" → the Criminal
         Procedure and Investigations Act 1996.
 
@@ -5860,18 +5860,56 @@ class Catalogue:
         practitioners actually use were the one way of naming an authority that search
         could not follow. The store already knows them; the popularity gate is what makes
         it safe to search on, since only names several documents independently agreed on
-        get this far. Exact (folded) match only — this is a lookup, not a substring
-        search."""
+        get this far. Prefix matching makes the result available while the person is still
+        typing (``CPI`` → ``CPIA``), but deliberately does not do arbitrary substring
+        matching: abbreviations are short, and a contains scan would both invent noisy
+        matches and defeat the indexed lookup on the million-row store.
+
+        Rows carry the matched spelling so a typeahead can explain why a title containing
+        none of the typed letters is being offered. Exact matches lead prefix matches;
+        within either band, the shorthand most independently established by the corpus
+        leads."""
         from ..citations.extractor import SHORTHAND_MIN_DOCS
 
         q = " ".join(str(query or "").split())
         if len(q) < 2:
             return []
+        folded = q.casefold()
+        starts = [folded]
+        # Definitions are commonly stored with their determiner ("the CPIA"), while a
+        # person naturally types "CPIA". Treat that grammatical wrapper as equivalent;
+        # do not strip arbitrary words from either side of a shorthand.
+        if not folded.startswith("the "):
+            starts.append("the " + folded)
+        # A half-open range is a prefix lookup which the existing lower(shorthand) btree
+        # can serve on PostgreSQL and SQLite alike. LIKE 'x%' needs a pattern-ops index
+        # under many PostgreSQL collations and otherwise quietly becomes a table scan.
+        bounds = [(s, s + "\U0010ffff") for s in starts]
+        ranges = " OR ".join("(lower(shorthand) >= ? AND lower(shorthand) < ?)"
+                             for _ in bounds)
+        exacts = ",".join("?" for _ in starts)
         rows = self.conn.execute(
-            "SELECT candidate_id, doc_count FROM learned_shorthands "
-            "WHERE lower(shorthand) = ? AND COALESCE(blocked, 0) = 0 "
-            "AND COALESCE(doc_count, 0) >= ? ORDER BY doc_count DESC LIMIT ?",
-            (q.casefold(), SHORTHAND_MIN_DOCS, limit)).fetchall()
+            "SELECT shorthand, candidate_id, doc_count FROM learned_shorthands "
+            f"WHERE ({ranges}) "
+            "AND COALESCE(blocked, 0) = 0 AND COALESCE(doc_count, 0) >= ? "
+            f"ORDER BY CASE WHEN lower(shorthand) IN ({exacts}) THEN 0 ELSE 1 END, "
+            "doc_count DESC, lower(shorthand), candidate_id LIMIT ?",
+            (*[v for pair in bounds for v in pair], SHORTHAND_MIN_DOCS,
+             *starts, limit)).fetchall()
+        return [dict(r) for r in rows if r["candidate_id"]]
+
+    def documents_by_shorthand(self, query: str, *, limit: int = 20) -> list[str]:
+        """Backward-compatible exact shorthand lookup used outside interactive search."""
+        from ..citations.extractor import SHORTHAND_MIN_DOCS
+
+        q = " ".join(str(query or "").split()).casefold()
+        if len(q) < 2:
+            return []
+        rows = self.conn.execute(
+            "SELECT candidate_id FROM learned_shorthands WHERE lower(shorthand) = ? "
+            "AND COALESCE(blocked, 0) = 0 AND COALESCE(doc_count, 0) >= ? "
+            "ORDER BY doc_count DESC, candidate_id LIMIT ?",
+            (q, SHORTHAND_MIN_DOCS, limit)).fetchall()
         return [r["candidate_id"] for r in rows if r["candidate_id"]]
 
     def browse_learned_shorthands(
@@ -6711,7 +6749,7 @@ class Catalogue:
         return {r["tag"]: r["n"] for r in rows}
 
     @staticmethod
-    def _doc_filter_clauses(*, source=None, doc_type=None, tag=None, query=None, court=None,
+    def _doc_filter_clauses(*, source=None, source_or_court=None, doc_type=None, tag=None, query=None, court=None,
                             id_prefix=None, id_in=None, id_or=None, year_from=None, year_to=None,
                             cites=None, cited_by=None, cites_pinpoint=None):
         """Shared WHERE-clause builder for list/count/search/facets (so every surface filters
@@ -6726,6 +6764,23 @@ class Catalogue:
         clauses.append("d.search_excluded = 0")
         if source:
             clauses.append("d.source = ?"); params.append(source)
+        if source_or_court:
+            sources, courts = source_or_court
+            ors: list[str] = []
+            if sources:
+                # A dpa-xx/court-xx token overrides the source jurisdiction in
+                # Facade._doc_bucket, so EU OSS records do not leak into an EU filter.
+                ors.append("(d.source IN (%s) AND (d.court IS NULL OR "
+                           "(substr(lower(d.court), 1, 4) <> 'dpa-' AND "
+                           "substr(lower(d.court), 1, 6) <> 'court-')))" %
+                           ",".join("?" for _ in sources))
+                params.extend(sources)
+            if courts:
+                ors.append("d.court IN (%s)" % ",".join("?" for _ in courts))
+                params.extend(courts)
+            # An unknown jurisdiction must match nothing, not silently widen to the
+            # whole corpus. The UI only sends advertised values, but the API is public.
+            clauses.append("(" + " OR ".join(ors) + ")" if ors else "1 = 0")
         if doc_type:
             clauses.append("d.doc_type = ?"); params.append(doc_type)
         if court:
@@ -6835,6 +6890,11 @@ class Catalogue:
     _RELEVANCE_BANDS = ("CASE WHEN lower(d.title) = ? THEN 0 "
                         "WHEN lower(d.title) LIKE ? THEN 1 "
                         "WHEN lower(d.title) LIKE ? THEN 2 ELSE 3 END, "
+                        # When title quality ties, primary material should lead the
+                        # commentary about it. An exact commentary title still wins a
+                        # merely-prefix primary title in the band immediately above.
+                        "CASE WHEN d.doc_type IN ('commentary', 'annotation', 'note', 'article') "
+                        "THEN 1 ELSE 0 END, "
                         "cited_by DESC, ")
 
     def _order_by(self, sort: str | None, query: str | None = None,
@@ -6852,8 +6912,12 @@ class Catalogue:
         boost = list(dict.fromkeys(i for i in (id_boost or []) if i))
         lead, lparams = "", []
         if boost:
-            qs = ",".join("?" for _ in boost)
-            lead = f"CASE WHEN d.stable_id IN ({qs}) THEN 0 ELSE 1 END, "
+            # Preserve the resolver's order: an exact shorthand leads a prefix match,
+            # which leads a merely textual title hit. A single IN band threw that useful
+            # confidence ordering away whenever one shorthand had several candidates.
+            lead = "CASE d.stable_id " + " ".join(
+                f"WHEN ? THEN {n}" for n, _ in enumerate(boost)) + \
+                f" ELSE {len(boost)} END, "
             lparams = list(boost)
         if (sort or "") != "relevance":
             return lead + self._sort_clause(sort), lparams
@@ -6962,6 +7026,7 @@ class Catalogue:
         self,
         *,
         source: str | None = None,
+        source_or_court=None,
         doc_type: str | None = None,
         tag: str | None = None,
         query: str | None = None,
@@ -6990,7 +7055,7 @@ class Catalogue:
         sql = "SELECT d.* FROM documents d"
         params: list[object] = []
         clauses, fparams = self._doc_filter_clauses(
-            source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
+            source=source, source_or_court=source_or_court, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
             year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by)
         if tag:
             clauses.insert(0, "EXISTS (SELECT 1 FROM document_tags t "
@@ -7119,7 +7184,7 @@ class Catalogue:
         params.extend([limit, offset])
         return self.conn.execute(sql, params).fetchall()
 
-    def count_documents(self, *, source: str | None = None, doc_type: str | None = None,
+    def count_documents(self, *, source: str | None = None, source_or_court=None, doc_type: str | None = None,
                         tag: str | None = None, query: str | None = None,
                         court: str | None = None, id_prefix: str | None = None,
                         id_in: list | None = None, id_or: list | None = None,
@@ -7140,7 +7205,7 @@ class Catalogue:
         # the Corpus page's total/pagination time out after the bulk imports.
         params: list[object] = []
         clauses, fparams = self._doc_filter_clauses(
-            source=source, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
+            source=source, source_or_court=source_or_court, doc_type=doc_type, tag=None, query=query, court=court, id_prefix=id_prefix,
             id_in=id_in, id_or=id_or, year_from=year_from, year_to=year_to, cites=cites,
             cited_by=cited_by, cites_pinpoint=cites_pinpoint)
         if tag:
