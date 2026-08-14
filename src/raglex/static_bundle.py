@@ -590,31 +590,33 @@ def _verbose_body_name(facade: Facade, court: str | None, source: str) -> str:
     return label or facade.source_label(source)
 
 
-def _source_domains(cat) -> dict[str, set[str]]:
-    """Root hosts represented by full-text records, keyed by source.
+def _source_domains(cat) -> dict[tuple[str, str, str], set[str]]:
+    """Root hosts represented by full-text records, keyed by source/type/body.
 
     PostgreSQL extracts and groups hosts in the database, returning only a few hundred
     rows instead of shipping millions of URLs into Python. SQLite is the small/dev path
     and can parse its rows locally. Only records with text participate, matching the
     counts on the page.
     """
-    out: dict[str, set[str]] = {}
+    out: dict[tuple[str, str, str], set[str]] = {}
     if cat.backend == "postgres":
         rows = cat.conn.execute(
-            "SELECT source, lower(substring(landing_url from "
+            "SELECT source, doc_type, court, lower(substring(landing_url from "
             "'^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:?#]+)')) AS host "
             "FROM documents WHERE has_text = 1 AND landing_url IS NOT NULL "
-            "GROUP BY source, host").fetchall()
-        pairs = ((r["source"], r["host"]) for r in rows)
+            "GROUP BY source, doc_type, court, host").fetchall()
+        pairs = ((r["source"], r["doc_type"], r["court"], r["host"]) for r in rows)
     else:
         rows = cat.conn.execute(
-            "SELECT source, landing_url FROM documents "
+            "SELECT source, doc_type, court, landing_url FROM documents "
             "WHERE has_text = 1 AND landing_url IS NOT NULL").fetchall()
-        pairs = ((r["source"], urlsplit(r["landing_url"] or "").hostname) for r in rows)
-    for source, host in pairs:
+        pairs = ((r["source"], r["doc_type"], r["court"],
+                  urlsplit(r["landing_url"] or "").hostname) for r in rows)
+    for source, doc_type, court, host in pairs:
         host = str(host or "").casefold().removeprefix("www.").strip(".")
         if host:
-            out.setdefault(str(source or ""), set()).add(host)
+            key = (str(source or ""), str(doc_type or ""), str(court or ""))
+            out.setdefault(key, set()).add(host)
     return out
 
 
@@ -656,8 +658,7 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
         country["total"] += count
 
         kind = facade._doc_kind(source, doc_type, court)
-        if (jurisdiction == "European Union"
-                and (doc_type == "opinion" or court.casefold() == "advocate general")):
+        if jurisdiction == "European Union" and court.casefold() == "advocate general":
             section, label = "Opinions of the Advocates General", "Opinions of the Advocates General"
         elif kind == "legislation":
             section, label = "Legislation", "Legislation"
@@ -688,7 +689,7 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
         })
         item["count"] += count
         item["sources"].add(source)
-        item["domains"].update(domains.get(source, set()))
+        item["domains"].update(domains.get((source, doc_type, court), set()))
         item["manual"] = item["manual"] or _manual_source(source)
         year = str(row["yr"] or "")
         if year.isdigit():

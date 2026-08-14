@@ -121,6 +121,8 @@ def test_sources_summary_is_full_text_only_verbose_and_caps_future_years(tmp_pat
          court="bcca", url="https://www.canlii.org/en/bc/bcca/doc/2024/1.html")
     hold("eu-cellar", "eu/ag/1", DocType.OPINION, "Opinion", date(2032, 1, 1),
          court="Advocate General", url="https://curia.europa.eu/juris/document/document.jsf")
+    hold("eu-berec", "eu/berec/1", DocType.OPINION, "BEREC Opinion", date(2024, 1, 1),
+         court="BEREC", url="https://berec.europa.eu/opinion/1")
     hold("fr-dila", "fr/ce/1", DocType.JUDGMENT, "Decision", date(201, 1, 1),
          court="Conseil d'État", url="https://legifrance.gouv.fr/ceta/id/1")
     hold("fr-dila", "fr/ce/2", DocType.JUDGMENT, "Décision", date(2025, 1, 1),
@@ -134,20 +136,27 @@ def test_sources_summary_is_full_text_only_verbose_and_caps_future_years(tmp_pat
 
     facade = Facade(config)
     summary = build_sources_summary(facade, current_year=2026)
-    assert summary["corpus_total"] == 5
-    assert summary["full_text_total"] == 4
+    assert summary["corpus_total"] == 6
+    assert summary["full_text_total"] == 5
     assert [j["name"] for j in summary["jurisdictions"]] == [
-        "France", "Canada", "European Union"]
-    france = summary["jurisdictions"][0]["entries"][0]
+        "European Union", "France", "Canada"]
+    countries = {j["name"]: j for j in summary["jurisdictions"]}
+    france = countries["France"]["entries"][0]
     assert france["label"] == "Conseil d’État"
     assert france["count"] == 2
     assert france["year_from"] == france["year_to"] == 2025
-    canada = summary["jurisdictions"][1]["entries"][0]
+    canada = countries["Canada"]["entries"][0]
     assert canada["label"] == "British Columbia Court of Appeal"
     assert canada["domains"] == ["canlii.org"]
-    ag = summary["jurisdictions"][2]["entries"][0]
+    eu_entries = countries["European Union"]["entries"]
+    ag = next(item for item in eu_entries
+              if item["section"] == "Opinions of the Advocates General")
     assert ag["section"] == "Opinions of the Advocates General"
+    assert ag["count"] == 1
+    assert ag["domains"] == ["curia.europa.eu"]
     assert ag["year_to"] == 2026
+    berec = next(item for item in eu_entries if item["domains"] == ["berec.europa.eu"])
+    assert berec["section"] != "Opinions of the Advocates General"
 
     page = render_sources_html(summary, intro="How these were collected.", facade=facade)
     assert "How these were collected." in page
