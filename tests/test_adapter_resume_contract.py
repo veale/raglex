@@ -181,3 +181,39 @@ def test_the_estonian_cursor_it_reports_is_the_one_it_accepts_back():
     adapter._call = _FakeRulings(per_month=40)
     offsets = [s.hints["resume_offset"] for s in adapter.discover(None)]
     assert offsets == list(range(120)), "the cursor restarted inside each month"
+
+
+def test_a_resumed_estonian_walk_steps_over_whole_months_in_one_request():
+    """Reaching a cursor must not cost a request per 25 rulings.
+
+    lahend.ee reports a window's ``total`` on that window's first call, so a month lying
+    wholly below the checkpoint costs exactly one request. Paging through it instead is
+    the difference between a resume that is quiet for eight minutes and one that is quiet
+    for fifty — and every one of those requests re-reads documents already held.
+    """
+    from raglex.adapters.ee_lahend import EstonianLahendAdapter
+
+    fake = _FakeRulings(per_month=40)          # 12 months x 40 = 480, 2 pages each
+    adapter = EstonianLahendAdapter(start_date="2024-01-01", end_date="2024-12-31",
+                                    start_offset=400)
+    adapter._call = fake
+    stubs = list(adapter.discover(None))
+
+    assert stubs, "a resumed walk yielded nothing"
+    # 9 whole months skipped at one call each, then the remaining months paged.
+    assert fake.calls <= 16, f"{fake.calls} requests to reach the cursor — months not skipped"
+    # …and the skipping must not overshoot: everything at or above the floor is still here.
+    assert len(stubs) >= 105, f"skipped past live documents ({len(stubs)} yielded)"
+
+
+def test_the_month_skip_never_runs_twice_for_one_month():
+    """``total`` is the whole month. Applied on the second page as well, it would step
+    over the month twice and silently skip documents the corpus does not hold."""
+    from raglex.adapters.ee_lahend import EstonianLahendAdapter
+
+    adapter = EstonianLahendAdapter(start_date="2024-01-01", end_date="2024-04-30",
+                                    start_offset=50)
+    adapter._call = _FakeRulings(per_month=40)   # 4 months x 40 = 160
+    offsets = [s.hints["resume_offset"] for s in adapter.discover(None)]
+    # resume_floor backs 50 off one page (25) → 25; everything from 25 on must survive.
+    assert offsets == list(range(25, 160)), "the walk skipped or repeated a month"

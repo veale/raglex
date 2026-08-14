@@ -220,12 +220,25 @@ class EstonianLahendAdapter(BaseAdapter):
                 total = int((payload or {}).get("total") or 0) or None
             if not rows:
                 return
+            # Resuming: the first call of a month reports that month's ``total``, so a
+            # month lying wholly below the checkpoint can be stepped over in ONE request
+            # instead of paged through 25 rulings at a time. Asking first is what makes
+            # the skip safe — a window's size cannot be guessed, and skipping blind risks
+            # a loop with nothing to stop it.
+            #
+            # It is the difference between a resume that is silent for eight minutes and
+            # one that is silent for fifty: the register runs from 1993 in this adapter's
+            # window list but holds nothing before 2024, so a cursor near the end of it
+            # otherwise costs ~2,400 requests to reach, almost all of them re-reading
+            # documents the corpus already has.
+            # Only on the month's FIRST page: ``total`` counts the whole month, and by
+            # the second page ``_seen`` has already absorbed the first, so re-applying it
+            # would step over the month twice and skip past documents the corpus lacks.
+            if offset == 0 and total and self._seen + total <= self.start_offset:
+                self._seen += total
+                return
             for row in rows:
                 stub = self._stub(row, feed_total=total, offset=self._seen)
-                # Resuming: the listing still has to be walked — a month's size is not
-                # known until it is asked for, so pages cannot be skipped blind without
-                # risking an unbounded loop — but nothing below the checkpoint is
-                # fetched. The saving is the 50,000 documents, not the listing.
                 if stub is not None and self._seen >= self.start_offset:
                     yield stub
                 self._seen += 1
