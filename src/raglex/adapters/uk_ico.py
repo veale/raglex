@@ -54,7 +54,7 @@ from datetime import date
 from typing import Iterator
 from urllib.parse import urljoin, urlsplit
 
-from ..core.adapter import BaseAdapter
+from ..core.adapter import BaseAdapter, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
@@ -630,6 +630,7 @@ class ICOAdapter(BaseAdapter):
     def __init__(self, *, collection: str = "enforcement",
                  min_interval: float | None = None,
                  sections: str | None = None,
+                 start_offset: int | str | None = None,
                  client: RateLimitedClient | None = None) -> None:
         self.collection = (collection or "enforcement").strip().lower()
         if self.collection not in REGISTERS and self.collection != "guidance":
@@ -643,6 +644,10 @@ class ICOAdapter(BaseAdapter):
         self.sections = tuple(
             s for s in GUIDANCE_SECTIONS if not wanted or s[0].strip("/").lower() in wanted
         ) or GUIDANCE_SECTIONS
+        # Handed back by ``jobs`` from an interrupted run's checkpoint. An adapter
+        # that reports ``resume_offset`` and cannot take it back raises TypeError
+        # on resume, and the retry is filed as done — see core.adapter.resume_floor.
+        self.start_offset = resume_floor(start_offset, 50)
         if min_interval is not None:
             self.min_interval = float(min_interval)
         self._client = client or RateLimitedClient(
@@ -703,6 +708,8 @@ class ICOAdapter(BaseAdapter):
         fresh = [i for i in items if not since or (i.created and i.created > since)]
         fresh.sort(key=lambda i: i.created)
         for n, item in enumerate(fresh):
+            if n < self.start_offset:
+                continue
             yield Stub(
                 stable_id=_item_slug(item.register, item.url),
                 landing_url=urljoin(BASE_URL, item.url),
@@ -725,6 +732,8 @@ class ICOAdapter(BaseAdapter):
             entries = [e for e in entries if e.lastmod and e.lastmod > since]
         entries.sort(key=lambda e: e.lastmod or "")
         for n, entry in enumerate(entries):
+            if n < self.start_offset:
+                continue
             yield Stub(
                 stable_id=_guidance_slug(entry),
                 landing_url=entry.url,

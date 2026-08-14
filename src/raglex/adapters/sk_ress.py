@@ -67,7 +67,7 @@ from datetime import date, datetime, timedelta
 from typing import Iterator
 
 from ..citations.slovak import case_id, eli_to_id
-from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.adapter import BaseAdapter, option_flag, option_int, resume_floor
 from ..core.errors import FetchError
 from ..extraction import ocr as _ocr
 from ..core.http import RateLimitedClient
@@ -156,6 +156,7 @@ class SlovakRESSAdapter(BaseAdapter):
         include_text: bool | str | None = None,
         page_size: int | str | None = None,
         start_page: int | str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.query = (query or "").strip() or None
@@ -172,6 +173,12 @@ class SlovakRESSAdapter(BaseAdapter):
         self.include_text = option_flag(include_text, True)
         self.page_size = max(1, min(_PAGE_SIZE, option_int(page_size, _PAGE_SIZE)))
         self.start_page = max(1, option_int(start_page, 1))
+        # Handed back by ``jobs`` from an interrupted run's checkpoint. The register
+        # pages uniformly, so the offset maps straight onto a page — see
+        # ``core.adapter.resume_floor`` for why it lands one page early on purpose.
+        if start_offset not in (None, ""):
+            floor = resume_floor(option_int(start_offset, 0), self.page_size)
+            self.start_page = max(self.start_page, floor // self.page_size + 1)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
 
@@ -215,7 +222,8 @@ class SlovakRESSAdapter(BaseAdapter):
             if not rows:
                 return
             for row in rows:
-                stub = self._stub(row, feed_total=total, offset=seen,
+                stub = self._stub(row, feed_total=total,
+                                  offset=(self.start_page - 1) * self.page_size + seen,
                                   watermark=(payload or {}).get("updateDate"))
                 if stub is not None:
                     yield stub

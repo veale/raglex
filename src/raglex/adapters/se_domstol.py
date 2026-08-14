@@ -98,7 +98,7 @@ from typing import Iterator
 from urllib.parse import quote
 
 from ..citations.swedish import act_id, case_id
-from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.adapter import BaseAdapter, option_flag, option_int, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
@@ -210,6 +210,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
         expand_groups: bool | str | None = None,
         page_size: int | str | None = None,
         start_page: int | str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.court = (court or "").strip().upper() or None
@@ -223,6 +224,11 @@ class SwedishCaseLawAdapter(BaseAdapter):
         self.expand_groups = option_flag(expand_groups, True)
         self.page_size = max(1, min(_PAGE_SIZE, option_int(page_size, _PAGE_SIZE)))
         self.start_page = max(0, option_int(start_page, 0))
+        # Handed back by ``jobs`` from an interrupted run's checkpoint — see
+        # ``core.adapter.resume_floor``.
+        if start_offset not in (None, ""):
+            floor = resume_floor(option_int(start_offset, 0), self.page_size)
+            self.start_page = max(self.start_page, floor // self.page_size)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
         self._courts: dict[str, str] | None = None
@@ -243,7 +249,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
             params["malnummer"] = self.case_number
         cutoff = _clean(since)[:19] if since else None
         page = self.start_page
-        seen = 0
+        seen = self.start_page * self.page_size
         state = _Walk()
         while True:
             rows = self._list({**params, "page": page})

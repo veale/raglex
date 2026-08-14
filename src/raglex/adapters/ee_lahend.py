@@ -63,7 +63,7 @@ from datetime import date, datetime, timedelta
 from typing import Iterator
 
 from ..citations.estonian import act_key, case_family_id, case_id
-from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.adapter import BaseAdapter, option_flag, option_int, resume_floor, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
@@ -143,6 +143,7 @@ class EstonianLahendAdapter(BaseAdapter):
         ids: str | list[str] | None = None,
         include_citations: bool | str | None = None,
         lookback_days: int | str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.query = (query or "").strip() or None
@@ -158,6 +159,10 @@ class EstonianLahendAdapter(BaseAdapter):
         self.ids = list(ids or [])
         self.include_citations = option_flag(include_citations, True)
         self.lookback_days = max(1, option_int(lookback_days, 90))
+        # Handed back by ``jobs`` from an interrupted run's checkpoint — see
+        # ``core.adapter.resume_floor``. An adapter that reports ``resume_offset`` and
+        # cannot take it back raises TypeError on resume, and the retry is filed as done.
+        self.start_offset = resume_floor(option_int(start_offset, 0), _LIMIT)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=120)
         self._rpc_id = 0
@@ -210,7 +215,11 @@ class EstonianLahendAdapter(BaseAdapter):
                 return
             for row in rows:
                 stub = self._stub(row, feed_total=total, offset=offset_base + offset)
-                if stub is not None:
+                # Resuming: the listing still has to be walked — a month's size is not
+                # known until it is asked for, so pages cannot be skipped blind without
+                # risking an unbounded loop — but nothing below the checkpoint is
+                # fetched. The saving is the 50,000 documents, not the listing.
+                if stub is not None and offset_base + offset >= self.start_offset:
                     yield stub
                 offset += 1
             if len(rows) < _LIMIT:

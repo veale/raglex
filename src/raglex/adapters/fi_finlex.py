@@ -58,7 +58,7 @@ from datetime import date, datetime
 from typing import Iterator
 from urllib.parse import urlsplit
 
-from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.adapter import BaseAdapter, option_flag, option_int, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
@@ -179,6 +179,7 @@ class FinlexAdapter(BaseAdapter):
         end_year: int | str | None = None,
         ids: str | list[str] | None = None,
         include_swedish: bool | str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         if series not in SERIES:
@@ -196,6 +197,10 @@ class FinlexAdapter(BaseAdapter):
             ids = [i.strip() for i in ids.split(",") if i.strip()]
         self.ids = list(ids or [])
         self.include_swedish = option_flag(include_swedish, False)
+        # Handed back by ``jobs`` from an interrupted run's checkpoint — see
+        # ``core.adapter.resume_floor``.
+        self.start_offset = resume_floor(option_int(start_offset, 0), _LIMIT)
+        self._emitted = 0
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90,
             # The service requires a User-Agent and answers 400 without one.
@@ -215,6 +220,7 @@ class FinlexAdapter(BaseAdapter):
         first = self.start_year or _EARLIEST_YEAR.get(self.tree) or 1979
         last = self.end_year or date.today().year
         emitted = 0
+        self._emitted = 0
         for year in range(last, first - 1, -1):
             for stub in self._walk({"startYear": year, "endYear": year}, max_pages=None,
                                    year=year):
@@ -238,11 +244,17 @@ class FinlexAdapter(BaseAdapter):
             if not rows:
                 return
             for row in rows:
-                stub = self._stub(row, year=year, offset=offset)
+                # The offset a resume is checkpointed at has to count the whole feed, not
+                # this year's slice — a per-year counter would restart a 1979-onwards
+                # backfill in the middle of whichever year it happened to reach.
+                stub = self._stub(row, year=year, offset=self._emitted)
                 offset += 1
+                self._emitted += 1
                 if stub is None or stub.stable_id in seen:
                     continue
                 seen.add(stub.stable_id)
+                if self._emitted <= self.start_offset:
+                    continue
                 yield stub
             if len(rows) < _LIMIT:
                 return

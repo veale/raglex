@@ -36,7 +36,7 @@ from datetime import date
 from typing import Iterator, Mapping
 from urllib.parse import urljoin
 
-from ..core.adapter import BaseAdapter
+from ..core.adapter import BaseAdapter, resume_floor
 from ..core.errors import FetchError, RateLimitException
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
@@ -170,6 +170,7 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         search_filters: Mapping[str, str] | None = None,
         record_doc_type: DocType | None = None,
         require_recognized_legal_citation: bool = True,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         if not (organisation or document_type or supergroup):
@@ -190,12 +191,16 @@ class GOVUKRegulatorAdapter(BaseAdapter):
         self.search_filters = dict(search_filters or {})
         self.record_doc_type = record_doc_type
         self.require_recognized_legal_citation = require_recognized_legal_citation
+        # Handed back by ``jobs`` from an interrupted run's checkpoint. An adapter
+        # that reports ``resume_offset`` and cannot take it back raises TypeError
+        # on resume, and the retry is filed as done — see core.adapter.resume_floor.
+        self.start_offset = resume_floor(start_offset, self.page_size)
         self._client = client or RateLimitedClient(
             source, min_interval=self.min_interval, timeout=60
         )
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        start = pages = 0
+        start, pages = self.start_offset, 0
         while True:
             params = {
                 "count": self.page_size,

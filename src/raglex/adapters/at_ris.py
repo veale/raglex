@@ -80,7 +80,7 @@ from datetime import date, datetime, timedelta
 from typing import Iterator
 
 from ..citations.austrian import case_id, collection_id, norm_citations, rechtssatz_id
-from ..core.adapter import BaseAdapter, option_int
+from ..core.adapter import BaseAdapter, option_int, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
@@ -230,6 +230,7 @@ class AustrianRISAdapter(BaseAdapter):
         earliest_year: int | str | None = None,
         lookback_days: int | str | None = None,
         start_date: str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         # A SourceOption arrives as whatever the form sent, including ``None`` for
@@ -249,6 +250,10 @@ class AustrianRISAdapter(BaseAdapter):
         # revises old documents, so a cursor on the decision date alone strands both.
         self.lookback_days = max(1, option_int(lookback_days, 120))
         self.start_date = (start_date or "").strip() or None
+        # Handed back by ``jobs`` from an interrupted run's checkpoint — see
+        # ``core.adapter.resume_floor``. Without this keyword the resume raises TypeError
+        # and the retry is recorded as done.
+        self.start_offset = resume_floor(option_int(start_offset, 0), _PER_PAGE)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
 
@@ -282,6 +287,14 @@ class AustrianRISAdapter(BaseAdapter):
             pages = min(_MAX_PAGES_PER_WINDOW,
                         max(1, (total + _PER_PAGE - 1) // _PER_PAGE))
             for page in range(1, pages + 1):
+                # Resuming: a page wholly below the checkpoint is skipped without being
+                # requested. The window walk is deterministic — the splits are driven by
+                # the API's own Hits — so counting past it reaches the same place the
+                # interrupted run had got to, at one request per window rather than per
+                # document.
+                if emitted + _PER_PAGE <= self.start_offset:
+                    emitted += _PER_PAGE
+                    continue
                 payload = self._search(window_lo, window_hi, page=page)
                 refs = _references(payload)
                 if not refs:

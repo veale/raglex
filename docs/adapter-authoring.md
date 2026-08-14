@@ -1,5 +1,13 @@
 # Adapter authoring contract
 
+> **Before anything else:** if your adapter sets `Stub.hints["resume_offset"]`, its
+> constructor **must** accept `start_offset` and honour it — see
+> [`AGENTS.md`](../AGENTS.md) §1. Omitting it makes every interrupted backfill of that
+> source resume, crash on the keyword, and record itself as **done**. Four backfills were
+> silently lost this way on 2026-08-14 and eleven more adapters had the same latent
+> defect. `tests/test_adapter_resume_contract.py` enforces it.
+
+
 Every adapter must have two entries in `raglex.adapters.registry`:
 
 1. one lazy, side-effect-free factory in `ADAPTERS`; and

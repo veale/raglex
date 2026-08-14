@@ -52,7 +52,7 @@ from collections import OrderedDict
 from datetime import date, datetime, timezone
 from typing import Iterator
 
-from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.adapter import BaseAdapter, resume_floor, option_flag, option_int
 from ..core.errors import FetchError
 from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
 
@@ -344,7 +344,8 @@ class ParliamentLibraryAdapter(BaseAdapter):
 
     def __init__(self, *, house: str = "commons", start_page: int = 1,
                  max_feed_pages: int = 2000, slugs: str | None = None,
-                 include_pdf: bool = True, ocr: bool = True) -> None:
+                 include_pdf: bool = True, ocr: bool = True,
+                 start_offset: int | str | None = None) -> None:
         key = (house or "commons").strip().lower()
         if key not in HOUSES:
             raise ValueError(f"house must be one of {sorted(HOUSES)}, not {house!r}")
@@ -357,6 +358,12 @@ class ParliamentLibraryAdapter(BaseAdapter):
         self.issuer = cfg["issuer"]
         self.id_prefix = cfg["id_prefix"]
         self.start_page = max(1, option_int(start_page, 1))
+        # Handed back by ``jobs`` from an interrupted run's checkpoint. An adapter
+        # that reports ``resume_offset`` and cannot take it back raises TypeError
+        # on resume, and the retry is filed as done — see core.adapter.resume_floor.
+        # Here the reported cursor is the feed page itself, not an item offset.
+        if start_offset not in (None, ""):
+            self.start_page = max(1, option_int(start_offset, 1) - 1)
         self.max_feed_pages = max(1, option_int(max_feed_pages, 2000))
         self.include_pdf = option_flag(include_pdf, True)
         self.ocr = option_flag(ocr, True)

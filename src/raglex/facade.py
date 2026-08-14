@@ -20,6 +20,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
@@ -797,6 +798,24 @@ _RETRIEVAL_BUCKET: dict[str, str] = {
     **{c: "ci" for c in ("je", "gg", "im")},
     **{c: "offshore" for c in ("ky", "ae", "qa", "sh", "io", "bm", "gi")},
 }
+
+
+@lru_cache(maxsize=1)
+def _registered_jurisdictions() -> dict[str, str]:
+    """source key → the natural-language jurisdiction its ``SourceInfo`` declares.
+
+    Imported lazily and cached: the registry imports every adapter module, and the facade
+    is imported by some of them. Rebuilt only if the process restarts, which is the same
+    lifetime the registry itself has.
+    """
+    from .adapters.registry import JURISDICTION_LABELS, SOURCE_INFO
+
+    out: dict[str, str] = {}
+    for key, info in SOURCE_INFO.items():
+        label = JURISDICTION_LABELS.get(info.jurisdiction or "")
+        if label and label != "Other":
+            out[key.lower()] = label
+    return out
 
 
 def _retrieval_bucket(code: str | None) -> str:
@@ -5086,6 +5105,11 @@ class Facade:
         (("hk-",), "Hong Kong"),
         (("in-",), "India"),
         (("us-",), "United States"),
+        # Imported corpora that have no adapter and so no SourceInfo to read a
+        # jurisdiction from. Without these two they are the only real material still
+        # filed under "Other", which is a worse answer than either name.
+        (("ci-",), "Channel Islands"),
+        (("offshore-",), "Offshore & int'l commercial"),
     )
 
     # source key → the natural-language name a person recognises (and, where the
@@ -5321,7 +5345,24 @@ class Facade:
         return self.source_label(code)
 
     def _jurisdiction_of(self, source: str) -> str:
+        """The bucket a source's documents are filed under on Explore and in search.
+
+        Read from the registry first, because ``SourceInfo`` is where a source states its
+        jurisdiction and ``adapter-authoring.md`` says that is the only place it may be
+        stated. The prefix table below is the fallback for the legacy keys that predate
+        the registry (``bailii``, ``westlaw``, ``hol``, ``ico``…) and is no longer the
+        thing a new source has to be added to.
+
+        It used to be the only lookup, and every source whose key did not begin with one
+        of fifteen hardcoded prefixes fell through to "Other" — which on 2026-08-14 meant
+        358,000 documents, including the whole of Finland, Estonia, Slovakia, Austria and
+        Sweden, sitting in a bucket named after not knowing what they were. Each of those
+        had declared its jurisdiction correctly in its ``SourceInfo`` all along.
+        """
         s = (source or "").lower()
+        registered = _registered_jurisdictions().get(s)
+        if registered:
+            return registered
         for prefixes, label in self._JURISDICTIONS:
             if any(s.startswith(p) or s == p.rstrip("-") for p in prefixes):
                 return label

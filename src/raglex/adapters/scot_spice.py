@@ -34,7 +34,7 @@ import re
 from datetime import date, datetime
 from typing import Iterator
 
-from ..core.adapter import BaseAdapter, option_flag, option_int
+from ..core.adapter import BaseAdapter, resume_floor, option_flag, option_int
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
@@ -154,7 +154,7 @@ class SPICeBriefingsAdapter(BaseAdapter):
     def __init__(self, *, client: RateLimitedClient | None = None,
                  date_select: str | None = None, subject: str | None = None,
                  slugs: str | None = None, page_size: int = PAGE_SIZE,
-                 ocr: bool = True) -> None:
+                 ocr: bool = True, start_offset: int | str | None = None) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=180)
         self.date_select = (date_select or "").strip() or None
@@ -163,6 +163,10 @@ class SPICeBriefingsAdapter(BaseAdapter):
         self.ocr = option_flag(ocr, True)
         self.slugs = tuple(s.strip() for s in str(slugs).split(",") if s.strip()) \
             if slugs else ()
+        # Handed back by ``jobs`` from an interrupted run's checkpoint. An adapter
+        # that reports ``resume_offset`` and cannot take it back raises TypeError
+        # on resume, and the retry is filed as done — see core.adapter.resume_floor.
+        self.start_page = resume_floor(start_offset, self.page_size) // self.page_size + 1
 
     # ---- plumbing ------------------------------------------------------------------
 
@@ -202,7 +206,7 @@ class SPICeBriefingsAdapter(BaseAdapter):
             params["dateSelect"] = chosen
         total = pages = None
         seen: set[str] = set()
-        page = 1
+        page = self.start_page
         while True:
             html = self._listing({**params, "page": page} if page > 1 else params)
             rows = parse_results(html)

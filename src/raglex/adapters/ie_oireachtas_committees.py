@@ -41,7 +41,7 @@ from datetime import date, datetime
 from html import unescape
 from typing import Iterator
 
-from ..core.adapter import BaseAdapter, option_flag
+from ..core.adapter import BaseAdapter, resume_floor, option_flag
 from ..core.errors import FetchError, RateLimitException
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
@@ -221,7 +221,8 @@ class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
 
     def __init__(self, *, client: RateLimitedClient | None = None,
                  families: str | None = None, include_reports=None,
-                 first_house=None, houses: str | None = None) -> None:
+                 first_house=None, houses: str | None = None,
+                 start_offset: int | str | None = None) -> None:
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=120,
             user_agent=BROWSER_UA)
@@ -233,6 +234,11 @@ class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
         self.first_house = _int_or(first_house, FIRST_HOUSE_ON_THE_SITE)
         self.houses: tuple[str, ...] = tuple(
             h.strip() for h in str(houses or "").split(",") if h.strip())
+        # Handed back by ``jobs`` from an interrupted run's checkpoint. An adapter
+        # that reports ``resume_offset`` and cannot take it back raises TypeError
+        # on resume, and the retry is filed as done — see core.adapter.resume_floor.
+        # The cursor here counts committees, not documents, so it is not paged.
+        self.start_offset = max(0, _int_or(start_offset, 0))
         self._walled: set[str] = set()
         self._misses = 0
 
@@ -283,6 +289,11 @@ class OireachtasCommitteeEvidenceAdapter(BaseAdapter):
         seen_ids: set[str] = set()
         pages = 0
         for index, (_house, house_no, code) in enumerate(wanted):
+            # Resuming: the cursor is the committee's position in this list, so a
+            # run interrupted at committee 40 of 300 restarts there rather than
+            # re-walking every earlier committee's document pages.
+            if index < self.start_offset:
+                continue
             for slug in committee_slugs(code):
                 urls = [u for u in committee_pages(house_no, slug) if u not in seen_pages]
                 if not urls:

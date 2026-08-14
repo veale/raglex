@@ -64,6 +64,25 @@ def option_flag(value, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def resume_floor(start_offset, page_size: int) -> int:
+    """Where a discovery resumed from a checkpoint should actually restart.
+
+    One page earlier than the checkpoint said. Re-covering a page costs one listing
+    request and nothing else, because the pipeline drops a stub whose document it already
+    holds; resuming even one item *late* loses that document for good. Page arithmetic
+    always drifts a little — a stub filtered out on the first pass advances the offset
+    without advancing the page — so the error has to be pushed to the harmless side
+    deliberately rather than hoped away.
+
+    Every adapter that puts ``resume_offset`` on its stubs is promising to accept
+    ``start_offset`` back: ``jobs`` reads the checkpoint and passes it to the constructor,
+    and an adapter that does not take the keyword raises ``TypeError`` on resume. That
+    failure is silent in the worst way — the retry is marked *done* with an error in its
+    result, so an interrupted backfill looks finished. Four of them were, on 2026-08-14.
+    """
+    return max(0, int(start_offset or 0) - max(1, int(page_size or 1)))
+
+
 def option_int(value, default: int) -> int:
     """A ``SourceOption`` integer, with ``None``/blank/unparseable meaning the default."""
     if value is None or value == "":

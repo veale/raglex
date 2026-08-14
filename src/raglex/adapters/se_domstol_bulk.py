@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ..citations.swedish import ACT_ABBREVS, ACTS, _fold, act_id
-from ..core.adapter import BaseAdapter, option_flag
+from ..core.adapter import BaseAdapter, option_flag, option_int, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
@@ -103,6 +103,7 @@ class SwedishCaseLawBulkAdapter(BaseAdapter):
         mode: str | None = None,
         ids: str | list[str] | None = None,
         verify_withdrawn: bool | str | None = None,
+        start_offset: int | str | None = None,
         client: RateLimitedClient | None = None,
     ) -> None:
         self.path = Path(path or DEFAULT_PATH)
@@ -111,6 +112,9 @@ class SwedishCaseLawBulkAdapter(BaseAdapter):
             ids = [i.strip() for i in ids.split(",") if i.strip()]
         self.ids = {i for i in (ids or []) if i}
         self.verify_withdrawn = option_flag(verify_withdrawn, True)
+        # Handed back by ``jobs`` from an interrupted run's checkpoint — see
+        # ``core.adapter.resume_floor``.
+        self.start_offset = resume_floor(option_int(start_offset, 0), 100)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
 
@@ -123,6 +127,8 @@ class SwedishCaseLawBulkAdapter(BaseAdapter):
             rows = [r for r in rows if self._is_withdrawn(_clean(r.get("pub_id")))]
         total = len(rows)
         for offset, row in enumerate(rows):
+            if offset < self.start_offset:
+                continue
             if max_pages is not None and offset >= max_pages * 100:
                 return
             pub_id = _clean(row.get("pub_id"))
