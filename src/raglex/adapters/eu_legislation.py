@@ -308,6 +308,11 @@ SELECT DISTINCT ?base WHERE {{
                     raw_url=f"{CELEX_BASE}/{celex}",
                     hints={
                         "consolidation_of": base,
+                        # Some historical expressions genuinely publish metadata but no
+                        # English body. Once that result is held, the weekly complete
+                        # sweep must not download it forever; an explicit refetch repair
+                        # can still override the pipeline prefilter.
+                        "metadata_only_complete": True,
                         # Pipeline persists this on the harvest job. A deploy resumes
                         # at the next row rather than replaying the whole Cellar walk.
                         "resume_offset": offset + index,

@@ -248,7 +248,12 @@ class Pipeline:
                 # Both lookups were answered by the batched prefilter above (held_id /
                 # held_extracted ride in with the stub); refetch_held skips it entirely.
                 refreshed = False
-                if held_id is not None and held_has_text is not False:
+                accepted_metadata_only = bool(
+                    held_id is not None
+                    and held_has_text is False
+                    and stub.hints.get("metadata_only_complete")
+                )
+                if held_id is not None and (held_has_text is not False or accepted_metadata_only):
                     # The pending-CJEU feed deliberately re-enumerates resolving
                     # decisions.  If the held copy is still French, fetch again because
                     # the English rendition may have appeared without changing the
@@ -302,7 +307,7 @@ class Pipeline:
                                 held_doc = self.catalogue.get_document(held_id)
                                 held_extracted = bool(
                                     held_doc["last_extracted_at"]) if held_doc else True
-                            if not held_extracted:
+                            if not held_extracted and not accepted_metadata_only:
                                 stats.stored_ids.append(held_id)
                             # A deduped stub was still seen and held: advance the cursor.
                             if not wm_frozen:

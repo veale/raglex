@@ -66,6 +66,7 @@ def test_reverse_sector_zero_sweep_keeps_future_versions_and_resume_offset(monke
         "32005L0029", "32005L0029",
     ]
     assert [s.hints["resume_offset"] for s in stubs[1:]] == [401, 402]
+    assert all(s.hints["metadata_only_complete"] for s in stubs[1:])
     assert stubs[0].hints["from_consolidation_sweep"] is True
     assert "^0[0-9]{4}[A-Z]+" in queries[0]
 

@@ -124,6 +124,25 @@ def test_url_fallback_still_dedups_provisional_ids(tmp_path):
         assert adapter.fetched == []
 
 
+def test_declared_complete_metadata_only_stub_is_not_refetched(tmp_path):
+    """A known textless CELLAR expression is complete, not an upgrade placeholder."""
+    facade = Facade(_config(tmp_path))
+    with facade._open() as (cat, rs, ts):
+        rec = Record(source="fake", stable_id="metadata-only",
+                     doc_type=DocType.LEGISLATION, title="Unavailable expression",
+                     extra={"metadata_only": True})
+        rec.ensure_payload_hash()
+        cat.upsert_document(rec)
+        cat.commit()
+
+        adapter = _FakeAdapter([
+            Stub(stable_id="metadata-only", hints={"metadata_only_complete": True})])
+        stats = Pipeline(cat, rs, textstore=ts).run(adapter, record_health=False)
+        assert stats.deduped == 1 and stats.stored == 0
+        assert stats.stored_ids == []
+        assert adapter.fetched == []
+
+
 class _RekeyAdapter:
     """A provisional-id adapter (Ireland/NZ pattern) whose stub id can't be matched
     against a bulk-seeded copy until fetch() reveals the real neutral-cite id."""
