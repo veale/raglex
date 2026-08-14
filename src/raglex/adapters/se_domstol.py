@@ -44,6 +44,26 @@ date would never see it. So a watch re-walks all 174 pages (a few seconds of req
 keeps what is new by ``publiceringstid``. That is the honest cost of a source with no
 usable publication-order cursor.
 
+## The paged list returns one publication per *group*, not every publication
+
+A case is published more than once: the court's own signed judgment
+(``publiceringsform: DOM_ELLER_BESLUT``, normally a PDF) and the edited report that
+enters the NJA/RÅ series (``REFERAT``, the HTML full text, carrying the report citation).
+Both are real publications with their own id and their own citable identity, and
+Domstolsverket ties them together with a ``gruppKorrelationsnummer``.
+
+**The paged list only ever returns one member of a group.** Walking all 174 pages returns
+17,321 publications, twice, deterministically — and 391 further publications exist that
+never appear on any page yet answer perfectly on ``/publiceringar/{id}``. Every one of
+them is the ``DOM_ELLER_BESLUT`` of a group whose ``REFERAT`` *is* listed: the court's own
+decision in *”Det filmade upploppet”* is unreachable by enumeration while the NJA report
+of the same case is on page 3. The facet counts at ``/sokforfiningar`` agree with the list
+rather than with reality, so nothing the service reports reveals the shortfall.
+
+So discovery expands each group it meets (``expand_groups``, on by default) and yields the
+siblings the list withheld. That costs one extra request per group on a backfill and a
+handful on a watch, and it is the only way to reach the judgments at all.
+
 ## No ECLI anywhere
 
 Sweden has not joined the ECLI cooperation. Identity is therefore the service's own record
@@ -92,6 +112,7 @@ from ..core.models import (
 )
 from ..extraction import ocr as _ocr
 from ..formats.domstol_html import parse_domstol_html
+from ..formats.se_dom_pdf import parse_se_judgment_pdf
 
 BASE = "https://rattspraxis.etjanst.domstol.se/api/v1"
 SITE = "https://rattspraxis.etjanst.domstol.se/sok"
@@ -119,6 +140,21 @@ _REPORT_RE = re.compile(
 _EU_ECLI_RE = re.compile(r"(?<![\w])ECLI:EU:[CT]:\d{4}:\d{1,4}(?![\w])")
 _EU_CASE_RE = re.compile(r"(?<![\w])(?P<kind>[CT])[-‑](?P<number>\d{1,4})/(?P<year>\d{2})"
                          r"(?![\w])")
+
+
+class _Walk:
+    """What one discovery run has already yielded.
+
+    Group expansion reaches the same publication from either member, and a målnummer
+    lookup can return both, so the walk has to remember ids as well as groups — otherwise
+    the corpus gets each judgment twice and the fetch cost doubles.
+    """
+
+    __slots__ = ("ids", "groups")
+
+    def __init__(self) -> None:
+        self.ids: set[str] = set()
+        self.groups: set[str] = set()
 
 
 def _clean(value) -> str:
@@ -171,6 +207,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
         case_number: str | None = None,
         ids: str | list[str] | None = None,
         include_documents: bool | str | None = None,
+        expand_groups: bool | str | None = None,
         page_size: int | str | None = None,
         start_page: int | str | None = None,
         client: RateLimitedClient | None = None,
@@ -183,6 +220,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
             ids = [i.strip() for i in ids.split(",") if i.strip()]
         self.ids = list(ids or [])
         self.include_documents = option_flag(include_documents, True)
+        self.expand_groups = option_flag(expand_groups, True)
         self.page_size = max(1, min(_PAGE_SIZE, option_int(page_size, _PAGE_SIZE)))
         self.start_page = max(0, option_int(start_page, 0))
         self._client = client or RateLimitedClient(
@@ -206,6 +244,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
         cutoff = _clean(since)[:19] if since else None
         page = self.start_page
         seen = 0
+        state = _Walk()
         while True:
             rows = self._list({**params, "page": page})
             if not rows:
@@ -219,9 +258,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
                 if cutoff and published and published <= cutoff:
                     seen += 1
                     continue
-                stub = self._stub(row, offset=seen)
-                if stub is not None:
-                    yield stub
+                yield from self._emit(row, state, offset=seen)
                 seen += 1
             if len(rows) < self.page_size:
                 return
@@ -230,6 +267,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
                 return
 
     def _discover_ids(self) -> Iterator[Stub]:
+        state = _Walk()
         for ident in self.ids:
             ident = ident.strip()
             if not ident:
@@ -237,15 +275,47 @@ class SwedishCaseLawAdapter(BaseAdapter):
             if re.fullmatch(r"[0-9a-f-]{36}", ident, re.IGNORECASE):
                 row = self._get(f"{BASE}/publiceringar/{ident}")
                 if row:
-                    stub = self._stub(row)
-                    if stub is not None:
-                        yield stub
+                    yield from self._emit(row, state)
                 continue
             for row in self._list({"malnummer": ident, "pagesize": self.page_size,
                                    "page": 0}):
-                stub = self._stub(row)
-                if stub is not None:
-                    yield stub
+                yield from self._emit(row, state)
+
+    def _emit(self, row: dict, state: "_Walk", *, offset: int | None = None) -> Iterator[Stub]:
+        """One listed publication, plus the group siblings the list withheld."""
+        record_id = _clean(row.get("id"))
+        if record_id and record_id not in state.ids:
+            state.ids.add(record_id)
+            stub = self._stub(row, offset=offset)
+            if stub is not None:
+                yield stub
+        if self.expand_groups:
+            yield from self._siblings(row, state)
+
+    def _siblings(self, row: dict, state: "_Walk") -> Iterator[Stub]:
+        """The rest of this publication's group — the members enumeration cannot reach.
+
+        The group payload is the full DTO for every member, so a sibling discovered here
+        needs no detail call: it is carried on the stub exactly as a listed row is.
+        """
+        group = _clean(row.get("gruppKorrelationsnummer"))
+        if not group or group in state.groups:
+            return
+        state.groups.add(group)
+        for member in _listify(self._get(f"{BASE}/publiceringar/grupp/{quote(group, safe='')}")):
+            if not isinstance(member, dict):
+                continue
+            ident = _clean(member.get("id"))
+            if not ident or ident in state.ids:
+                continue
+            state.ids.add(ident)
+            stub = self._stub(member)
+            if stub is not None:
+                # The group route serves the full DTO, so an empty ``innehall`` here means
+                # "this publication is a PDF", not "the list abridged it". Saying so keeps
+                # fetch from spending a detail call to be told the same thing.
+                stub.hints["complete"] = True
+                yield stub
 
     def _stub(self, row: dict, *, offset: int | None = None) -> Stub | None:
         record_id = _clean(row.get("id"))
@@ -271,7 +341,7 @@ class SwedishCaseLawAdapter(BaseAdapter):
         # The list payload already carries every field the single-record route returns,
         # so the detail call is only worth making when the list omitted the body — which
         # it does for the records that have one.
-        if not _clean(row.get("innehall")) and record_id:
+        if not _clean(row.get("innehall")) and record_id and not stub.hints.get("complete"):
             detail = self._get(f"{BASE}/publiceringar/{record_id}")
             if detail:
                 row.update(detail)
@@ -286,6 +356,14 @@ class SwedishCaseLawAdapter(BaseAdapter):
             if raw:
                 text, needs_ocr, _spans, _engine = _ocr.text_or_ocr(raw)
                 ext = "pdf"
+                # Every judgment reached by expanding a group is a PDF, and read as
+                # extracted it opens with the court's switchboard number. The parser
+                # gives it the same two-level outline the HTML referat of the same case
+                # gets, so both renditions read alike.
+                if pdf := parse_se_judgment_pdf(text):
+                    text = pdf.text or text
+                    segments = list(pdf.segments)
+                    parsed = parsed or pdf
         if not (text or "").strip():
             # A referat with no full text is still a real publication: the summary, the
             # statutory citations and the cited authorities are the whole point of the
@@ -429,6 +507,12 @@ def _aliases(marks: list[str], reports: list[str], row: dict) -> list[str]:
     for mark in marks:
         out.append(f"se:mal:{mark}")
     if group := _clean(row.get("gruppKorrelationsnummer")):
+        # Both members of a group carry this key and the alias table is first-writer-wins,
+        # so it lands on whichever is harvested first. Discovery yields the listed member
+        # before the siblings it expands, and the member the list keeps is always the
+        # REFERAT — the one with the NJA/RÅ citation and the full text, which is what a
+        # reference to the group should resolve to. A judgment with no report sibling is
+        # its group's only member and claims the key itself.
         out.append(f"se:grupp:{group}")
     return [a for a in dict.fromkeys(out) if a]
 

@@ -56,6 +56,7 @@ from .at_ris import APPLICATIONS as RIS_APPLICATIONS, AustrianRISAdapter
 from .sk_ress import SlovakRESSAdapter
 from .fi_finlex import SERIES as FINLEX_SERIES, FinlexAdapter
 from .se_domstol import SwedishCaseLawAdapter
+from .se_domstol_bulk import SwedishCaseLawBulkAdapter
 from .ee_lahend import EstonianLahendAdapter
 from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
@@ -457,6 +458,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     **{key: (lambda series: lambda **kw: FinlexAdapter(series=series, **kw))(key)
        for key in FINLEX_SERIES},
     "se-domstol": SwedishCaseLawAdapter,
+    "se-domstol-bulk": SwedishCaseLawBulkAdapter,
     "ee-lahend": EstonianLahendAdapter,
     # France bulk seed (no auth): the DILA OPENDATA archives read from local disk. One
     # adapter across funds; the PISTE/Conseil-d'État live adapters handle increments.
@@ -2488,6 +2490,37 @@ SOURCE_INFO: dict[str, SourceInfo] = {
                       "ECLI:FI:KKO:2024:1, S2022/290, 2024/1")),
         ("authority/year/number",),
     ),
+    "se-domstol-bulk": SourceInfo(
+        "se-domstol-bulk", "Sweden — withdrawn case law (archived Sök rättspraxis)",
+        "caselaw", "SE", False,
+        "The publications Domstolsverket has taken down. Read from a local parquet "
+        "snapshot of its own REST service (nexoneAB/swedish-legal-decisions-raw-v1, "
+        "17,228 publications; the README's 55,096 counts the same records rendered three "
+        "ways and written twice each). This is not a faster route to the corpus — "
+        "`se-domstol` reads the publisher's HTML and PDF and its text was comparable or "
+        "longer in every record of a 400-record comparison, never shorter — so `mode` "
+        "defaults to `withdrawn`: walk the live service and import only what it can no "
+        "longer supply. That is 41 publications, 40 of them prövningstillstånd notices "
+        "from Högsta domstolen and Högsta förvaltningsdomstolen granted between October "
+        "2024 and March 2026. A leave-to-appeal notice states the question the court "
+        "agreed to hear and is taken down once the court has answered it, so it is "
+        "evidence that stops existing exactly when it becomes citable. (The other 391 "
+        "unlisted ids are judgments the paged list merely hides; `se-domstol` reaches "
+        "those by expanding the publication group, and they are not imported here.) "
+        "Deciding what is withdrawn costs about 600 requests, not 17,228: the paged list "
+        "settles the rest in 174. If the service is unreachable, `withdrawn` mode raises "
+        "rather than importing everything — a network failure and a withdrawal must not "
+        "produce the same import. `mode=all` is for a cold start with no network and "
+        "should not be run against a corpus already harvested live.",
+        (SourceOption("path", "Local corpus directory", "/data/corpora/se"),
+         SourceOption("mode", "What to import",
+                      "withdrawn (default) — only what the live service no longer "
+                      "serves | all"),
+         SourceOption("verify_withdrawn", "Probe each unlisted id before importing",
+                      "true (default) — false trusts the paged list alone"),
+         SourceOption("ids", "Publication UUIDs", "544e30bb-0378-4499-b442-f8268ade966f")),
+        ("record UUID", "målnummer (T 2067-25)"),
+    ),
     "se-domstol": SourceInfo(
         "se-domstol", "Sweden — superior courts (Sök rättspraxis)", "caselaw", "SE", True,
         "Domstolsverket's own case-law service: 17,321 publications from the "
@@ -2514,6 +2547,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
                       "DOM_ELLER_BESLUT | REFERAT | NOTIS"),
          SourceOption("case_number", "Målnummer", "e.g. Ö 4337-25"),
          SourceOption("include_documents", "Download the PDF", "true/false"),
+         SourceOption("expand_groups", "Also fetch the group members the list hides",
+                      "true (default) — reaches 391 judgments no page returns"),
          SourceOption("start_page", "Resume at page", "0-based"),
          SourceOption("ids", "Record UUIDs or målnummer", "Ö 4337-25")),
         ("NJA 2020 s. 123", "målnummer (Ö 4337-25)", "record UUID"),
@@ -2725,6 +2760,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     # paged result set, and publication lags the decision by up to twelve years — so the
     # watch walks all 174 pages and filters on publiceringstid itself.
     "se-domstol": "full-walk",
+    "se-domstol-bulk": "bulk",
     # Estonia: search_rulings filters on the DECISION date and publication lags it, so a
     # watch re-walks a trailing window rather than cutting at the cursor.
     "ee-lahend": "server",
