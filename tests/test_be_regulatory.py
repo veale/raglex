@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import date
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ from raglex.adapters.be_regulatory import (
     bipt_total,
     classify_bipt_court,
     market_court_stubs,
+    _publication_pdf,
 )
 from raglex.adapters.registry import ADAPTERS, INCREMENTAL_MODE, SOURCE_INFO
 from raglex.core.models import DocType, Stub
@@ -110,6 +113,14 @@ def test_judgments_force_bilingual_ocr_but_decisions_do_not(monkeypatch):
     assert calls == ["forced", "normal"]
     assert judgment and judgment.doc_type == DocType.JUDGMENT
     assert decision and decision.doc_type == DocType.DECISION
+
+
+def test_bipt_zip_selects_principal_decision_not_annex():
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("Annexe_2A_large-specification.pdf", b"%PDF annex" + b"x" * 1000)
+        archive.writestr("2026-03-10_Decision-obligation-ferroviaire.pdf", b"%PDF decision")
+    assert _publication_pdf(output.getvalue(), language="fr") == b"%PDF decision"
 
 
 def test_every_resumable_constructor_accepts_a_cursor():

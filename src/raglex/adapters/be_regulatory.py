@@ -13,8 +13,10 @@ their born-digital text and use the normal OCR fallback only when it is actually
 
 from __future__ import annotations
 
+import io
 import re
 import unicodedata
+import zipfile
 from datetime import date
 from typing import Iterator
 from urllib.parse import urljoin, urlsplit
@@ -220,6 +222,39 @@ def _forced_bilingual_ocr(blob: bytes) -> tuple[str, bool, list, str]:
     return fallback, True if fallback else needs, spans, engine
 
 
+def _publication_pdf(blob: bytes, *, language: str | None = None) -> bytes | None:
+    """Return a PDF, including the principal decision from BIPT ZIP bundles.
+
+    BIPT occasionally advertises one language-specific ZIP instead of a PDF.  Those
+    bundles mix the actual decision with technical annexes, so blindly choosing the
+    largest member can archive a modem specification instead of the legal instrument.
+    Prefer decision-named, non-annex PDFs and use size only as the final tie-breaker.
+    """
+    if blob.startswith(b"%PDF"):
+        return blob
+    if not blob.startswith(b"PK"):
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            candidates = []
+            for info in archive.infolist():
+                name = info.filename.casefold()
+                if info.is_dir() or not name.endswith(".pdf") or info.file_size <= 0:
+                    continue
+                principal = bool(re.search(r"(?:^|[-_ ])(?:decision|d[eé]cision|besluit)(?:[-_ .]|$)", name))
+                annex = bool(re.search(r"(?:^|[/ _-])(?:annex|annexe|bijlage)[ _-]?\d*", name))
+                language_match = ((language == "fr" and any(x in name for x in ("decision", "décision")))
+                                  or (language == "nl" and "besluit" in name))
+                candidates.append(((principal, language_match, not annex, info.file_size), info))
+            if not candidates:
+                return None
+            _score, chosen = max(candidates, key=lambda item: item[0])
+            payload = archive.read(chosen)
+            return payload if payload.startswith(b"%PDF") else None
+    except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
+        return None
+
+
 class GBAMarketCourtAdapter(BaseAdapter):
     source = "be-market-court-gba"
     min_interval = 1.5
@@ -368,8 +403,9 @@ class BIPTPublicationsAdapter(BaseAdapter):
                 facet_pages += 1
 
     def fetch(self, stub: Stub) -> Record | None:
-        blob = self._client.get(stub.raw_url).content
-        if not blob.startswith(b"%PDF"):
+        payload = self._client.get(stub.raw_url).content
+        blob = _publication_pdf(payload, language=str(stub.hints.get("language") or ""))
+        if blob is None:
             raise FetchError(f"{self.source}: advertised publication was not a PDF")
         if self.kind == "judgments":
             text, needs, spans, engine = _forced_bilingual_ocr(blob)
