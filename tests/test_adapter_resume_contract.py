@@ -120,3 +120,64 @@ def test_a_finnish_resume_cursor_counts_the_whole_feed_not_one_year():
     walk = walk[:walk.index("\n    def ", 1)]
     assert re.search(r"offset=self\._emitted", walk), (
         "fi_finlex must checkpoint a feed-wide offset, not the per-year one")
+
+
+# ── the cursor has to measure what was WALKED, not what was yielded ──────────
+class _FakeRulings:
+    """lahend.ee's JSON-RPC search, with a fixed number of rulings per month."""
+
+    def __init__(self, per_month: int = 40):
+        self.per_month = per_month
+        self.calls = 0
+
+    def __call__(self, method, arguments):
+        self.calls += 1
+        offset = int(arguments.get("offset") or 0)
+        limit = int(arguments.get("limit") or 20)
+        remaining = max(0, self.per_month - offset)
+        n = min(limit, remaining)
+        month = str(arguments.get("date_from"))[:7]
+        return {"total": self.per_month,
+                "rulings": [{"id": f"ruling:{month}-{offset + i}",
+                             "caseNo": f"2-{offset + i}-1/{month[:4]}",
+                             "court": "Riigikohus", "date": f"{month}-01"}
+                            for i in range(n)]}
+
+
+def test_a_resumed_estonian_walk_still_yields_something():
+    """The bug this exists for: measuring the cursor against *yields* rather than
+    against rows walked. Nothing below the checkpoint is yielded, so the counter never
+    advances, so nothing is ever above the checkpoint — the resumed backfill walks the
+    whole register and emits zero. It reports success, having harvested nothing.
+    """
+    from raglex.adapters.ee_lahend import EstonianLahendAdapter
+
+    fake = _FakeRulings(per_month=40)
+    adapter = EstonianLahendAdapter(start_date="2024-01-01", end_date="2024-12-31",
+                                    start_offset=200)
+    adapter._call = fake
+
+    stubs = list(adapter.discover(None))
+    assert stubs, "a resumed walk yielded nothing at all"
+    # 12 months x 40 = 480 rulings; resume_floor backs 200 off by one page.
+    assert len(stubs) < 480, "the cursor was ignored — everything was re-emitted"
+    assert len(stubs) >= 280, f"the cursor skipped too far ({len(stubs)} of 480)"
+
+
+def test_an_unresumed_estonian_walk_yields_everything():
+    from raglex.adapters.ee_lahend import EstonianLahendAdapter
+
+    adapter = EstonianLahendAdapter(start_date="2024-01-01", end_date="2024-12-31")
+    adapter._call = _FakeRulings(per_month=40)
+    assert len(list(adapter.discover(None))) == 480
+
+
+def test_the_estonian_cursor_it_reports_is_the_one_it_accepts_back():
+    """A checkpoint is only useful if the number written is on the same scale as the
+    number read. Feed-wide out, feed-wide in."""
+    from raglex.adapters.ee_lahend import EstonianLahendAdapter
+
+    adapter = EstonianLahendAdapter(start_date="2024-01-01", end_date="2024-03-31")
+    adapter._call = _FakeRulings(per_month=40)
+    offsets = [s.hints["resume_offset"] for s in adapter.discover(None)]
+    assert offsets == list(range(120)), "the cursor restarted inside each month"

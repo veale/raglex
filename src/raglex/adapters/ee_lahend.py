@@ -163,6 +163,7 @@ class EstonianLahendAdapter(BaseAdapter):
         # ``core.adapter.resume_floor``. An adapter that reports ``resume_offset`` and
         # cannot take it back raises TypeError on resume, and the retry is filed as done.
         self.start_offset = resume_floor(option_int(start_offset, 0), _LIMIT)
+        self._seen = 0
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=120)
         self._rpc_id = 0
@@ -185,15 +186,21 @@ class EstonianLahendAdapter(BaseAdapter):
             start = _iso(self.start_date) or _EARLIEST
             end = _iso(self.end_date) or today
             windows = list(_months(start, end))
+        # ``_seen`` counts every ruling the walk passes; ``emitted`` counts the ones
+        # actually yielded. They are only the same on a fresh run. On a resume the
+        # cursor has to be measured against what was WALKED — counting yields would
+        # leave the offset at zero for the whole crawl, because nothing below the
+        # checkpoint is yielded, and a resumed run would then emit nothing at all.
+        self._seen = 0
         emitted = 0
         for lo, hi in windows:
-            for stub in self._walk(lo, hi, offset_base=emitted):
+            for stub in self._walk(lo, hi):
                 yield stub
                 emitted += 1
             if max_pages is not None and emitted >= max_pages * _LIMIT:
                 return
 
-    def _walk(self, lo: date, hi: date, *, offset_base: int) -> Iterator[Stub]:
+    def _walk(self, lo: date, hi: date) -> Iterator[Stub]:
         arguments: dict[str, object] = {
             "date_from": lo.isoformat(), "date_to": hi.isoformat(), "limit": _LIMIT}
         if self.query:
@@ -214,13 +221,14 @@ class EstonianLahendAdapter(BaseAdapter):
             if not rows:
                 return
             for row in rows:
-                stub = self._stub(row, feed_total=total, offset=offset_base + offset)
+                stub = self._stub(row, feed_total=total, offset=self._seen)
                 # Resuming: the listing still has to be walked — a month's size is not
                 # known until it is asked for, so pages cannot be skipped blind without
                 # risking an unbounded loop — but nothing below the checkpoint is
                 # fetched. The saving is the 50,000 documents, not the listing.
-                if stub is not None and offset_base + offset >= self.start_offset:
+                if stub is not None and self._seen >= self.start_offset:
                     yield stub
+                self._seen += 1
                 offset += 1
             if len(rows) < _LIMIT:
                 return
