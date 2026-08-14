@@ -62,6 +62,7 @@ def is_fetchable(adapter: str | None) -> bool:
 # case (the HUDOC adapter looks it up). Distinct from a CJEU number, which has a C-/T- prefix.
 ECHR_APPNO_RE = re.compile(r"^\d{1,5}/\d{2}$")  # app-number year is always 2 digits
 _ECHR_APPNO_RE = ECHR_APPNO_RE  # back-compat alias
+_ECHR_ITEMID_RE = re.compile(r"^001-\d+$")  # opaque but exact HUDOC document identifier
 # UK legislation slug prefixes (ukpga/1998/42, nisi/1981/1675, wsi/2016/413) —
 # distinct from neutral citations. legislation.gov.uk hosts ALL UK jurisdictions
 # (England/Wales/Scotland/NI), so every one of these is fetchable via uk-legislation.
@@ -166,6 +167,8 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
                            court, "fr-judilibre")
             return f"ECLI judgment (FR:{court})", country, adapter
         return f"ECLI judgment ({country})", country, _ECLI_ADAPTER.get(country)
+    if _ECHR_ITEMID_RE.match(candidate):
+        return "ECHR HUDOC item ID", "CoE", "echr"
     if _ECHR_APPNO_RE.match(candidate):
         return "ECHR application no.", "CoE", "echr"
     if candidate.lower() == "echr/convention":

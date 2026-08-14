@@ -449,6 +449,10 @@ class ECHRAdapter(BaseAdapter):
         except ValueError:
             dec_date = None
         ecli = stub.hints.get("ecli") or (stub.stable_id if stub.stable_id.startswith("ECLI:") else None)
+        itemids = [stub.hints.get("itemid"),
+                   *[alt.get("itemid") for alt in (stub.hints.get("alt") or [])]]
+        itemid_aliases = [alias for itemid in itemids if itemid
+                          for alias in (itemid, f"echr/{itemid}")]
         return Record(
             source=self.source,
             stable_id=stub.stable_id,
@@ -467,5 +471,8 @@ class ECHRAdapter(BaseAdapter):
             segments=segments,
             extracted_via=ExtractedVia.STRUCTURED,
             extra={**(stub.hints.get("meta") or {}), "itemid": stub.hints.get("itemid"),
-                   "appno": stub.hints.get("appno"), "format": "hudoc-html"},
+                   "appno": stub.hints.get("appno"), "format": "hudoc-html",
+                   # PACE committee PDFs link through HUDOC's opaque item IDs. Preserve
+                   # every language/rendition ID as an alias of this one ECLI-keyed case.
+                   "aliases": itemid_aliases},
         )

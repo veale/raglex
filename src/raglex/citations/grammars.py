@@ -877,6 +877,28 @@ register(Grammar(
     lambda m: ("echr/convention", f"Article {m.group('num')}", "treaty"),
 ))
 
+# The rest of the Council of Europe Treaty Series.  The Treaty Office itself uses both
+# forms after the 2004 rename, and legal writing commonly puts the pinpoint before the
+# reference: "Article 9 of CETS No. 108".  Number 005 is the ECHR and must land on the
+# long-established ``echr/convention`` node rather than fork it under the generic series.
+register(Grammar(
+    "coe_treaty_series", "treaty",
+    re.compile(
+        r"(?:\bArt(?:icle)?s?\.?\s+(?P<article>\d+[A-Za-z]?)"
+        r"(?:\s*\((?P<paragraph>\d+)\))?\s+(?:of\s+)?)?"
+        r"\b(?P<series>CETS|ETS)\s*(?:No\.?\s*)?(?P<number>\d{1,3}[A-Z]?)\b",
+        re.IGNORECASE,
+    ),
+    lambda m: (
+        "echr/convention" if m.group("number").upper().zfill(3) == "005"
+        else f"coe/treaty/{m.group('number').upper().zfill(3)}",
+        (f"Article {m.group('article')}"
+         + (f"({m.group('paragraph')})" if m.group("paragraph") else ""))
+        if m.group("article") else None,
+        "treaty",
+    ),
+))
+
 # EU primary law + the Charter, cited by name: "Article 4(2) TEU", "Article 267 of
 # the Treaty on the Functioning of the European Union", "Article 52(1) of the
 # Charter of Fundamental Rights". These weren't recognised at all, so the reference

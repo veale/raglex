@@ -36,6 +36,12 @@ from .hk_legislation import HKLegislationAdapter
 from .nz_legislation import NZLegislationAdapter
 from .sg_legislation import SGLegislationAdapter
 from .echr import ECHRAdapter
+from .council_of_europe import (
+    CouncilOfEuropeEdocAdapter,
+    CouncilOfEuropeTreatiesAdapter,
+    ECHRPublicationsAdapter,
+    PACECommitteeDocumentsAdapter,
+)
 from .edpb import EDPBAdapter
 from .eu_cellar import EUCellarAdapter
 from .eu_curia_observations import EUCuriaObservationsAdapter
@@ -234,6 +240,16 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "eu-curia-observations": EUCuriaObservationsAdapter,
     # ECHR — HUDOC; resolves by ECLI (ECLI:CE:ECHR:…) OR application number (58170/13).
     "echr": ECHRAdapter,
+    # Council of Europe material lives in three unrelated publishing systems.  Edoc has
+    # a cheap newest-first watch and a separate exhaustive category walk; both use the
+    # printed publication reference as identity, so their overlap is one document.
+    "coe-edoc": CouncilOfEuropeEdocAdapter,
+    "coe-edoc-catalog": lambda **kw: CouncilOfEuropeEdocAdapter(catalog=True, **kw),
+    "echr-factsheets": ECHRPublicationsAdapter,
+    "echr-joint-publications": lambda **kw: ECHRPublicationsAdapter(
+        collection="joint-publications", **kw),
+    "coe-treaties": CouncilOfEuropeTreatiesAdapter,
+    "coe-pace-committees": PACECommitteeDocumentsAdapter,
     # House of Lords (1996–2009) — scraped from publications.parliament.uk. Resolves
     # "[YYYY] UKHL N" and gives pre-2001 report-only cases a home (§5a).
     "uk-hol": HouseOfLordsAdapter,
@@ -1055,6 +1071,71 @@ SOURCE_INFO: dict[str, SourceInfo] = {
                       "GRANDCHAMBER,CHAMBER (default); add COMMITTEE or DECISIONS"),
          SourceOption("query", "Extra HUDOC query clause", 'e.g. article="8"')),
         ("ECLI:CE:ECHR:…", "application no. 58170/13"),
+    ),
+    "coe-edoc": SourceInfo(
+        "coe-edoc", "Council of Europe Publishing — new items", "guidance", "CoE", False,
+        "Monthly keep-current feed for new English-site Edoc publications. Product cards "
+        "are keyed by the Council of Europe reference (for example 043126GBR), then the "
+        "official PDF and its author, subject, language, format, summary and contents are "
+        "stored. Use the catalogue source for the exhaustive historical backfill.",
+        (SourceOption("references", "Publication references", "043126GBR, 057320GBR"),),
+        ("Council of Europe publication reference (043126GBR)",),
+    ),
+    "coe-edoc-catalog": SourceInfo(
+        "coe-edoc-catalog", "Council of Europe Publishing — full catalogue", "guidance",
+        "CoE", False,
+        "Exhaustive backfill over every parent and child category in Edoc's English-site "
+        "catalogue (Bioethics, Internet, Media and all other branches). Each category is "
+        "paged sequentially and overlapping cards are deduplicated by publication "
+        "reference before any detail page or PDF is fetched.",
+        (SourceOption("references", "Publication references", "043126GBR"),
+         SourceOption("max_category_pages", "Maximum pages per category", "500")),
+        ("Council of Europe publication reference (043126GBR)",),
+    ),
+    "echr-factsheets": SourceInfo(
+        "echr-factsheets", "ECHR thematic factsheets", "guidance", "CoE", False,
+        "The English PDF for every thematic ECtHR case-law factsheet. The small index is "
+        "walked in full and duplicate links across topic headings are collapsed. Because "
+        "factsheets are revised in place without a change feed, a monthly watch rechecks "
+        "their PDFs; the shared citation stage extracts ECtHR application numbers and "
+        "ECLI:CE:ECHR / ECLI:EU case identifiers from their text.",
+        (SourceOption("documents", "PDF document slugs", "FS_Children_ENG"),),
+        ("ECHR document slug (FS_Children_ENG)",),
+    ),
+    "echr-joint-publications": SourceInfo(
+        "echr-joint-publications", "ECHR and FRA joint publications", "guidance", "CoE",
+        False,
+        "English editions of the ECHR/FRA handbooks on European law. A monthly full walk "
+        "detects replacements at stable PDF URLs, while RagLex's citation stage extracts "
+        "EU and ECtHR case law, ECLIs, application numbers and legislation references.",
+        (SourceOption("documents", "PDF document slugs", "Handbook_access_justice_ENG"),),
+        ("ECHR document slug (Handbook_access_justice_ENG)",),
+    ),
+    "coe-treaties": SourceInfo(
+        "coe-treaties", "Council of Europe Treaty Series", "legislation", "CoE", False,
+        "The complete Treaty Office register and each treaty's English official PDF, from "
+        "the oldest ETS instruments through current CETS instruments. Treaty text is "
+        "segmented into citable Articles and numbered paragraphs, and official/short "
+        "titles from the Treaty Office metadata are registered as aliases. ETS No. 005 "
+        "is stored at echr/convention, the identifier already used by RagLex's ECHR "
+        "grammar.",
+        (SourceOption("numbers", "ETS/CETS numbers", "005,108,225"),),
+        ("ETS or CETS number (005, 108, 225)",),
+    ),
+    "coe-pace-committees": SourceInfo(
+        "coe-pace-committees", "PACE committee documents and declarations",
+        "preparatory", "CoE", False,
+        "English PDF documents and declarations from the seven PACE committee archives: "
+        "Legal Affairs, Political Affairs, Rules, Monitoring, Equality, Culture and "
+        "Migration. The full indexes are watched monthly and overlapping documents are "
+        "deduplicated by their printed AS committee reference. PDF hyperlink annotations "
+        "to HUDOC are retained as case-law relations and resolved through HUDOC item IDs, "
+        "even when the linked words contain only a party name.",
+        (SourceOption("committees", "PACE committee route codes",
+                      "asjur,aspol,aspro,asmon,asega,ascult,asmig"),
+         SourceOption("references", "Committee document references",
+                      "AS/Jur (2026) 01")),
+        ("PACE committee reference (AS/Jur (2026) 01)",),
     ),
     "uk-legislation": SourceInfo(
         "uk-legislation", "UK legislation (legislation.gov.uk)", "legislation", "GB", True,
@@ -2924,6 +3005,13 @@ INCREMENTAL_MODE: dict[str, str] = {
     "ie-dpc-guidance": "full-walk",
     # HUDOC's own feed is newest-first by kpdate, so the crawl breaks at the cursor.
     "echr": "early-stop",
+    # Edoc's new-products view has a product-id cursor; the exhaustive sibling walks
+    # every overlapping category. ECtHR publications are revised in place at stable URLs,
+    # so their small indexes and PDFs must be rechecked in full. Treaty texts are immutable
+    # once opened, but the rendered register must be walked to discover new numbers.
+    "coe-edoc": "early-stop", "coe-edoc-catalog": "full-walk",
+    "echr-factsheets": "full-walk", "echr-joint-publications": "full-walk",
+    "coe-treaties": "full-walk", "coe-pace-committees": "full-walk",
     # targeted-only — no keep-current crawl (the audit's live-update GAPS)
     "au-nsw": "targeted",
     # bulk / local-file seeds (no live path)
