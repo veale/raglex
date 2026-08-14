@@ -290,7 +290,17 @@ class BrowserBytesFetcher:
             page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             deadline = time.monotonic() + self.timeout_ms / 1000
             while True:
-                html = page.content()
+                try:
+                    html = page.content()
+                except Exception:  # noqa: BLE001
+                    # Cloudflare replaces its challenge document by navigation. During
+                    # that hand-off Playwright briefly reports "execution context was
+                    # destroyed"; it is progress, not a failed fetch. Keep the retry
+                    # bounded by the same page deadline.
+                    if time.monotonic() >= deadline:
+                        raise
+                    page.wait_for_timeout(500)
+                    continue
                 if not _is_browser_challenge(html) or time.monotonic() >= deadline:
                     return html
                 # A normal CF managed challenge takes roughly 5–10 seconds. This loop is

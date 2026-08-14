@@ -37,6 +37,20 @@ class _Browser:
         return self.page
 
 
+class _RedirectingPage(_Page):
+    def __init__(self):
+        super().__init__()
+        self.reads = 0
+
+    def content(self):
+        self.reads += 1
+        if self.reads == 1:
+            return CHALLENGE
+        if self.reads == 2:
+            raise RuntimeError("Execution context was destroyed, most likely because of a navigation")
+        return REAL
+
+
 def test_browser_html_waits_for_cloudflare_to_replace_the_interstitial():
     page = _Page()
     fetcher = BrowserBytesFetcher(timeout_ms=10_000)
@@ -45,3 +59,11 @@ def test_browser_html_waits_for_cloudflare_to_replace_the_interstitial():
     assert not _is_browser_challenge(REAL)
     assert fetcher._fetch_html("https://example.test") == REAL
     assert page.waits == 2
+
+
+def test_browser_html_tolerates_cloudflare_redirect_context_destruction():
+    page = _RedirectingPage()
+    fetcher = BrowserBytesFetcher(timeout_ms=10_000)
+    fetcher._ensure = lambda: _Browser(page)
+    assert fetcher._fetch_html("https://example.test") == REAL
+    assert page.reads == 3
