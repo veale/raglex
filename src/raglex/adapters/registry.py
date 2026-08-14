@@ -121,6 +121,12 @@ from .uk_isc import ISCReportsAdapter
 from .uk_ehrc import EHRCAdapter
 from .uk_ofgem import OfgemPublicationsAdapter
 from .uk_ofs import OfSPublicationsAdapter
+from .parliamentary_reports import (
+    AssembleeInformationReportsAdapter,
+    SenatComparativeLawAdapter,
+    SenatInformationReportsAdapter,
+    TweedeKamerReportsAdapter,
+)
 
 
 def _scrape_factory(recipe):
@@ -467,6 +473,10 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "fr-dila-jade": lambda **kw: FrDilaAdapter(fond="JADE", **kw),
     "fr-dila-constit": lambda **kw: FrDilaAdapter(fond="CONSTIT", **kw),
     "fr-dila-cnil": lambda **kw: FrDilaAdapter(fond="CNIL", **kw),
+    "fr-senat-reports": SenatInformationReportsAdapter,
+    "fr-senat-lc": SenatComparativeLawAdapter,
+    "fr-an-reports": AssembleeInformationReportsAdapter,
+    "nl-tk-reports": TweedeKamerReportsAdapter,
     # Scrape recipes (§5a) — regulator portals with no API.
     **{key: _scrape_factory(recipe) for key, recipe in RECIPES.items()},
 }
@@ -1838,6 +1848,45 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("since_date", "Stop a seed here", "2020-01-01")),
         ("Judilibre decision id",),
     ),
+    "fr-senat-reports": SourceInfo(
+        "fr-senat-reports", "Sénat — rapports d'information", "preparatory", "FR", False,
+        "French Senate information and control reports. Incremental runs use the Senate's "
+        "Atom feed; backfills walk every parliamentary session since 1958. Each notice is "
+        "followed to the complete one-page HTML report, with whole-report PDF fallback.",
+        (SourceOption("start_offset", "Resume listing offset", "0"),),
+        ("Sénat report number", "r25-883"),
+    ),
+    "fr-senat-lc": SourceInfo(
+        "fr-senat-lc", "Sénat — études de législation comparée", "preparatory", "FR", False,
+        "All comparative-law studies (LC) from the Senate's complete year accordions. The "
+        "collapsed sections are present in static markup; each notice is followed to the "
+        "complete HTML study or, where HTML is unavailable, the complete PDF.",
+        (SourceOption("start_offset", "Resume listing offset", "0"),),
+        ("LC study number", "LC 362"),
+    ),
+    "fr-an-reports": SourceInfo(
+        "fr-an-reports", "Assemblée nationale — rapports d'information", "preparatory",
+        "FR", False,
+        "Information reports from every separately queried legislature. Backfills do not "
+        "rely on the current-legislature default: they page legislatures 17 through 1 and "
+        "prefer the complete dyn/opendata HTML rendition, falling back to the report PDF.",
+        (SourceOption("legislatures", "Legislatures (comma-separated)", "17,16,15"),
+         SourceOption("start_offset", "Resume listing offset", "0"),
+         SourceOption("page_size", "Rows per listing page", "150")),
+        ("Assemblée report number", "RINFANR5L17B3074"),
+    ),
+    "nl-tk-reports": SourceInfo(
+        "nl-tk-reports", "Tweede Kamer — committee and research reports", "preparatory",
+        "NL", False,
+        "Committee/debate reports and standalone parliamentary, scientific and audit "
+        "reports from the public OData v4 service. Bills, votes and bill-stage reports are "
+        "excluded. OData's modification timestamp makes watches incremental; the full "
+        "authoritative DOCX resource is ingested because the public HTML page is metadata.",
+        (SourceOption("types", "Document types (comma-separated)", "Rapport,Jaarverslag"),
+         SourceOption("start_offset", "Resume OData offset", "0"),
+         SourceOption("page_size", "OData page size", "250")),
+        ("Tweede Kamer document number", "2026D38058"),
+    ),
     "fr-conseil-etat": SourceInfo(
         "fr-conseil-etat", "France — administrative order (Conseil d'État)", "caselaw",
         "FR", False,
@@ -2768,6 +2817,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "us-caselaw": "server", "nl-rechtspraak": "server", "nl-legislation": "server",
     "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server", "fr-judilibre-ca": "server",
     "de-bt-drucksachen": "server",
+    "nl-tk-reports": "server",
     "fr-judilibre-tj": "server",
     "fr-conseil-etat": "server", "fr-legislation": "server", "fr-cnil": "server",
     "fr-constit": "server", "ca-canlii": "server", "au-cth": "server",
@@ -2821,6 +2871,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "be-gba-decisions": "early-stop",
     # both filter server-side on a date and sort newest-first
     "uk-parl-committees": "server", "uk-parl-written-questions": "server",
+    "fr-senat-reports": "early-stop", "fr-senat-lc": "full-walk",
+    "fr-an-reports": "early-stop",
     # Both Library feeds are ordered newest-first by post date, so an incremental run
     # stops within a page or two. It is early-stop rather than server-side: the feed
     # takes no date parameter, only ?paged=N.
