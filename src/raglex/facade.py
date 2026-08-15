@@ -5347,6 +5347,13 @@ class Facade:
             de_name = _de_court_name(code)
             if de_name:
                 return de_name
+        # A full natural-language body name is already a label, not a neutral-citation
+        # code.  Feeding it to the generic code classifier can match its initials to an
+        # unrelated Commonwealth jurisdiction: both Slovak supreme courts became
+        # "Namibian court", and the Finnish KHO became "Kenyan court".  Codes do not
+        # contain spaces; preserve names that do before trying the code registry.
+        if _re.search(r"\s", (code or "").strip()):
+            return (code or "").strip()
         # bracketless-citation jurisdictions (Canada, US) vs bracketed (AU, NZ, UK)
         src = (source or "").lower()
         hint = False if src.startswith(("ca-", "ca/")) else True if src.startswith(
@@ -5394,10 +5401,83 @@ class Facade:
         "BGH": "Bundesgerichtshof (Federal Court of Justice)",
         "BFH": "Bundesfinanzhof (Federal Fiscal Court)",
         "BAG": "Bundesarbeitsgericht (Federal Labour Court)",
-        "BVerwG": "Bundesverwaltungsgericht (Federal Administrative Court)",
+        "BVERWG": "Bundesverwaltungsgericht (Federal Administrative Court)",
         "BSG": "Bundessozialgericht (Federal Social Court)",
-        "BVerfG": "Bundesverfassungsgericht (Federal Constitutional Court)",
+        "BVERFG": "Bundesverfassungsgericht (Federal Constitutional Court)",
+        "BUNDESGERICHTSHOF": "Bundesgerichtshof (Federal Court of Justice)",
+        "BUNDESFINANZHOF": "Bundesfinanzhof (Federal Fiscal Court)",
+        "BUNDESPATENTGERICHT": "Bundespatentgericht (Federal Patent Court)",
+        "KAMMERGERICHT": "Kammergericht (Higher Regional Court of Berlin)",
         "BE-MARKET-COURT": "Marktenhof / Cour des marchés",
+        "BE-BRUSSELS-COURT-OF-APPEAL": "Court of Appeal of Brussels",
+        "BE-BRUSSELS-FIRST-INSTANCE": "Court of First Instance of Brussels",
+        "BE-CASSATION": "Court of Cassation (Belgium)",
+        "BIPT": "Belgian Institute for Postal Services and Telecommunications (BIPT)",
+        "OFGEM": "Office of Gas and Electricity Markets (Ofgem)",
+        "OFCOM": "Office of Communications (Ofcom)",
+        "ICO": "Information Commissioner's Office (ICO)",
+        "CJEU": "Court of Justice of the European Union",
+        "EUBOA": "Board of Appeal of the European Supervisory Authorities",
+        "MARKKINAOIKEUS": "Market Court of Finland",
+        "VAKUUTUSOIKEUS": "Insurance Court of Finland",
+        "VALTIONEUVOSTO": "Finnish Government",
+        "VESIYLIOIKEUS": "Water Court of Appeal (Finland, historical)",
+        "ARBETSDOMSTOLEN": "Labour Court of Sweden",
+        "MARKNADSDOMSTOLEN": "Market Court of Sweden (historical)",
+        "MISC": "Other courts and tribunals in the BAILII collection",
+        "CTH": "Australian Commonwealth courts (court unspecified)",
+        "NSW": "New South Wales courts (court unspecified)",
+        "NSWCATEN": "New South Wales Civil and Administrative Tribunal — Enforcement",
+        "OIREACHTAS": "Houses of the Oireachtas",
+        "PACE": "Parliamentary Assembly of the Council of Europe",
+        "GREVIO": "Group of Experts on Action against Violence against Women and Domestic Violence (GREVIO)",
+        "BEREC": "Body of European Regulators for Electronic Communications (BEREC)",
+        "EUIPO": "European Union Intellectual Property Office (EUIPO)",
+        "DMA": "European Commission — Digital Markets Act decisions",
+        "CDDH": "Steering Committee for Human Rights (CDDH)",
+        "CDMSI": "Steering Committee on Media and Information Society (CDMSI)",
+        "EDQM": "European Directorate for the Quality of Medicines & HealthCare (EDQM)",
+    }
+
+    # A few multi-country registers store the deciding national authority in ``court``.
+    # SourceInfo can only describe the register (EU), so the body is the authoritative
+    # jurisdiction discriminator.  The same table also repairs clearly foreign judgments
+    # accidentally imported through UK Find Case Law.
+    _BODY_JURISDICTIONS = {
+        "echr": "Council of Europe", "court-ecthr-europe": "Council of Europe",
+        "hca": "Australia", "cjeu": "European Union", "euboa": "European Union",
+        "financial services and markets authority (fsma)": "Belgium",
+        "hellenic capital market commission (hcmc)": "Greece",
+        "central bank of hungary": "Hungary",
+        "financial supervision commission (fsc)": "Bulgaria",
+        "commissione nazionale per le societa e la borsa (consob)": "Italy",
+        "comisión nacional del mercado de valores (cnmv)": "Spain",
+        "cyprus securities and exchange commission (cysec)": "Cyprus",
+        "romanian financial supervisory authority": "Romania",
+        "polish financial supervisory authority (knf)": "Poland",
+        "austrian financial market authority (fma)": "Austria",
+        "czech national bank (cnb)": "Czechia",
+        "netherlands authority for the financial markets (afm)": "Netherlands",
+        "autorité des marchés financiers (amf)": "France",
+        "hungarian financial supervisory authority (pszaf)": "Hungary",
+        "commission de surveillance du secteur financier (cssf)": "Luxembourg",
+        "federal financial supervisory authority (bafin)": "Germany",
+        "finanssivalvonta (fsa)": "Finland",
+        "central bank of ireland (cbi)": "Ireland",
+        "malta financial services authority (mfsa)": "Malta",
+        "national bank of slovakia (nbs)": "Slovakia",
+        "finansinspektionen (fi)": "Sweden",
+        "finanstilsynet": "Denmark",
+        "bank of lithuania (lsc)": "Lithuania",
+        "iceland financial supervisory authority (fme)": "Iceland",
+        "latvijas banka": "Latvia",
+        "norwegian financial supervisory authority": "Norway",
+        "finanzmarktaufsicht (fma)": "Liechtenstein",
+        "banca d'italia": "Italy",
+        "comissão do mercado de valores mobiliários (cmvm)": "Portugal",
+        "estonian financial supervision authority (efsa)": "Estonia",
+        "financial conduct authority (fca)": "United Kingdom",
+        "financial services authority (fsa)": "United Kingdom",
     }
 
     # National regulators' decisions (EDPB one-stop-shop, court = dpa-xx) belong to
@@ -5424,6 +5504,7 @@ class Facade:
     # "administrative decisions" filter, where a lawyer looking for them actually looks.
     _ADMIN_SOURCES = {
         "edpb-oss", "ofcom-enforcement", "ico", "uk-ico-enforcement", "ie-dpc",
+        "uk-ofgem-publications", "nl-rdi",
         # EU bodies: the Board itself (binding decisions + Art 64 opinions), the
         # Commission's competition/DMA registers, the sectoral appeal panels, the Ombudsman
         "edpb", "eu-dgcomp-antitrust", "dma-cases", "eu-esma-sanctions",
@@ -5435,7 +5516,15 @@ class Facade:
     # legislation, constitutional decisions *and* CNIL deliberations under one source
     # key.  CNIL is a regulator, not a court, so its decisions belong beside other DPA
     # administrative decisions even though DILA stores them with doc_type ``decision``.
-    _ADMIN_COURTS = {"cnil"}
+    _ADMIN_COURTS = {
+        "cnil", "bipt", "ofgem", "ofcom", "ico", "euboa",
+        "tietosuojavaltuutetun toimisto", "oikeuskanslerinvirasto",
+        "datenschutzkommission", "datenschutzbehörde",
+        "gleichbehandlungskommission", "bundes gleichbehandlungskommission",
+        "bundesvergabeamt", "bundes vergabekontrollkommission",
+        "vergabekontrollsenat wien", "vergabekontrollsenat salzburg",
+        "parlamentarisches datenschutzkomitee",
+    }
     # The only source whose PREPARATORY documents are legislative travaux (Commission
     # proposals, impact assessments) rather than reports. Everything else that files as
     # preparatory — a Law Commission report, a Scottish Law Commission paper — is a REPORT,
@@ -5455,7 +5544,11 @@ class Facade:
     # "Data protection authority · <country>". The `iedpc` court code (BAILII's
     # Irish DPC case studies) is canonicalised to `dpa-ie` at write time
     # (Catalogue._COURT_CANON), so this one label covers both intake paths.
-    _DPA_PROPER_NAME = {"ie": "Data Protection Commission (Ireland)"}
+    _DPA_PROPER_NAME = {
+        "ie": "Data Protection Commission (Ireland)",
+        "fi": "Office of the Data Protection Ombudsman (Finland)",
+        "at": "Austrian Data Protection Authority",
+    }
 
     # How a citation names the country whose law it means. Ireland and the United
     # Kingdom re-enacted each other's statute book under the same short titles — both
@@ -5535,7 +5628,11 @@ class Facade:
     def _doc_bucket(self, source: str, court: str | None) -> str:
         c = (court or "").lower()
         if c.startswith(("dpa-", "court-")):
+            if c in self._BODY_JURISDICTIONS:
+                return self._BODY_JURISDICTIONS[c]
             return self._DPA_COUNTRY.get(c.split("-", 1)[1], "European Union")
+        if c in self._BODY_JURISDICTIONS:
+            return self._BODY_JURISDICTIONS[c]
         return self._jurisdiction_of(source)
 
     @staticmethod

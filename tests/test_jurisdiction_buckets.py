@@ -98,3 +98,31 @@ def test_the_registry_mapping_covers_the_whole_catalogue():
                 if i.jurisdiction and i.jurisdiction in registry.JURISDICTION_LABELS
                 and registry.JURISDICTION_LABELS[i.jurisdiction] != "Other"}
     assert declared <= set(mapped)
+
+
+def test_full_slovak_names_are_not_reinterpreted_as_commonwealth_codes():
+    facade = Facade.__new__(Facade)
+    name = "Najvyšší správny súd Slovenskej republiky"
+    assert facade.court_label(name, "sk-ress") == name
+    assert "Namib" not in facade.court_label(name, "sk-ress")
+
+
+def test_body_name_registry_keys_match_uppercase_lookup():
+    facade = Facade.__new__(Facade)
+    assert facade.court_label("BVerwG", "de-rii") == (
+        "Bundesverwaltungsgericht (Federal Administrative Court)")
+    assert facade.court_label("BUNDESGERICHTSHOF", "de-rii") == (
+        "Bundesgerichtshof (Federal Court of Justice)")
+    assert facade.court_label("VESIYLIOIKEUS", "fi-hao") == (
+        "Water Court of Appeal (Finland, historical)")
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("National Bank of Slovakia (NBS)", "Slovakia"),
+    ("Bank of Lithuania (LSC)", "Lithuania"),
+    ("Austrian Financial Market Authority (FMA)", "Austria"),
+    ("hca", "Australia"),
+    ("echr", "Council of Europe"),
+])
+def test_multicountry_registers_follow_the_deciding_body(body, expected):
+    assert Facade.__new__(Facade)._doc_bucket("eu-esma-sanctions", body) == expected

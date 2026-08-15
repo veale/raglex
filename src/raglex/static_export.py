@@ -1442,6 +1442,79 @@ def _slim_payload_json(data_json: str) -> str:
         return data_json
 
 
+_PAGE_GROUP_CHUNK_SIZE = 400
+
+
+def _deferred_page_payloads(data_json: str) -> tuple[str, str]:
+    """Small immediately parsed payload plus idle/on-demand citing-document chunks.
+
+    A GDPR edition carries nearly 30,000 citing documents and about 115 MB of excerpts.
+    Parsing that monolith before replacing each provision's ``Loading…`` marker froze the
+    browser before the law became interactive.  The law, counts and three leading citers
+    per provision are now the small core. Full rows remain in this SAME HTML file, split
+    into bounded JSON blocks which JavaScript parses one at a time when idle; opening a
+    provision puts its blocks at the front of that queue.
+    """
+    try:
+        page = _slim_for_page(json.loads(data_json))
+    except Exception:  # noqa: BLE001 — correctness fallback for an unexpected cache
+        return _escape_for_script(data_json), ""
+    groups = list(page.pop("groups", []) or [])
+    index = page.get("index") or {}
+
+    # Provision headings need names immediately, but only the leading three. Everything
+    # else belongs to the dialog and can wait for its chunk. Preserve the existing index
+    # order (already authority-ranked) and count DOCUMENTS, as the prose does.
+    visible_keys = {str(section.get("key") or "")
+                    for section in ((page.get("law") or {}).get("sections") or [])}
+    annotations: dict[str, dict] = {}
+    for key in visible_keys:
+        leaders = []
+        direct_count = 0
+        for group_index in index.get(key) or []:
+            try:
+                group = groups[int(group_index)]
+            except (IndexError, TypeError, ValueError):
+                continue
+            total = int((group.get("mentions_by_key") or {}).get(key) or 0)
+            inherited = int((group.get("inherited_mentions_by_key") or {}).get(key) or 0)
+            if total <= inherited:
+                continue
+            direct_count += 1
+            if len(leaders) < 3:
+                leaders.append({k: group.get(k) for k in ("id", "cite", "title")})
+        if direct_count:
+            annotations[key] = {"direct": leaders, "direct_count": direct_count}
+    page["annotation_citers"] = annotations
+    page["groups"] = []
+
+    # Put anchored documents first in the byte stream. Whole-instrument-only rows are
+    # useful when somebody asks for All mentions, but they must not delay Article 5.
+    anchored: list[tuple[int, dict]] = []
+    general: list[tuple[int, dict]] = []
+    for group_index, group in enumerate(groups):
+        keys = set((group.get("mentions_by_key") or {}).keys()) - {"all", "whole"}
+        (anchored if keys else general).append((group_index, group))
+    ordered = anchored + general
+    chunks = [ordered[i:i + _PAGE_GROUP_CHUNK_SIZE]
+              for i in range(0, len(ordered), _PAGE_GROUP_CHUNK_SIZE)]
+    group_chunks = [0] * len(groups)
+    for chunk_index, chunk in enumerate(chunks):
+        for group_index, _group in chunk:
+            group_chunks[group_index] = chunk_index
+    page["group_chunks"] = group_chunks
+    page["chunk_count"] = len(chunks)
+    page["anchored_chunk_count"] = (
+        (len(anchored) + _PAGE_GROUP_CHUNK_SIZE - 1) // _PAGE_GROUP_CHUNK_SIZE)
+
+    chunk_html = "\n".join(
+        f'  <script id="raglex-chunk-{chunk_index}" type="application/json">'
+        f'{_json_for_script(chunk)}</script>'
+        for chunk_index, chunk in enumerate(chunks)
+    )
+    return _json_for_script(page), chunk_html
+
+
 def _json_dump(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
@@ -1689,6 +1762,7 @@ def render_static_page(
         parsed = json.loads(data_json)
     except (ValueError, TypeError):
         parsed = {}
+    core_json, chunk_html = _deferred_page_payloads(data_json)
     nav_html, law_html = _prerendered_law(parsed) if parsed else ("", "")
     lang = html.escape(
         str(((parsed.get("law") or {}).get("language")) or "en"), quote=True)
@@ -1704,7 +1778,8 @@ def render_static_page(
         "__ATTRIBUTION_BLOCK__": _attribution_block(note, parsed.get("subset")),
         "__STYLE__": _STYLE,
         "__SCRIPT__": _SCRIPT,
-        "__DATA__": _escape_for_script(_slim_payload_json(data_json)),
+        "__DATA__": core_json,
+        "__CHUNKS__": chunk_html,
     }
     for token, value in replacements.items():
         page = page.replace(token, value)
@@ -1790,6 +1865,10 @@ __SEO_HEAD__
         </select>
       </label>
     </div>
+    <div id="mentions-load" class="mentions-load" role="status" hidden>
+      <span id="mentions-load-label">Loading citation details…</span>
+      <progress id="mentions-load-progress" max="1" value="0"></progress>
+    </div>
     <div id="results"></div>
     <button id="more-results" class="more" type="button">+ show more</button>
   </dialog>
@@ -1818,8 +1897,12 @@ __SEO_HEAD__
     </div>
     <div id="compare-body" class="compare-body"></div>
   </dialog>
+  <!-- The small core runs before the large citation blocks: provision annotations become
+       interactive while the remainder of this single file is still arriving. -->
   <script id="raglex-data" type="application/json">__DATA__</script>
   <script>__SCRIPT__</script>
+__CHUNKS__
+  <script>window.dispatchEvent(new Event("raglex-chunks-ready"));</script>
 </body>
 </html>
 """
@@ -2094,6 +2177,17 @@ dialog::backdrop { background: rgba(24, 23, 20, .42); }
   padding: .3rem .4rem;
   font-size: 1rem;
 }
+.mentions-load {
+  padding: .9rem 0;
+  color: var(--quiet);
+}
+.mentions-load progress {
+  display: block;
+  width: min(28rem, 100%);
+  height: .75rem;
+  margin-top: .35rem;
+  accent-color: var(--ink);
+}
 .facet-tokens { display: flex; flex: 1 1 30rem; flex-wrap: wrap; gap: .35rem .5rem; }
 /* The same breakdown the provision heading offers, repeated inside the dialog: which
    law the citing document actually named. Sits above the ordinary facets because it
@@ -2275,6 +2369,82 @@ _SCRIPT = r"""
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
   const number = (n) => Number(n || 0).toLocaleString();
+  if (!Array.isArray(data.groups)) data.groups = [];
+
+  // Full citing-document rows live later in this same HTML file as bounded JSON chunks.
+  // The law and its annotations need none of them. Parse one chunk only during an idle
+  // period; a provision click temporarily takes priority and yields between chunks so the
+  // progress indicator paints and scrolling remains responsive.
+  const parsedChunks = new Set();
+  let chunksReadyResolve;
+  const chunksReady = new Promise((resolve) => { chunksReadyResolve = resolve; });
+  let foregroundLoads = 0;
+  const chunkCount = Number(data.chunk_count || 0);
+  if (!chunkCount) chunksReadyResolve();
+  window.addEventListener("raglex-chunks-ready", () => {
+    chunksReadyResolve();
+    window.setTimeout(scheduleBackgroundChunks, 1500);
+  }, { once: true });
+
+  function parseChunk(chunkIndex) {
+    if (parsedChunks.has(chunkIndex)) return;
+    const node = document.getElementById(`raglex-chunk-${chunkIndex}`);
+    if (!node) return;
+    const rows = JSON.parse(node.textContent || "[]");
+    for (const [groupIndex, group] of rows) data.groups[Number(groupIndex)] = group;
+    parsedChunks.add(chunkIndex);
+    // The parsed object is now authoritative. Releasing the enormous text node avoids
+    // retaining both representations for the rest of a long reading session.
+    node.textContent = "";
+  }
+
+  function nextBackgroundChunk() {
+    for (let i = 0; i < chunkCount; i += 1) {
+      if (!parsedChunks.has(i)) return i;
+    }
+    return null;
+  }
+
+  function scheduleBackgroundChunks() {
+    if (!chunkCount || foregroundLoads || nextBackgroundChunk() == null) return;
+    const run = (deadline) => {
+      if (foregroundLoads) { scheduleBackgroundChunks(); return; }
+      const next = nextBackgroundChunk();
+      if (next == null) return;
+      // Exactly one bounded parse per callback. Even a generous idle deadline should not
+      // turn into a 100 MB burst that competes with somebody reading the law.
+      if (!deadline || deadline.didTimeout || deadline.timeRemaining() > 3) parseChunk(next);
+      scheduleBackgroundChunks();
+    };
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(run, { timeout: 5000 });
+    } else {
+      window.setTimeout(() => run(null), 75);
+    }
+  }
+
+  async function ensureGroups(ids, progress) {
+    if (!chunkCount) return;
+    await chunksReady;
+    const wanted = [...new Set((ids || []).map(
+      (id) => Number((data.group_chunks || [])[Number(id)]))
+      .filter((id) => Number.isFinite(id) && !parsedChunks.has(id)))];
+    foregroundLoads += 1;
+    try {
+      let done = 0;
+      progress?.(done, wanted.length);
+      for (const chunkIndex of wanted) {
+        parseChunk(chunkIndex);
+        done += 1;
+        progress?.(done, wanted.length);
+        // Let the browser paint the bar and service input before the next JSON.parse.
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      }
+    } finally {
+      foregroundLoads -= 1;
+      scheduleBackgroundChunks();
+    }
+  }
 
   // The law and its contents list are ALSO rendered into the HTML server-side, so the
   // page is readable and indexable without JavaScript. Build the interactive copy away
@@ -2410,10 +2580,9 @@ _SCRIPT = r"""
   function mentionsLine(key, label) {
     const ids = data.index[key] || [];
     if (!ids.length) return null;
-    const groups = ids.map((id) => data.groups[id]).filter(Boolean);
-    const directOf = (g) => Number(g.mentions_by_key[key] || 0)
-      - Number(g.inherited_mentions_by_key[key] || 0);
-    const direct = groups.filter((g) => directOf(g) > 0);
+    const annotation = (data.annotation_citers || {})[key] || {};
+    const direct = annotation.direct || [];
+    const directCount = Number(annotation.direct_count || 0);
 
     const p = document.createElement("p");
     p.className = "mentions-line";
@@ -2449,10 +2618,10 @@ _SCRIPT = r"""
       add("Mentioned by ");
       const named = direct.slice(0, NAMED_CITERS);
       named.forEach((g, i) => {
-        if (i) add(i === named.length - 1 && direct.length <= NAMED_CITERS ? " and " : ", ");
+        if (i) add(i === named.length - 1 && directCount <= NAMED_CITERS ? " and " : ", ");
         cite(g);
       });
-      const rest = direct.length - named.length;
+      const rest = directCount - named.length;
       if (rest > 0) add(` and ${number(rest)} more`);
       add(". ");
       link("cite-link see-all", "See all mentions", "",
@@ -2464,7 +2633,7 @@ _SCRIPT = r"""
       const sentence = document.createElement("span");
       sentence.className = "via-line";
       sentence.appendChild(document.createTextNode(
-        direct.length ? " Also mentioned by " : "Mentioned by "));
+        directCount ? " Also mentioned by " : "Mentioned by "));
       const b = document.createElement("a");
       b.className = "cite-link";
       b.setAttribute("role", "link");
@@ -2553,8 +2722,12 @@ _SCRIPT = r"""
   const flagHtml = (jurisdiction) => data.flags[jurisdiction]
     ? `<img class="flag-icon" src="${data.flags[jurisdiction]}" alt="">` : "";
 
-  const state = { key: "all", label: "All mentions", limit: 40, facet: null, route: "all" };
-  function openMentions(key, label, route = "all", focusId = null) {
+  const state = {
+    key: "all", label: "All mentions", limit: 40, facet: null, route: "all",
+    loadToken: 0
+  };
+  async function openMentions(key, label, route = "all", focusId = null) {
+    const loadToken = ++state.loadToken;
     state.key = key;
     state.label = label;
     state.limit = 40;
@@ -2564,6 +2737,30 @@ _SCRIPT = r"""
     state.route = routeIsLive(key, route) ? route : "all";
     $("mentions-title").textContent = label;
     $("sort-filter").value = "authority";
+    $("route-tokens").innerHTML = "";
+    $("facet-tokens").innerHTML = "";
+    $("results").innerHTML = "";
+    $("more-results").hidden = true;
+    const loader = $("mentions-load");
+    const bar = $("mentions-load-progress");
+    loader.hidden = false;
+    if (!$("mentions-dialog").open) $("mentions-dialog").showModal();
+    try {
+      await ensureGroups(data.index[key] || [], (done, total) => {
+        bar.max = Math.max(1, total);
+        bar.value = done;
+        $("mentions-load-label").textContent = total
+          ? `Loading citation details — ${number(done)} of ${number(total)} blocks…`
+          : "Citation details ready.";
+      });
+    } catch (error) {
+      if (loadToken !== state.loadToken) return;
+      $("mentions-load-label").textContent = "Citation details could not be loaded.";
+      console.error(error);
+      return;
+    }
+    if (loadToken !== state.loadToken) return;
+    loader.hidden = true;
     // Following a name must land ON that document, not at the top of a list it happens
     // to be somewhere inside — so page far enough to include it before rendering.
     if (focusId) {
@@ -2572,7 +2769,6 @@ _SCRIPT = r"""
       if (at >= state.limit) state.limit = at + 20;
     }
     renderResults();
-    $("mentions-dialog").showModal();
     if (focusId) {
       const row = $("results").querySelector(`[data-doc="${CSS.escape(focusId)}"]`);
       if (row) {

@@ -534,6 +534,9 @@ h3 { font-size: 12pt; margin: .8rem 0 .15rem; font-style: italic; font-weight: n
 p { margin: .45rem 0; }
 ul { margin: .15rem 0 .7rem 1.35rem; padding: 0; }
 li { margin: .18rem 0; }
+details { margin: .18rem 0; }
+summary { cursor: pointer; }
+details > ul { margin-top: .35rem; }
 a { color: #0000ee; text-decoration: underline; }
 .back { margin-bottom: 1rem; }
   </style>
@@ -572,13 +575,68 @@ def _verbose_body_name(facade: Facade, court: str | None, source: str) -> str:
     if not raw:
         return ""
     if raw.casefold().startswith("court-"):
-        return "Courts and tribunals (GDPRhub collection)"
+        key = raw.casefold()
+        code = key.split("-", 1)[1]
+        country = facade._BODY_JURISDICTIONS.get(key) or facade._DPA_COUNTRY.get(code)
+        return (f"{country} courts and tribunals (GDPRhub collection)" if country
+                else "Courts and tribunals (GDPRhub collection)")
     match = _FRENCH_ADMIN_RE.match(raw)
     if match:
         place = match.group(1).strip().lower().title()
         return f"Cour administrative d’appel de {place}"
     if _name_key(raw) == "conseil d'etat":
         return "Conseil d’État"
+    # RIS abbreviations are names, not user-facing labels.  Expand them here while the
+    # raw value is still available; the parent grouping below then collects each level.
+    austrian = (
+        (r"^OLG\s+(.+)$", "Oberlandesgericht {}"),
+        (r"^LG\s+(.+)$", "Landesgericht {}"),
+        (r"^BG\s+(.+)$", "Bezirksgericht {}"),
+    )
+    for pattern, template in austrian:
+        if m := re.match(pattern, raw, re.IGNORECASE):
+            return template.format(m.group(1).strip())
+    austrian_bodies = {
+        "datenschutzbehörde": "Austrian Data Protection Authority",
+        "datenschutzkommission": "Austrian Data Protection Commission (pre-2014)",
+        "gleichbehandlungskommission": "Equal Treatment Commission (Austria)",
+        "bundes gleichbehandlungskommission": "Federal Equal Treatment Commission (Austria)",
+        "bundesvergabeamt": "Federal Procurement Office (Austria, pre-2014)",
+        "bundes vergabekontrollkommission": "Federal Procurement Review Commission (Austria)",
+        "vergabekontrollsenat wien": "Vienna Procurement Review Senate",
+        "vergabekontrollsenat salzburg": "Salzburg Procurement Review Senate",
+        "parlamentarisches datenschutzkomitee": "Parliamentary Data Protection Committee (Austria)",
+    }
+    if raw.casefold() in austrian_bodies:
+        return austrian_bodies[raw.casefold()]
+    if "ausl" in raw.casefold():
+        upper = raw.upper().replace("_", " ")
+        reference_names = (
+            ("OGH", "Austrian Supreme Court"),
+            ("EGMR", "European Court of Human Rights"),
+            ("EGMRH", "European Court of Human Rights"),
+            ("EKMR", "European Commission of Human Rights"),
+            ("EUGH", "Court of Justice of the European Union"),
+            ("BAG", "German Federal Labour Court"),
+            ("BGH", "German Federal Court of Justice"),
+            ("RG", "German Reich Court"),
+        )
+        names = list(dict.fromkeys(name for token, name in reference_names
+                                   if re.search(rf"\b{token}\b", upper)))
+        if names:
+            return "Recorded court references: " + "; ".join(names)
+    finnish = {
+        "korkein hallinto-oikeus": "Supreme Administrative Court of Finland",
+        "korkein oikeus": "Supreme Court of Finland",
+        "markkinaoikeus": "Market Court of Finland",
+        "vakuutusoikeus": "Insurance Court of Finland",
+        "työtuomioistuin": "Labour Court of Finland",
+        "oikeuskanslerinvirasto": "Office of the Chancellor of Justice (Finland)",
+        "tietosuojavaltuutetun toimisto": "Office of the Data Protection Ombudsman (Finland)",
+        "valtioneuvosto": "Finnish Government",
+    }
+    if raw.casefold() in finnish:
+        return finnish[raw.casefold()]
     label = str(facade.court_label(raw, source) or "").strip()
     # A registry miss prettifies "nswcatod" as "Nswcatod". That is still a slug, and
     # publishing it would imply a name we do not know. Keep the rows separate but make
@@ -626,6 +684,161 @@ def _manual_source(source: str) -> bool:
             or value in {"user", "import"})
 
 
+def _coe_parent(label: str) -> str:
+    """Institutional Council of Europe author, never an individual report author."""
+    key = _name_key(label)
+    groups = (
+        (("committee of ministers", "comite des ministres"),
+         "Committee of Ministers"),
+        (("parliamentary assembly", "pace"),
+         "Parliamentary Assembly of the Council of Europe"),
+        (("cepej", "efficiency of justice", "efficacite de la justice"),
+         "European Commission for the Efficiency of Justice (CEPEJ)"),
+        (("greta", "trafficking in human beings", "traite des etres humains"),
+         "Group of Experts on Action against Trafficking in Human Beings (GRETA)"),
+        (("grevio", "violence against women", "violence a l'egard des femmes"),
+         "Group of Experts on Action against Violence against Women (GREVIO)"),
+        (("edqm", "quality of medicines", "qualite du medicament"),
+         "European Directorate for the Quality of Medicines & HealthCare (EDQM)"),
+        (("venice commission", "democracy through law"),
+         "Venice Commission"),
+        (("ecri", "racism and intolerance"),
+         "European Commission against Racism and Intolerance (ECRI)"),
+        (("prevention of torture", "prevention de la torture", "cpt"),
+         "Committee for the Prevention of Torture (CPT)"),
+        (("cddh", "steering committee for human rights", "directeur pour les droits"),
+         "Steering Committee for Human Rights (CDDH)"),
+        (("cdadi", "anti discrimination", "anti-discrimination"),
+         "Steering Committee on Anti-discrimination, Diversity and Inclusion (CDADI)"),
+        (("pompidou group", "groupe pompidou"), "Pompidou Group"),
+        (("modern languages", "langues vivantes"),
+         "European Centre for Modern Languages"),
+        (("secretary general", "secretaire general"), "Secretary General"),
+        (("european court of human rights",), "European Court of Human Rights"),
+    )
+    for needles, name in groups:
+        if any(needle in key for needle in needles):
+            return name
+    return "Other Council of Europe reports and publications"
+
+
+def _legal_parent(country: str, section: str, label: str) -> str | None:
+    """A legally coherent expandable parent for a court/body label."""
+    key = _name_key(label)
+    if country == "Council of Europe" and section == "Guidance, reports and commentary":
+        return _coe_parent(label)
+    if section != "Case law":
+        return None
+    if country == "France":
+        rules = (
+            (("cour administrative d'appel",), "Cours administratives d’appel"),
+            (("cour d'appel",), "Cours d’appel"),
+            (("cour de cassation",), "Cour de cassation and its chambers"),
+            (("tribunal administratif",), "Tribunaux administratifs"),
+            (("tribunal judiciaire",), "Tribunaux judiciaires"),
+            (("tribunal de grande instance",), "Tribunaux de grande instance"),
+            (("tribunal d'instance",), "Tribunaux d’instance"),
+            (("conseil de prud'hommes", "conseil de prud'hommes"),
+             "Conseils de prud’hommes"),
+            (("cour d'assises",), "Cours d’assises"),
+            (("tribunal de commerce",), "Tribunaux de commerce"),
+        )
+    elif country == "Netherlands":
+        rules = (
+            (("rechtbank",), "Rechtbanken (district courts)"),
+            (("gerechtshof",), "Gerechtshoven (courts of appeal)"),
+        )
+    elif country == "Germany":
+        rules = (
+            (("landessozialgericht",), "Landessozialgerichte (state social courts)"),
+            (("sozialgericht",), "Sozialgerichte (social courts)"),
+            (("landesarbeitsgericht",), "Landesarbeitsgerichte (state labour courts)"),
+            (("arbeitsgericht",), "Arbeitsgerichte (labour courts)"),
+            (("oberverwaltungsgericht", "verwaltungsgerichtshof"),
+             "Oberverwaltungsgerichte / Verwaltungsgerichtshöfe"),
+            (("verwaltungsgericht",), "Verwaltungsgerichte (administrative courts)"),
+            (("oberlandesgericht",), "Oberlandesgerichte (higher regional courts)"),
+            (("landgericht",), "Landgerichte (regional courts)"),
+            (("amtsgericht",), "Amtsgerichte (local courts)"),
+            (("finanzgericht",), "Finanzgerichte (fiscal courts)"),
+            (("verfassungsgerichtshof", "staatsgerichtshof", "landesverfassungsgericht"),
+             "State constitutional courts"),
+        )
+    elif country == "Austria":
+        rules = (
+            (("landesverwaltungsgericht",), "Landesverwaltungsgerichte (state administrative courts)"),
+            (("oberlandesgericht",), "Oberlandesgerichte (higher regional courts)"),
+            (("landesgericht",), "Landesgerichte (regional courts)"),
+            (("bezirksgericht",), "Bezirksgerichte (district courts)"),
+            (("ausl ", "ausl_", "ausl;", "ogh, ausl", "ogh; ausl", "ogh,ausl",
+              "recorded court references"),
+             "Decisions carrying foreign or international court references"),
+        )
+    elif country == "United Kingdom":
+        rules = (
+            (("court of session",), "Court of Session (Scotland)"),
+            (("ni high court",), "High Court of Justice in Northern Ireland"),
+        )
+    else:
+        return None
+    for needles, parent in rules:
+        if any(needle in key for needle in needles):
+            return parent
+    return None
+
+
+def _combine_items(label: str, children: list[dict]) -> dict:
+    years_from = [c["year_from"] for c in children if c.get("year_from") is not None]
+    years_to = [c["year_to"] for c in children if c.get("year_to") is not None]
+    return {
+        "section": children[0]["section"], "label": label,
+        "count": sum(int(c["count"]) for c in children),
+        "year_from": min(years_from) if years_from else None,
+        "year_to": max(years_to) if years_to else None,
+        "domains": sorted({v for c in children for v in c.get("domains") or []}),
+        "sources": sorted({v for c in children for v in c.get("sources") or []}),
+        "manual": any(c.get("manual") for c in children),
+        "details": sorted(children, key=lambda c: (-int(c["count"]), c["label"])),
+    }
+
+
+def _group_source_entries(country: str, entries: list[dict]) -> list[dict]:
+    """Collapse long institutional tails, preserving every original row in ``details``."""
+    parents: dict[tuple[str, str], list[dict]] = {}
+    loose: list[dict] = []
+    for item in entries:
+        parent = _legal_parent(country, item["section"], item["label"])
+        if parent:
+            parents.setdefault((item["section"], parent), []).append(item)
+        else:
+            loose.append(item)
+    combined: list[dict] = []
+    for (_section, parent), children in parents.items():
+        # Council of Europe author strings are never useful top-level headings even when
+        # a committee happened to contribute only one item. Elsewhere one member is not a
+        # group and remains an ordinary row.
+        if len(children) > 1 or country == "Council of Europe":
+            combined.append(_combine_items(parent, children))
+        else:
+            loose.extend(children)
+
+    # A residual handful of one-off bodies should not make a country hundreds of lines
+    # long. This is explicitly a browse bucket, not a claim of legal equivalence, and its
+    # disclosure retains every court/body and its own count, dates and sources.
+    tail_names = {
+        "Case law": "Other courts and tribunals",
+        "Administrative decisions": "Other administrative bodies",
+        "Guidance, reports and commentary": "Other guidance, reports and commentary",
+    }
+    for section, parent in tail_names.items():
+        tail = [item for item in loose if item["section"] == section
+                and int(item["count"]) <= 5]
+        if len(tail) >= 3:
+            loose = [item for item in loose if item not in tail]
+            combined.append(_combine_items(parent, tail))
+    return loose + combined
+
+
 def build_sources_summary(facade: Facade, *, current_year: int | None = None) -> dict:
     """Full-text corpus inventory for the optional sources page.
 
@@ -652,6 +865,11 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
         source = str(row["source"] or "")
         court = str(row["court"] or "")
         doc_type = str(row["doc_type"] or "other")
+        # BIPT republishes a tiny set of CJEU judgments already held from the Court's
+        # own register. They are neither Belgian case law nor an additional EU source,
+        # so listing them creates exactly the misleading orphan row this page avoids.
+        if source == "be-bipt-judgments" and court.casefold() == "cjeu":
+            continue
         jurisdiction = facade._doc_bucket(source, court)
         country = jurisdictions.setdefault(
             jurisdiction, {"name": jurisdiction, "total": 0, "groups": {}})
@@ -668,10 +886,14 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
         elif kind == "administrative":
             section = "Administrative decisions"
             label = _verbose_body_name(facade, court, source) or "Administrative decisions"
+            if label.startswith("Other court or tribunal ("):
+                label = facade.source_label(source)
         elif kind == "guidance":
             section = "Guidance, reports and commentary"
             label = (_verbose_body_name(facade, court, source)
                      or "Guidance, reports and commentary")
+            if label.startswith("Other court or tribunal ("):
+                label = facade.source_label(source)
         elif kind == "preparatory":
             section, label = "Legislative and preparatory materials", "Legislative and preparatory materials"
         elif kind == "explanatory":
@@ -718,6 +940,9 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
             entries.append(item)
         entries.sort(key=lambda item: (
             section_order.get(item["section"], 99), -item["count"], item["label"]))
+        entries = _group_source_entries(country["name"], entries)
+        entries.sort(key=lambda item: (
+            section_order.get(item["section"], 99), -item["count"], item["label"]))
         country["entries"] = entries
         countries.append(country)
     countries.sort(key=lambda country: (-country["total"], country["name"]))
@@ -745,6 +970,17 @@ def render_sources_html(summary: dict, *, intro: str, facade: Facade,
     intro_html = editorial_paragraphs(
         apply_placeholders(intro, when=generated_at,
                            count=int(summary.get("full_text_total") or 0)), "attribution")
+    def item_text(item: dict) -> str:
+        years = ""
+        if item.get("year_from") is not None:
+            years = (f", {item['year_from']}–{item['year_to']}"
+                     if item["year_from"] != item["year_to"] else f", {item['year_from']}")
+        sources = _source_links(item, facade)
+        count = int(item["count"])
+        noun = "document" if count == 1 else "documents"
+        return (f"{escape(item['label'])} ({count:,} {noun}{years})"
+                + (f" from {sources}" if sources else ""))
+
     blocks = []
     for country in summary.get("jurisdictions") or []:
         parts = [f'  <section>\n    <h2>{escape(country["name"])} '
@@ -754,16 +990,14 @@ def render_sources_html(summary: dict, *, intro: str, facade: Facade,
             if item["section"] != current_section:
                 current_section = item["section"]
                 parts.append(f"    <h3>{escape(current_section)}</h3>\n    <ul>")
-            years = ""
-            if item.get("year_from") is not None:
-                years = (f", {item['year_from']}–{item['year_to']}"
-                         if item["year_from"] != item["year_to"] else f", {item['year_from']}")
-            sources = _source_links(item, facade)
-            count = int(item["count"])
-            noun = "document" if count == 1 else "documents"
-            parts.append(
-                f"      <li>{escape(item['label'])} ({count:,} {noun}"
-                f"{years})" + (f" from {sources}" if sources else "") + "</li>")
+            if item.get("details"):
+                parts.append(f"      <li><details><summary>{item_text(item)}</summary>\n"
+                             "        <ul>")
+                parts.extend(f"          <li>{item_text(child)}</li>"
+                             for child in item["details"])
+                parts.append("        </ul>\n      </details></li>")
+            else:
+                parts.append(f"      <li>{item_text(item)}</li>")
             # Close before the next heading (or after the final item).
             next_index = index + 1
             if (next_index == len(country["entries"])

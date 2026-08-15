@@ -10,6 +10,7 @@ from raglex.core.models import DocType, ExtractedVia, Record
 from raglex.facade import Facade
 from raglex.settings import SettingsStore
 from raglex.static_bundle import (
+    _group_source_entries,
     apply_placeholders,
     build_sources_summary,
     build_bundle,
@@ -52,6 +53,45 @@ def _hold(config: Config, stable_id: str, title: str, text: str) -> None:
     textstore.put_segments(record.payload_hash, record.segments)
     cat.upsert_document(record, text_path=str(path))
     cat.close()
+
+
+def _source_item(label, count, year_from, year_to, *, section="Case law"):
+    return {"section": section, "label": label, "count": count,
+            "year_from": year_from, "year_to": year_to,
+            "domains": ["example.test"], "sources": ["test"], "manual": False}
+
+
+def test_sources_group_court_levels_even_when_the_level_is_a_suffix():
+    entries = [
+        _source_item("Thüringer Landessozialgericht", 1222, 2010, 2025),
+        _source_item("Landessozialgericht Berlin-Brandenburg", 800, 2005, 2026),
+        _source_item("Amtsgericht Aachen", 4, 2021, 2024),
+        _source_item("Amtsgericht Bonn", 6, 2020, 2026),
+    ]
+    grouped = _group_source_entries("Germany", entries)
+    social = next(row for row in grouped if row["label"].startswith("Landessozialgerichte"))
+    assert social["count"] == 2022 and social["year_from"] == 2005
+    assert social["year_to"] == 2026 and len(social["details"]) == 2
+    local = next(row for row in grouped if row["label"].startswith("Amtsgerichte"))
+    assert local["count"] == 10 and len(local["details"]) == 2
+
+
+def test_council_of_europe_guidance_groups_by_institution_not_person():
+    section = "Guidance, reports and commentary"
+    entries = [
+        _source_item("Louise Drammeh", 6, 2010, 2011, section=section),
+        _source_item("Aoife Nolan", 2, 2019, 2019, section=section),
+        _source_item("Council of Europe Committee of Ministers", 4, 2023, 2024,
+                     section=section),
+        _source_item("Comité des Ministres du Conseil de l'Europe", 2, 2019, 2025,
+                     section=section),
+    ]
+    grouped = _group_source_entries("Council of Europe", entries)
+    ministers = next(row for row in grouped if row["label"] == "Committee of Ministers")
+    assert ministers["count"] == 6 and len(ministers["details"]) == 2
+    other = next(row for row in grouped if row["label"].startswith("Other Council"))
+    assert other["count"] == 8 and {r["label"] for r in other["details"]} == {
+        "Louise Drammeh", "Aoife Nolan"}
 
 
 @pytest.fixture(autouse=True)

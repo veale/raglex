@@ -169,6 +169,13 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
     )
     assert match
     data = json.loads(match.group(1))
+    for block in re.findall(
+            r'<script id="raglex-chunk-\d+" type="application/json">(.*?)</script>',
+            page, re.DOTALL):
+        for group_index, group_row in json.loads(block):
+            while len(data["groups"]) <= group_index:
+                data["groups"].append(None)
+            data["groups"][group_index] = group_row
     assert data["counts"]["art:15"] == 1
     assert data["counts"]["exact:art15(3)"] == 1
     group = data["groups"][0]
@@ -452,6 +459,42 @@ def test_the_page_is_readable_without_running_its_script():
     assert 'const renderedLaw = document.createDocumentFragment();' in _SCRIPT
     assert '$("law").replaceChildren(renderedLaw);' in _SCRIPT
     assert '$("contents-nav").textContent = "";' in _SCRIPT
+
+
+def test_citing_rows_are_chunked_after_the_immediate_annotation_core():
+    """One HTML file, but the 100 MB dialog payload must not gate the readable law."""
+    from raglex.static_export import _SCRIPT, render_static_page
+
+    data = json.loads(json.dumps(_SEO_DATA))
+    data["law"]["sections"][0]["key"] = "s1"
+    data["counts"].update({"s1": 1, "whole": 1})
+    base = {
+        "title": "A long citing title", "date": "2024-01-01", "jurisdiction": "UK",
+        "kind": "cases", "court": "Court", "source_label": "Source", "pagerank": 1,
+        "links": [], "snippets": [], "snippet_indices": {}, "labels_by_key": {},
+        "inherited_mentions_by_key": {}, "previous_mentions_by_key": {},
+        "version_mentions_by_key": {},
+    }
+    data["groups"] = [
+        {**base, "id": "general", "cite": "General only",
+         "mentions_by_key": {"all": 1, "whole": 1}},
+        {**base, "id": "anchored", "cite": "Anchored authority",
+         "mentions_by_key": {"all": 1, "s1": 1}},
+    ]
+    data["index"] = {"all": [0, 1], "whole": [0], "s1": [1]}
+    page = render_static_page(title=data["law"]["title"], data_json=json.dumps(data))
+    core = json.loads(re.search(
+        r'<script id="raglex-data" type="application/json">(.*?)</script>',
+        page, re.S).group(1))
+    first_chunk = json.loads(re.search(
+        r'<script id="raglex-chunk-0" type="application/json">(.*?)</script>',
+        page, re.S).group(1))
+    assert core["groups"] == []
+    assert core["annotation_citers"]["s1"]["direct"][0]["id"] == "anchored"
+    assert first_chunk[0][0] == 1       # anchored bytes precede whole-only bytes
+    assert page.index("<script>" + _SCRIPT) < page.index('id="raglex-chunk-0"')
+    assert "requestIdleCallback" in _SCRIPT and "async function ensureGroups" in _SCRIPT
+    assert 'id="mentions-load-progress"' in page
 
 
 def test_each_prerendered_provision_says_its_mentions_are_loading():
