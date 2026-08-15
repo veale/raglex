@@ -205,6 +205,33 @@ _IT_DP_ARTICLE = (
 )
 _IT_DP_GDPR_RE = re.compile(_IT_DP_ARTICLE + r"(?-i:Regolamento)\b", re.I)
 _IT_DP_CODE_RE = re.compile(_IT_DP_ARTICLE + r"(?-i:Codice)\b", re.I)
+# The named form, which the Garante uses in the *visto* at the top of every measure and
+# whenever a second instrument is in play: "art. 5, par. 1, lett. a) del Regolamento (UE)
+# 2016/679" and "art. 9 del regolamento (UE) 2024/1689". Unlike the bare "del
+# Regolamento" above it needs no introduction, because it names the instrument itself.
+_IT_DP_NUMBERED_RE = re.compile(
+    _IT_DP_ARTICLE +
+    r"regolamento\s*(?:\(\s*(?:UE|CE|CEE)\s*\)\s*)?(?:n\.?\s*)?"
+    r"(?P<a>\d{1,4})\s*/\s*(?P<b>\d{1,4})\b", re.I)
+# ``allegato III, punto 2`` / ``punto 2 dell'allegato III`` — the AI Act's whole
+# high-risk classification lives in its annexes, so a Garante measure about it that
+# could not anchor an allegato reference would link to the instrument and nothing else.
+_IT_ANNEX_RE = re.compile(
+    # the reverse order first — "il punto 2 dell'allegato III" — so it is not read as a
+    # bare allegato reference with the point thrown away
+    r"\b(?:(?:punto|n\.)\s*(?P<rpoint>\d{1,3}[a-z]?)\s+(?:del|dell['’])\s*)?"
+    r"allegato\s+(?P<annex>[IVXLC]{1,7}|\d{1,2})"
+    r"(?:\s*,?\s*(?:punto|n\.)\s*(?P<point>\d{1,3}[a-z]?))?"
+    r"\s*,?\s*(?:del|dell['’]|della)\s+"
+    r"(?:(?-i:Regolamento)\b|regolamento\s*(?:\(\s*UE\s*\)\s*)?(?:n\.?\s*)?"
+    r"(?P<a>\d{1,4})\s*/\s*(?P<b>\d{1,4})\b)", re.I)
+# ``considerando 47 del Regolamento`` — the Italian recital, which folds onto the same
+# ``Recital N`` anchor the English and Spanish grammars produce.
+_IT_RECITAL_RE = re.compile(
+    r"\bconsiderando\s*\(?\s*(?P<recital>\d{1,3})\s*\)?"
+    r"\s*,?\s*(?:del|dell['’]|della)\s+"
+    r"(?:(?-i:Regolamento)\b|regolamento\s*(?:\(\s*UE\s*\)\s*)?(?:n\.?\s*)?"
+    r"(?P<a>\d{1,4})\s*/\s*(?P<b>\d{1,4})\b)", re.I)
 
 
 def _formex_pin(article: str, para: str | None, letter: str | None,
@@ -216,8 +243,52 @@ def _formex_pin(article: str, para: str | None, letter: str | None,
     return out
 
 
+def _numbered_host(match: re.Match[str]) -> tuple[str, str] | None:
+    """The regulation a match named by number, or the GDPR when it wrote "il Regolamento".
+
+    The bare-noun branch is only reachable from a pattern that also accepts the numbered
+    form, so it means "this document's Regulation" — and in Garante material that is the
+    GDPR unless another one is named, which the numbered branch would then have caught.
+    """
+    groups = match.groupdict()
+    if not groups.get("a"):
+        return (GDPR_ID, "regulation")
+    celex = _eu_celex("regulation", groups["a"], groups["b"])
+    return (celex, "regulation") if celex else None
+
+
 def data_protection_citations(text: str) -> list[Citation]:
     out: list[Citation] = []
+    for m in _IT_DP_NUMBERED_RE.finditer(text or ""):
+        celex = _eu_celex("regulation", m.group("a"), m.group("b"))
+        if not celex:
+            continue
+        out.append(Citation(
+            raw=m.group(0), entity_kind="regulation", candidate_id=celex,
+            pinpoint=_formex_pin(m.group("article"), m.group("para"),
+                                 m.group("letter"), m.group("point")),
+            char_start=m.start(), char_end=m.end(),
+            method="it_eu_regulation_article", confidence=1.0))
+    for pattern, method in ((_IT_ANNEX_RE, "it_annex"), (_IT_RECITAL_RE, "it_recital")):
+        for m in pattern.finditer(text or ""):
+            host = _numbered_host(m)
+            if not host:
+                continue
+            if host[0] == GDPR_ID and not _IT_GDPR_INTRO.search(text or ""):
+                continue          # "del Regolamento" with no Regulation introduced
+            groups = m.groupdict()
+            if method == "it_annex":
+                annex = groups["annex"]
+                pinpoint = f"Annex {annex.upper() if annex.isalpha() else annex}"
+                point = groups.get("point") or groups.get("rpoint")
+                if point:
+                    pinpoint += f", point {point}"
+            else:
+                pinpoint = f"Recital {groups['recital']}"
+            out.append(Citation(
+                raw=m.group(0), entity_kind=host[1], candidate_id=host[0],
+                pinpoint=pinpoint, char_start=m.start(), char_end=m.end(),
+                method=method, confidence=.98))
     if _IT_GDPR_INTRO.search(text or ""):
         out += [Citation(
             raw=m.group(0), entity_kind="regulation", candidate_id=GDPR_ID,

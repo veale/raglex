@@ -1404,11 +1404,21 @@ def _attach_section_lists(text: str, kept: list[Citation]) -> list[Citation]:
 _BARE_PROVISION = re.compile(
     r"\b(?P<cue>section|sections|sub-?section|s|ss|article|articles|art|arts|"
     r"artikel|artikelen|articolo|articoli|"
+    # Spanish. A DPA resolución or an AESIA guide states its host once and then writes
+    # "el artículo 9" for pages at a time; without these cues those pages produced no
+    # edges at all, which is why every Spanish guidance document read as citing the law
+    # far less than it does. ``considerando`` is the Spanish recital.
+    r"art[íi]culo|art[íi]culos|considerando|considerandos|"
     r"recital|recitals|"
     r"regulation|regulations|reg|regs|paragraph|paragraphs|para|paras|schedule|sch)\.?\s*"
     # Application/pleading paragraph labels can be hierarchical (13.1(a)); stopping
     # at the first integer linked the wrong, much broader pinpoint (feedback 142).
-    r"(?P<num>\d+[A-Z]?(?:\.\d+)*(?:\s*\(\s*[A-Z0-9]+\s*\))*)(?!\s*:)(?=\W|$)",
+    # The trailing ``.f)`` is the Spanish lettered rung — "artículo 6.1.f)" — which the
+    # bracketed English form cannot express because Spain writes only the closing
+    # parenthesis. Harmless elsewhere: no other drafting style in the corpus writes a
+    # lettered subdivision that way.
+    r"(?P<num>\d+[A-Z]?(?:\.\d+)*(?:\.[a-z]\)?)?(?:\s*\(\s*[A-Z0-9]+\s*\))*)"
+    r"(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
 # The two-level forms, which the single-cue pattern above cannot express and therefore
@@ -1435,25 +1445,61 @@ _H = r"[ \t\u00a0]{0,3}"
 # The loss of function…" yielded "Annex 8", and "…point 8 of that annex. 24. The
 # referring court considers…" yielded "Annex 24". Allowing the dot only for the schedule
 # spellings removes that whole family of false positives at once.
-_ANNEX_CUE = r"annexe?"
+# ``anexo`` gets the same no-full-stop treatment as "annex", for the same reason.
+_ANNEX_CUE = r"annexe?|anexos?"
 _SCHEDULE_CUE = r"(?:schedule|sched|sch)\.?"
 _CUES = rf"(?:{_ANNEX_CUE}|{_SCHEDULE_CUE})"
 _BARE_COMPOUND = re.compile(
     r"\b(?:"
     # reverse order first, so "point 29 of Annex I" is not read as a bare "Annex I"
-    rf"(?:points?|paragraphs?|paras?)\.?{_H}\(?(?P<rsub>\d{{1,3}}[a-z]?)\)?{_H}"
-    rf"(?:of|to|in){_H}\s(?:the{_H}\s)?(?P<rcue>{_CUES}){_H}"
+    rf"(?:points?|puntos?|paragraphs?|paras?)\.?{_H}\(?(?P<rsub>\d{{1,3}}[a-z]?)\)?{_H}"
+    # ``del`` is the Spanish genitive: "el punto 5 del anexo IV". Safe beside the
+    # English connectors because the cue that follows must still be an annex/schedule
+    # word, and no English text writes "del annex".
+    rf"(?:of|to|in|del){_H}\s(?:the{_H}\s)?(?P<rcue>{_CUES}){_H}"
     rf"(?P<rnum>{_ANNEX_OR_SCHEDULE_NUM})"
     r"|"
     rf"(?P<cue>{_CUES}){_H}(?P<num>{_ANNEX_OR_SCHEDULE_NUM})"
-    rf"(?:{_H},?{_H}(?:points?|paragraphs?|paras?)\.?{_H}\(?(?P<sub>\d{{1,3}}[a-z]?)\)?)?"
+    rf"(?:{_H},?{_H}(?:points?|puntos?|paragraphs?|paras?)\.?{_H}\(?(?P<sub>\d{{1,3}}[a-z]?)\)?)?"
     r")(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
 # "this Annex", "that annex", "the present Annex" — an instrument or judgment referring
 # to ITS OWN annex. Carry-forward would attach it to whatever instrument was last NAMED,
 # which is by definition a different one: not a missed edge but a wrong edge avoided.
-_SELF_ANNEX_RE = re.compile(r"(?i)\b(?:this|that|the\s+present|the\s+said|said)\s+$")
+# The Spanish demonstratives are here for the same reason and are needed more often:
+# a guide's body says "en el presente anexo" where an EU act says "in this Annex".
+_SELF_ANNEX_RE = re.compile(
+    r"(?i)\b(?:this|that|the\s+present|the\s+said|said"
+    r"|este|esta|ese|dicho|dicha|el\s+presente|la\s+presente)\s+$")
+
+_ROMAN_DIGITS = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+#: Above this, a "Roman numeral" annex is really a LETTER. No instrument in this corpus
+#: has thirty annexes, and a document's own appendices are lettered — "Anexo C", "Annex
+#: D" — which ``[ivxlc]+`` reads as 100 and 500. An AESIA guide's own Annexes A, B and C
+#: were being recorded as citations of Annex 100 of the AI Act; Annexes I, V and X stay
+#: below the threshold and are unaffected, which is the whole point of putting it here
+#: rather than rejecting single letters outright.
+_MAX_PLAUSIBLE_ANNEX = 30
+
+
+def _annex_is_really_a_letter(number: str) -> bool:
+    if not number.isalpha():
+        return False
+    digits = [_ROMAN_DIGITS.get(c, 0) for c in number.lower()]
+    if not all(digits):
+        return True
+    value = sum(-d if i + 1 < len(digits) and d < max(digits[i + 1:]) else d
+                for i, d in enumerate(digits))
+    return value > _MAX_PLAUSIBLE_ANNEX
+
+
+#: Vocabulary only a Spanish document contains. Used for one decision: whether ``para``
+#: is the English abbreviation for "paragraph" or the Spanish preposition "for". Spain
+#: never abbreviates *párrafo* that way — it writes *apartado* — so in a document using
+#: this vocabulary, "para 2 casos de uso" is "for 2 use cases" and not a pincite.
+_SPANISH_PROVISION_VOCAB = re.compile(
+    r"(?:\bart[íi]culos?\b|\bapartados?\b|\bconsiderandos?\b|\banexos?\b)", re.IGNORECASE)
 # A reference that names its own host through "to"/"in" rather than the "of" that
 # _EXPLICIT_HOST_RE already catches: "Annex 9 to the Convention on International Civil
 # Aviation", "Annex 2 to the WTO Agreement". That host is not the last-named instrument.
@@ -1494,10 +1540,15 @@ def _cue_allows(cue: str, kind: str, candidate_id: str | None = None) -> bool:
         # divided into Articles too, so the CELEX test matters here: without it a
         # "Section 1 of the Code" in a Commission opinion attached itself to the DSA.
         return not eu
-    if c.startswith(("article", "art")):
-        if c.startswith(("artikel", "articolo", "articoli")):
-            return True  # Dutch/Italian statutes and EU instruments both use articles
+    if c.startswith(("article", "art", "artí", "arti")):
+        if c.startswith(("artikel", "articolo", "articoli")) or _is_spanish_cue(c):
+            # Dutch, Italian and Spanish statutes are divided into articles, as are EU
+            # instruments, so the cue says nothing about which — unlike English, where
+            # "Article" rules out a UK Act.
+            return True
         return eu                             # Article → EU instrument / treaty, not a UK Act
+    if c.startswith("considerando"):
+        return eu or kind in {"regulation", "named"}
     if c.startswith("recital"):
         # Recitals belong to EU instruments (regulations included — the GDPR is one) and
         # never to a UK Act, which has no recitals.
@@ -1505,10 +1556,36 @@ def _cue_allows(cue: str, kind: str, candidate_id: str | None = None) -> bool:
     return True                                # regulation / paragraph — leave to nearest
 
 
+#: The Spanish article cue, as distinct from the English/Italian/Dutch ones it shares a
+#: stem with. ``art.`` is deliberately NOT here: it is written the same way in five
+#: languages, so an abbreviated reference keeps the default English rendering and only
+#: the fully spelled Spanish word triggers Spanish normalisation.
+_SPANISH_CUE_RE = re.compile(r"^(?:art[íi]culos?|considerandos?|anexos?)$", re.IGNORECASE)
+
+
+def _is_spanish_cue(cue: str) -> bool:
+    return bool(_SPANISH_CUE_RE.match(cue.strip().rstrip(".")))
+
+
+def spanish_bare_pinpoint(cue: str, num: str, kind: str | None,
+                          candidate_id: str | None = None) -> str:
+    """A bare Spanish provision reference, rendered for the host it turned out to have.
+
+    ``artículo 6.1.f)`` is ``Article 6(1)(f)`` when carried onto the GDPR, whose Article
+    segments are labelled that way, and ``Artículo 6.1.f)`` when carried onto a Spanish
+    act, which is how the explicit Spanish grammar anchors one. Rendering it once, before
+    the host is known, would put half of every AEPD resolución's pincites on an anchor
+    that can never match the provision they name.
+    """
+    from .spanish import bare_pinpoint
+
+    return bare_pinpoint(cue, num, kind, candidate_id)
+
+
 def _bare_pinpoint(cue: str, num: str) -> str:
     num = re.sub(r"\s+", "", num)
     c = cue.lower().rstrip(".")
-    if c.startswith("recital"):
+    if c.startswith("recital") or c.startswith("considerando"):
         return f"Recital {num}"
     if c.startswith(("article", "art")):
         if c.startswith("artikel"):
@@ -1613,6 +1690,7 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
     if not antecedents and not home_id:
         return kept
     out = list(kept)
+    spanish = bool(_SPANISH_PROVISION_VOCAB.search(text))
     # Compound forms are scanned FIRST and their spans marked, so the single-cue pattern
     # cannot come back and record a second, poorer citation for the same words —
     # "Schedule 1, paragraph 27" must not also yield a bare "Sch. 1".
@@ -1639,16 +1717,18 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
             cue_raw = (groups.get("rcue") if reverse else groups.get("cue")) or ""
             number = (groups.get("rnum") if reverse else groups.get("num")) or ""
             sub = (groups.get("rsub") if reverse else groups.get("sub")) or None
-            if cue_raw.lower().startswith("annex"):
+            if cue_raw.lower().startswith(("annex", "anex")):
                 cue_at = m.start("rcue") if reverse else m.start("cue")
                 if _SELF_ANNEX_RE.search(text[max(0, cue_at - 16):cue_at]):
                     continue          # "this Annex" — the instrument's own, not the host's
                 if _ANNEX_HOST_RE.match(text[e:e + 48]):
                     continue          # "Annex 9 to the Convention …" names its own host
+                if _annex_is_really_a_letter(number):
+                    continue          # the document's OWN Annex C, not Annex 100
             pinpoint = _compound_pinpoint(cue_raw, number, sub)
         else:
-            cue_raw = m.group("cue")
-            pinpoint = _bare_pinpoint(cue_raw, m.group("num"))
+            cue_raw, number, sub = m.group("cue"), m.group("num"), None
+            pinpoint = _bare_pinpoint(cue_raw, number)
         cue = cue_raw.lower().rstrip(".")
         # A possessive followed by a tax/academic year is not the abbreviation for
         # section: ``client's 2011/12 tax return`` previously minted ``s. 2011``.
@@ -1674,6 +1754,12 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
         # last-named directive minted a phantom legislation edge per case cite
         # (the 2026-07 C-604/22 bug). Paragraph cues defer to a nearby case.
         if cue.startswith("para"):
+            # In Spanish, "para" is the preposition "for". Spain abbreviates *párrafo*
+            # as *párr.* and mostly writes *apartado* instead, so it never means
+            # "paragraph" here: "un ejemplo … para 2 casos de uso" is "for 2 use cases",
+            # and reading it as a pincite gave the AI Act a paragraph 2 it does not have.
+            if spanish and cue in ("para", "paras"):
+                continue
             prev = [c for c in all_sorted if c.char_end <= s and s - c.char_end <= 80]
             if prev and prev[-1].entity_kind in ("case", "opinion"):
                 continue
@@ -1699,6 +1785,11 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
                 host_id, host_kind = home_id, home_kind
         if not host_id:
             continue
+        if _is_spanish_cue(cue_raw):
+            # Rendered only now: the notation depends on the host it was carried onto.
+            pinpoint = spanish_bare_pinpoint(cue_raw, number, host_kind, host_id)
+            if sub:
+                pinpoint += f", point {sub}"
         out.append(Citation(
             raw=m.group(0), entity_kind=host_kind, candidate_id=host_id,
             pinpoint=pinpoint,
@@ -2053,9 +2144,15 @@ def _dedupe_overlaps(cites: list[Citation]) -> list[Citation]:
     kept: list[Citation] = []
     occupied: list[tuple[int, int]] = []
     for c in ordered:
+        # Methods that legitimately emit SEVERAL citations over one span, because the
+        # text is one expression naming several provisions ("articles 15 à 22", "los
+        # artículos 6, 9 y 32"). One Grammar match can express only one edge, so these
+        # grammars expand the list themselves and every member carries the whole
+        # expression's span.
         exact_multi = c.method in ("de_law_reference", "nl_juriconnect",
                                    "fr_code_articles", "fr_echr_articles",
                                    "fr_eu_articles", "fr_statute_articles",
+                                   "es_article", "es_host_article",
                                    "uk_cpr_rule_list", "uk_cpr_pd_paragraph_list") and any(
             k.char_start == c.char_start and k.char_end == c.char_end
             and k.method == c.method and k.pinpoint != c.pinpoint for k in kept)
