@@ -9,6 +9,7 @@ APD and the Garante each publish several series through one view.
 from __future__ import annotations
 
 from raglex.adapters.eu_dpa_guidance import (
+    GARANTE_TYPE_IDS,
     _slug,
     aepd_stubs,
     cnil_stubs,
@@ -173,21 +174,82 @@ def test_gba_search_result_records_year_precision_rather_than_a_fake_date():
 # ---------------------------------------------------------------------------
 
 def test_garante_is_keyed_on_the_doc_web_number_practitioners_cite():
-    html = b"""<div class="d-flex"><div><strong>
-      <a class="titolo-risultato" href="/web/guest/home/docweb/-/docweb-display/docweb/10241943">
-      Provvedimento del 17 aprile 2026 - Linee Guida tracking pixel [10241943]</a>
-      </strong></div></div>
+    html = b"""<div class="card-risultato">
+      <div class="label-risultato"><a href="/home/ricerca/-/search/tipologia/Linee%20guida"
+        >Linee guida</a></div>
+      <div class="data-risultato"><p>17/04/2026</p></div>
       <div class="d-flex"><div><strong>
       <a class="titolo-risultato" href="/web/guest/home/docweb/-/docweb-display/docweb/10241943">
-      duplicate</a></strong></div></div>"""
+      Provvedimento del 17 aprile 2026 - Linee Guida tracking pixel [10241943]</a>
+      </strong>
+      <p class="estratto-risultato">Il Garante adotta le linee guida[...]</p></div></div>
+      <a href="/home/ricerca/-/search/argomento/Marketing">Marketing</a>
+      <a href="/home/ricerca/-/search/argomento/Cookies">Cookies</a>
+      </div>
+      <div class="card-risultato"><div class="d-flex"><div><strong>
+      <a class="titolo-risultato" href="/web/guest/home/docweb/-/docweb-display/docweb/10241943">
+      duplicate</a></strong></div></div></div>"""
     rows = garante_stubs(html)
     assert len(rows) == 1
     assert rows[0]["docweb"] == "10241943"
     assert rows[0]["title"] == "Provvedimento del 17 aprile 2026 - Linee Guida tracking pixel"
     assert rows[0]["date"].isoformat() == "2026-04-17"
+    # the card's own metadata, which the docweb page does not expose
+    assert rows[0]["category"] == "Linee guida"
+    assert rows[0]["topics"] == ["Marketing", "Cookies"]
+    assert rows[0]["summary"].startswith("Il Garante adotta")
     url, params = garante_search_url("10516", 3)
     assert params["_g_gpdp5_search_GGpdp5SearchPortlet_cur"] == "3"
     assert params["_g_gpdp5_search_GGpdp5SearchPortlet_idsTipologia"] == "10516"
+
+
+def test_garante_dates_a_card_whose_title_carries_no_date():
+    """About a third of the archive is titled "Parere su istanza di accesso civico" with
+    no date in it. Reading the date out of the title alone left those undated."""
+    html = b"""<div class="card-risultato">
+      <div class="data-risultato"><p>03/07/2026</p></div>
+      <a class="titolo-risultato" href="/web/guest/home/docweb/-/docweb-display/docweb/10270087"
+      >Parere su istanza di accesso civico [10270087]</a></div>"""
+    assert garante_stubs(html)[0]["date"].isoformat() == "2026-07-03"
+
+
+def test_garante_asks_for_every_tipologia_because_the_parent_does_not_expand():
+    """``10533`` is the facet's "Provvedimenti (13702)" node, and querying it alone
+    returns about eighty measures — the ones tagged with the parent itself. The other
+    13,600 carry a child id and are absent, with no error and an ordinary-looking
+    results page. The first version of this adapter asked for an id that is not in the
+    tree at all and harvested 38 documents out of 13,800."""
+    ids = GARANTE_TYPE_IDS.split(",")
+    assert "10533" in ids and "10498" in ids and "10526" in ids
+    assert "10516" in ids                      # linee guida, the old adapter's one hit
+    assert "10515" not in ids                  # the id that was never in the tree
+    assert len(ids) > 30
+    # the whole tree in ONE query, so the walk is one ordered series with one cursor
+    adapter = get_adapter("it-garante")
+    series = list(adapter._series(1))
+    assert len(series) == 1
+    _url, params, _ctx = next(series[0])
+    assert params["_g_gpdp5_search_GGpdp5SearchPortlet_idsTipologia"] == GARANTE_TYPE_IDS
+
+
+def test_garante_resumes_on_the_page_its_checkpoint_names():
+    """1,380 pages: a resumed backfill must not re-request all of them. Safe here only
+    because the page size is fixed and the walk is a single series, so an item's
+    position determines its page exactly — and ``resume_floor`` still backs off one
+    page, so the restart is early rather than late."""
+    adapter = get_adapter("it-garante", start_offset=5000)
+    _url, params, _ctx = next(next(iter(adapter._series(1))))
+    # 5000 - one page = 4990 → page 499 (0-based) → the portlet's 1-based cursor 500
+    assert params["_g_gpdp5_search_GGpdp5SearchPortlet_cur"] == "500"
+
+
+def test_garante_keep_current_asks_the_server_for_a_window():
+    """The portlet's dataInizio/dataFine really filter (a January 2020 window returns
+    January 2020), so keep-current is a handful of requests rather than 1,380."""
+    adapter = get_adapter("it-garante", watch_days=180)
+    list(adapter.discover("2026-08-01", max_pages=1))[:0]
+    _url, params, _ctx = next(next(iter(adapter._series(1))))
+    assert params["_g_gpdp5_search_GGpdp5SearchPortlet_dataInizio"] == "2026-02-02"
 
 
 def test_garante_takes_the_richest_portlet_not_the_first():
@@ -290,6 +352,8 @@ def test_a_multi_series_register_does_not_stop_at_the_first_exhausted_series():
     """The DSK, the Belgian APD and the Garante each publish several series through one
     view. An empty page means that SERIES is done; treating it as the end of the crawl
     silently dropped every series after the first."""
-    for key, expected in (("de-dsk", 3), ("be-gba", 3), ("it-garante", 2)):
+    # The Garante is deliberately NOT here any more: its whole tipologia tree is one
+    # comma-separated query, which is what gives the 1,380-page walk a single cursor.
+    for key, expected in (("de-dsk", 3), ("be-gba", 3), ("es-aepd-guias", 2)):
         adapter = get_adapter(key)
         assert len(list(adapter._series(1))) == expected, key

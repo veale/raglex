@@ -76,6 +76,8 @@ from .eu_ombudsman import EUOmbudsmanAdapter
 from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
 from .eu_dgcomp import DGCompAntitrustAdapter
 from .eu_consumer_guidance import EUConsumerGuidanceAdapter
+from .es_aepd import AEPDResolutionsAdapter
+from .es_aesia import AESIAGuidesAdapter
 from .eu_dpa_guidance import (
     AEPDGuidanceAdapter,
     CNILGuidanceAdapter,
@@ -403,6 +405,11 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # national DPA guidance libraries (§ eu_dpa_guidance)
     "fr-cnil-guidance": CNILGuidanceAdapter,
     "es-aepd-guias": AEPDGuidanceAdapter,
+    # …and the AEPD's enforcement register, which is a different kind of document and
+    # forty times the size of every DPA guidance library here put together
+    "es-aepd-resoluciones": AEPDResolutionsAdapter,
+    # Spain's AI supervisor: the sandbox guides to the AI Act's Chapter III duties
+    "es-aesia-guias": AESIAGuidesAdapter,
     "dk-datatilsynet": DatatilsynetGuidanceAdapter,
     "de-dsk": DSKGuidanceAdapter,
     "be-gba": GBAGuidanceAdapter,
@@ -836,8 +843,51 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "es-aepd-guias", "AEPD guías (Spain)", "guidance", "ES", False,
         "The Agencia Española de Protección de Datos' guías y herramientas: the "
         "official PDF guides with their publication dates, covering the RGPD and the "
-        "Spanish LOPDGDD.",
+        "Spanish LOPDGDD. Both surfaces are walked, because they disagree — the listing "
+        "view reports 111 results and the RSS feed carries 160, a strict superset "
+        "reaching back to 2016. The extras are the same authority's decálogos, "
+        "infographics and institutional declarations, published under the same content "
+        "type and simply not promoted into the guías view; a feed item that resolves to "
+        "a video rather than a document is dropped. Every guide declares the RGPD as "
+        "its governing instrument unless its own title names another, so a bare "
+        "\"artículo 9\" late in a guide still links to Article 9.",
         (), ("aepd.es guía URL",),
+    ),
+    "es-aepd-resoluciones": SourceInfo(
+        "es-aepd-resoluciones", "AEPD resoluciones (Spain)", "administrative", "ES",
+        False,
+        "Every resolution the Spanish data-protection authority has signed — about "
+        "46,900 of them, 2007 to date, and the largest single-authority enforcement "
+        "register in the corpus. The file number is the identity and names the "
+        "procedure: PS is a fining decision, TD a rights complaint, PD a rights "
+        "procedure, AI an investigation, and a REPOSICION- prefix is an appeal against "
+        "the decision of the same number — recorded as a link to it, since the relation "
+        "exists nowhere else. Backfill walks the listing (4,690 pages, ten to a page, "
+        "resumable); keep-current reads the RSS feed, which carries no pubDate at all "
+        "and is therefore used as an id set beside a re-read of the newest listing "
+        "pages. Untethered article references default to the RGPD unless the file's own "
+        "title names another instrument.",
+        (SourceOption("watch_pages", "Listing pages a keep-current run re-reads", "10"),
+         SourceOption("ocr", "OCR a PDF with no text layer", "true"),
+         SourceOption("max_ocr_pages", "Page ceiling for one OCR pass", "120")),
+        ("AEPD file number", "PS-00355-2025", "REPOSICION-PS-00503-2024"),
+    ),
+    "es-aesia-guias": SourceInfo(
+        "es-aesia-guias", "AESIA AI Act guides (Spain)", "guidance", "ES", False,
+        "The Agencia Española de Supervisión de la Inteligencia Artificial's guide "
+        "series, written in Spain's regulatory sandbox: two introductory guides, "
+        "thirteen requirement-by-requirement technical ones (risk management, human "
+        "oversight, data governance, transparency, accuracy, robustness, "
+        "cybersecurity, logging, post-market monitoring, incident reporting, technical "
+        "documentation, conformity assessment, quality management) and the checklist "
+        "manual. AESIA says these are the basis it is offering the Commission's working "
+        "group for the European guidance. They discuss the AI Act continuously and name "
+        "it almost never, so every guide declares Regulation (EU) 2024/1689 as its "
+        "governing instrument and a bare \"el artículo 9\" forty pages in still links "
+        "to Article 9.",
+        (SourceOption("ocr", "OCR a PDF with no text layer", "true"),
+         SourceOption("max_ocr_pages", "Page ceiling for one OCR pass", "300")),
+        ("AESIA guide slug", "05-guia-de-gestion-de-riesgos"),
     ),
     "dk-datatilsynet": SourceInfo(
         "dk-datatilsynet", "Datatilsynet guidance (Denmark)", "guidance", "DK", False,
@@ -1092,11 +1142,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     "it-garante": SourceInfo(
         "it-garante", "Garante per la protezione dei dati personali (Italy)",
         "guidance", "IT", False,
-        "The Garante's linee guida and provvedimenti, keyed on the doc web number — "
-        "the authority's own permanent identifier, the one Italian practitioners cite "
-        "('doc. web n. 10241943'). The adoption date is parsed from the measure's "
-        "title, which is where the Garante puts it.",
-        (), ("doc web number", "10241943"),
+        "The Garante's whole measure archive — about 13,800 documents back to 1996 — "
+        "keyed on the doc web number, the authority's own permanent identifier and the "
+        "one Italian practitioners cite ('doc. web n. 10241943'). Every tipologia the "
+        "search facet offers is requested by id, because the parent node does not "
+        "expand: asking for 'Provvedimenti' alone returns eighty of its 13,702 members "
+        "and no error. Each record keeps the card's tipologia (ordinanza ingiunzione, "
+        "parere, ammonimento…) and the Garante's own subject taxonomy, and the ~100 "
+        "measures published as an attachment rather than a web page are followed to "
+        "their PDF. Keep-current uses the portlet's date window instead of re-walking "
+        "1,380 pages.",
+        (SourceOption("watch_days", "Days a keep-current window reaches back", "180"),),
+        ("doc web number", "10241943"),
     ),
     "eu-berec": SourceInfo(
         "eu-berec", "BEREC document register (EU electronic communications)",
@@ -3063,7 +3120,16 @@ INCREMENTAL_MODE: dict[str, str] = {
     "dma-annual-reports": "full-walk",
     "fr-cnil-guidance": "full-walk", "es-aepd-guias": "full-walk",
     "dk-datatilsynet": "full-walk", "de-dsk": "full-walk",
-    "be-gba": "full-walk", "it-garante": "full-walk",
+    "be-gba": "full-walk",
+    # The Garante's search takes a real dataInizio/dataFine window (verified against an
+    # unfiltered walk), so keep-current asks for the last few months rather than
+    # re-reading 1,380 pages.
+    "it-garante": "server",
+    # The AEPD listing has no date filter; the watch reads the RSS feed and the newest
+    # listing pages and stops there.
+    "es-aepd-resoluciones": "early-stop",
+    # One page, sixteen PDFs, revised in place — there is nothing to stop at.
+    "es-aesia-guias": "full-walk",
     # newest-first search view with its own result total, so an incremental
     # run stops at the cursor within a page or two
     "be-gba-decisions": "early-stop",

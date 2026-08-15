@@ -15,17 +15,21 @@ them, and several of these authorities re-list them.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+import unicodedata
+from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Iterator
 from urllib.parse import urljoin, urlsplit
+from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
 
-from ..core.adapter import BaseAdapter
+from ..core.adapter import BaseAdapter, option_int, resume_floor
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..extraction import extract_bytes
+from ._governing_instrument import GDPR, default_instrument
 
 # Month names, for the authorities that print a date instead of publishing one.
 _MONTHS: dict[str, dict[str, int]] = {
@@ -163,6 +167,67 @@ def aepd_stubs(html: bytes | str) -> list[dict]:
     return out
 
 
+def _fold_title(value: str | None) -> str:
+    """Compare two spellings of one publication's title. The feed and the listing differ
+    in trailing whitespace and in typographic apostrophes, and nothing else."""
+    text = unicodedata.normalize("NFKD", " ".join((value or "").split()))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+
+
+def aepd_feed_items(xml: bytes | str) -> list[dict]:
+    """The guías RSS, newest first. Unlike the resoluciones feed this one dates its
+    items, so a watch can compare against a cursor rather than trusting depth."""
+    if isinstance(xml, str):
+        xml = xml.encode("utf-8")
+    out: list[dict] = []
+    for item in ElementTree.fromstring(xml).iter("item"):
+        title = " ".join((item.findtext("title") or "").split())
+        url = " ".join((item.findtext("link") or "").split())
+        if not title or not url:
+            continue
+        published = None
+        stamp = " ".join((item.findtext("pubDate") or "").split())
+        if stamp:
+            try:
+                published = parsedate_to_datetime(stamp).date()
+            except (TypeError, ValueError):
+                published = None
+        out.append({"title": title, "url": url, "date": published})
+    return out
+
+
+def aepd_document_url(client: RateLimitedClient, page_url: str) -> str | None:
+    """The document a feed item points at, or ``None`` where it is not a document.
+
+    ``/recurso-multimedia/{slug}`` is not a landing page at all: it 301s straight to the
+    file, which for a guía is ``/guias/{slug}.pdf`` — the very URL the listing links to,
+    so a publication reached either way lands on ONE stable id rather than two.
+
+    The redirect is read from the ``Location`` header of an UNFOLLOWED request rather
+    than from the final URL of a followed one, and that is not a micro-optimisation:
+
+    * ``HEAD`` on these paths returns **500** for most of the archive while ``GET``
+      returns the file, so resolving by HEAD looks like a broken source. Worse, a 500 is
+      retried five times with exponential backoff, so fifty feed items took hours.
+    * Following the redirect downloads the document — several are over 8 MB — which the
+      pipeline is about to do again anyway when it fetches the stub.
+
+    A feed item that redirects to a ``.png`` is a campaign graphic and one that redirects
+    nowhere is a video: both are returned as ``None`` rather than stored as documents.
+    """
+    try:
+        response = client.request("GET", page_url, follow_redirects=False,
+                                  raise_for_4xx=False)
+    except FetchError:
+        return None
+    location = str(response.headers.get("location") or "")
+    if not location:
+        return None
+    target = urljoin(page_url, location)
+    return target if _is_pdf_url(target) else None
+
+
 # ---------------------------------------------------------------------------
 # Denmark — Datatilsynet, "Regler og vejledning"
 # ---------------------------------------------------------------------------
@@ -296,19 +361,92 @@ GARANTE_BASE = "https://www.garanteprivacy.it"
 # The Liferay search portlet. Every parameter is required for the portlet to render;
 # ``idsTipologia`` selects the document type and ``cur`` is the 1-based page.
 _GARANTE_PORTLET = "_g_gpdp5_search_GGpdp5SearchPortlet_"
-# Tipologia ids from the search UI's own facet links.
-GARANTE_TYPES = {
-    "10516": "Linee guida",
-    "10515": "Provvedimenti",
+GARANTE_PAGE_SIZE = 10
+
+#: **The tipologia tree is not expanded server-side.** ``10533`` is the parent node the
+#: facet UI labels "Provvedimenti (13702)", and querying it ALONE returns eight pages —
+#: about eighty measures, the handful tagged with the parent itself. The other 13,600 are
+#: tagged with one of its thirty children and are simply absent, with no error, no
+#: warning and a results page that looks perfectly ordinary. The search UI compensates by
+#: sending every child id explicitly, and so must we; the first version of this adapter
+#: asked for a "Provvedimenti" id that is not in the tree at all (``10515``, which
+#: returns three unrelated rows) and harvested nothing but the 38 linee guida beside it.
+#:
+#: The counts are the facet's own, recorded here so the next person can tell a source
+#: change from a parser change:
+GARANTE_PROVVEDIMENTI: dict[str, str] = {
+    "10533": "Provvedimenti",                       # 13702 — the parent
+    "10498": "Decisione su ricorso",                # 6174
+    "10526": "Ordinanza ingiunzione o revoca",      # 2195
+    "10527": "Parere del Garante",                  # 1561
+    "10499": "Deliberazione",                       # 1037
+    "10529": "Prescrizioni del Garante",            # 1019
+    "10530": "Prescrizioni e divieto del Garante",  # 421
+    "10485": "Autorizzazione generale",             # 204
+    "10546": "Verifica preliminare",                # 200
+    "10532": "Provvedimenti a carattere generale",  # 153
+    "10535": "Quesiti di soggetti pubblici e privati",  # 152
+    "10500": "Divieto del trattamento",             # 108
+    "2034210": "Autorizzazione trasferimento dati estero",  # 90
+    "10488": "Blocco del trattamento",              # 81
+    "10484": "Autorizzazione",                      # 55
+    "2034211": "Bcr",                               # 51
+    "2010735": "Provvedimenti ex art. 110 del Codice",  # 40
+    "10516": "Linee guida",                         # 38
+    "10492": "Consultazione pubblica",              # 37
+    "9567234": "Ammonimento",                       # 35
+    "10503": "Esonero informativa",                 # 27
+    "2024563": "Autorizzazione trasferimento dati verso Paesi terzi",  # 20
+    "9150852": "Consultazione preventiva per adozione della DPIA",  # 11
+    "9660377": "Avvertimento",                      # 9
+    "10528": "Particolari accertamenti",            # 4
+    "9445099": "Accreditamento degli organismi di certificazione",  # 3
+    # Four types the facet counts at zero today. They are the post-GDPR corrective
+    # vocabulary — the categories the Garante will file future measures under — so they
+    # are asked for now rather than discovered missing later.
+    "9161733": "Estinzione di procedimento sanzionatorio",
+    "9150851": "Provvedimenti correttivi anche non prescrittivi",
+    "9271403": "Provvedimento correttivo e sanzionatorio",
+    "9625871": "Provvedimento prescrittivo e sanzionatorio",
+    "9126615": "Richiesta di parere a EDPB",
 }
+#: The top-level categories that are NOT under Provvedimenti and are still law: the
+#: inspection programme, approved codes of conduct, the Garante's own regulations and
+#: the regole deontologiche (which are binding under Article 2-quater of the Codice).
+GARANTE_OTHER: dict[str, str] = {
+    "10170750": "Attività ispettiva",               # 16
+    "9119875": "Codice di condotta",                # 4
+    "2038802": "Regolamento del Garante",           # 4
+    "2005281": "AllegatiCodice",                    # 4
+    "9615872": "Regole deontologiche",              # 1
+    "7447479": "Note istituzionali",                # 1
+}
+#: One query, not one per type. The portlet takes a comma-separated id list, and asking
+#: once keeps discovery a SINGLE ordered series — which is what lets a resumed backfill
+#: start on the right page. A per-type series would give each slice its own counter, and
+#: a resume would restart in the middle of whichever slice it happened to reach: the bug
+#: Finlex had (AGENTS.md §1, "the cursor must count the whole feed").
+GARANTE_TYPE_IDS = ",".join([*GARANTE_PROVVEDIMENTI, *GARANTE_OTHER])
+GARANTE_TYPE_LABELS = {**GARANTE_PROVVEDIMENTI, **GARANTE_OTHER}
+#: Kept for callers that still name the old two-entry mapping.
+GARANTE_TYPES = GARANTE_TYPE_LABELS
 
 
-def garante_search_url(type_id: str, page: int) -> tuple[str, dict]:
+def garante_search_url(type_id: str, page: int, *, date_from: str = "",
+                       date_to: str = "") -> tuple[str, dict]:
+    """The portlet URL for one page of results.
+
+    ``dataInizio``/``dataFine`` really do filter — a 2020-01 window returns January 2020
+    and nothing else, checked against the unfiltered walk — which is what makes the
+    keep-current path a handful of requests instead of 1,380.
+    """
     params = {
         "p_p_id": "g_gpdp5_search_GGpdp5SearchPortlet",
         "p_p_lifecycle": "0", "p_p_state": "normal", "p_p_mode": "view",
         f"{_GARANTE_PORTLET}mvcRenderCommandName": "/renderSearch",
         f"{_GARANTE_PORTLET}text": "",
+        f"{_GARANTE_PORTLET}dataInizio": date_from,
+        f"{_GARANTE_PORTLET}dataFine": date_to,
         f"{_GARANTE_PORTLET}idsTipologia": type_id,
         f"{_GARANTE_PORTLET}ordinamentoPer": "DESC",
         f"{_GARANTE_PORTLET}ordinamentoTipo": "data",
@@ -320,18 +458,32 @@ def garante_search_url(type_id: str, page: int) -> tuple[str, dict]:
 _DOCWEB_RE = re.compile(r"/docweb-display/docweb/(?P<id>\d+)")
 
 
-def garante_stubs(html: bytes | str) -> list[dict]:
-    """Search results keyed on the *doc web* number.
+_GARANTE_DMY = re.compile(r"(?P<d>\d{1,2})/(?P<m>\d{1,2})/(?P<y>(?:19|20)\d{2})")
 
-    That number is the Garante's own permanent identifier — it appears in the URL, in
-    square brackets at the end of the title and in the way every Italian lawyer cites
-    the measure ("doc. web n. 10241943"), which makes it the right stable id. The title
-    also carries the adoption date ("Provvedimento del 17 aprile 2026 - …").
+
+def garante_stubs(html: bytes | str) -> list[dict]:
+    """Search results keyed on the *doc web* number, with the card's own metadata.
+
+    That number is the Garante's permanent identifier — it appears in the URL, in square
+    brackets at the end of the title and in the way every Italian lawyer cites the
+    measure ("doc. web n. 10241943"), which makes it the right stable id.
+
+    Each result card also carries three things the docweb page does not put anywhere a
+    parser can find: the **tipologia** (ordinanza ingiunzione, parere, ammonimento — the
+    difference between a fine and an opinion), the **argomenti** (the Garante's own
+    297-term subject taxonomy: telemarketing, diritto all'oblio, videosorveglianza,
+    intelligenza artificiale) and the **adoption date** as ``dd/mm/yyyy``. The date is
+    read from the card rather than parsed out of the title, because roughly a third of
+    the archive is titled "Parere su istanza di accesso civico" or "Newsletter" with no
+    date in it at all.
     """
     soup = BeautifulSoup(html, "html.parser")
     out: list[dict] = []
     seen: set[str] = set()
-    for link in soup.select("a.titolo-risultato[href]"):
+    for card in soup.select(".card-risultato"):
+        link = card.select_one("a.titolo-risultato[href]")
+        if link is None:
+            continue
         match = _DOCWEB_RE.search(str(link.get("href") or ""))
         if not match:
             continue
@@ -340,11 +492,34 @@ def garante_stubs(html: bytes | str) -> list[dict]:
             continue
         seen.add(docweb)
         title = " ".join(link.get_text(" ", strip=True).split())
+        stamp = card.select_one(".data-risultato")
+        printed = _GARANTE_DMY.search(stamp.get_text(" ", strip=True)) if stamp else None
+        published = None
+        if printed:
+            try:
+                published = date(int(printed.group("y")), int(printed.group("m")),
+                                 int(printed.group("d")))
+            except ValueError:
+                published = None
+        # The tipologia links sit in the card's label block and the argomenti in its
+        # tail; both are rendered as ``/home/ricerca/-/search/{facet}/{value}`` links,
+        # which is the only thing distinguishing them from one another in the markup.
+        kinds = [" ".join(a.get_text(" ", strip=True).split())
+                 for a in card.select('a[href*="/search/tipologia/"]')]
+        topics = [" ".join(a.get_text(" ", strip=True).split())
+                  for a in card.select('a[href*="/search/argomento/"]')]
+        excerpt = card.select_one(".estratto-risultato")
         out.append({
             "url": f"{GARANTE_BASE}/web/guest/home/docweb/-/docweb-display/docweb/{docweb}",
             "title": re.sub(rf"\s*\[{docweb}\]\s*$", "", title),
-            "category": None,
-            "date": month_date(title, "it"),
+            "category": kinds[0] if kinds else None,
+            "categories": kinds,
+            "topics": topics,
+            "summary": (" ".join(excerpt.get_text(" ", strip=True).split())
+                        if excerpt else None),
+            # The card's date is authoritative; the title's is the fallback for the few
+            # cards the portlet renders without one.
+            "date": published or month_date(title, "it"),
             "docweb": docweb,
         })
     return out
@@ -390,10 +565,29 @@ class _DPAGuidanceAdapter(BaseAdapter):
     doc_type = DocType.GUIDANCE
     id_prefix = ""
     min_interval = 1.0
+    #: Items per index page, for the registers whose index has a fixed one. Non-zero
+    #: turns on the resume cursor: the position of each item in the whole walk is put on
+    #: its stub as ``resume_offset``, and a resumed run restarts on that page. Zero
+    #: means "this register is a few pages and reports no cursor" — which is honest for
+    #: the five hub-page libraries here and is why they are not obliged to resume.
+    page_size = 0
+    #: The instrument this register's documents are about when their own title does not
+    #: name one. See ``_governing_instrument``; ``None`` for a mixed register.
+    default_instrument: dict | None = None
 
-    def __init__(self, *, client: RateLimitedClient | None = None) -> None:
+    def __init__(self, *, start_offset: int | str | None = None,
+                 client: RateLimitedClient | None = None) -> None:
+        # Accepted by every subclass even though only the paged ones report a cursor:
+        # ``jobs`` passes it to whichever adapter it is resuming, and one that cannot
+        # take the keyword raises TypeError and files the retry as **done**
+        # (AGENTS.md §1). ``resume_floor`` backs off a page on purpose.
+        self.start_offset = resume_floor(option_int(start_offset, 0), self.page_size or 1)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
+
+    def _resume_page(self) -> int:
+        """The 0-based index page a resumed walk restarts on."""
+        return self.start_offset // self.page_size if self.page_size else 0
 
     def _series(self, max_pages: int | None) -> Iterator[Iterator[tuple[str, dict, dict]]]:
         """Yield one page-generator per independent series.
@@ -417,6 +611,10 @@ class _DPAGuidanceAdapter(BaseAdapter):
         # expose no usable date cursor, so they are walked whole; the payload hash is
         # what tells a revision from a re-read (INCREMENTAL_MODE "full-walk").
         seen: set[str] = set()
+        # Where in the WHOLE walk we are — across every series, not within one. A
+        # per-series counter would restart a resumed run in the middle of whichever
+        # series it happened to reach (AGENTS.md §1).
+        emitted = self._resume_page() * self.page_size
         for pages in self._series(max_pages):
             for url, params, context in pages:
                 try:
@@ -432,14 +630,17 @@ class _DPAGuidanceAdapter(BaseAdapter):
                     seen.add(key)
                     fresh += 1
                     published = item.get("date")
+                    hints = {k: v for k, v in item.items()
+                             if k not in ("url", "title", "date")} | {
+                        "watermark": published.isoformat() if published else None}
+                    if self.page_size:
+                        hints["resume_offset"] = emitted
+                    emitted += 1
                     yield Stub(
                         stable_id=key,
                         landing_url=item["url"], raw_url=item["url"],
                         title=item.get("title"), court=self.court,
-                        hint_date=published,
-                        hints={k: v for k, v in item.items()
-                               if k not in ("url", "title", "date")} | {
-                            "watermark": published.isoformat() if published else None},
+                        hint_date=published, hints=hints,
                     )
                 # A page that adds nothing is the end of THIS series: either it was
                 # empty or the view has started repeating itself past its last page.
@@ -501,6 +702,7 @@ class _DPAGuidanceAdapter(BaseAdapter):
         if len(text.strip()) < 120:
             return None
         category = stub.hints.get("category")
+        topics = [t for t in (stub.hints.get("topics") or []) if t]
         return Record(
             source=self.source,
             stable_id=stub.stable_id,
@@ -513,13 +715,23 @@ class _DPAGuidanceAdapter(BaseAdapter):
             raw_bytes=raw, raw_ext=ext, text=text.strip(),
             extracted_via=ExtractedVia.STRUCTURED,
             topic_tags=["data-protection", *self.tags,
-                        *([category.casefold()] if category else [])],
+                        *([category.casefold()] if category else []),
+                        *(t.casefold() for t in topics)],
             extra={
                 "jurisdiction": self.jurisdiction,
                 "category": category,
+                "categories": stub.hints.get("categories") or (
+                    [category] if category else []),
+                "topics": topics,
                 "date_precision": stub.hints.get("date_precision"),
                 "summary": stub.hints.get("summary"),
                 "attachments": attachments,
+                # A register whose documents are all about one instrument declares it,
+                # so a measure that names the Regulation once in its *visto* and then
+                # argues in bare articles for ten pages still links to those articles.
+                # A document whose own title names another instrument overrides it.
+                "citation_default_instrument": default_instrument(
+                    stub.title, self.default_instrument),
                 # A DPA's guidance library is single-subject: everything in it is about
                 # the GDPR and its national implementing act, and much of it explains
                 # the law without formally citing it. Gating on a recognised citation
@@ -555,15 +767,58 @@ class CNILGuidanceAdapter(_DPAGuidanceAdapter):
 
 
 class AEPDGuidanceAdapter(_DPAGuidanceAdapter):
+    """The AEPD's guías, from the listing AND its RSS feed.
+
+    The two do not agree, and the feed is the larger. The listing view reports 111
+    results across fourteen pages; the feed carries 160 distinct items back to 2016, a
+    strict superset — reconciled item by item, every listing URL is in the feed and 49
+    feed URLs are not in the listing. The extras are the same authority's decálogos,
+    campaign infographics and institutional declarations, published as ``recurso-
+    multimedia`` like the guías and simply not promoted into the guías view. Several are
+    substantive (the *canal prioritario* material, the school-platform principles); the
+    rest are videos, which resolve to no PDF and are dropped by the shared fetch.
+
+    So both are walked. The listing first, because it links straight to the PDF and is
+    fourteen requests; then the feed, whose items link to a landing page and need one
+    request each to reach their document — paid only for the items the listing did not
+    already supply, which is what keeps a monthly watch to about fifty requests instead
+    of a hundred and sixty.
+    """
+
     source = "es-aepd-guias"
     court, language, jurisdiction = "dpa-es", "es", "es"
     tags, id_prefix = ("spain", "aepd"), "es/aepd"
+    default_instrument = GDPR
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        #: Titles the listing has already supplied this run. A feed item matching one of
+        #: them is the same publication and needs no landing-page request.
+        self._listing_titles: set[str] = set()
 
     def _series(self, max_pages):
         yield _numbered(f"{AEPD_BASE}/guias-y-herramientas/guias", max_pages)
+        yield iter([(f"{AEPD_BASE}/guias-y-herramientas/guias/feed.xml", {},
+                     {"feed": True})])
 
     def _parse(self, html: bytes, url: str, context: dict) -> list[dict]:
-        return aepd_stubs(html)
+        if not context.get("feed"):
+            rows = aepd_stubs(html)
+            self._listing_titles.update(_fold_title(r["title"]) for r in rows)
+            return rows
+        return self._feed_rows(html)
+
+    def _feed_rows(self, xml: bytes) -> list[dict]:
+        out: list[dict] = []
+        for item in aepd_feed_items(xml):
+            if _fold_title(item["title"]) in self._listing_titles:
+                continue
+            document = aepd_document_url(self._client, item["url"])
+            if not document:
+                continue        # a campaign graphic or a video: no document to hold
+            out.append({"url": document, "title": item["title"], "category": "Guía",
+                        "date": item["date"]})
+        return out
 
 
 class DatatilsynetGuidanceAdapter(_DPAGuidanceAdapter):
@@ -616,29 +871,73 @@ class GBAGuidanceAdapter(_DPAGuidanceAdapter):
 
 
 class GaranteGuidanceAdapter(_DPAGuidanceAdapter):
+    """The Garante's whole measure archive: ~13,800 documents back to 1996.
+
+    Ordinanze ingiunzione, decisioni su ricorso, pareri, prescrizioni, ammonimenti,
+    autorizzazioni generali, BCR approvals, linee guida, codici di condotta and the
+    regole deontologiche — every tipologia the search facet offers, asked for by id
+    because the parent node does not expand (see :data:`GARANTE_PROVVEDIMENTI`).
+
+    One ordered series of 1,380 pages, ten to a page, newest first, so the walk has a
+    single durable cursor. Keep-current uses the portlet's ``dataInizio``/``dataFine``
+    window instead of walking: the filter genuinely filters (a January 2020 window
+    returns January 2020), so a monthly check costs a handful of requests.
+
+    Roughly a hundred measures are published as an attachment rather than as a web page.
+    Those docweb pages are a 23 kB shell whose only content is a link into
+    ``/documents/10160/…``; the shared fetch follows it, so the measure's text comes from
+    the PDF and the shell is not stored as though it were the document.
+    """
+
     source = "it-garante"
     court, language, jurisdiction = "dpa-it", "it", "it"
     tags, id_prefix = ("italy", "garante"), "it/garante/docweb"
+    page_size = GARANTE_PAGE_SIZE
+    default_instrument = GDPR
+    #: How far back a keep-current window reaches. Generous on purpose: the Garante
+    #: publishes a measure weeks after it signs it, and the search sorts on the signature
+    #: date, so a new document lands *behind* the cursor rather than in front of it.
+    watch_days = 180
+
+    def __init__(self, *, watch_days: int | str | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.watch_days = max(1, option_int(watch_days, type(self).watch_days))
 
     def stable_id(self, item: dict) -> str:
         return f"{self.id_prefix}/{item['docweb']}"
 
+    def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        self._window = None
+        if since:
+            cutoff = str(since)[:10]
+            try:
+                start = date.fromisoformat(cutoff) - timedelta(days=self.watch_days)
+            except ValueError:
+                start = date.today() - timedelta(days=self.watch_days)
+            self._window = (start.isoformat(), "")
+        yield from super().discover(since, max_pages=max_pages)
+
     def _series(self, max_pages):
-        def pages(type_id: str, label: str):
-            page = 1  # the portlet's cursor is 1-based
-            while max_pages is None or page <= max_pages:
-                url, params = garante_search_url(type_id, page)
-                yield url, params, {"category": label}
+        date_from, date_to = getattr(self, "_window", None) or ("", "")
+        # 1-based cursor. A resumed backfill starts on the page its checkpoint names
+        # rather than re-requesting everything before it — safe here, and only here,
+        # because the page size is fixed and the whole walk is ONE series, so the
+        # position of an item in the feed determines its page exactly.
+        first = self._resume_page() + 1
+        end = None if max_pages is None else first + max(0, max_pages) - 1
+
+        def pages():
+            page = first
+            while end is None or page <= end:
+                url, params = garante_search_url(
+                    GARANTE_TYPE_IDS, page, date_from=date_from, date_to=date_to)
+                yield url, params, {}
                 page += 1
 
-        for type_id, label in GARANTE_TYPES.items():
-            yield pages(type_id, label)
+        yield pages()
 
     def _parse(self, html: bytes, url: str, context: dict) -> list[dict]:
-        rows = garante_stubs(html)
-        for row in rows:
-            row["category"] = context["category"]
-        return rows
+        return garante_stubs(html)
 
     def _page_text(self, html: bytes) -> str:
         return garante_text(html)
