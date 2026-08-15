@@ -746,6 +746,31 @@ def test_formex_legislation_splits_articles_into_paragraphs():
     assert [s.label for s in js] == ["1", "ruling"]
 
 
+def test_formex_annex_numbered_points_are_independent_pincite_targets():
+    """EU courts cite the UCPD blacklist as “point 11 of Annex I”."""
+    from raglex.adapters.eu_cellar import extract_formex
+
+    xml = b"""<ACT><ENACTING.TERMS>
+      <ARTICLE><TI.ART>Article 1</TI.ART><P>Purpose.</P></ARTICLE>
+      </ENACTING.TERMS><ANNEX><TITLE><TI><P>ANNEX I</P></TI>
+      <STI><P>COMMERCIAL PRACTICES ALWAYS CONSIDERED UNFAIR</P></STI></TITLE>
+      <LIST TYPE="ARAB">
+        <ITEM><NP><NO.P>10.</NO.P><TXT>Presenting legal rights as special.</TXT></NP></ITEM>
+        <ITEM><NP><NO.P>11.</NO.P><TXT>Using paid editorial content without disclosure.</TXT>
+          <LIST TYPE="alpha"><ITEM><NP><NO.P>(a)</NO.P><TXT>Nested detail.</TXT></NP></ITEM></LIST>
+        </NP></ITEM>
+        <ITEM><NP><NO.P>11a.</NO.P><TXT>Paid search placement without disclosure.</TXT></NP></ITEM>
+      </LIST></ANNEX></ACT>"""
+    text, segments = extract_formex(xml)
+    labels = [segment.label for segment in segments]
+    assert "ANNEX I COMMERCIAL PRACTICES ALWAYS CONSIDERED UNFAIR" in labels
+    assert "Annex I, point 10" in labels
+    assert "Annex I, point 11" in labels
+    assert "Annex I, point 11a" in labels
+    point = next(segment for segment in segments if segment.label == "Annex I, point 11")
+    assert "Nested detail" in text[point.char_start:point.char_end]
+
+
 def test_formex_legislation_combines_split_zip_members():
     """The UCPD package stores Annex I outside the largest XML member."""
     import io

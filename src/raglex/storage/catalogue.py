@@ -5888,6 +5888,9 @@ class Catalogue:
         ranges = " OR ".join("(lower(shorthand) >= ? AND lower(shorthand) < ?)"
                              for _ in bounds)
         exacts = ",".join("?" for _ in starts)
+        # Pull some headroom because deterministic digital-law names are filtered below;
+        # a polluted exact-name band can otherwise consume the whole SQL LIMIT before
+        # the correct authority is reached.
         rows = self.conn.execute(
             "SELECT shorthand, candidate_id, doc_count FROM learned_shorthands "
             f"WHERE ({ranges}) "
@@ -5895,12 +5898,36 @@ class Catalogue:
             f"ORDER BY CASE WHEN lower(shorthand) IN ({exacts}) THEN 0 ELSE 1 END, "
             "doc_count DESC, lower(shorthand), candidate_id LIMIT ?",
             (*[v for pair in bounds for v in pair], SHORTHAND_MIN_DOCS,
-             *starts, limit)).fetchall()
-        return [dict(r) for r in rows if r["candidate_id"]]
+             *starts, max(limit * 4, limit))).fetchall()
+        from ..citations.extractor import _protected_shorthand_target
+
+        out: list[dict] = []
+        for row in rows:
+            item = dict(row)
+            candidate = item.get("candidate_id")
+            if not candidate:
+                continue
+            canonical = _protected_shorthand_target(item.get("shorthand"))
+            search_key = re.sub(
+                r"[^a-z0-9]+", "",
+                re.sub(r"^\s*the\s+", "", item.get("shorthand") or "", flags=re.I).casefold(),
+            )
+            if search_key == "ukgdpr":
+                canonical = "european/regulation/2016/0679"
+            if canonical and candidate != canonical:
+                # Learned names are evidence, not permission to redefine GDPR, DSA,
+                # NIS2, the ePrivacy Directive, etc. This is the search-side twin of
+                # the extraction guard: autocomplete must not confidently call the
+                # 1995 Data Protection Directive “the GDPR”.
+                continue
+            out.append(item)
+            if len(out) >= limit:
+                break
+        return out
 
     def documents_by_shorthand(self, query: str, *, limit: int = 20) -> list[str]:
         """Backward-compatible exact shorthand lookup used outside interactive search."""
-        from ..citations.extractor import SHORTHAND_MIN_DOCS
+        from ..citations.extractor import SHORTHAND_MIN_DOCS, _protected_shorthand_target
 
         q = " ".join(str(query or "").split()).casefold()
         if len(q) < 2:
@@ -5910,7 +5937,15 @@ class Catalogue:
             "AND COALESCE(blocked, 0) = 0 AND COALESCE(doc_count, 0) >= ? "
             "ORDER BY doc_count DESC, candidate_id LIMIT ?",
             (q, SHORTHAND_MIN_DOCS, limit)).fetchall()
-        return [r["candidate_id"] for r in rows if r["candidate_id"]]
+        canonical = _protected_shorthand_target(query)
+        search_key = re.sub(
+            r"[^a-z0-9]+", "",
+            re.sub(r"^\s*the\s+", "", query or "", flags=re.I).casefold(),
+        )
+        if search_key == "ukgdpr":
+            canonical = "european/regulation/2016/0679"
+        return [r["candidate_id"] for r in rows if r["candidate_id"]
+                and (not canonical or r["candidate_id"] == canonical)]
 
     def browse_learned_shorthands(
         self, *, query: str | None = None, candidate_id: str | None = None,

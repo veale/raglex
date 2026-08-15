@@ -169,6 +169,57 @@ def test_autocomplete_prefixes_a_learned_shorthand_and_explains_the_hit(tmp_path
     assert hit["items"][0]["matched_shorthand"] == "the CPIA"
 
 
+def test_protected_digital_shorthand_cannot_rank_a_predecessor_as_gdpr(tmp_path):
+    """Corpus learning is evidence, but cannot redefine a canonical digital-law name."""
+    from raglex.citations.extractor import SHORTHAND_MIN_DOCS
+
+    f = Facade(_config(tmp_path))
+    with f._open() as (cat, _rs, _ts):
+        for stable_id, title in (
+            ("32016R0679", "General Data Protection Regulation"),
+            ("31995L0046", "Data Protection Directive 95/46/EC"),
+        ):
+            cat.upsert_document(Record(
+                source="eu-legislation", stable_id=stable_id,
+                doc_type=DocType.LEGISLATION, title=title,
+                extracted_via=ExtractedVia.STRUCTURED))
+        for i in range(SHORTHAND_MIN_DOCS):
+            cat.add_learned_shorthands([
+                {"shorthand": "the GDPR", "candidate_id": "31995L0046",
+                 "entity_kind": "regulation", "is_abbrev": True},
+                {"shorthand": "the GDPR", "candidate_id": "32016R0679",
+                 "entity_kind": "regulation", "is_abbrev": True},
+            ], doc_id=f"case/{i}")
+        cat.commit()
+
+    hit = f.search_corpus(query="GDPR", facets=False)
+    assert hit["items"][0]["stable_id"] == "32016R0679"
+    assert all(item["stable_id"] != "31995L0046" for item in hit["items"])
+    assert hit["items"][0]["matched_shorthand"].casefold() == "the gdpr"
+
+
+def test_canonical_digital_law_names_are_protected_from_learned_redefinition():
+    from raglex.citations.extractor import _protected_shorthand_target as target
+
+    expected = {
+        "the GDPR": "32016R0679",
+        "EU GDPR": "32016R0679",
+        "Digital Services Act": "32022R2065",
+        "the DMA": "32022R1925",
+        "AI Act": "32024R1689",
+        "NIS 2 Directive": "32022L2555",
+        "Law Enforcement Directive": "32016L0680",
+        "ePrivacy Directive": "32002L0058",
+        "UCPD": "32005L0029",
+        "Data Governance Act": "32022R0868",
+        "Cyber Resilience Act": "32024R2847",
+        "European Media Freedom Act": "32024R1083",
+        "EECC": "32018L1972",
+        "AVMSD": "32010L0013",
+    }
+    assert {name: target(name) for name in expected} == expected
+
+
 def test_search_corpus_jurisdiction_filter_uses_explore_buckets(tmp_path):
     """OSS decisions inherit their country from dpa-xx, not their EU source."""
     f = Facade(_config(tmp_path))

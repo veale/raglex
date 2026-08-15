@@ -1705,6 +1705,9 @@ table.two-col td:first-child { width: 55%; padding-right: var(--sp-4); }
 
 /* --- Admin ▸ Search -------------------------------------------------------- */
 .search-admin .panel { margin-bottom: var(--sp-5); }
+.search-admin button.mini.active {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
+}
 .cov-grid { display: flex; gap: var(--sp-5); flex-wrap: wrap; }
 .cov-card { flex: 1 1 190px; }
 .cov-n { font-size: 1.7rem; font-weight: 600; letter-spacing: -.02em; }

@@ -147,8 +147,42 @@ def _annex_blocks(root: ET.Element) -> list[tuple[str, str, str]]:
             annex, skip_tags={"title", "ti.annex"},
             line_tags={"parag", "item", "row"},
         )
-        if body:
+        if not body:
+            continue
+        parents = {child: parent for parent in annex.iter() for child in parent}
+        points: list[tuple[str, ET.Element]] = []
+        for item in (node for node in annex.iter() if localname(node.tag) == "ITEM"):
+            parent = parents.get(item)
+            nested_item = False
+            while parent is not None and parent is not annex:
+                if localname(parent.tag) == "ITEM":
+                    nested_item = True
+                    break
+                parent = parents.get(parent)
+            if nested_item:
+                continue
+            number_node = next(
+                (node for node in item.iter() if localname(node.tag) == "NO.P"), None)
+            printed = (element_text(number_node) if number_node is not None else "").strip()
+            printed = printed.rstrip(".")
+            if re.fullmatch(r"\d+[a-z]?", printed, re.IGNORECASE):
+                points.append((printed, item))
+        if not points:
             blocks.append((label, "annex", body))
+            continue
+        match = re.search(r"\bannex\s+([IVXLCDM]+|\d+)\b", label, re.IGNORECASE)
+        if match:
+            number = match.group(1)
+            designation = f"Annex {number.upper() if number.isalpha() else number}"
+        else:
+            designation = f"Annex {index}"
+        blocks.append((label, "annex", label))
+        for printed, item in points:
+            point_body = flow_text(item, line_tags={"item", "parag"})
+            if point_body:
+                blocks.append(
+                    (f"{designation}, point {printed}", "point", point_body)
+                )
     return blocks
 
 

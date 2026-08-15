@@ -1032,6 +1032,7 @@ _COMMON_INITIALISMS = {"ca", "sc", "hc", "cj", "dpp", "ec", "eu", "uk", "us", "e
 # already in ``learned_shorthands`` and prevents a rescan from learning them again.
 _PROTECTED_SHORTHAND_TARGETS = {
     "gdpr": "32016R0679",
+    "eugdpr": "32016R0679",
     "dsgvo": "32016R0679",
     "avg": "32016R0679",
     "rgpd": "32016R0679",
@@ -1039,15 +1040,33 @@ _PROTECTED_SHORTHAND_TARGETS = {
     # EU grammar (including the Commission form "Article 50 AI Act"), and must never
     # be overwritten by a noisy corpus-learned definition.
     "aiact": "32024R1689",
+    "artificialintelligenceact": "32024R1689",
     "bdsg": "de/gesetz/bdsg",
     "dsa": "32022R2065",
+    "digitalservicesact": "32022R2065",
     "dma": "32022R1925",
+    "digitalmarketsact": "32022R1925",
     "nis2": "32022L2555",
+    "nis2directive": "32022L2555",
+    "led": "32016L0680",
+    "lawenforcementdirective": "32016L0680",
+    "eprivacydirective": "32002L0058",
+    "ucpd": "32005L0029",
+    "unfaircommercialpracticesdirective": "32005L0029",
+    "eudpr": "32018R1725",
+    "dataact": "32023R2854",
+    "datagovernanceact": "32022R0868",
+    "cyberresilienceact": "32024R2847",
+    "emfa": "32024R1083",
+    "europeanmediafreedomact": "32024R1083",
+    "eecc": "32018L1972",
+    "avmsd": "32010L0013",
 }
 
 
 def _protected_shorthand_target(name: str | None) -> str | None:
-    key = re.sub(r"[^a-z0-9]+", "", (name or "").casefold())
+    value = re.sub(r"^\s*the\s+", "", name or "", flags=re.IGNORECASE)
+    key = re.sub(r"[^a-z0-9]+", "", value.casefold())
     return _PROTECTED_SHORTHAND_TARGETS.get(key)
 
 

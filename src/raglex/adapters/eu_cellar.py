@@ -599,6 +599,35 @@ def _article_number(ti_art: str | None, fallback: int) -> str:
     return m.group(1) if m else str(fallback)
 
 
+def _annex_designation(title: str | None, fallback: int) -> str:
+    """The citable part of a long Formex annex title (``Annex I``)."""
+    match = re.search(r"\bannex\s+([IVXLCDM]+|\d+)\b", title or "", re.IGNORECASE)
+    if match:
+        number = match.group(1)
+        return f"Annex {number.upper() if number.isalpha() else number}"
+    return f"Annex {fallback}"
+
+
+def _annex_point_items(annex) -> list[tuple[str, object]]:
+    """Top-level numbered ``ITEM``s, excluding their nested (a)/(b) sub-points."""
+    parents = {child: parent for parent in annex.iter() for child in parent}
+    points: list[tuple[str, object]] = []
+    for item in (node for node in annex.iter() if _localname(node.tag) == "ITEM"):
+        parent = parents.get(item)
+        nested_item = False
+        while parent is not None and parent is not annex:
+            if _localname(parent.tag) == "ITEM":
+                nested_item = True
+                break
+            parent = parents.get(parent)
+        if nested_item:
+            continue
+        printed = (_fmx_first_child_text(item, "NO.P") or "").strip().rstrip(".")
+        if re.fullmatch(r"\d+[a-z]?", printed, re.IGNORECASE):
+            points.append((printed, item))
+    return points
+
+
 def _formex_legislation_blocks(root) -> list[tuple[str, str, str]]:
     """(label, kind, text) blocks for an EU legislative act in Formex 4 (the L-series OJ
     structure). Native units, per the Formex manual: the PREAMBLE's ``<VISA>`` legal-basis
@@ -648,15 +677,29 @@ def _formex_legislation_blocks(root) -> list[tuple[str, str, str]]:
             body = "\n".join(_fmx_render(art)).strip()
             if body:
                 blocks.append((art_label, "article", body))
-    # ANNEXes.
+    # ANNEXes. Their numbered points are independent legal propositions: EU judgments
+    # cite the UCPD blacklist as “point 11 of Annex I”, not merely “Annex I”.
     for i, anx in enumerate((e for e in root.iter() if _localname(e.tag) == "ANNEX"), 1):
         if id(anx) in seen:
             continue
         seen.add(id(anx))
         t = "\n".join(_fmx_render(anx)).strip()
-        if t:
-            label = _fmx_first_child_text(anx, "TITLE") or _fmx_first_child_text(anx, "TI") or f"Annex {i}"
-            blocks.append((label[:60], "annex", t))
+        if not t:
+            continue
+        title = _fmx_first_child_text(anx, "TITLE") or _fmx_first_child_text(anx, "TI")
+        label = (title or f"Annex {i}")[:60]
+        point_items = _annex_point_items(anx)
+        if not point_items:
+            blocks.append((label, "annex", t))
+            continue
+        designation = _annex_designation(title, i)
+        # Keep the annex itself as an anchor/outline entry, followed by independently
+        # addressable points. The point body retains nested (a)/(b) content.
+        blocks.append((label, "annex", title or designation))
+        for printed, item in point_items:
+            body = "\n".join(_fmx_render(item)).strip()
+            if body:
+                blocks.append((f"{designation}, point {printed}", "point", body))
     return blocks
 
 

@@ -625,6 +625,18 @@ export function SearchAdminView() {
 
   const byJurisdiction: Record<string, any[]> = {};
   rows.forEach((r) => (byJurisdiction[r.jurisdiction] ||= []).push(r));
+  const jurisdictionNames = Object.keys(byJurisdiction).sort();
+  const jurisdictionSelected = (jurisdiction: string) => {
+    const sources = byJurisdiction[jurisdiction].map((r) => r.source);
+    return sources.length > 0 && sources.every((source) => picked.includes(source));
+  };
+  const toggleJurisdiction = (jurisdiction: string) => {
+    const sources = byJurisdiction[jurisdiction].map((r) => r.source);
+    setPicked(jurisdictionSelected(jurisdiction)
+      ? picked.filter((source) => !sources.includes(source))
+      : [...new Set([...picked, ...sources])]);
+  };
+  const selectedJurisdictions = jurisdictionNames.filter(jurisdictionSelected).length;
 
   return (
     <div className="search-admin">
@@ -653,6 +665,7 @@ export function SearchAdminView() {
             <div className="cov-l">in the current free-text scope</div>
             <div className="muted cov-sub">
               {chosen.length} source{chosen.length === 1 ? "" : "s"} ticked ·
+              {" "}{selectedJurisdictions} complete jurisdiction{selectedJurisdictions === 1 ? "" : "s"} ·
               {" "}{FMT(inScopeText - inScopeIndexed)} still to index
             </div>
           </div>
@@ -684,12 +697,20 @@ export function SearchAdminView() {
       <div className="panel">
         <h3 style={{ marginTop: 0 }}>Scope <span className="muted">
           — tick what the free-text box searches. Un-ticking does not delete an index.</span></h3>
+        <p className="muted" style={{ marginTop: -4, fontSize: 12 }}>
+          New and revised documents from selected sources are indexed automatically when
+          scheduled harvests finish; the build button fills the existing backlog.
+        </p>
         <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
           <button className="mini" onClick={() => setPicked(rows.map((r) => r.source))}>all</button>
           <button className="mini" onClick={() => setPicked([])}>none</button>
-          {Object.keys(byJurisdiction).sort().map((j) => (
-            <button key={j} className="mini" onClick={() => setPicked([...new Set([
-              ...picked, ...byJurisdiction[j].map((r) => r.source)])])}>+ {j}</button>
+          {jurisdictionNames.map((j) => (
+            <button key={j} className={`mini${jurisdictionSelected(j) ? " active" : ""}`}
+              aria-pressed={jurisdictionSelected(j)}
+              title={`${jurisdictionSelected(j) ? "Remove" : "Select"} all ${byJurisdiction[j].length} sources in ${j}`}
+              onClick={() => toggleJurisdiction(j)}>
+              {jurisdictionSelected(j) ? "✓" : "+"} {j}
+            </button>
           ))}
           <span style={{ flex: 1 }} />
           <button className="mini" disabled={busy === "scope"}
@@ -709,7 +730,7 @@ export function SearchAdminView() {
             <th className="num">free text</th><th className="num">embedded</th><th />
           </tr></thead>
           <tbody>
-            {Object.keys(byJurisdiction).sort().map((j) => (
+            {jurisdictionNames.map((j) => (
               <Fragment key={j}>
                 <tr className="jur-row"><td colSpan={6}>{j}</td></tr>
                 {byJurisdiction[j].map((r) => (

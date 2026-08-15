@@ -45,6 +45,40 @@ def test_echr_adapter_resolves_by_ecli_and_appno_to_full_judgment():
         assert rec.extra["appno"].startswith("58170/13")
 
 
+def test_hudoc_spaced_markers_form_one_complete_main_judgment_run():
+    """HUDOC emits ``12 .`` as well as ``12.`` and appends opinions restarting at 1.
+
+    Quoted numbered lists and the opinion must remain within their host text: only the
+    Court's principal, longest consecutive run supplies the citable ``§`` anchors.
+    """
+    html = """<html><body>
+      <p>PROCEDURE</p>
+      <p>1. First.</p><p>2 . Second.</p>
+      <p>Quoted rules:</p><p>1. Not judgment paragraph one.</p>
+      <p>3. Third.</p><p>4 . Fourth.</p><p>5. Fifth.</p>
+      <p>FOR THESE REASONS, THE COURT</p><p>Holds unanimously.</p>
+      <p>SEPARATE OPINION</p><p>1. Opinion one.</p><p>2. Opinion two.</p>
+    </body></html>"""
+    text, segments = parse_body_html(html)
+    paragraphs = [segment for segment in segments if segment.kind == "paragraph"]
+    assert [segment.label for segment in paragraphs] == ["1", "2", "3", "4", "5"]
+    assert text[paragraphs[1].char_start:paragraphs[1].char_end].startswith("Second.")
+    assert "Not judgment paragraph one" in text[paragraphs[1].char_start:paragraphs[1].char_end]
+
+
+def test_hudoc_chooses_long_judgment_after_short_numbered_front_matter():
+    html = """<body>
+      <p>Contents</p><p>1. Procedure</p><p>2. Facts</p>
+      <p>THE JUDGMENT</p>
+      <p>1 . Merits one.</p><p>2 . Merits two.</p><p>3 . Merits three.</p>
+      <p>4 . Merits four.</p><p>5 . Merits five.</p><p>6 . Merits six.</p>
+    </body>"""
+    text, segments = parse_body_html(html)
+    paragraphs = [segment for segment in segments if segment.kind == "paragraph"]
+    assert [segment.label for segment in paragraphs] == [str(n) for n in range(1, 7)]
+    assert text[paragraphs[0].char_start:paragraphs[0].char_end].startswith("Merits one.")
+
+
 def test_echr_grammars_and_routing():
     # application number (the resolvable key) routes to the HUDOC adapter
     appno = next(c for c in extract_citations("Handyside v United Kingdom, Application no. 5493/72")

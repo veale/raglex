@@ -172,7 +172,46 @@ def _pick_judgment(rows: list[dict], appno: str | None) -> dict | None:
     return ranked[0] if ranked else None
 
 
-_PARA_NUM = re.compile(r"^(\d{1,4})\.\s")
+_PARA_NUM = re.compile(r"^(\d{1,4})\s*[.．]\s+")
+
+
+def _judgment_paragraphs(paras: list[str]) -> dict[int, tuple[int, int]]:
+    """Return ``p-index -> (number, marker-end)`` for the principal judgment.
+
+    HUDOC's DOCX converter inconsistently prints the marker as both ``12.`` and
+    ``12 .``.  More importantly, judgments quote numbered legislation and append
+    separately numbered opinions.  Treating every line-opening number as a Court
+    paragraph therefore creates duplicate anchors and makes ``§ 12`` ambiguous.
+
+    The principal reasons are the longest consecutive run beginning at 1 (or, for a
+    damaged old conversion, 2).  Off-sequence quoted lists are skipped, while a later
+    opinion restarting at 1 competes as a separate, normally much shorter run.  This
+    recovers all 536 paragraphs of Big Brother Watch rather than the 484 whose marker
+    happened not to contain a space.
+    """
+    candidates: list[tuple[int, int, int]] = []
+    for index, para in enumerate(paras):
+        match = _PARA_NUM.match(para)
+        if match:
+            candidates.append((index, int(match.group(1)), match.end()))
+    starts = [i for i, (_, number, _) in enumerate(candidates) if number in (1, 2)]
+    best: list[tuple[int, int, int]] = []
+    best_score = (0, 0, -10**9)
+    for start in starts:
+        run: list[tuple[int, int, int]] = []
+        expected = candidates[start][1]
+        last_candidate_index = start
+        for candidate_index, candidate in enumerate(candidates[start:], start):
+            if candidate[1] == expected:
+                run.append(candidate)
+                expected += 1
+                last_candidate_index = candidate_index
+        skipped = last_candidate_index - start + 1 - len(run)
+        score = (len(run), run[-1][1] if run else 0, -skipped)
+        if score > best_score:
+            best = run
+            best_score = score
+    return {index: (number, marker_end) for index, number, marker_end in best}
 
 
 def parse_body_html(html: bytes | str) -> tuple[str | None, list]:
@@ -188,14 +227,16 @@ def parse_body_html(html: bytes | str) -> tuple[str | None, list]:
     paras = [p for p in paras if p]
     if not paras:
         return None, []
+    numbered = _judgment_paragraphs(paras)
     blocks: list[tuple[str, str, str]] = []
     label, kind, cur = "Header", "section", []
-    for p in paras:
-        m = _PARA_NUM.match(p)
-        if m:
+    for index, p in enumerate(paras):
+        marker = numbered.get(index)
+        if marker:
             if cur:
                 blocks.append((label, kind, "\n".join(cur)))
-            label, kind, cur = m.group(1), "paragraph", [p[m.end():].strip() or p]
+            number, marker_end = marker
+            label, kind, cur = str(number), "paragraph", [p[marker_end:].strip() or p]
         elif re.match(r"^FOR\s+THESE\s+REASONS", p, re.IGNORECASE) and len(p) < 80:
             if cur:
                 blocks.append((label, kind, "\n".join(cur)))
