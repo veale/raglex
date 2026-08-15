@@ -19,6 +19,7 @@ from . import (  # noqa: F401  (register on import)
     gii_xml,
     govuk_govspeak,
     hklm_xml,
+    hudoc_html,
     jats,
     lawmaker_html,
     ldml_de,

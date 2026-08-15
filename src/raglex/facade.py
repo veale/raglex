@@ -8330,6 +8330,13 @@ class Facade:
                 from .adapters.uk_caselaw import parse_judgment
                 text, _relations, _ncn, segments = parse_judgment(raw)
                 fmt = "uk-caselaw-judgment"
+            elif doc["source"] == "echr":
+                # HUDOC's conversion is source-specific HTML; byte sniffing cannot
+                # distinguish it from a generic page. Keep one-document repairs on the
+                # same parser as harvest and the registered whole-source reparse path.
+                from .adapters.echr import parse_body_html
+                text, segments = parse_body_html(raw)
+                fmt = "hudoc-html"
             else:
                 # Older harvests can pre-date (or omit) a byte signature that the
                 # current sniffer knows about.  The importer records the parser format

@@ -79,6 +79,15 @@ def test_hudoc_chooses_long_judgment_after_short_numbered_front_matter():
     assert text[paragraphs[0].char_start:paragraphs[0].char_end].startswith("Merits one.")
 
 
+def test_hudoc_format_is_registered_for_held_corpus_reparses():
+    from raglex.formats import available, parse
+
+    assert "hudoc-html" in available()
+    parsed = parse("hudoc-html", b"<body><p>1 . One.</p><p>2. Two.</p><p>3 . Three.</p></body>")
+    assert [segment.label for segment in parsed.segments if segment.kind == "paragraph"] == [
+        "1", "2", "3"]
+
+
 def test_echr_grammars_and_routing():
     # application number (the resolvable key) routes to the HUDOC adapter
     appno = next(c for c in extract_citations("Handyside v United Kingdom, Application no. 5493/72")
