@@ -684,6 +684,20 @@ def _manual_source(source: str) -> bool:
             or value in {"user", "import"})
 
 
+def _display_coverage_year(kind: str, source: str, court: str,
+                           year: int, current_year: int) -> int | None:
+    """A defensible coverage year, without rewriting the underlying document date."""
+    if kind != "legislation" and year < 1000:
+        return None
+    # BAILII's historical ScotCS index contains a few impossible pseudo-years (1028,
+    # 1174 and 1481 among them). The Court of Session was established in 1532; retaining
+    # those records in the document total is honest, but claiming 1028 as court coverage
+    # is not. This is a presentation floor, not a destructive catalogue correction.
+    if source == "uk-caselaw" and court.casefold() == "scotcs" and year < 1532:
+        return None
+    return min(year, current_year)
+
+
 def _coe_parent(label: str) -> str:
     """Institutional Council of Europe author, never an individual report author."""
     key = _name_key(label)
@@ -919,8 +933,10 @@ def build_sources_summary(facade: Facade, *, current_year: int | None = None) ->
             # Ancient legislation is real; a modern court recorded in year 201 is not.
             # DILA contains a handful of truncated 201x dates, which must not make a
             # court's published coverage claim read "201–2022".
-            if kind == "legislation" or parsed_year >= 1000:
-                item["years"].add(min(parsed_year, current_year))
+            display_year = _display_coverage_year(
+                kind, source, court, parsed_year, current_year)
+            if display_year is not None:
+                item["years"].add(display_year)
 
     section_order = {
         "Legislation": 0, "Case law": 1, "Opinions of the Advocates General": 2,

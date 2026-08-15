@@ -10,6 +10,7 @@ from raglex.core.models import DocType, ExtractedVia, Record
 from raglex.facade import Facade
 from raglex.settings import SettingsStore
 from raglex.static_bundle import (
+    _display_coverage_year,
     _group_source_entries,
     apply_placeholders,
     build_sources_summary,
@@ -92,6 +93,15 @@ def test_council_of_europe_guidance_groups_by_institution_not_person():
     other = next(row for row in grouped if row["label"].startswith("Other Council"))
     assert other["count"] == 8 and {r["label"] for r in other["details"]} == {
         "Louise Drammeh", "Aoife Nolan"}
+
+
+def test_scottish_coverage_does_not_predate_the_court_of_session():
+    assert _display_coverage_year(
+        "cases", "uk-caselaw", "scotcs", 1028, 2026) is None
+    assert _display_coverage_year(
+        "cases", "uk-caselaw", "scotcs", 1532, 2026) == 1532
+    assert _display_coverage_year(
+        "cases", "uk-caselaw", "scotcs", 2030, 2026) == 2026
 
 
 @pytest.fixture(autouse=True)
