@@ -5446,6 +5446,11 @@ class Facade:
     _BODY_JURISDICTIONS = {
         "echr": "Council of Europe", "court-ecthr-europe": "Council of Europe",
         "hca": "Australia", "cjeu": "European Union", "euboa": "European Union",
+        "european data protection supervisor (edps)": "European Union",
+        "european data protection board (edpb)": "European Union",
+        "article 29 working party": "European Union",
+        "austrian data protection authority": "Austria",
+        "data protection authority of liechtenstein": "Liechtenstein",
         "financial services and markets authority (fsma)": "Belgium",
         "hellenic capital market commission (hcmc)": "Greece",
         "central bank of hungary": "Hungary",

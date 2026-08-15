@@ -58,6 +58,7 @@ from .de_bundestag import BundestagDrucksachenAdapter, BundestagWDAdapter
 from .de_openlegaldata import DeOpenLegalDataAdapter
 from .de_neuris import DeNeurisAdapter
 from .de_rii import DeRiiAdapter
+from .de_datenschutzarchiv import DatenschutzArchivReportsAdapter
 from .at_ris import APPLICATIONS as RIS_APPLICATIONS, AustrianRISAdapter
 from .sk_ress import SlovakRESSAdapter
 from .fi_finlex import SERIES as FINLEX_SERIES, FinlexAdapter
@@ -468,6 +469,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     # (424k decisions, 918 courts). Bulk-seeded from the parquet dump (`path`), then kept
     # current off the same project's REST API. ECLI-keyed, so it dedups against de-rii.
     "de-openlegaldata": DeOpenLegalDataAdapter,
+    "de-datenschutzarchiv-reports": DatenschutzArchivReportsAdapter,
     # ---- Austria: one RIS Applikation per key ------------------------------
     # The API partitions its 985,000 documents by deciding body, and the bodies are not
     # comparable — OGH civil judgments, the constitutional court, and the data-protection
@@ -854,6 +856,20 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "and the Länder authorities mostly link here. An Orientierungshilfe and its "
         "Anhang are kept as one document.",
         (), ("datenschutzkonferenz-online.de PDF URL",),
+    ),
+    "de-datenschutzarchiv-reports": SourceInfo(
+        "de-datenschutzarchiv-reports",
+        "DatenschutzArchiv activity reports (German, Austrian, EU and Liechtenstein DPAs)",
+        "preparatory", "DE", False,
+        "The activity-report collection maintained by Stiftung Datenschutz, from 1971 "
+        "onwards. Backfill follows each misleading .pdf-named detail page to its actual "
+        "/fileadmin/ PDF. The monthly watch reads the archive's current RSS feed and "
+        "accepts only entries whose title contains Tätigkeitsbericht. Austrian, "
+        "Liechtenstein, EDPS/EDPB and Article 29 reports are filed under their issuing "
+        "jurisdiction rather than Germany.",
+        (SourceOption("ocr", "OCR scanned reports", "true"),
+         SourceOption("max_ocr_pages", "Maximum OCR pages per report", "300")),
+        ("datenschutzarchiv.org activity-report detail URL",),
     ),
     "be-gba": SourceInfo(
         "be-gba", "Belgian DPA (APD/GBA) publications", "guidance", "BE", False,
@@ -3066,6 +3082,9 @@ INCREMENTAL_MODE: dict[str, str] = {
     # takes no date parameter, only ?paged=N.
     "uk-commons-library": "early-stop", "uk-lords-library": "early-stop",
     "de-bt-wd": "early-stop",
+    # A full backfill walks the archive category; the monthly keep-current path reads one
+    # newest-first RSS document window and filters it to Tätigkeitsbericht entries.
+    "de-datenschutzarchiv-reports": "early-stop",
     # The SPICe listing sorts newest-first and reports an authoritative result count.
     "scot-spice": "early-stop",
     # One sitemap / one page for the whole archive, then filtered — cheap, and there is
