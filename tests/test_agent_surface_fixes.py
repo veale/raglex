@@ -26,6 +26,7 @@ from raglex.facade import (
     _cited_name_conflict,
     _inserted_provisions,
     _label_help,
+    _match_segment,
     _treatment_cues,
     _trim_party_lead_in,
     Facade,
@@ -35,6 +36,12 @@ from raglex.facade import (
 class _Seg:
     def __init__(self, label):
         self.label = label
+
+
+def test_annex_point_pinpoint_matches_its_point_not_the_whole_annex():
+    segments = [_Seg("ANNEX I — unfair practices"), _Seg("Annex I, point 11")]
+    assert _match_segment(segments, "Annex I, point 11") == 1
+    assert _match_segment(segments, "point 11 of Annex I") == 1
 
 
 # --- doc_type: a rejected filter is not an answer about the corpus ------------------

@@ -1392,8 +1392,9 @@ def test_annex_anchor_keys_fold_roman_numerals():
 
     assert _anchor_key("Annex I") == "annex:1"
     assert _anchor_key("Annexe II") == "annex:2"           # the French spelling
-    # the tail folds to the family, exactly as "Article 28(3)" folds to art:28
-    assert _anchor_key("Annex I, point 29") == "annex:1"
+    # Once the annex has native point segments, the point stays independently citable.
+    assert _anchor_key("Annex I, point 29") == "annex:1:pt:29"
+    assert _anchor_key("point 29 of Annex I") == "annex:1:pt:29"
     # the segment label carries the annex's TITLE and must still meet the bare anchor
     assert _anchor_key(
         "ANNEX I COMMERCIAL PRACTICES WHICH ARE IN ALL CIRCUMSTANCES CONSIDERED UNFAIR"
@@ -1404,6 +1405,8 @@ def test_annex_anchor_keys_fold_roman_numerals():
     # ...but the SQL guard must still look for what the corpus actually STORES, which for
     # an annex is the roman spelling. Guarding on arabic alone would match nothing.
     assert _anchor_sql_prefixes("Annex I") == ["annex1", "annexi"]
+    assert _anchor_sql_prefixes("Annex I, point 29") == [
+        "annex1point29", "annexipoint29", "point29ofannex1", "point29ofannexi"]
     # a roman numeral must not be read out of a word ("Annex Introduction")
     assert _anchor_key("Annex Introduction") is None
 

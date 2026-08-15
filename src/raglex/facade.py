@@ -327,9 +327,11 @@ def _match_segment(segs, anchor: str) -> int:
     # never equals it outright. Restricted to a SIMPLE anchor — a bare unit+number, with
     # optional sub-parts — because a compound label like "Sch 2 Pt 2 para 7" folds to just
     # "sch:2" and would otherwise match any part of Schedule 2.
-    if _re.fullmatch(r"\s*[a-z]*\.?\s*\d+[a-z]?\s*(?:\([^()]+\)\s*)*", anchor.strip(),
-                     _re.IGNORECASE):
-        key = _anchor_key(anchor)
+    key = _anchor_key(anchor)
+    simple = _re.fullmatch(
+        r"\s*[a-z]*\.?\s*\d+[a-z]?\s*(?:\([^()]+\)\s*)*", anchor.strip(),
+        _re.IGNORECASE)
+    if simple or (key and key.startswith("annex:")):
         if key:
             for i, s in enumerate(segs):
                 if _anchor_key(s.label) == key:
@@ -1043,18 +1045,32 @@ def _int_to_roman(value: int) -> str:
 
 def _anchor_key(text: str | None) -> str | None:
     t = (text or "").strip().lower().lstrip("[(")
+    reverse_annex_point = re.match(
+        r"^(?:point|pt)\.?\s*(\d+[a-z]?)\s+of\s+annexe?\.?\s+([ivxlc]+|\d+)\b", t)
+    if reverse_annex_point:
+        annex_number = reverse_annex_point.group(2)
+        annex_number = (str(_roman_to_int(annex_number))
+                        if annex_number.isalpha() else annex_number)
+        return f"annex:{annex_number}:pt:{reverse_annex_point.group(1)}"
     # An annex is numbered in ROMAN — "Annex I", "Annexe II" — which the arabic matcher
     # below cannot see at all, so every annex anchor and every annex segment label folded
     # to no key: the citations existed but could never join the annex they were about.
     # The tail is dropped, so "Annex I, point 29" keys to the annex family exactly as
     # "Article 28(3)" keys to art:28, and the exact anchor keeps the point.
-    annex = re.match(r"^annexe?\.?\s+([ivxlc]+)(?![a-z0-9])", t)
+    annex = re.match(r"^annexe?\.?\s+([ivxlc]+|\d+)(?![a-z0-9])", t)
     if annex:
         # Folded to ARABIC, because the two spellings occur for the same annex: Wind Tre
         # writes "Annex I, point 29" twelve times and "Annex 1, point 29" once, and the
         # UCPD's own segment label is "ANNEX I". Keying them apart would scatter a
         # provision's citers across two keys for a typographic difference.
-        return f"annex:{_roman_to_int(annex.group(1))}"
+        annex_number = annex.group(1)
+        annex_number = (str(_roman_to_int(annex_number))
+                        if annex_number.isalpha() else annex_number)
+        point = re.match(
+            r"\s*,?\s*(?:point|pt)\.?\s*(\d+[a-z]?)\b", t[annex.end():])
+        if point:
+            return f"annex:{annex_number}:pt:{point.group(1)}"
+        return f"annex:{annex_number}"
     # The number may be MULTI-LEVEL: a code of practice is cited by "paragraph 3.19",
     # a rule of court by "r 3.1". Stopping at the first dot folded 3.19 and 3.2 onto the
     # same key as 3 — every paragraph of a chapter answering to its chapter number. The
@@ -1195,6 +1211,14 @@ def _anchor_sql_prefixes(anchor: str | None) -> list[str]:
     key = _anchor_key(anchor)
     if not key:
         return []
+    compound_annex = re.fullmatch(r"annex:(\d+):pt:(\d+[a-z]?)", key)
+    if compound_annex:
+        annex_number, point = compound_annex.groups()
+        roman = _int_to_roman(int(annex_number))
+        return [
+            f"annex{annex_number}point{point}", f"annex{roman}point{point}",
+            f"point{point}ofannex{annex_number}", f"point{point}ofannex{roman}",
+        ]
     typ, _, number = key.partition(":")
     # The database guard compares against a normalisation that removes dots, so the
     # prefix must too, or "para 3.19" would be looked up as "para3.19" against a stored

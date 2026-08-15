@@ -1421,6 +1421,18 @@ const _ANCHOR_TYPE: Record<string, string> = {
 };
 function anchorKey(text: string): string | null {
   const t = (text || "").trim().toLowerCase().replace(/^[[(]/, "");
+  const roman = (value: string) => {
+    if (/^\d+$/.test(value)) return value;
+    const vals: Record<string, number> = { i: 1, v: 5, x: 10, l: 50, c: 100 };
+    const chars = value.toLowerCase().split("");
+    return String(chars.reduce((sum, char, i) =>
+      sum + (chars.slice(i + 1).some((later) => vals[later] > vals[char])
+        ? -vals[char] : vals[char]), 0));
+  };
+  const reversed = /^(?:point|pt)\.?\s*(\d+[a-z]?)\s+of\s+annexe?\.?\s+([ivxlc]+|\d+)\b/i.exec(t);
+  if (reversed) return `annex:${roman(reversed[2])}:pt:${reversed[1]}`;
+  const annex = /^annexe?\.?\s+([ivxlc]+|\d+)(?![a-z0-9])(?:\s*,?\s*(?:point|pt)\.?\s*(\d+[a-z]?))?/i.exec(t);
+  if (annex) return `annex:${roman(annex[1])}${annex[2] ? `:pt:${annex[2]}` : ""}`;
   // Multi-level numbers are real citation units: "paragraph 3.19" of a code of
   // practice, "r 3.1" of the rules. Stopping at the first dot folded every paragraph of
   // a chapter onto its chapter number. Must stay identical to the server's _anchor_key.
