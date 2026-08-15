@@ -320,6 +320,64 @@ def test_a_walk_reports_a_cursor_and_the_adapter_accepts_it_back():
     assert resumed.start_offset == 4990
 
 
+# The 3 kB script AEPD's WAF serves with HTTP 200 instead of page 228.
+AEPD_CHALLENGE = (b"<html><head></head><body><script type=\"text/javascript\">"
+                  b"eval(function(p,a,c,k,e,d){...})</script>"
+                  b"<!-- cookiesession8341 --></body></html>")
+
+
+def test_a_waf_challenge_is_not_an_empty_page():
+    """It arrives as 200 with 3 kB where a real page is 288 kB, and it carries none of
+    the listing's markup. Read as an empty result set it ended the backfill 2,280
+    documents into 46,900; read as a parser failure it would stop a walk that is working
+    everywhere else."""
+    from raglex.adapters.es_aepd import is_challenge
+
+    assert is_challenge(AEPD_CHALLENGE)
+    assert not is_challenge(AEPD_LISTING)
+    # a real page the parser cannot read is NOT a challenge, however small — that is
+    # the other bug, and it has to reach the parser-broken branch
+    assert not is_challenge(b"<div class=\"js-pager__items\"></div>")
+
+
+def test_a_blocked_page_is_retried_with_a_cache_busting_parameter():
+    """The block is cached against the exact request line: three identical retries in a
+    row returned the same script, a cookie jar changed nothing, and every page around it
+    answered normally in the same session. One inert extra parameter answers at once."""
+    class _WAF(_FakeClient):
+        def get(self, url, params=None, **kwargs):
+            self.calls.append((url, dict(params or {})))
+            if params and params.get("page") == 1 and "items_per_page" not in params:
+                return _FakeResponse(AEPD_CHALLENGE, url)
+            return _FakeResponse(self.pages[str((params or {}).get("page", ""))], url)
+
+    client = _WAF({"": AEPD_LISTING, "1": AEPD_LISTING})
+    stubs = list(AEPDResolutionsAdapter(client=client).discover(None, max_pages=2))
+    assert len(stubs) == 4                       # both pages, nothing lost
+    assert client.calls[-1][1] == {"page": 1, "items_per_page": 10}
+
+
+def test_an_unreachable_page_is_carried_to_the_end_not_raised_on_the_spot():
+    """One page in 4,690. Raising where it happens cost the backfill the 44,000
+    documents it had not reached yet; swallowing it would leave an unreported hole in an
+    enforcement register, which is worse. So: yield everything reachable, then fail."""
+    class _Blocked(_FakeClient):
+        def get(self, url, params=None, **kwargs):
+            self.calls.append((url, dict(params or {})))
+            if params and params.get("page") == 1:
+                return _FakeResponse(AEPD_CHALLENGE, url)
+            return _FakeResponse(self.pages[str((params or {}).get("page", ""))], url)
+
+    adapter = AEPDResolutionsAdapter(
+        client=_Blocked({"": AEPD_LISTING, "1": AEPD_LISTING, "2": AEPD_LISTING}))
+    stubs = []
+    with pytest.raises(ValueError, match="unreachable after retry"):
+        for stub in adapter.discover(None, max_pages=3):
+            stubs.append(stub)
+    # page 0 and page 2 survived; only page 1's ten are missing, and the job says so
+    assert len(stubs) == 4
+
+
 def test_an_unparseable_listing_page_raises_rather_than_ending_the_backfill():
     """A page inside a 4,690-page archive that parses to nothing is a broken parser, not
     the end of the register — the pager already said where that is. Returning quietly

@@ -163,6 +163,54 @@ def listing_items(html: bytes | str) -> list[dict]:
     return out
 
 
+#: The obfuscated cookie-setting script AEPD's WAF serves **with HTTP 200** instead of a
+#: listing page. It is 3 kB where a real page is 288 kB, and it carries none of the
+#: listing's own markup — so it is nothing like an empty result set, and must never be
+#: read as one.
+_CHALLENGE = re.compile(rb"eval\(function\(p,a,c,k,e,d\)|cookiesession\d+")
+#: What a genuine listing page always has, whether or not this parser can read its rows.
+#: Structure decides, not size: a page carrying the view's own markup is the page that
+#: was asked for even when the teaser parser can no longer read a single row out of it,
+#: and that case has to reach the parser-broken branch rather than be filed as a block.
+_LISTING_MARKERS = (b"node--type-resolucion-reclamacion", b"js-pager__items",
+                    b"view-listado", b"js-view-dom-id", b"class=\"pagination")
+
+
+def _page_params(page: int) -> list[dict]:
+    """The forms of one page request, plain first then cache-busting.
+
+    ``items_per_page`` is INERT — the view ignores it, returning ten rows whether it is
+    sent as 5, 10 or 20 — which is exactly why it is the right second attempt: it changes
+    the request line the block is cached against without changing the result set. Named
+    after a real Drupal parameter rather than an invented one so the retry still looks
+    like a browser to anything watching.
+    """
+    return [{"page": page}, {"page": page, "items_per_page": PAGE_SIZE}]
+
+
+def is_challenge(html: bytes) -> bool:
+    """Whether a 200 is the WAF's challenge rather than the page that was asked for.
+
+    Page 228 of the archive is refused **deterministically** — every page around it
+    answers normally in the same session, three retries in a row return the same 3 kB
+    script, and a cookie jar makes no difference — so this is not rate limiting and not
+    a transient blip. It is a cached block on that exact request line, and ANY extra
+    query parameter defeats it (see ``_page_params``): with one added, the same request
+    returns the ten resolutions of 21→16 February 2024 that sit exactly between the last
+    row of page 227 and the first of page 229.
+
+    Distinguishing this from "the parser broke" matters both ways round. Treated as an
+    empty page it ends the backfill 2,280 documents into 46,900; treated as a parser
+    failure it stops a walk that is working perfectly everywhere else.
+    """
+    body = bytes(html or b"")
+    if any(marker in body for marker in _LISTING_MARKERS):
+        return False
+    # Nothing of the listing in it. Either it says outright what it is, or it is some
+    # other interstitial too small to be a 288 kB page of resolutions.
+    return bool(_CHALLENGE.search(body)) or len(body) < 20_000
+
+
 def last_page(html: bytes | str) -> int:
     """The pager's own last-page number — the only place the archive states its size."""
     soup = BeautifulSoup(html, "html.parser")
@@ -267,6 +315,26 @@ class AEPDResolutionsAdapter(BaseAdapter):
                     row["date"] and row["date"] < cutoff for row in items):
                 return
 
+    def _page(self, page: int) -> bytes | None:
+        """One listing page, past the WAF if it has to be.
+
+        The retry adds an inert query parameter rather than sleeping or changing headers:
+        the block is cached against the exact request line, so a second identical request
+        is refused identically (measured three times) while ``?page=228&…`` answers at
+        once. ``None`` means the page is genuinely unreachable — the caller records the
+        hole, it does not paper over it.
+        """
+        for params in _page_params(page):
+            try:
+                body = self._client.get(LISTING, params=params).content
+            except FetchError:
+                return None
+            if not is_challenge(body):
+                return body
+            log.warning("%s: listing page %s refused by the WAF (%s bytes); retrying "
+                        "with a cache-busting parameter", self.source, page, len(body))
+        return None
+
     def _walk(self, max_pages: int | None) -> Iterator[Stub]:
         try:
             first = self._client.get(LISTING).content
@@ -277,22 +345,45 @@ class AEPDResolutionsAdapter(BaseAdapter):
         first_page = self.start_offset // PAGE_SIZE
         if max_pages is not None:
             end = min(end, first_page + max(0, max_pages) - 1)
+        blocked: list[int] = []
         for page in range(first_page, end + 1):
-            body = first if page == 0 else self._client.get(
-                LISTING, params={"page": page}).content
+            body = first if page == 0 else self._page(page)
+            if body is None:
+                # Ten documents behind a page nothing can reach. Recorded and carried to
+                # the end of the walk rather than raised here: this is one page in 4,690,
+                # and stopping cost a backfill 44,000 documents it could have had. The
+                # walk must not report success with a hole in it either, which is what
+                # the raise below is for.
+                blocked.append(page)
+                log.error("%s: listing page %s unreachable — %s resolutions missing",
+                          self.source, page, PAGE_SIZE)
+                continue
             items = listing_items(body)
             if not items:
-                # A page inside a 4,690-page archive that parses to nothing is a broken
-                # parser or a broken response, not the end of the register — the pager
-                # already told us where that is. Raising keeps a truncated backfill from
-                # recording itself as complete.
+                # A full-size listing page that parses to nothing is a BROKEN PARSER, not
+                # a blocked one (``is_challenge`` has already ruled that out) and not the
+                # end of the register — the pager said where that is. Nothing later in
+                # the walk will be right either, so this one does stop immediately.
                 raise ValueError(
-                    f"{self.source}: listing page {page} of {end} has no resolutions")
+                    f"{self.source}: listing page {page} of {end} has the listing's own "
+                    f"markup but no resolutions — the teaser parser no longer matches")
             for row in items:
                 yield self._stub(
                     row, key=stable_id(row["title"]), discovered_via="listing",
                     feed_total=total,
                     resume_offset=page * PAGE_SIZE + int(row["position"]))
+        if blocked:
+            # Everything reachable has been yielded and stored by now, so nothing is
+            # thrown away — but the job must not finish 'done' with a known gap in it.
+            # An unreported hole in an enforcement register is exactly the failure this
+            # repository is built around: nothing in the corpus says a document is
+            # missing, because a missing document leaves no trace.
+            raise ValueError(
+                f"{self.source}: {len(blocked)} listing page(s) unreachable after retry "
+                f"({', '.join(str(p) for p in blocked[:20])}"
+                f"{'…' if len(blocked) > 20 else ''}) — about "
+                f"{len(blocked) * PAGE_SIZE} resolutions are not held. Everything else "
+                f"was harvested; re-run to retry the blocked pages.")
 
     def _stub(self, row: dict, *, key: str, discovered_via: str,
               feed_total: int | None = None,
