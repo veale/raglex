@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import shutil
 import unicodedata
 import zipfile
 from datetime import datetime, timezone
@@ -39,7 +40,7 @@ from .static_export import (
     cached_export_page_title,
     editorial_paragraphs,
     public_base_url,
-    render_cached_export,
+    render_cached_export_assets,
     static_export_status,
 )
 
@@ -1404,8 +1405,8 @@ def build_bundle(
         emit(index, f"{label} ({position}) — writing {item['slug']}.html")
         # Every edition links back to the index by its title — the set reads as one site,
         # not a scatter of files, however a reader arrived at this one.
-        html_bytes = render_cached_export(
-            status, note=item.get("note"),
+        html_bytes, page_assets = render_cached_export_assets(
+            status, note=item.get("note"), asset_prefix=f"{item['slug']}.data",
             canonical=(f"{base_url}/{item['slug']}.html" if base_url else None),
             index_link={"href": "index.html", "title": config["index_title"]},
             # "Crossreferenced AI Act - UCL Digital Laws": a tab, a bookmark and a
@@ -1418,6 +1419,7 @@ def build_bundle(
             short_title=item.get("short") or None)
         filename = f"{item['slug']}.html"
         files.append((filename, html_bytes))
+        files.extend(page_assets.items())
         entries.append({
             "filename": filename,
             "slug": item["slug"],
@@ -1485,14 +1487,20 @@ def build_bundle(
     # The folder is written every run — scheduled or manual — and same-named files are
     # replaced outright. It is a mirror of the current corpus, not an archive.
     out_dir.mkdir(parents=True, exist_ok=True)
+    # A law can lose provisions or chunks between builds. Remove only its generated asset
+    # directory first, otherwise an obsolete priority pack survives on disk indefinitely.
+    for entry in entries:
+        shutil.rmtree(out_dir / f"{entry['slug']}.data", ignore_errors=True)
     if not sources_summary:
         # Turning the optional page off must turn it off on disk too. Leaving the prior
         # file behind would keep publishing stale corpus claims at a known URL.
         (out_dir / "sources.html").unlink(missing_ok=True)
     for filename, payload in files:
-        temporary = out_dir / f".{filename}.tmp"
+        target = out_dir / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.tmp")
         temporary.write_bytes(payload)
-        temporary.replace(out_dir / filename)
+        temporary.replace(target)
 
     result = {
         "documents": len(entries),

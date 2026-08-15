@@ -153,7 +153,6 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
     assert "Article 15 Right of access" in page
     assert "Example v Commissioner" in page
     assert "Article%2015%20GDPR" in page
-    assert "fetch(" not in page
     assert 'font-family: Times, "Times New Roman", serif' in page
     assert "--paper: #ffffff" in page
     assert 'id="contents-search"' not in page
@@ -169,6 +168,9 @@ def test_static_export_contains_law_mentions_snippets_and_public_links(tmp_path)
     )
     assert match
     data = json.loads(match.group(1))
+    # Direct downloads remain self-contained. The shared renderer knows how to fetch
+    # bundle sidecars, but this page gives it no external URLs.
+    assert "chunk_urls" not in data
     for block in re.findall(
             r'<script id="raglex-chunk-\d+" type="application/json">(.*?)</script>',
             page, re.DOTALL):
@@ -495,6 +497,57 @@ def test_citing_rows_are_chunked_after_the_immediate_annotation_core():
     assert page.index("<script>" + _SCRIPT) < page.index('id="raglex-chunk-0"')
     assert "requestIdleCallback" in _SCRIPT and "async function ensureGroups" in _SCRIPT
     assert 'id="mentions-load-progress"' in page
+
+
+def test_published_page_uses_article_priority_sidecars_and_keeps_rows_small():
+    """A paragraph click must not download every document in every citation block."""
+    from raglex.static_export import render_static_page
+
+    data = json.loads(json.dumps(_SEO_DATA))
+    data["law"]["sections"][0]["key"] = "art:24"
+    base = {
+        "id": "authority", "title": "An authority", "cite": "[2026] Test 1",
+        "date": "2026-01-01", "jurisdiction": "UK", "kind": "cases",
+        "court": "Court", "source_label": "Source", "pagerank": 1, "links": [],
+        "mentions_by_key": {"art:24": 1, "exact:art24(2)": 1, "art:99": 1},
+        "inherited_mentions_by_key": {}, "previous_mentions_by_key": {},
+        "version_mentions_by_key": {}, "labels_by_key": {},
+        "snippets": [
+            {"text": "Article 24(2) excerpt"},
+            {"text": "Unrelated Article 99 excerpt"},
+        ],
+        "snippet_indices": {"exact:art24(2)": [0], "art:99": [1]},
+    }
+    data["groups"] = [base]
+    data["index"] = {"art:24": [0], "exact:art24(2)": [0], "art:99": [0]}
+    data["counts"].update({"art:24": 1, "exact:art24(2)": 1, "art:99": 1})
+    assets = {}
+    page = render_static_page(
+        title=data["law"]["title"], data_json=json.dumps(data),
+        asset_prefix="gdpr.data", _asset_sink=assets)
+    core = json.loads(re.search(
+        r'<script id="raglex-data" type="application/json">(.*?)</script>',
+        page, re.S).group(1))
+
+    assert 'id="raglex-chunk-0"' not in page
+    assert core["chunk_urls"] == ["gdpr.data/c000.json"]
+    pack_name = core["priority_pack_urls"]["exact:art24(2)"]
+    assert core["priority_pack_urls"]["art:24"] == pack_name
+    pack = json.loads(assets[pack_name])
+    row = pack["packs"]["exact:art24(2)"]["rows"][0][1]
+    assert pack["packs"]["exact:art24(2)"]["complete"] is True
+    assert row["mentions_by_key"] == {"exact:art24(2)": 1}
+    assert row["snippets"] == [{"text": "Article 24(2) excerpt"}]
+    assert "Unrelated Article 99 excerpt" not in assets[pack_name].decode()
+    assert "new AbortController()" in page
+    assert "stopBackgroundLoading();" in page
+
+
+def test_only_statute_pages_get_the_wide_head_and_frozen_sidebar_heading():
+    from raglex.static_export import _STYLE
+
+    assert ".page-head > div {\n  grid-column: 1 / -1;" in _STYLE
+    assert ".contents-head {\n  position: sticky;\n  top: 0;" in _STYLE
 
 
 def test_each_prerendered_provision_says_its_mentions_are_loading():

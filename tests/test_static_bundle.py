@@ -339,8 +339,17 @@ def test_build_writes_folder_and_zip_with_per_item_notes(tmp_path, monkeypatch):
     assert "United Kingdom (2 full-text documents)" in sources
 
     with zipfile.ZipFile(result["zip"]) as archive:
-        assert sorted(archive.namelist()) == [
+        names = archive.namelist()
+        assert sorted(name for name in names if name.endswith(".html")) == [
             "dpa.html", "index.html", "osa.html", "sources.html"]
+        assert any(name.endswith(".data/c000.json") for name in names)
+
+    # The wider introduction and sticky law label belong only to statute pages. The
+    # independent index and sources documents retain their old single-column measure.
+    assert '<body class="no-sidebar">' in index
+    assert "body.no-sidebar .page-head, body.no-sidebar .page {\n  grid-template-columns: minmax(0, 52rem);" in index
+    assert "body { max-width: 56rem;" in sources
+    assert "grid-column: 1 / -1" not in sources
 
     # progress is descriptive: which edition, its position, and what is happening
     messages = [p.get("item", "") for p in seen]

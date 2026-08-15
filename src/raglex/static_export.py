@@ -1,8 +1,9 @@
-"""Self-contained, static editions of a held law and the documents mentioning it.
+"""Static editions of a held law and the documents mentioning it.
 
 The output deliberately has no dependency on the RagLex API.  The selected law, its
-provision index, citing-document metadata and short citation-context excerpts are embedded
-in one HTML file.  It therefore works from GitHub Pages and when opened directly from disk.
+provision index is embedded in the HTML. A direct download can remain one self-contained
+file; a published bundle writes the heavy citing-document rows as fetchable sidecars so a
+reader opening one paragraph does not first download and parse the entire citation graph.
 """
 
 from __future__ import annotations
@@ -1249,8 +1250,31 @@ def render_cached_export(
     """Render the page for a cached edition, applying the CURRENT attribution, this
     edition's own note, and (for a bundle item) the way back to its index page.
     ``status`` is a ready :func:`static_export_status`."""
+    page, _assets = _render_cached_export(
+        status, note=note, index_link=index_link, page_title=page_title,
+        short_title=short_title, canonical=canonical)
+    return page
+
+
+def render_cached_export_assets(
+    status: dict, *, asset_prefix: str, note: str | None = None,
+    index_link: dict | None = None, page_title: str | None = None,
+    short_title: str | None = None, canonical: str | None = None,
+) -> tuple[bytes, dict[str, bytes]]:
+    """Published page plus independently fetchable citation-data sidecars."""
+    return _render_cached_export(
+        status, note=note, index_link=index_link, page_title=page_title,
+        short_title=short_title, canonical=canonical, asset_prefix=asset_prefix)
+
+
+def _render_cached_export(
+    status: dict, *, note: str | None = None, index_link: dict | None = None,
+    page_title: str | None = None, short_title: str | None = None,
+    canonical: str | None = None, asset_prefix: str | None = None,
+) -> tuple[bytes, dict[str, bytes]]:
     payload = Path(status["_path"]).read_text(encoding="utf-8")
-    return render_static_page(
+    assets: dict[str, bytes] = {}
+    page = render_static_page(
         title=status.get("title") or status["stable_id"],
         data_json=payload,
         note=note,
@@ -1258,7 +1282,10 @@ def render_cached_export(
         page_title=page_title or cached_export_page_title(status),
         short_title=short_title or status.get("short_title") or None,
         canonical=canonical,
+        asset_prefix=asset_prefix,
+        _asset_sink=assets,
     ).encode("utf-8")
+    return page, assets
 
 
 def public_base_url() -> str | None:
@@ -1443,22 +1470,66 @@ def _slim_payload_json(data_json: str) -> str:
 
 
 _PAGE_GROUP_CHUNK_SIZE = 400
+_PRIORITY_PACK_LIMIT = 80
 
 
-def _deferred_page_payloads(data_json: str) -> tuple[str, str]:
+_PROJECTED_GROUP_MAPS = (
+    "mentions_by_key", "inherited_mentions_by_key", "previous_mentions_by_key",
+    "version_mentions_by_key", "labels_by_key",
+)
+
+
+def _project_group_for_key(group: dict, key: str) -> dict:
+    """The complete display row for ONE provision, without unrelated excerpts.
+
+    A single guidance document can mention ninety GDPR provisions and carry sixty-four
+    excerpts. Copying that whole row into a paragraph-priority pack made a 45-document
+    Article 24(2) result weigh 812 KB. Keeping just that paragraph's maps and excerpts is
+    56 KB, while the canonical background chunk remains the one deduplicated full copy.
+    """
+    out = {name: value for name, value in group.items()
+           if name not in {*_PROJECTED_GROUP_MAPS, "snippets", "snippet_indices"}}
+    for field in _PROJECTED_GROUP_MAPS:
+        source = group.get(field) or {}
+        out[field] = {key: source[key]} if key in source else {}
+    snippets = group.get("snippets") or []
+    old_indices = (group.get("snippet_indices") or {}).get(key) or []
+    out["snippets"] = [snippets[index] for index in old_indices
+                       if isinstance(index, int) and 0 <= index < len(snippets)]
+    out["snippet_indices"] = {key: list(range(len(out["snippets"])))}
+    return out
+
+
+def _section_priority_keys(base_key: str, index: dict) -> list[str]:
+    """Keys whose results belong to the same visible Article/Recital disclosure."""
+    if base_key.startswith("art:"):
+        stem = "exact:art" + base_key.split(":", 1)[1] + "("
+        bare = "bare:" + base_key
+    elif base_key.startswith("rec:"):
+        stem = "exact:rec" + base_key.split(":", 1)[1] + "("
+        bare = "bare:" + base_key
+    else:
+        return [base_key] if base_key in index else []
+    related = [base_key, bare]
+    related.extend(key for key in index if key.startswith(stem))
+    return [key for key in dict.fromkeys(related) if key in index]
+
+
+def _deferred_page_payloads(
+    data_json: str, *, asset_prefix: str | None = None,
+) -> tuple[str, str, dict[str, bytes]]:
     """Small immediately parsed payload plus idle/on-demand citing-document chunks.
 
     A GDPR edition carries nearly 30,000 citing documents and about 115 MB of excerpts.
     Parsing that monolith before replacing each provision's ``Loading…`` marker froze the
-    browser before the law became interactive.  The law, counts and three leading citers
-    per provision are now the small core. Full rows remain in this SAME HTML file, split
-    into bounded JSON blocks which JavaScript parses one at a time when idle; opening a
-    provision puts its blocks at the front of that queue.
+    browser before the law became interactive. The law, counts and three leading citers
+    per provision are now the small core. A standalone download keeps bounded blocks in
+    the HTML; a published bundle writes cacheable sidecars and tiny provision-first packs.
     """
     try:
         page = _slim_for_page(json.loads(data_json))
     except Exception:  # noqa: BLE001 — correctness fallback for an unexpected cache
-        return _escape_for_script(data_json), ""
+        return _escape_for_script(data_json), "", {}
     groups = list(page.pop("groups", []) or [])
     index = page.get("index") or {}
 
@@ -1507,12 +1578,49 @@ def _deferred_page_payloads(data_json: str) -> tuple[str, str]:
     page["anchored_chunk_count"] = (
         (len(anchored) + _PAGE_GROUP_CHUNK_SIZE - 1) // _PAGE_GROUP_CHUNK_SIZE)
 
-    chunk_html = "\n".join(
-        f'  <script id="raglex-chunk-{chunk_index}" type="application/json">'
-        f'{_json_for_script(chunk)}</script>'
-        for chunk_index, chunk in enumerate(chunks)
-    )
-    return _json_for_script(page), chunk_html
+    assets: dict[str, bytes] = {}
+    if asset_prefix:
+        prefix = asset_prefix.rstrip("/")
+        page["chunk_urls"] = []
+        for chunk_index, chunk in enumerate(chunks):
+            filename = f"{prefix}/c{chunk_index:03d}.json"
+            page["chunk_urls"].append(filename)
+            assets[filename] = _json_dump(chunk).encode("utf-8")
+
+        # One small file per visible Article/Recital. It contains the first page of that
+        # section plus each of its subparagraphs. A click on Article 24(2) therefore also
+        # warms 24(1) and 24(3), without creating a thousand tiny files or duplicating the
+        # full multi-provision source rows.
+        priority_urls: dict[str, str] = {}
+        visible_keys = [str(section.get("key") or "") for section in
+                        ((page.get("law") or {}).get("sections") or [])]
+        for base_key in dict.fromkeys(visible_keys):
+            related = _section_priority_keys(base_key, index)
+            if not related:
+                continue
+            packs = {}
+            for key in related:
+                ids = list(index.get(key) or [])
+                selected = ids[:_PRIORITY_PACK_LIMIT]
+                packs[key] = {
+                    "complete": len(selected) == len(ids),
+                    "rows": [[group_index, _project_group_for_key(groups[group_index], key)]
+                             for group_index in selected],
+                }
+            digest = hashlib.sha256(base_key.encode("utf-8")).hexdigest()[:12]
+            filename = f"{prefix}/p-{digest}.json"
+            assets[filename] = _json_dump({"packs": packs}).encode("utf-8")
+            for key in related:
+                priority_urls[key] = filename
+        page["priority_pack_urls"] = priority_urls
+        chunk_html = ""
+    else:
+        chunk_html = "\n".join(
+            f'  <script id="raglex-chunk-{chunk_index}" type="application/json">'
+            f'{_json_for_script(chunk)}</script>'
+            for chunk_index, chunk in enumerate(chunks)
+        )
+    return _json_for_script(page), chunk_html, assets
 
 
 def _json_dump(data: dict) -> str:
@@ -1746,6 +1854,7 @@ def render_static_page(
     *, title: str, data_json: str, note: str | None = None,
     index_link: dict | None = None, page_title: str | None = None,
     short_title: str | None = None, canonical: str | None = None,
+    asset_prefix: str | None = None, _asset_sink: dict[str, bytes] | None = None,
 ) -> str:
     """Render the page around an already-serialised payload.
 
@@ -1762,7 +1871,10 @@ def render_static_page(
         parsed = json.loads(data_json)
     except (ValueError, TypeError):
         parsed = {}
-    core_json, chunk_html = _deferred_page_payloads(data_json)
+    core_json, chunk_html, assets = _deferred_page_payloads(
+        data_json, asset_prefix=asset_prefix)
+    if _asset_sink is not None:
+        _asset_sink.update(assets)
     nav_html, law_html = _prerendered_law(parsed) if parsed else ("", "")
     lang = html.escape(
         str(((parsed.get("law") or {}).get("language")) or "en"), quote=True)
@@ -1970,9 +2082,13 @@ a:visited { color: var(--link-visited); }
   line-height: 1.4;
 }
 .attribution + .attribution { margin-top: .3rem; }
-/* The title block sits over the text, not over the contents column — the first column of
-   the head is the contents column's width, and nothing occupies it. */
-.page-head > div { grid-column: 2; }
+/* Only an individual law uses this template. Its introductory material gets the combined
+   contents-and-text measure; the bundle index and sources page have separate templates. */
+.page-head > div {
+  grid-column: 1 / -1;
+  max-width: calc(var(--sidebar) + 2.7rem + 52rem);
+}
+.page-head h1, .page-head .attribution { max-width: none; }
 /* A page with no contents column at all — the bundle's index — is one column, centred on
    the same measure the text would have had. (This was the [ contents ] button's collapsed
    state; the button is gone, but the layout it left behind is what the index is.) */
@@ -1994,13 +2110,17 @@ body.no-sidebar .page-head > div { grid-column: 1; }
   top: 0;
   max-height: 100vh;
   overflow: auto;
-  padding: 1rem .8rem 1.2rem 0;
+  padding: 0 .8rem 1.2rem 0;
   border-right: 1px solid var(--rule);
 }
 .contents nav { margin-top: 0; }
 .contents-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   margin-bottom: .55rem;
-  padding-bottom: .5rem;
+  padding: 1rem 0 .5rem;
+  background: var(--paper);
   border-bottom: 1px solid var(--rule);
 }
 .contents-title { margin: 0; font-size: 1.05rem; line-height: 1.25; text-wrap: balance; }
@@ -2335,7 +2455,7 @@ mark { padding: 0 .08em; background: var(--mark); color: inherit; }
     position: relative;
     max-height: 45vh;
     margin-bottom: 1rem;
-    padding: 1rem 0;
+    padding: 0;
     border-right: 0;
     border-bottom: 1px solid var(--ink);
   }
@@ -2371,34 +2491,100 @@ _SCRIPT = r"""
   const number = (n) => Number(n || 0).toLocaleString();
   if (!Array.isArray(data.groups)) data.groups = [];
 
-  // Full citing-document rows live later in this same HTML file as bounded JSON chunks.
-  // The law and its annotations need none of them. Parse one chunk only during an idle
-  // period; a provision click temporarily takes priority and yields between chunks so the
-  // progress indicator paints and scrolling remains responsive.
+  // Published editions fetch bounded sidecars; a downloaded standalone page retains the
+  // same blocks inline. In either form only one canonical block is admitted at an idle
+  // callback. A provision click ABORTS the background request, loads its tiny Article pack
+  // first, and only then fills any remainder from canonical blocks.
   const parsedChunks = new Set();
+  const chunkLoads = new Map();
+  const priorityLoads = new Map();
+  const loadedPriorityUrls = new Set();
+  const completePriorityKeys = new Set();
   let chunksReadyResolve;
   const chunksReady = new Promise((resolve) => { chunksReadyResolve = resolve; });
   let foregroundLoads = 0;
+  let backgroundController = null;
+  let foregroundController = null;
+  const backgroundPriorityChunks = [];
   const chunkCount = Number(data.chunk_count || 0);
-  if (!chunkCount) chunksReadyResolve();
+  const externalChunks = Array.isArray(data.chunk_urls) && data.chunk_urls.length > 0;
+  if (!chunkCount || externalChunks) chunksReadyResolve();
   window.addEventListener("raglex-chunks-ready", () => {
     chunksReadyResolve();
     window.setTimeout(scheduleBackgroundChunks, 1500);
   }, { once: true });
+  if (externalChunks) window.setTimeout(scheduleBackgroundChunks, 1500);
 
-  function parseChunk(chunkIndex) {
+  function mergeProjectedGroup(groupIndex, incoming) {
+    const index = Number(groupIndex);
+    const existing = data.groups[index];
+    if (!existing) { data.groups[index] = incoming; return; }
+    const merged = { ...existing, ...incoming };
+    for (const field of ["mentions_by_key", "inherited_mentions_by_key",
+      "previous_mentions_by_key", "version_mentions_by_key", "labels_by_key"]) {
+      merged[field] = { ...(existing[field] || {}), ...(incoming[field] || {}) };
+    }
+    const priorSnippets = existing.snippets || [];
+    const extraSnippets = incoming.snippets || [];
+    merged.snippets = [...priorSnippets, ...extraSnippets];
+    merged.snippet_indices = { ...(existing.snippet_indices || {}) };
+    for (const [key, indices] of Object.entries(incoming.snippet_indices || {})) {
+      merged.snippet_indices[key] = indices.map((value) => priorSnippets.length + Number(value));
+    }
+    data.groups[index] = merged;
+  }
+
+  async function parseChunk(chunkIndex, signal = null) {
     if (parsedChunks.has(chunkIndex)) return;
-    const node = document.getElementById(`raglex-chunk-${chunkIndex}`);
-    if (!node) return;
-    const rows = JSON.parse(node.textContent || "[]");
-    for (const [groupIndex, group] of rows) data.groups[Number(groupIndex)] = group;
-    parsedChunks.add(chunkIndex);
-    // The parsed object is now authoritative. Releasing the enormous text node avoids
-    // retaining both representations for the rest of a long reading session.
-    node.textContent = "";
+    if (chunkLoads.has(chunkIndex)) return chunkLoads.get(chunkIndex);
+    const load = (async () => {
+      let rows;
+      const url = (data.chunk_urls || [])[chunkIndex];
+      if (url) {
+        const response = await fetch(url, { signal, cache: "force-cache" });
+        if (!response.ok) throw new Error(`Citation block ${chunkIndex} returned ${response.status}`);
+        rows = await response.json();
+      } else {
+        const node = document.getElementById(`raglex-chunk-${chunkIndex}`);
+        if (!node) throw new Error(`Citation block ${chunkIndex} is missing`);
+        rows = JSON.parse(node.textContent || "[]");
+        // The parsed object is now authoritative. Do not retain both representations.
+        node.textContent = "";
+      }
+      for (const [groupIndex, group] of rows) data.groups[Number(groupIndex)] = group;
+      parsedChunks.add(chunkIndex);
+    })();
+    chunkLoads.set(chunkIndex, load);
+    try { await load; }
+    finally { if (chunkLoads.get(chunkIndex) === load) chunkLoads.delete(chunkIndex); }
+  }
+
+  async function loadPriorityPack(key, signal) {
+    const url = (data.priority_pack_urls || {})[key];
+    if (!url || loadedPriorityUrls.has(url)) return;
+    if (priorityLoads.has(url)) return priorityLoads.get(url);
+    const load = (async () => {
+      const response = await fetch(url, { signal, cache: "force-cache" });
+      if (!response.ok) throw new Error(`Priority citation pack returned ${response.status}`);
+      const payload = await response.json();
+      for (const [packKey, pack] of Object.entries(payload.packs || {})) {
+        for (const [groupIndex, group] of pack.rows || []) {
+          mergeProjectedGroup(groupIndex, group);
+        }
+        if (pack.complete) completePriorityKeys.add(packKey);
+      }
+      loadedPriorityUrls.add(url);
+    })();
+    priorityLoads.set(url, load);
+    try { await load; }
+    finally { if (priorityLoads.get(url) === load) priorityLoads.delete(url); }
   }
 
   function nextBackgroundChunk() {
+    while (backgroundPriorityChunks.length) {
+      const candidate = backgroundPriorityChunks.shift();
+      if (!parsedChunks.has(candidate)) return candidate;
+    }
     for (let i = 0; i < chunkCount; i += 1) {
       if (!parsedChunks.has(i)) return i;
     }
@@ -2406,15 +2592,24 @@ _SCRIPT = r"""
   }
 
   function scheduleBackgroundChunks() {
-    if (!chunkCount || foregroundLoads || nextBackgroundChunk() == null) return;
-    const run = (deadline) => {
+    if (!chunkCount || foregroundLoads || backgroundController
+        || nextBackgroundChunk() == null) return;
+    const run = async (deadline) => {
       if (foregroundLoads) { scheduleBackgroundChunks(); return; }
       const next = nextBackgroundChunk();
       if (next == null) return;
       // Exactly one bounded parse per callback. Even a generous idle deadline should not
       // turn into a 100 MB burst that competes with somebody reading the law.
-      if (!deadline || deadline.didTimeout || deadline.timeRemaining() > 3) parseChunk(next);
-      scheduleBackgroundChunks();
+      if (!deadline || deadline.didTimeout || deadline.timeRemaining() > 3) {
+        backgroundController = new AbortController();
+        try { await parseChunk(next, backgroundController.signal); }
+        catch (error) {
+          if (error.name !== "AbortError") console.error(error);
+        } finally {
+          backgroundController = null;
+        }
+      }
+      if (!foregroundLoads) scheduleBackgroundChunks();
     };
     if ("requestIdleCallback" in window) {
       window.requestIdleCallback(run, { timeout: 5000 });
@@ -2423,26 +2618,50 @@ _SCRIPT = r"""
     }
   }
 
-  async function ensureGroups(ids, progress) {
+  function stopBackgroundLoading() {
+    if (backgroundController) backgroundController.abort();
+  }
+
+  function prioritizeArticleRemainder(key) {
+    const priorityUrl = (data.priority_pack_urls || {})[key];
+    if (!priorityUrl) return;
+    const related = Object.entries(data.priority_pack_urls || {})
+      .filter(([, url]) => url === priorityUrl).map(([relatedKey]) => relatedKey);
+    const chunks = [];
+    for (const relatedKey of related) {
+      for (const groupIndex of data.index[relatedKey] || []) {
+        const chunkIndex = Number((data.group_chunks || [])[Number(groupIndex)]);
+        if (Number.isFinite(chunkIndex) && !parsedChunks.has(chunkIndex)) chunks.push(chunkIndex);
+      }
+    }
+    for (const chunkIndex of [...new Set(chunks)]) {
+      if (!backgroundPriorityChunks.includes(chunkIndex)) {
+        backgroundPriorityChunks.push(chunkIndex);
+      }
+    }
+  }
+
+  async function ensureGroups(ids, progress, signal) {
     if (!chunkCount) return;
     await chunksReady;
     const wanted = [...new Set((ids || []).map(
       (id) => Number((data.group_chunks || [])[Number(id)]))
       .filter((id) => Number.isFinite(id) && !parsedChunks.has(id)))];
-    foregroundLoads += 1;
-    try {
-      let done = 0;
-      progress?.(done, wanted.length);
-      for (const chunkIndex of wanted) {
-        parseChunk(chunkIndex);
-        done += 1;
-        progress?.(done, wanted.length);
-        // Let the browser paint the bar and service input before the next JSON.parse.
-        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    let done = 0;
+    progress?.(done, wanted.length);
+    for (const chunkIndex of wanted) {
+      try {
+        await parseChunk(chunkIndex, signal);
+      } catch (error) {
+        // A just-aborted background request may still own this block for one microtask.
+        // Retry it under the foreground controller; a genuine foreground abort propagates.
+        if (error.name !== "AbortError" || signal?.aborted) throw error;
+        await parseChunk(chunkIndex, signal);
       }
-    } finally {
-      foregroundLoads -= 1;
-      scheduleBackgroundChunks();
+      done += 1;
+      progress?.(done, wanted.length);
+      // Let the browser paint the bar and service input before parsing the next block.
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
     }
   }
 
@@ -2728,6 +2947,11 @@ _SCRIPT = r"""
   };
   async function openMentions(key, label, route = "all", focusId = null) {
     const loadToken = ++state.loadToken;
+    if (foregroundController) foregroundController.abort();
+    stopBackgroundLoading();
+    const controller = new AbortController();
+    foregroundController = controller;
+    foregroundLoads += 1;
     state.key = key;
     state.label = label;
     state.limit = 40;
@@ -2746,18 +2970,48 @@ _SCRIPT = r"""
     loader.hidden = false;
     if (!$("mentions-dialog").open) $("mentions-dialog").showModal();
     try {
-      await ensureGroups(data.index[key] || [], (done, total) => {
-        bar.max = Math.max(1, total);
-        bar.value = done;
-        $("mentions-load-label").textContent = total
-          ? `Loading citation details — ${number(done)} of ${number(total)} blocks…`
-          : "Citation details ready.";
-      });
-    } catch (error) {
+      await chunksReady;
+      bar.max = 1;
+      bar.value = 0;
+      $("mentions-load-label").textContent = "Loading priority citation details…";
+      try {
+        await loadPriorityPack(key, controller.signal);
+      } catch (error) {
+        // A rapid second click in the same Article can inherit the first click's promise
+        // just as that first controller is being aborted. Re-own the pack immediately.
+        if (error.name !== "AbortError" || controller.signal.aborted) throw error;
+        await loadPriorityPack(key, controller.signal);
+      }
       if (loadToken !== state.loadToken) return;
+
+      const ready = (data.index[key] || []).filter((id) => data.groups[id]).length;
+      if (ready) {
+        renderResults();
+        bar.value = completePriorityKeys.has(key) ? 1 : 0;
+        $("mentions-load-label").textContent = completePriorityKeys.has(key)
+          ? `Citation details ready — ${number(ready)} documents.`
+          : `${number(ready)} documents ready; loading the remainder…`;
+      }
+
+      if (!completePriorityKeys.has(key)) {
+        await ensureGroups(data.index[key] || [], (done, total) => {
+          bar.max = Math.max(1, total);
+          bar.value = done;
+          $("mentions-load-label").textContent = total
+            ? `Loading remaining citation details — ${number(done)} of ${number(total)} blocks…`
+            : "Citation details ready.";
+        }, controller.signal);
+      }
+      prioritizeArticleRemainder(key);
+    } catch (error) {
+      if (loadToken !== state.loadToken || error.name === "AbortError") return;
       $("mentions-load-label").textContent = "Citation details could not be loaded.";
       console.error(error);
       return;
+    } finally {
+      if (foregroundController === controller) foregroundController = null;
+      foregroundLoads = Math.max(0, foregroundLoads - 1);
+      if (!foregroundLoads) scheduleBackgroundChunks();
     }
     if (loadToken !== state.loadToken) return;
     loader.hidden = true;
@@ -2830,6 +3084,7 @@ _SCRIPT = r"""
   function selectedGroups() {
     const ids = data.index[state.key] || [];
     const rows = ids.map((id) => data.groups[id]).filter((group) => {
+      if (!group) return false;
       const inherited = Number(group.inherited_mentions_by_key[state.key] || 0);
       const total = Number(group.mentions_by_key[state.key] || 0);
       if (state.route === "direct" && total <= inherited) return false;
@@ -3136,7 +3391,7 @@ _SCRIPT = r"""
     const facets = new Map();
     for (const id of data.index[state.key] || []) {
       const group = data.groups[id];
-      if (!group.jurisdiction || !group.kind) continue;
+      if (!group || !group.jurisdiction || !group.kind) continue;
       const key = `${group.jurisdiction}|${group.kind}`;
       const current = facets.get(key) || {
         jurisdiction: group.jurisdiction, kind: group.kind, count: 0
@@ -3180,9 +3435,14 @@ _SCRIPT = r"""
     $("more-results").hidden = visible.length >= rows.length;
   }
 
-  $("dialog-close").addEventListener("click", () => $("mentions-dialog").close());
+  function closeMentions() {
+    state.loadToken += 1;
+    if (foregroundController) foregroundController.abort();
+    $("mentions-dialog").close();
+  }
+  $("dialog-close").addEventListener("click", closeMentions);
   $("mentions-dialog").addEventListener("click", (event) => {
-    if (event.target === $("mentions-dialog")) $("mentions-dialog").close();
+    if (event.target === $("mentions-dialog")) closeMentions();
   });
   $("more-results").addEventListener("click", () => { state.limit += 40; renderResults(); });
   $("sort-filter").addEventListener("change", () => {
