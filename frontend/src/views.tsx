@@ -31,6 +31,35 @@ export function PeekProvider({ children }: { children: any }) {
   return <PeekCtx.Provider value={{ current, push: setCurrent, close: () => setCurrent(null) }}>{children}</PeekCtx.Provider>;
 }
 
+// --- The document in the MAIN window ---------------------------------------
+// A pincite in a sidebar that points INTO the document already open behind it must take
+// the reader THERE, not stack a third copy of the same text beside the two on screen.
+// The main reader registers itself (and a way to scroll to one of its passages) while it
+// is mounted; every cite handler asks here before opening anything.
+type MainDoc = { id: string; reveal: (anchor?: string | null) => boolean };
+const MainDocCtx = createContext<{ current: MainDoc | null; set: (m: MainDoc | null) => void } | null>(null);
+export function MainDocProvider({ children }: { children: any }) {
+  const [current, setCurrent] = useState<MainDoc | null>(null);
+  return <MainDocCtx.Provider value={{ current, set: setCurrent }}>{children}</MainDocCtx.Provider>;
+}
+function useMainDoc() {
+  return useContext(MainDocCtx) ?? { current: null as MainDoc | null, set: (_m: MainDoc | null) => {} };
+}
+
+// One handler for "the reader clicked a citation", used by every panel that renders
+// citations. Same document as the main window → scroll and flash it there; anything
+// else → the ordinary preview.
+function useCiteOpener(): (c: any) => void {
+  const peek = usePeek();
+  const main = useMainDoc();
+  return (c: any) => {
+    const id = c?.resolved_id || c?.candidate_id || c?.raw;
+    if (id && main.current && String(id).toLowerCase() === main.current.id.toLowerCase()
+        && main.current.reveal(c?.pinpoint)) return;
+    peek.push(citePeek(c));
+  };
+}
+
 // --- Tray stack (stacking side "organiser") --------------------------------
 // A stack of side trays that offset like bookmarks: opening a link inside a tray pushes
 // a new one on top (you still see the ones beneath), each with its own close cross.
@@ -38,7 +67,8 @@ type Tray =
   | { kind: "mentions"; target: string; anchor?: string; exact?: boolean; label: any }
   | { kind: "cites"; target: string; family: "cases" | "statute"; label: any }
   | { kind: "doc"; id: string; highlightTarget?: string; highlightAnchor?: string;
-      occurrenceStart?: number; label: any };
+      occurrenceStart?: number; label: any }
+  | { kind: "pending"; target: string; anchor: string; label: any };
 const TrayCtx = createContext<{ stack: Tray[]; push: (t: Tray) => void; closeAt: (i: number) => void } | null>(null);
 export function useTray() {
   return useContext(TrayCtx) ?? { stack: [] as Tray[], push: (_t: Tray) => {}, closeAt: (_i: number) => {} };
@@ -116,6 +146,7 @@ function TrayContent({ t, open }: { t: Tray; open: (id: string, a?: string) => v
   if (t.kind === "doc") return <MentionReader id={t.id} highlightTarget={t.highlightTarget}
     highlightAnchor={t.highlightAnchor} occurrenceStart={t.occurrenceStart} open={open} />;
   if (t.kind === "cites") return <CitesTray target={t.target} family={t.family} open={open} />;
+  if (t.kind === "pending") return <PendingOnProvisionTray target={t.target} anchor={t.anchor} />;
   return <MentionsTray target={t.target} anchor={t.anchor} exact={t.exact} open={open} />;
 }
 
@@ -414,8 +445,7 @@ function MentionReader({ id, highlightTarget, highlightAnchor, occurrenceStart, 
     open: (id: string, a?: string) => void }) {
   const [body, , reloadBody] = useAsync(() => api.documentBody(id), [id]);
   const [occIndex, setOccIndex] = useState(0);
-  const peek = usePeek();
-  const onCite = (c: any) => peek.push(citePeek(c));
+  const onCite = useCiteOpener();
   const segs: any[] = (body?.segments || []).length ? body.segments
     : body?.text ? [{ label: "document", char_start: 0, char_end: body.text.length, kind: "document", level: 0 }] : [];
   const cites: any[] = body?.citations || [];
@@ -624,6 +654,115 @@ function MentionedBy({ list, target, anchor }: { list: any[]; target: string; an
           <a className="mb-via" title={`Open ${g.from_title || g.from_id} ${g.from_anchor}`}
             onClick={() => peek({ kind: "doc", id: g.from_id, anchor: g.from_anchor })}>
             {g.label}</a>.
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// --- What is still an OPEN QUESTION about this provision -------------------
+// "Mentioned by" is the past: documents that have already said something about this
+// article. A pending Article 267 reference is the opposite — nobody knows yet what the
+// provision means, and the answer is coming. That belongs on the provision the reference
+// turns on, not only in a box at the foot of the instrument, because a reader who has
+// scrolled to Article 15 to find out what it requires has no reason to scroll back.
+
+// Which of an instrument's live proceedings turn on ONE provision. The aggregate is
+// fetched once for the whole document; this picks the rows that name this article.
+function pendingForAnchor(rows: any[], anchor: string): any[] {
+  const want = anchorKey(anchor);
+  if (!want) return [];
+  return rows.filter((r: any) => (r.anchors || []).some((a: string) => anchorKey(a) === want));
+}
+
+// The count phrase. A preliminary reference asks what the text MEANS; an annulment action
+// or an appeal is also pending but asks something else, so the two are never added
+// together under a word that only fits one of them.
+function pendingPhrase(rows: any[]): string {
+  const refs = rows.filter((r: any) => r.preliminary).length;
+  const other = rows.length - refs;
+  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+  if (refs && !other) return `${plural(refs, "pending CJEU reference")}`;
+  if (!refs && other) return `${plural(other, "pending CJEU case")}`;
+  return `${plural(refs, "pending CJEU reference")} and ${plural(other, "other pending case")}`;
+}
+
+function PendingOnProvision({ rows, target, anchor }:
+  { rows: any[]; target: string; anchor: string }) {
+  const { push } = useTray();
+  if (!rows.length) return null;
+  return (
+    <div className="pending-prov">
+      <a className="pending-prov-flag"
+        title="Open the cases before the Court that turn on this provision, at the passages that cite it"
+        onClick={() => push({ kind: "pending", target, anchor,
+          label: <>Before the Court · {shortAnchor(anchor)}</> })}>
+        ⚖ {pendingPhrase(rows)}
+      </a>
+    </div>
+  );
+}
+
+// A segment label is the whole heading ("Article 15 Right of access by the data
+// subject"); a tray title wants the citable part of it.
+function shortAnchor(anchor: string): string {
+  const m = /^((?:article|recital|section|s\.?|reg(?:ulation)?|rule|point|annexe?|schedule|para(?:graph)?)\s*[\d.]+[a-z]?(?:\(\d+[a-z]?\))*)/i
+    .exec((anchor || "").trim());
+  return m ? m[1] : anchor;
+}
+
+// The list itself. It re-fetches the instrument's aggregate rather than being handed the
+// rows, so the tray survives the reader navigating away underneath it.
+function PendingOnProvisionTray({ target, anchor }: { target: string; anchor: string }) {
+  const { push } = useTray();
+  const [data, err, reload] = useAsync<any>(() => api.pendingReferences(target), [target]);
+  useEffect(() => {
+    if (!data?._warming) return;
+    const iv = setInterval(() => reload(), 2500);
+    return () => clearInterval(iv);
+  }, [data?._warming]);
+  if (err) return <p className="err">{err}</p>;
+  if (!data || data._warming) return <p className="muted loading-pulse">Loading…</p>;
+  const rows = pendingForAnchor(data.pending || [], anchor);
+  if (!rows.length) return <p className="muted">Nothing pending on this provision.</p>;
+  const want = anchorKey(anchor);
+  return (
+    <div>
+      <p className="muted pending-prov-sub">{pendingPhrase(rows)} on {shortAnchor(anchor)}.</p>
+      {rows.map((r: any) => (
+        <div className="pref-row" key={r.stable_id}>
+          <div className="pref-head">
+            <DocLink className="pref-case" id={r.stable_id}
+              // The notice opens scrolled to where it cites THIS article — the question
+              // referred, which is the only part of it the reader came for.
+              onOpen={() => push({ kind: "doc", id: r.stable_id, highlightTarget: target,
+                highlightAnchor: anchor, label: <>{r.case_number || r.stable_id}</> })}
+              title="Open this case at the passage that cites this provision">
+              {r.case_number || r.stable_id}</DocLink>
+            <span className="pref-title">{String(r.title || "")
+              .replace(/^Pending:\s*/, "").replace(/\s*\([CT]-\d+\/\d+\)\s*$/, "")}</span>
+            <span className={`tag${r.preliminary ? " tag-pending" : ""}`}>
+              {r.procedure_label || (r.preliminary ? "Preliminary reference" : "Pending")}</span>
+            {r.ag_opinion && (
+              <DocLink className="tag tag-ag" id={r.ag_opinion.stable_id}
+                onOpen={() => push({ kind: "doc", id: r.ag_opinion.stable_id,
+                  label: <>AG opinion · {r.case_number || r.ag_opinion.stable_id}</> })}
+                title={`Opinion of the Advocate General${r.ag_opinion.advocate_general
+                  ? ` ${r.ag_opinion.advocate_general}` : ""} — delivered, but the Court has not yet ruled`}>
+                AG opinion{r.ag_opinion.date ? ` · ${String(r.ag_opinion.date).slice(0, 4)}` : ""}</DocLink>
+            )}
+          </div>
+          <div className="pref-meta muted">
+            {[r.referring_court, r.origin_country, r.date].filter(Boolean).join(" · ")}
+            {(r.anchors || []).length > 0 && <>{" · "}
+              {/* every provision the case turns on, with the one you came from marked —
+                  a reference on Article 15 usually asks about Article 12 in the same
+                  breath, and that is the useful part of seeing the list */}
+              {r.anchors.map((a: string) => (
+                <span key={a} className={`pref-prov${anchorKey(a) === want ? " pref-prov-here" : ""}`}>
+                  {a}</span>
+              ))}</>}
+          </div>
         </div>
       ))}
     </div>
@@ -1516,6 +1655,168 @@ function segBody(text: string, s: { label: string; char_start: number; char_end:
   };
 }
 
+// --- Copying a provision out of the reader ---------------------------------
+// Selecting a provision with the mouse gives you the gutter number, the mention line and
+// the ＋, run together without the indentation that carries half a statute's meaning —
+// and no citation. Someone building a casebook or a handout wants the provision, its
+// drafted hierarchy, its emphasis and where it came from, in one click, in a form that
+// survives the paste. So the button writes BOTH flavours to the clipboard: rich HTML
+// (Word, Pages, Google Docs keep the indents and the italics) and Markdown (an editor,
+// a plain-text note, a chat message). The receiving application picks.
+
+const _MD_SPECIAL = /([\\`*_[\]<>#|])/g;
+const mdEscape = (t: string) => t.replace(_MD_SPECIAL, "\\$1");
+const htmlEscape = (t: string) =>
+  t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Markdown emphasis does not survive wrapping its own surrounding spaces ("* text *" is
+// literal asterisks), so the whitespace is pushed outside the markers.
+function mdEmphasis(text: string, marker: string): string {
+  const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+  return m && m[2] ? `${m[1]}${marker}${m[2]}${marker}${m[3]}` : text;
+}
+
+// The same run-splitting as formattedRun, rendered to a string instead of React nodes:
+// the stored bold/italic/underline runs are the instrument's own emphasis (a defined
+// term, the title of an annex) and dropping them loses drafting, not decoration.
+function markedRun(text: string, start: number, end: number,
+                   formatting: any[] = [], flavour: "md" | "html"): string {
+  const esc = flavour === "html" ? htmlEscape : mdEscape;
+  const marks = (formatting || []).filter((m) => m.char_start < end && m.char_end > start);
+  if (!marks.length) return esc(text.slice(start, end));
+  const cuts = Array.from(new Set([start, end, ...marks.flatMap((m) =>
+    [Math.max(start, m.char_start), Math.min(end, m.char_end)])])).sort((a, b) => a - b);
+  return cuts.slice(0, -1).map((a, i) => {
+    const b = cuts[i + 1];
+    const active = new Set(marks.filter((m) => m.char_start <= a && m.char_end >= b).map((m) => m.kind));
+    let out = esc(text.slice(a, b));
+    if (!out.trim()) return out;
+    if (flavour === "html") {
+      if (active.has("underline")) out = `<u>${out}</u>`;
+      if (active.has("italic")) out = `<em>${out}</em>`;
+      if (active.has("bold")) out = `<strong>${out}</strong>`;
+    } else {
+      // Markdown has no underline. Emphasising it instead would assert something the
+      // instrument does not; it is left as plain text rather than mis-stated.
+      if (active.has("italic")) out = mdEmphasis(out, "*");
+      if (active.has("bold")) out = mdEmphasis(out, "**");
+    }
+    return out;
+  }).join("");
+}
+
+// The blocks of one segment, with the indentation depth the drafting gives them. A
+// statute segment carries its own hierarchy in `lines`; anything else is split on blank
+// lines, which is where the extractor put the paragraph breaks.
+function segBlocks(text: string, s: any): { start: number; end: number; depth: number }[] {
+  if (s.lines && s.lines.length > 1) {
+    return s.lines.filter((l: any) => text.slice(l.start, l.end).trim())
+      .map((l: any) => ({ start: l.start, end: l.end, depth: l.depth || 0 }));
+  }
+  const out: { start: number; end: number; depth: number }[] = [];
+  const re = /\n[ \t]*\n/g;
+  let from = s.char_start, m: RegExpExecArray | null;
+  const slice = text.slice(s.char_start, s.char_end);
+  re.lastIndex = 0;
+  while ((m = re.exec(slice))) {
+    const end = s.char_start + m.index;
+    if (text.slice(from, end).trim()) out.push({ start: from, end, depth: 0 });
+    from = s.char_start + re.lastIndex;
+  }
+  if (text.slice(from, s.char_end).trim()) out.push({ start: from, end: s.char_end, depth: 0 });
+  return out;
+}
+
+// How this passage should be cited, for the attribution line under the quote — the
+// document's own OSCOLA citation plus the pinpoint the reader copied.
+function copyPinpoint(docType: string, label: string): string {
+  const num = labelNum(label);
+  if (CASE_DOC_TYPES.has(docType) && num) return `[${num}]`;
+  return shortAnchor(label);
+}
+
+function segmentClipboard(body: any, s: any, citation: string): { text: string; html: string } {
+  const text: string = body?.text || "";
+  const blocks = segBlocks(text, s);
+  const raw = text.slice(s.char_start, s.char_end);
+  const num = labelNum(s.label);
+  // A judgment prints its paragraph number at the head of the prose AND stores it as the
+  // label; repeating it above the quote would number the paragraph twice.
+  const numInline = !!num && new RegExp(`^\\s*${num}[.)\\]]?\\s`).test(raw);
+  const heading = s.kind === "heading" || numInline ? "" : String(s.label || "");
+  const pin = copyPinpoint(String(body?.doc_type || ""), String(s.label || ""));
+  const attribution = [citation, pin && pin !== citation ? pin : ""].filter(Boolean).join(", ");
+
+  const md: string[] = [];
+  if (heading) md.push(`**${mdEscape(heading)}**`);
+  for (const b of blocks) {
+    // Two spaces per level, not four: four opens a Markdown code block, which would
+    // turn a sub-paragraph of a statute into a monospaced listing.
+    md.push("  ".repeat(b.depth) + markedRun(text, b.start, b.end, s.formatting, "md").trim());
+  }
+  if (attribution) md.push(`— ${mdEscape(attribution)}`);
+
+  const html: string[] = ['<div style="font-family:Georgia,serif;line-height:1.45">'];
+  if (heading) html.push(`<p style="margin:0 0 .5em"><strong>${htmlEscape(heading)}</strong></p>`);
+  for (const b of blocks) {
+    // Word reads margin-left in points; em would be resolved against ITS font, not ours.
+    const indent = b.depth ? `margin-left:${b.depth * 24}pt;` : "";
+    html.push(`<p style="margin:0 0 .5em;${indent}">`
+      + markedRun(text, b.start, b.end, s.formatting, "html").trim() + "</p>");
+  }
+  if (attribution) {
+    html.push('<p style="margin:.75em 0 0;font-size:.9em"><em>'
+      + htmlEscape(`— ${attribution}`) + "</em></p>");
+  }
+  html.push("</div>");
+  return { text: md.join("\n\n"), html: html.join("") };
+}
+
+async function copyRich(payload: { text: string; html: string }): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([payload.html], { type: "text/html" }),
+        "text/plain": new Blob([payload.text], { type: "text/plain" }),
+      })]);
+      return true;
+    }
+  } catch {
+    // Firefox refuses text/html from ClipboardItem; the Markdown alone is still useful,
+    // so a browser that cannot take the rich flavour must not come away with nothing.
+  }
+  try {
+    await navigator.clipboard.writeText(payload.text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The gutter handles that appear on hover, left of the provision. Copy is for everyone —
+// it reads; ＋ attaches commentary and stays behind the write permission.
+function SegTools({ body, seg, citation, onAugment }:
+  { body: any; seg: any; citation: string; onAugment?: () => void }) {
+  const [state, setState] = useState<"" | "ok" | "fail">("");
+  const copy = async () => {
+    const ok = await copyRich(segmentClipboard(body, seg, citation));
+    setState(ok ? "ok" : "fail");
+    setTimeout(() => setState(""), 1500);
+  };
+  return (
+    <span className="seg-tools">
+      <a className={`seg-tool seg-copy${state ? ` seg-copy-${state}` : ""}`} role="button" tabIndex={0}
+        title="Copy this provision — formatted, indented and with its citation — ready for Word or Markdown"
+        aria-label="Copy this provision"
+        onClick={copy} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") copy(); }}>
+        {state === "ok" ? "✓" : state === "fail" ? "✕" : "⧉"}</a>
+      {onAugment && <a className="seg-tool seg-plus" role="button" tabIndex={0}
+        title="Link commentary or an authority to this passage" aria-label="Link commentary"
+        onClick={onAugment}>＋</a>}
+    </span>
+  );
+}
+
 function scrollToSeg(id: string) {
   const el = document.getElementById(id);
   if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("seg-flash"); setTimeout(() => el.classList.remove("seg-flash"), 2000); }
@@ -1524,7 +1825,8 @@ function scrollToSeg(id: string) {
 // The side panel itself — renders the top of the peek stack (with back/close), as
 // a margin column on desktop and a bottom sheet on mobile (CSS).
 export function PeekPanel({ open }: { open: (id: string, a?: string) => void }) {
-  const { current, push, close } = usePeek();
+  const { current, close } = usePeek();
+  const onCite = useCiteOpener();
   if (!current) return null;
   return (
     <aside className="peek" role="dialog" aria-label="preview">
@@ -1534,7 +1836,7 @@ export function PeekPanel({ open }: { open: (id: string, a?: string) => void }) 
       </div>
       <div className="peek-body">
         {current.kind === "doc"
-          ? <DocPeek id={current.id} anchor={current.anchor} raw={current.raw} onCite={(c) => push(citePeek(c))} openFull={(id, a) => { close(); open(id, a); }} />
+          ? <DocPeek id={current.id} anchor={current.anchor} raw={current.raw} onCite={onCite} openFull={(id, a) => { close(); open(id, a); }} />
           : <AugmentPanel docId={current.docId} onDone={close} pinAnchor={current.anchor} clearPin={() => {}} />}
       </div>
     </aside>
@@ -1937,22 +2239,66 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
     cur.list.push(...list.filter((m: any) => !seen.has(m.src_id)));
   }
   const mentionsFor = (label: string) => { const ck = anchorKey(label); return ck ? byAnchor[ck] : undefined; };
+  // Live CJEU proceedings, indexed by the provision each one turns on. One fetch for the
+  // instrument (the same aggregate the "Before the Court" box at the foot uses, so it is
+  // already warm), then read per segment — never a request per article.
+  const [pending] = useAsync<any>(
+    () => body?.doc_type === "legislation" ? api.pendingReferences(id) : Promise.resolve(null),
+    [id, body?.doc_type]);
+  const pendingByAnchor = useMemo(() => {
+    const by = new Map<string, any[]>();
+    for (const r of (pending?.pending || []) as any[]) {
+      for (const a of new Set(((r.anchors || []) as string[]).map(anchorKey))) {
+        if (a) by.set(a, [...(by.get(a) || []), r]);
+      }
+    }
+    return by;
+  }, [pending]);
+  const pendingFor = (label: string) => {
+    const ck = anchorKey(label);
+    return ck ? (pendingByAnchor.get(ck) || []) : [];
+  };
   const peek = usePeek();
   const readerRef = useRef<HTMLDivElement>(null);   // minimap measures this
-  const onCite = (c: any) => peek.push(citePeek(c));
+  const onCite = useCiteOpener();
+  // What the copy button puts under the quote. The OSCOLA citation is what a footnote
+  // wants; the title is the fallback for a document that has no minted citation yet.
+  const copyCitation = String(oscola?.text || title || id);
   const onPara = (n: string) => scrollToSeg(segId(n + "."));   // jump to paragraph n
   const paraSet = paraNumbers(body?.segments || []);
+  const allSegments = useMemo(
+    () => [...(body?.inherited_recitals?.segments || []), ...(body?.segments || [])],
+    [body]);
   // deep-link: when opened at a pinpoint (a paragraph "para 80" or a section
   // "Article 17"), scroll to the matching segment.
   useEffect(() => {
     if (!body || !pinpoint) return;
-    const allSegments = [
-      ...(body.inherited_recitals?.segments || []),
-      ...(body.segments || []),
-    ];
     const idx = matchSegIndex(allSegments, pinpoint);
     if (idx >= 0) setTimeout(() => scrollToSeg(segId(allSegments[idx].label)), 80);
-  }, [body, pinpoint]);
+  }, [body, pinpoint, allSegments]);
+  // Announce this text as the one in the main window, so a sidebar's pincite into it
+  // scrolls here instead of opening the same passage a second time alongside. Only
+  // while there is text to scroll TO: with the reader still loading, or showing the
+  // original PDF, a preview is the only thing that can answer the click.
+  const { set: setMainDoc } = useMainDoc();
+  const canReveal = !!body?.text && view === "text";
+  useEffect(() => {
+    if (!canReveal) return;
+    setMainDoc({
+      id,
+      reveal: (anchor?: string | null) => {
+        const idx = matchSegIndex(allSegments, anchor || undefined);
+        // No matching provision — still not a second copy of this document: the top of
+        // the text is what an unpinpointed citation of it means. But if there is no
+        // segment at all to scroll to, say so and let the preview answer the click.
+        const label = (idx >= 0 ? allSegments[idx] : allSegments[0])?.label;
+        if (!label) return false;
+        scrollToSeg(segId(label));
+        return true;
+      },
+    });
+    return () => setMainDoc(null);
+  }, [id, allSegments, canReveal, setMainDoc]);
   if (!body) return <p className="muted">Loading text…</p>;
   if (!body.text && !rawKind) return (
     <div>
@@ -2030,9 +2376,10 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
             <div className={`seg lvl${Math.min(s.level, 2)} kind-recital`
                    + (mb && mb.list.length ? " has-mentions" : "")}
                  key={i} id={segId(s.label)}>
-              {canWrite && <a className="seg-plus"
-                title="Link commentary or an authority to this recital"
-                onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>}
+              <SegTools body={inheritedRecitals} seg={s}
+                citation={inheritedRecitals.source_title || copyCitation}
+                onAugment={canWrite
+                  ? () => peek.push({ kind: "augment", docId: id, anchor: s.label }) : undefined} />
               {sb.showLabel && <span className="seg-label">{s.label}</span>}
               <span className="seg-body">{sb.body}</span>
               {pinned(s.label).map((r, j) => (
@@ -2045,6 +2392,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
               ))}
               {mb && mb.list.length > 0
                 && <MentionedBy list={mb.list} target={id} anchor={s.label} />}
+              <PendingOnProvision rows={pendingFor(s.label)} target={id} anchor={s.label} />
             </div>
           );
         })}
@@ -2085,8 +2433,9 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
                 <span className="rail-line" />
               </span>
             )}
-            {canWrite && <a className="seg-plus" title="Link commentary or an authority to this paragraph"
-              onClick={() => peek.push({ kind: "augment", docId: id, anchor: s.label })}>＋</a>}
+            <SegTools body={body} seg={s} citation={copyCitation}
+              onAugment={canWrite
+                ? () => peek.push({ kind: "augment", docId: id, anchor: s.label }) : undefined} />
             {sb.showLabel && <span className="seg-label">{s.label}</span>}
             <span className="seg-body">{sb.body}</span>
             {/* Sub-paragraph badges are placed on their own provision line above, and
@@ -2103,6 +2452,7 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
             ))}
             {mb && mb.list.length > 0
               && <MentionedBy list={mb.list} target={id} anchor={s.label} />}
+            <PendingOnProvision rows={pendingFor(s.label)} target={id} anchor={s.label} />
           </div>
           );
         })}
@@ -7420,6 +7770,13 @@ function ProvisionMappingPanel({ id, open }: { id: string; open: (id: string, a?
 // server-side (the same ladder the reader uses); names go through the corpus
 // autocomplete. Enter opens the document at the pinpoint. The fastest navigation
 // primitive in the app.
+// ⌘K is invisible to anyone who has not been told about it, and it is the fastest thing
+// in the app. The header carries a button for the same palette; rather than thread an
+// opener through every view, the palette listens on window for it exactly as it already
+// listens for the keystroke.
+export const OPEN_PALETTE_EVENT = "raglex:open-palette";
+export const openCommandPalette = () => window.dispatchEvent(new Event(OPEN_PALETTE_EVENT));
+
 export function CommandPalette({ open }: { open: (id: string, a?: string) => void }) {
   const [show, setShow] = useState(false);
   const [q, setQ] = useState("");
@@ -7428,13 +7785,21 @@ export function CommandPalette({ open }: { open: (id: string, a?: string) => voi
   const [hi, setHi] = useState(0);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
+    const reset = () => { setQ(""); setCites([]); setDocs([]); setHi(0); };
     const down = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault(); setShow((s) => !s); setQ(""); setCites([]); setDocs([]); setHi(0);
+        e.preventDefault(); setShow((s) => !s); reset();
       } else if (e.key === "Escape") setShow(false);
     };
+    // The button always OPENS (a toggle would make a second click on a covered button
+    // dismiss the thing the reader just asked for).
+    const viaButton = () => { setShow(true); reset(); };
     window.addEventListener("keydown", down);
-    return () => window.removeEventListener("keydown", down);
+    window.addEventListener(OPEN_PALETTE_EVENT, viaButton);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener(OPEN_PALETTE_EVENT, viaButton);
+    };
   }, []);
   useEffect(() => {
     if (!show) return;

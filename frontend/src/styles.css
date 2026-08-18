@@ -174,6 +174,16 @@ header h1::after { content: ""; }
   color: var(--subtext); font-size: 1.25rem; line-height: 1; align-self: center;
   margin-right: calc(-1 * var(--sp-3)); transition: color .12s, transform .12s; }
 .back-arrow:hover { color: var(--accent); transform: translateX(-2px); }
+/* the masthead's search glass — the visible door to the ⌘K palette. It sits after the
+   tabs and before the theme/auth controls, aligned to them rather than to the baseline
+   the rest of the masthead uses (an icon has no baseline to share). */
+.header-search {
+  background: transparent; border: none; cursor: pointer; align-self: center;
+  color: var(--subtext); font-size: 1.05rem; line-height: 1; padding: var(--sp-2);
+  display: inline-flex; align-items: center; border-radius: var(--radius);
+  transition: color .12s, background .12s;
+}
+.header-search:hover, .header-search:focus-visible { color: var(--accent); background: var(--surface); }
 nav { display: flex; gap: 0; flex-wrap: wrap; margin-left: auto; }
 nav button {
   background: transparent; color: var(--subtext); border: none; border-bottom: 2px solid transparent;
@@ -546,12 +556,20 @@ tbody tr:hover { background: var(--surface-2); }
 /* the side panels are ~384px wide — a full-width indent would eat the text, so
    the tiers step in much more finely there while staying distinguishable */
 .peek .reader, .tray .reader { --indent-step: .6em; }
-/* left-gutter link handle: fades in on paragraph hover, aligned to its vertical centre */
-.reader .seg-plus { position: absolute; left: -1.25em; top: 50%; transform: translateY(-50%);
-  color: var(--accent); font-size: .95rem; line-height: 1; opacity: 0; cursor: pointer;
-  user-select: none; text-decoration: none; transition: opacity .15s; }
-.reader .seg:hover .seg-plus { opacity: .5; }
-.reader .seg-plus:hover { opacity: 1; text-decoration: none; }
+/* left-gutter handles: fade in on paragraph hover, stacked and centred on the provision.
+   Copy sits above ＋ because it is the one every reader has. */
+.reader .seg-tools { position: absolute; left: -1.35em; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; align-items: center; gap: .1em; }
+.reader .seg-tool { color: var(--accent); font-size: .95rem; line-height: 1; opacity: 0;
+  cursor: pointer; user-select: none; text-decoration: none; transition: opacity .15s; }
+.reader .seg:hover .seg-tool, .reader .seg-tool:focus-visible { opacity: .5; }
+.reader .seg-tool:hover, .reader .seg-tool:focus-visible { opacity: 1; text-decoration: none; }
+/* the tick/cross after a copy stays visible on its own — the pointer has usually left */
+.reader .seg-copy-ok, .reader .seg:hover .seg-copy-ok { opacity: 1; color: var(--ok); }
+.reader .seg-copy-fail, .reader .seg:hover .seg-copy-fail { opacity: 1; color: var(--bad); }
+/* Touch has no hover: without this the handles are unreachable on a phone, so they stay
+   faintly visible there instead of appearing only for a pointer that never arrives. */
+@media (hover: none) { .reader .seg-tool { opacity: .35; } }
 /* inline paragraph number (de-duplicated from the label above), greeny-blue + bold, in flow */
 .reader .seg-num { color: var(--info); font-weight: 700; }
 /* --- the paragraph rail (cases only) ---------------------------------------
@@ -1424,6 +1442,10 @@ table { width: 100%; }
   .reader { padding-left: 0; padding-right: 0; }
   .seg-rail { display: none !important; }
   .reader.has-rails .seg, .seg.has-rail { padding-left: 0; }
+  /* there is no left gutter to hang the handles in, so they ride at the provision's
+     top-right corner rather than off the edge of the screen */
+  .reader .seg-tools { left: auto; right: 0; top: 0; transform: none;
+    flex-direction: row; gap: var(--sp-2); }
   /* the top nav keeps its title + "find in document"; the section skeleton moves to
      the bottom jump-sheet so it isn't a tall block pushing the text down */
   .doc-nav-index { display: none; }
@@ -1625,6 +1647,27 @@ button.mini { font-size: 11px; padding: 1px 7px; }
 .pref-provs { cursor: pointer; text-decoration: underline dotted; }
 .pref-anchors { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin: var(--sp-2) 0 0; }
 .pref-stale { font-size: .75rem; margin: var(--sp-3) 0 0; }
+/* in the per-provision tray the provisions are context, not links — except the one the
+   reader arrived from, which is marked so the list is legible at a glance */
+.pref-prov-here { color: var(--warn); text-decoration: underline; text-underline-offset: 2px; }
+.pending-prov-sub { font-size: .8125rem; margin: 0 0 var(--sp-2); }
+
+/* The open question ON one provision, under its "Mentioned by" line. Mentioned-by is
+   what has already been said about the article; this is what nobody knows yet, so it
+   carries the same warm accent as the box at the foot rather than the citation blue —
+   and it is a filled flag, not another quiet grey line, because it is the one thing on
+   the provision that will change. */
+.reader .pending-prov { margin: var(--sp-1) 0 0; line-height: 1.5; }
+.reader .pending-prov-flag {
+  display: inline-block; cursor: pointer; font-size: .78rem; font-weight: 600;
+  color: var(--warn); padding: 1px var(--sp-2); border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.reader .pending-prov-flag:hover {
+  background: color-mix(in srgb, var(--warn) 24%, transparent); text-decoration: none;
+}
+.reader .pending-prov-flag:focus-visible { outline: 2px solid var(--warn); outline-offset: 1px; }
 
 /* A two-column reference table where BOTH columns carry real content. Auto layout
    apportions width by the longest cell, so a 90-character document title took ~80% and
@@ -1659,7 +1702,7 @@ table.two-col td:first-child { width: 55%; padding-right: var(--sp-4); }
 .seg.kind-heading.lvl1 .seg-body { font-size: 1.2rem; }
 .seg.kind-heading.lvl2 .seg-body { font-size: 1.02rem; color: var(--subtext);
   letter-spacing: .01em; }
-.seg.kind-heading .seg-rail, .seg.kind-heading .seg-plus { display: none; }
+.seg.kind-heading .seg-rail, .seg.kind-heading .seg-tools { display: none; }
 
 /* The bench (and counsel) under a judgment's title: standing metadata, quiet, one line
    for the judges and the representation beneath. */

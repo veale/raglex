@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MaintainView, PeekPanel, PeekProvider, SettingsView, StaticExportView, TrayProvider, TrayStack, UnresolvedView } from "./views";
+import { CiteHoverLayer, CommandPalette, Dashboard, DocumentView, EscapeCloser, ImportView, JobsPanel, MainDocProvider, openCommandPalette, MaintainView, PeekPanel, PeekProvider, SettingsView, StaticExportView, TrayProvider, TrayStack, UnresolvedView } from "./views";
 import { ExploreView, SearchAdminView, SearchPage } from "./explore";
 import { GraphView } from "./graph";
 import { useState as useReactState } from "react";
@@ -434,6 +434,7 @@ export function App() {
   return (
     <PeekProvider>
     <TrayProvider>
+    <MainDocProvider>
     {backDestination && <button className="history-edge history-edge-back"
       onClick={() => { saveCurrentPosition(); history.back(); }}
       title={`Back to ${backDestination.label}`} aria-label={`Back to ${backDestination.label}`}>‹</button>}
@@ -455,6 +456,15 @@ export function App() {
             <button className={tab === "graph" ? "active" : ""}
               onClick={() => tab !== "graph" && openGraph(graphId)}>Graph</button>}
         </nav>
+        {/* The palette is ⌘K, which nobody discovers on their own. Same search, visible. */}
+        <button className="header-search" onClick={openCommandPalette}
+          title="Search — jump to a citation, a case or an act (⌘K)" aria-label="Search">
+          <svg viewBox="0 0 20 20" width="1em" height="1em" aria-hidden="true" focusable="false">
+            <circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" strokeWidth="2" />
+            <line x1="12.7" y1="12.7" x2="18" y2="18" stroke="currentColor"
+              strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
         <ThemeSwitch />
         <AuthBadge />
         <FeedbackBox context={feedbackContext} />
@@ -484,6 +494,7 @@ export function App() {
     {isAdmin && <JobsPanel />}
     <CommandPalette open={open} />
     <CiteHoverLayer />
+    </MainDocProvider>
     </TrayProvider>
     </PeekProvider>
   );
