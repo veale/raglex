@@ -777,6 +777,41 @@ for _key in ("uk-ico-enforcement", "uk-ico-audits", "uk-ico-consultations",
     _SOURCE_ALIASES[_key] = dict(_ICO_ALIASES)
 del _key
 
+# ENISA writes the EU cybersecurity acquis in acronyms and almost never by number: a
+# whole technical guidance runs on "the CRA", "NIS2", "the CSA", "DORA" without a CELEX
+# or an OJ reference anywhere in it. Every one of these is expanded corpus-wide by
+# grammars._NAME_TO_CELEX *when spelled out*; what cannot be safely expanded everywhere
+# is the bare acronym — a Canadian "CRA" is the Canada Revenue Agency, "CSA" is the
+# Canadian Standards Association and a Court of Session Act, "DORA" is the Defence of the
+# Realm Act, "CER" is a Commission enforcement reference, "RED" is a colour. Inside
+# ENISA's own register each can mean nothing else, which is exactly what a source-scoped
+# alias is for.
+_ENISA_ALIASES: dict[str, str] = {
+    "CRA": "32024R2847",
+    "the CRA": "32024R2847",
+    "CRA Regulation": "32024R2847",
+    "CSA": "32019R0881",
+    "the CSA": "32019R0881",
+    "CSOA": "32025R0038",
+    "DORA": "32022R2554",
+    "CER": "32022L2557",
+    "CER Directive": "32022L2557",
+    "NIS": "32016L1148",
+    "NIS Directive": "32016L1148",
+    # The Implementing Regulation that gives NIS2's Article 21 measures their operative
+    # content for digital infrastructure and digital providers — ENISA's technical
+    # guidance IS a commentary on it, and calls it "the implementing regulation".
+    "Implementing Regulation 2024/2690": "32024R2690",
+    "the Implementing Regulation": "32024R2690",
+    "EUCC": "32024R0482",
+    "EUCC scheme": "32024R0482",
+    "RED": "32014L0053",
+    "Radio Equipment Directive": "32014L0053",
+    "RED Delegated Regulation": "32022R0030",
+    "Machinery Regulation": "32023R1230",
+}
+_SOURCE_ALIASES["eu-enisa"] = dict(_ENISA_ALIASES)
+
 
 # Conventional abbreviations that are only safe once the document has NAMED the Act in
 # full. A judgment writes "the Data Protection Act 2018 ('the DPA')" and then uses the

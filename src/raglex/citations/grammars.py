@@ -161,6 +161,35 @@ _NAME_TO_CELEX = {
     "data governance act": "32022R0868",
     "nis2": "32022L2555", "nis 2": "32022L2555", "nis2 directive": "32022L2555",
     "nis 2 directive": "32022L2555",
+    # ── the EU cybersecurity acquis ─────────────────────────────────────────
+    # What ENISA's register is ABOUT, and what its guidance implements. Spelled-out
+    # names only here: the acronyms these instruments are usually written by (CRA, CSA,
+    # DORA, CER, RED) each mean something else in some other corner of this corpus, so
+    # they are expanded only inside the sources where they can mean nothing else — see
+    # citations.stage._ENISA_ALIASES.
+    #
+    # NIS1 and NIS2 are separate instruments and the older one is still the reference
+    # point for a decade of national transposition. "The NIS Directive" without a number
+    # is always 2016/1148: after 2022 the newer one is always written "NIS2".
+    "nis directive": "32016L1148", "nis1": "32016L1148", "nis 1": "32016L1148",
+    "nis1 directive": "32016L1148", "nis 1 directive": "32016L1148",
+    "network and information security directive": "32016L1148",
+    "cybersecurity act": "32019R0881", "eu cybersecurity act": "32019R0881",
+    "cyber resilience act": "32024R2847",
+    "cyber solidarity act": "32025R0038",
+    "digital operational resilience act": "32022R2554",
+    "dora regulation": "32022R2554",
+    "critical entities resilience directive": "32022L2557",
+    "cer directive": "32022L2557",
+    "eidas regulation": "32014R0910",
+    # Regulation (EU) 2024/1183 AMENDS eIDAS to create the European Digital Identity
+    # Wallet; it is a distinct act and "eIDAS 2" means it, not the 2014 Regulation.
+    "eidas 2": "32024R1183", "eidas2": "32024R1183",
+    "eidas 2 regulation": "32024R1183",
+    "european digital identity regulation": "32024R1183",
+    "eucc": "32024R0482", "eucc scheme": "32024R0482",
+    "cybercrime directive": "32013L0040",
+    "attacks against information systems directive": "32013L0040",
     "emfa": "32024R1083", "european media freedom act": "32024R1083",
     "cyber resilience act": "32024R2847",
     "chips act": "32023R1781",
@@ -236,6 +265,7 @@ _NAME_TO_CELEX = {
     # matched text, folded, and an acronym never reaches the full-name map.
     "eutmr": "32017R1001", "eutmd": "32015L2436",
     "ipred": "32004L0048", "cdsm": "32019L0790",
+    "eidas": "32014R0910",
 }
 # Acronyms are matched UPPERCASE-only (case-sensitive) so the common word "led" never
 # resolves to the Law Enforcement Directive; the spelled-out names match case-
@@ -250,8 +280,13 @@ _NAME_TO_CELEX = {
 # EUTMR / EUTMD / IPRED / CDSM are the IP acquis's universal acronyms and collide with
 # nothing. CDR, TSD, SPC and UPC are deliberately absent: each is an ordinary
 # abbreviation somewhere else in this corpus, and their spelled-out names carry them.
-_EU_ACRONYMS = (r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|EMFA|AVMSD|EECC|UCPD"
-                r"|EUTMR|EUTMD|IPRED|CDSM")
+# eIDAS and NIS1/NIS2 are the exceptions to "uppercase only": they are coined names
+# rather than initialisms of ordinary words, they are always written in exactly this
+# shape, and neither collides with anything. eIDAS must not swallow the "eIDAS 2"
+# amending Regulation, which is a different act — the full-name route below carries
+# that one, and this pattern stands out of its way.
+_EU_ACRONYMS = (r"GDPR|AVG|DSGVO|RGPD|DMA|DSA|LED|NIS2|NIS1|EMFA|AVMSD|EECC|UCPD"
+                r"|EUTMR|EUTMD|IPRED|CDSM|eIDAS(?!\s*2\b)|EUCC")
 _EU_FULL_NAMES = "|".join(
     re.escape(k).replace(r"\ ", r"\s+")
     for k in sorted(_NAME_TO_CELEX, key=len, reverse=True) if " " in k)

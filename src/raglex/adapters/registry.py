@@ -73,6 +73,7 @@ from .eu_ep_thinktank import EPThinkTankAdapter
 from .eu_ep_resolutions import EPResolutionsAdapter
 from .eu_preparatory import EUPreparatoryAdapter
 from .eu_ombudsman import EUOmbudsmanAdapter
+from .eu_enisa import ENISAPublicationsAdapter
 from .eu_edps import EDPSInvestigationsAdapter, EDPSOpinionsAdapter
 from .eu_dgcomp import DGCompAntitrustAdapter
 from .eu_consumer_guidance import EUConsumerGuidanceAdapter
@@ -397,6 +398,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "nl-ap": APDocumentsAdapter,
     "nl-rdi": RDIDocumentsAdapter,
     "eu-berec": BERECAdapter,
+    "eu-enisa": ENISAPublicationsAdapter,
     # EUIPO Observatory publications — the site's own public Algolia index faceted
     # to observatory-publications, then the study PDFs linked one level down.
     "eu-euipo": EUIPOPublicationsAdapter,
@@ -1165,6 +1167,18 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "feed carrying no documents, so keep-current re-reads the newest page of each "
         "category and stops at the cursor.",
         (), ("BoR document number", "BoR (26) 88_1"),
+    ),
+    "eu-enisa": SourceInfo(
+        "eu-enisa", "ENISA publications (EU Agency for Cybersecurity)",
+        "guidance", "EU", False,
+        "The whole /publications register: the NIS2 technical implementation guidance, "
+        "the CRA technical and notified-body material, the EUCC certification scheme "
+        "documents, the annual Threat Landscape and the sector risk assessments \u2014 where "
+        "the operative detail of EU cybersecurity law is actually written down. The index "
+        "is a list of abstracts, so each card is followed to the publication\u2019s own page "
+        "and its PDF; annexes and mapping tables are recorded as attachments beside it. "
+        "Keep-current re-reads the newest page and stops at the cursor.",
+        (), (),
     ),
     "eu-euipo": SourceInfo(
         "eu-euipo", "EUIPO Observatory publications (EU intellectual property)",
@@ -3113,7 +3127,8 @@ INCREMENTAL_MODE: dict[str, str] = {
     "nl-acm-publications": "early-stop",
     "nl-ap": "early-stop",
     "nl-rdi": "early-stop",
-    "eu-berec": "early-stop", "dma-consultations": "early-stop",
+    "eu-berec": "early-stop", "eu-enisa": "early-stop",
+    "dma-consultations": "early-stop",
     # Nine pages of JSON, not ordered by date, and a study's page is re-published
     # when a language version or a country note is added. Walk it all.
     "eu-euipo": "full-walk",
