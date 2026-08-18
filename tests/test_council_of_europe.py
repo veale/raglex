@@ -18,6 +18,7 @@ from raglex.adapters.council_of_europe import (
     parse_treaty_api_rows,
     parse_treaty_list,
     treaty_api_config,
+    strip_page_furniture,
     treaty_aliases,
     treaty_segments,
 )
@@ -207,6 +208,78 @@ ARTICLE 2
         ("Article 1(2)", "paragraph"), ("Article 2", "article"),
         ("Article 2(1)", "paragraph"), ("Article 2(2)", "paragraph")]
     assert all(text[s.char_start:s.char_end].strip() for s in segments)
+
+
+# The Cybercrime Convention as the extractor delivers it: blocks separated by a blank
+# line, and every page after the first opened by its number and the Treaty Office's
+# running header. The header's rule is a different length on each page.
+def _ets185_pages() -> tuple[str, list]:
+    head = "ETS 185 – Cybercrime (Convention), 23.XI.2001 "
+    bodies = [
+        "Convention on Cybercrime\n\nBudapest, 23.XI.2001\n\nPreamble",
+        f"3\n\n{head}{'_' * 82}\n\nArticle 3 – Illegal interception\n\n"
+        "1 Each Party shall adopt such measures as may be necessary.",
+        f"4\n\n{head}{'_' * 79}\n\nArticle 4 – Data interference\n\n"
+        "1 Each Party shall adopt such legislative measures.\n\n2 A Party may reserve the right.",
+        f"5\n\n{head}{'_' * 82}\n\n3 For the purpose of paragraph 2 above.",
+    ]
+    text, spans, cursor = "", [], 0
+    for n, body in enumerate(bodies, start=1):
+        if text:
+            text += "\n\n"
+            cursor += 2
+        spans.append((n, cursor, cursor + len(body)))
+        text += body
+        cursor += len(body)
+    return text, spans
+
+
+def test_the_running_header_and_page_numbers_leave_the_treaty_text():
+    """They were IN the reader: the header cut the preamble in half and came back on
+    every page, and each page number was read as a paragraph of whatever article it
+    landed in ("Article 3(3)" is a page number under a header)."""
+    text, spans = _ets185_pages()
+    clean, clean_spans = strip_page_furniture(text, spans)
+
+    assert "ETS 185 – Cybercrime" not in clean
+    assert "\n3\n" not in f"\n{clean}\n"          # the page number went with it
+    assert clean.count("Article 3 – Illegal interception") == 1
+    assert "3 For the purpose of paragraph 2 above." in clean   # …but the paragraph stays
+    # The spans still describe the text they are offsets into.
+    assert [clean[s:e].splitlines()[0] for _n, s, e in clean_spans] == [
+        "Convention on Cybercrime", "Article 3 – Illegal interception",
+        "Article 4 – Data interference", "3 For the purpose of paragraph 2 above."]
+
+    labels = [(s.label, s.kind) for s in treaty_segments(clean)]
+    assert ("Article 3", "article") in labels
+    assert ("Article 3(3)", "paragraph") not in labels   # the page number, not a paragraph
+    assert ("Article 4(1)", "paragraph") in labels
+    assert ("Article 4(2)", "paragraph") in labels
+
+
+def test_a_page_number_alone_is_never_a_paragraph_even_unstripped():
+    """Second line of defence, for a treaty whose furniture does not repeat enough to be
+    recognised (a two-page protocol) or that arrived through OCR with no page spans."""
+    text = "Article 7 – Scope\n\n1 Parties shall cooperate.\n\n8\n\nSome running header\n"
+    assert [(s.label, s.kind) for s in treaty_segments(text)] == [
+        ("Article 7", "article"), ("Article 7(1)", "paragraph")]
+
+
+def test_page_furniture_stripping_leaves_a_document_without_any_alone():
+    """Nothing repeats in edge position → nothing is removed. A bare number at the top of
+    a page is then just as likely to be the text of the treaty."""
+    body = ["Article 1 – Purpose\n\n1 This Convention protects rights.",
+            "Article 2 – Scope\n\n1 Parties shall cooperate.",
+            "Article 3 – Entry into force\n\n1 This Convention enters into force."]
+    text, spans, cursor = "", [], 0
+    for n, part in enumerate(body, start=1):
+        if text:
+            text += "\n\n"
+            cursor += 2
+        spans.append((n, cursor, cursor + len(part)))
+        text += part
+        cursor += len(part)
+    assert strip_page_furniture(text, spans) == (text, spans)
 
 
 def test_treaties_mint_official_name_aliases_from_metadata():

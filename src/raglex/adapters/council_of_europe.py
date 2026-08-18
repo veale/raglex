@@ -597,7 +597,85 @@ def treaty_aliases(number: str, detail: dict) -> list[str]:
 _ARTICLE = re.compile(
     r"(?im)^(?:ARTICLE|Article)[ \t]+(\d+[A-Z]?)[ \t]*(?:[-–—:][ \t]*)?.*$"
 )
-_PARAGRAPH = re.compile(r"(?m)^(\d{1,2})[.)]?\s+(?=\S)")
+# The paragraph number and its first words are ONE line. The PDF extractor collapses a
+# block's internal wrapping to spaces and separates blocks with a blank line, so "1 Each
+# Party shall …" arrives whole — while a page number sits alone in its own block. Allowing
+# `\s+` here let every page number adopt the article it fell in as its parent and become a
+# paragraph of it: the Cybercrime Convention showed an "Article 3(3)", an "Article 20(10)"
+# and nineteen more, each of them a page number followed by the running header.
+_PARAGRAPH = re.compile(r"(?m)^(\d{1,2})[.)]?[ \t]+(?=\S)")
+
+#: A page number alone on a line — the other half of the same furniture.
+_PAGE_NUMBER_LINE = re.compile(r"^\d{1,3}$")
+#: The Treaty Office rules off under its running header with a row of underscores whose
+#: length varies between pages, so it cannot be part of the identity of the line.
+_FURNITURE_RULE = re.compile(r"[_\-–—]{4,}\s*$")
+
+
+def _furniture_key(line: str) -> str:
+    return " ".join(_FURNITURE_RULE.sub("", line).split()).casefold()
+
+
+def strip_page_furniture(text: str, spans: list, *, min_repeats: int = 3,
+                         window: int = 2) -> tuple[str, list]:
+    """``(text, page spans)`` with the running header and page numbers removed.
+
+    Every Treaty Office PDF prints "ETS 185 – Cybercrime (Convention), 23.XI.2001" over a
+    rule at the top of each page after the first, under the page number. Both land in the
+    extracted text, and the reader shows them: the header cut the preamble in half
+    mid-sentence and reappeared twenty-one times through the articles, which is what the
+    document looked like it was repeating. It was also read as a citation of the treaty
+    to itself, once per page.
+
+    Furniture is identified by REPETITION IN EDGE POSITION, not by matching the Treaty
+    Office's particular wording — a treaty whose header this parser has never seen loses
+    it too, and a sentence that happens to resemble a header keeps its place, because no
+    sentence of a treaty opens three different pages. Where nothing repeats, nothing is
+    removed: a bare number at the top of a page is then as likely to be text.
+    """
+    pages = [text[start:end] for _n, start, end in (spans or [])]
+    if len(pages) < min_repeats:
+        return text, list(spans or [])
+    counts: dict[str, int] = {}
+    for page in pages:
+        lines = [ln.strip() for ln in page.splitlines() if ln.strip()]
+        edge = lines[:window] + lines[-window:]
+        for key in {_furniture_key(ln) for ln in edge if not _PAGE_NUMBER_LINE.match(ln)}:
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    repeated = {key for key, n in counts.items() if n >= min_repeats}
+    if not repeated:
+        return text, list(spans or [])
+
+    cleaned: list[str] = []
+    for page in pages:
+        lines = page.splitlines()
+        drop: set[int] = set()
+        for indices in (range(len(lines)), range(len(lines) - 1, -1, -1)):
+            removed = 0
+            for i in indices:
+                stripped = lines[i].strip()
+                if not stripped:
+                    continue                       # blank separators never close the run
+                if removed >= window or i in drop:
+                    break
+                if _PAGE_NUMBER_LINE.match(stripped) or _furniture_key(stripped) in repeated:
+                    drop.add(i)
+                    removed += 1
+                    continue
+                break                              # real text — the edge is over
+        cleaned.append("\n".join(ln for i, ln in enumerate(lines) if i not in drop).strip("\n"))
+
+    sep, parts, out_spans, cursor = "\n\n", [], [], 0
+    for (number, _s, _e), body in zip(spans, cleaned):
+        if not body:
+            continue                               # a page that was nothing but furniture
+        if parts:
+            cursor += len(sep)
+        out_spans.append((number, cursor, cursor + len(body)))
+        parts.append(body)
+        cursor += len(body)
+    return sep.join(parts), out_spans
 
 
 def treaty_segments(text: str) -> list[Segment]:
@@ -611,8 +689,6 @@ def treaty_segments(text: str) -> list[Segment]:
                            kind="article", level=0))
         body_start = match.end()
         for para in _PARAGRAPH.finditer(text, body_start, end):
-            # Page headers and article headings are common bare numbers; paragraphs must
-            # begin after the heading and the next non-space character must be prose.
             para_end = end
             following = _PARAGRAPH.search(text, para.end(), end)
             if following:
@@ -737,6 +813,10 @@ class CouncilOfEuropeTreatiesAdapter(BaseAdapter):
                              transient=True)
         pdf = self._pdf(detail["pdf_url"], stub.landing_url)
         text, needs_ocr, spans, engine = text_or_ocr(pdf, max_pages=220)
+        # Before segmenting, not after: the running header is what the page numbers that
+        # were being read as paragraphs belong to, and both have to leave the TEXT — the
+        # reader shows the text, and every offset below is measured against it.
+        text, spans = strip_page_furniture(text, spans)
         structured = treaty_segments(text)
         segments = structured or [Segment(label=f"p. {n}", char_start=start,
                                             char_end=end, kind="page")
