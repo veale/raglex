@@ -10,6 +10,7 @@ from raglex.adapters.eu_enisa import (
     index_rows,
     last_page,
     parse_publication,
+    sitemap_publications,
 )
 from raglex.adapters.registry import ADAPTERS, INCREMENTAL_MODE, SOURCE_INFO
 from raglex.core.errors import FetchError
@@ -111,64 +112,116 @@ def test_publication_type_separates_the_agency_accounting_for_itself():
     assert doc_type_for(None, "ENISA's view on cybersecurity") is DocType.GUIDANCE
 
 
-class _FakeClient:
-    def __init__(self, pages: dict[int, str]) -> None:
-        self.pages = pages
-        self.asked: list[int] = []
+SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://www.enisa.europa.eu/</loc><changefreq>daily</changefreq></url>
+<url><loc>https://www.enisa.europa.eu/news/some-news-item</loc><lastmod>2026-08-05T09:00Z</lastmod></url>
+<url><loc>https://www.enisa.europa.eu/publications/sme-cra-survey-report</loc><lastmod>2026-08-05T09:00Z</lastmod></url>
+<url><loc>https://www.enisa.europa.eu/publications/nis2-technical-implementation-guidance</loc><lastmod>2025-06-26T10:31Z</lastmod></url>
+<url><loc>https://www.enisa.europa.eu/publications/an-undated-one</loc></url>
+</urlset>"""
 
-    def get(self, _url, params=None, **_kw):
-        page = int((params or {}).get("page") or 0)
-        self.asked.append(page)
+
+class _FakeClient:
+    """Answers the sitemap and the paged index; records what was asked for."""
+
+    def __init__(self, pages: dict[int, str] | None = None, sitemap: str = SITEMAP_XML) -> None:
+        self.pages = pages or {}
+        self.sitemap = sitemap
+        self.asked: list[int] = []
+        self.sitemap_reads = 0
+
+    def get(self, url, params=None, **_kw):
+        if "sitemap" in url:
+            self.sitemap_reads += 1
+            body = self.sitemap
+        else:
+            page = int((params or {}).get("page") or 0)
+            self.asked.append(page)
+            body = self.pages.get(page, "<div class='view-content'></div>")
 
         class _R:
-            content = self.pages.get(page, "<div class='view-content'></div>").encode()
-            url = _url
+            content = body.encode()
+
+        _R.url = url
         return _R()
+
+
+def test_the_sitemap_is_the_manifest_and_lists_only_publications():
+    rows = sitemap_publications(SITEMAP_XML)
+    assert [r["url"].rsplit("/", 1)[-1] for r in rows] == [
+        "sme-cra-survey-report", "nis2-technical-implementation-guidance", "an-undated-one"]
+    assert rows[0]["lastmod"] == date(2026, 8, 5)
+    assert rows[-1]["lastmod"] is None
+
+
+def test_a_backfill_enumerates_the_sitemap_not_the_broken_pager():
+    """The paged index repeats page 0 for about a third of its page numbers, with a 200
+    and a well-formed body, so a deep walk of it stops early and reports itself complete
+    — 20 of 593 on the first live run. The sitemap is complete in one request."""
+    client = _FakeClient(pages={0: INDEX_HTML})
+    stubs = list(ENISAPublicationsAdapter(client=client).discover(None))
+    assert client.sitemap_reads == 1 and client.asked == []
+    assert [s.stable_id for s in stubs] == [
+        "eu/enisa/sme-cra-survey-report",
+        "eu/enisa/nis2-technical-implementation-guidance",
+        "eu/enisa/an-undated-one"]
+    # The sitemap's lastmod is when the NODE changed. Offering it as the publication date
+    # would back-date this year's edit onto a 2012 report; fetch() reads the real one.
+    assert all(s.hint_date is None for s in stubs)
+
+
+def test_an_empty_sitemap_is_an_outage_not_an_empty_register():
+    client = _FakeClient(sitemap="<urlset></urlset>")
+    with pytest.raises(FetchError):
+        list(ENISAPublicationsAdapter(client=client).discover(None))
 
 
 def test_discovery_reports_a_cursor_over_the_whole_feed():
     """§1: the offset counts the FEED, not the position within a page — a per-page
-    counter restarts a 59-page backfill in the middle of whichever page it reached."""
-    page1 = INDEX_HTML.replace('href="?page=58"', 'href="?page=1"')
-    ad = ENISAPublicationsAdapter(client=_FakeClient({0: page1, 1: page1}))
-    stubs = list(ad.discover(None))
-    assert [s.stable_id for s in stubs] == [
-        "eu/enisa/sme-cra-survey-report", "eu/enisa/nis2-technical-implementation-guidance"]
+    counter restarts a walk in the middle of whichever page it reached."""
+    ad = ENISAPublicationsAdapter(client=_FakeClient({0: INDEX_HTML}))
+    stubs = list(ad.discover("2020-01-01"))
     assert [s.hints["resume_offset"] for s in stubs] == [0, 1]
+    # …and a backfill's offsets run over the whole manifest.
+    back = list(ENISAPublicationsAdapter(client=_FakeClient()).discover(None))
+    assert [s.hints["resume_offset"] for s in back] == [0, 1, 2]
 
 
-def test_a_reported_cursor_is_accepted_back_and_resumes_a_page_early():
+def test_a_reported_cursor_is_accepted_back_and_resumes_early():
     """The bug this whole rule exists for: a resumed backfill that raises TypeError is
     recorded as done, and the run looks finished with 14,000 of 357,000 harvested."""
-    client = _FakeClient({2: INDEX_HTML, 3: INDEX_HTML})
-    ad = ENISAPublicationsAdapter(client=client, start_offset="30")
-    list(ad.discover(None, max_pages=1))
-    # 30 // 10 == page 3; resume_floor backs off one page, so the walk restarts at 2 and
-    # re-reads ten cards the pipeline already holds rather than skipping any.
-    assert client.asked == [2]
+    # resume_floor backs the checkpoint off by a whole page, so a run that reported it
+    # had reached item 12 restarts at 2 — re-emitting ten the pipeline already holds
+    # rather than risking one it does not.
+    ad = ENISAPublicationsAdapter(client=_FakeClient(), start_offset="12")
+    assert [s.hints["resume_offset"] for s in ad.discover(None)] == [2]
+    # A cursor past the end of the manifest simply yields nothing, and never raises.
+    ad2 = ENISAPublicationsAdapter(client=_FakeClient(), start_offset="900")
+    assert list(ad2.discover(None)) == []
 
 
-def test_an_empty_page_before_the_end_is_an_outage_not_an_exhausted_feed():
+def test_an_empty_index_is_an_outage_not_an_exhausted_feed():
     """§3/§5c: "the register is broken" and "there is nothing left" must never produce
-    the same outcome — a silently short walk reports a complete backfill."""
-    ad = ENISAPublicationsAdapter(client=_FakeClient({0: INDEX_HTML}))
+    the same outcome — a silently short walk reports a complete keep-current pass."""
+    ad = ENISAPublicationsAdapter(client=_FakeClient({}))
     with pytest.raises(FetchError):
-        list(ad.discover(None))
+        list(ad.discover("2020-01-01"))
 
 
-def test_discovery_stops_at_the_cursor():
+def test_keep_current_stops_at_the_cursor():
     ad = ENISAPublicationsAdapter(client=_FakeClient({0: INDEX_HTML, 1: INDEX_HTML}))
     stubs = list(ad.discover("2026-01-01"))
     assert [s.stable_id for s in stubs] == ["eu/enisa/sme-cra-survey-report"]
 
 
-def test_walking_past_the_last_page_does_not_loop_on_page_zero():
-    """ENISA answers an out-of-range ?page= with a 200 carrying page 0 — ten valid
-    cards. Read as a fresh page it is an infinite backfill that never finishes and never
-    errors."""
-    wrapped = INDEX_HTML.replace('href="?page=58"', 'href="?page=1"')
-    client = _FakeClient({0: wrapped, 1: wrapped, 2: wrapped})
-    stubs = list(ENISAPublicationsAdapter(client=client).discover(None))
+def test_a_repeated_page_never_reads_as_the_end_of_the_register():
+    """Measured live: ?page=2 returns page 0's ten newest cards, with a 200, five times
+    running and through a cache-buster. Keep-current must stop rather than loop — but it
+    must never be the thing that decides a backfill is complete, which is why a backfill
+    does not come this way at all."""
+    client = _FakeClient({0: INDEX_HTML, 1: INDEX_HTML, 2: INDEX_HTML})
+    stubs = list(ENISAPublicationsAdapter(client=client).discover("2020-01-01"))
     assert len(stubs) == 2 and client.asked == [0, 1]
 
 

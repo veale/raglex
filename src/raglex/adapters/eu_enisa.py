@@ -17,6 +17,19 @@ follows it.
 per-language renditions beside the main PDF. The English PDF is the document; everything
 else is recorded as an attachment so the apparatus is visible without being pasted into
 the text.
+
+**The paged index CANNOT be walked, and says nothing about it.** ``?page=N`` returns page
+0's ten newest cards for about a third of N — measured 2026-08-18, pages 2, 4, 5, 7, 30,
+40, 56 and 57 of 58 all served the same ten publications as page 0, with HTTP 200 and a
+perfectly well-formed body. It is not a blip: page 2 answered identically on five
+consecutive requests, with a cache-buster, and ten seconds apart. A backfill that trusts
+the pager therefore stops at the first repeat and reports itself complete — which is how
+the first run here stored 20 of 593 and recorded ``errors: 0``.
+
+So the register is enumerated from the site's OWN SITEMAP, which lists every publication
+node in one request and is the independent inventory §4 asks for; the paged index is used
+only for keep-current, where page 0 alone is enough and always works. A page that repeats
+one already seen is never read as the end of the feed.
 """
 
 from __future__ import annotations
@@ -36,6 +49,9 @@ from ..extraction import extract_bytes
 
 BASE = "https://www.enisa.europa.eu"
 INDEX = f"{BASE}/publications"
+#: The manifest. One request, every publication node, and the only enumeration of this
+#: register that is actually complete — see the module docstring.
+SITEMAP = f"{BASE}/sitemap.xml"
 
 #: Cards per page of the Drupal view (measured: 10, with 59 pages back to 2006). Only
 #: used to turn a resume cursor back into a page number; the real page size is whatever
@@ -112,6 +128,32 @@ def index_rows(html: bytes | str) -> list[dict]:
             "date": _iso_date(str(stamp["datetime"]) if stamp and stamp.get("datetime") else None),
             "summary": _clean(card.select_one(".publication-content .content")),
         })
+    return out
+
+
+def sitemap_publications(xml: bytes | str) -> list[dict]:
+    """``{url, lastmod}`` for every publication in the site's sitemap, newest first.
+
+    ``lastmod`` is when the NODE last changed, not when the publication was issued, so it
+    orders the walk but is never offered as the document's date — the publication's own
+    page carries that and ``fetch`` reads it there.
+    """
+    text = xml.decode("utf-8", "replace") if isinstance(xml, bytes) else xml
+    out: list[dict] = []
+    seen: set[str] = set()
+    for entry in re.finditer(r"<url>(.*?)</url>", text, re.S):
+        block = entry.group(1)
+        loc = re.search(r"<loc>\s*([^<]+?)\s*</loc>", block)
+        if not loc:
+            continue
+        url = loc.group(1).strip()
+        if "/publications/" not in urlsplit(url).path or url in seen:
+            continue
+        seen.add(url)
+        stamp = re.search(r"<lastmod>\s*([^<]+?)\s*</lastmod>", block)
+        out.append({"url": url, "lastmod": _iso_date(stamp.group(1)) if stamp else None})
+    out.sort(key=lambda r: (r["lastmod"].isoformat() if r["lastmod"] else "", r["url"]),
+             reverse=True)
     return out
 
 
@@ -200,19 +242,55 @@ class ENISAPublicationsAdapter(BaseAdapter):
         self.start_offset = resume_floor(option_int(start_offset, 0), PAGE_SIZE)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        """Walk the index newest-first, stopping at the cursor.
+        """Every publication (backfill) or just the newest (keep-current).
 
-        The view is one series ordered by publication date, so a ``since`` early-stop is
-        sound: everything below an already-seen row is older. (The featured block above
-        the list is NOT ``.publications-item``, so it cannot end the walk on its first
-        row.) A backfill walks all 59 pages; keep-current normally reads one.
+        The two jobs use different routes because only one of them CAN be done on the
+        paged index: it repeats page 0 for about a third of its page numbers, so a deep
+        walk of it silently stops early (see the module docstring). A backfill therefore
+        enumerates the sitemap, which is complete in one request; keep-current reads the
+        index's page 0, which is the only page that always answers and is where anything
+        new appears.
         """
-        offset = self.start_offset
-        page = offset // PAGE_SIZE
-        end: int | None = None
-        pages_read = 0
+        if since:
+            yield from self._newest(since, max_pages)
+        else:
+            yield from self._everything(max_pages)
+
+    def _everything(self, max_pages: int | None) -> Iterator[Stub]:
+        """The whole register, from the site's own manifest."""
+        rows = sitemap_publications(self._client.get(SITEMAP).content)
+        if not rows:
+            # An empty manifest is a broken sitemap, never an empty register — filing it
+            # as "nothing to harvest" is how a source goes quiet without a trace.
+            raise FetchError(f"{self.source}: the sitemap listed no publications",
+                             transient=True)
+        limit = len(rows) if max_pages is None else min(len(rows), max_pages * PAGE_SIZE)
+        # Skipping EMISSION, not requests: the whole list arrived in the one request
+        # already made, so a resume costs nothing and cannot mis-bound anything (§1).
+        for offset in range(min(self.start_offset, len(rows)), limit):
+            row = rows[offset]
+            yield Stub(
+                stable_id=f"eu/enisa/{_slug(row['url'])}",
+                landing_url=row["url"], raw_url=row["url"],
+                title=None, court="ENISA",
+                # Deliberately no hint_date: the sitemap's lastmod is when the NODE
+                # changed, and offering it as the publication date would back-date this
+                # year's edits onto a 2012 report. fetch() reads the real one.
+                hints={"resume_offset": offset,
+                       "lastmod": row["lastmod"].isoformat() if row["lastmod"] else None},
+            )
+
+    def _newest(self, since: str, max_pages: int | None) -> Iterator[Stub]:
+        """The index, newest-first, stopping at the cursor.
+
+        Bounded to the pages that can be trusted. Page 0 always answers; beyond it a page
+        that repeats one already seen is the register misbehaving, and the walk stops
+        there rather than reading the repeat as the end of the feed — a keep-current pass
+        only has to reach the cursor, and a backfill has the sitemap.
+        """
         seen: set[str] = set()
-        while max_pages is None or pages_read < max_pages:
+        end: int | None = None
+        for page in range(0, (max_pages if max_pages is not None else 60)):
             try:
                 response = self._client.get(INDEX, params={"page": page} if page else None)
             except FetchError:
@@ -221,28 +299,20 @@ class ENISAPublicationsAdapter(BaseAdapter):
                 end = last_page(response.content)
             rows = index_rows(response.content)
             if not rows:
-                # An empty page is either the end of the walk or ENISA serving a
-                # non-page: past the pager's own last page it is the end, before it the
-                # register has broken and must not be reported as exhausted.
-                if end is not None and page <= end:
-                    raise FetchError(
-                        f"{self.source}: page {page} of {end} listed no publications",
-                        transient=True)
+                if page == 0:
+                    raise FetchError(f"{self.source}: the index listed no publications",
+                                     transient=True)
                 return
-            # Drupal answers an OUT-OF-RANGE ?page= with page 0 — a 200 carrying ten
-            # perfectly valid cards. Without this the walk past the last page loops on
-            # the newest ten for ever, and the pager (which bounds it below) is a
-            # template detail that could vanish in a redesign.
-            fresh = [r for r in rows if f"eu/enisa/{_slug(r['url'])}" not in seen]
-            if not fresh:
-                return
+            ids = [f"eu/enisa/{_slug(r['url'])}" for r in rows]
+            if page and all(i in seen for i in ids):
+                return                      # a repeated page, not the end of the register
             for index, row in enumerate(rows):
                 published = row.get("date")
                 if since and published and published.isoformat() < since[:10]:
-                    return                      # newest-first: everything below is older
-                seen.add(f"eu/enisa/{_slug(row['url'])}")
+                    return                  # newest-first: everything below is older
+                seen.add(ids[index])
                 yield Stub(
-                    stable_id=f"eu/enisa/{_slug(row['url'])}",
+                    stable_id=ids[index],
                     landing_url=row["url"], raw_url=row["url"],
                     title=row["title"], court="ENISA",
                     hint_date=published,
@@ -254,9 +324,7 @@ class ENISAPublicationsAdapter(BaseAdapter):
                         "watermark": published.isoformat() if published else None,
                     },
                 )
-            pages_read += 1
-            page += 1
-            if end is not None and page > end:
+            if end is not None and page >= end:
                 return
 
     def fetch(self, stub: Stub) -> Record | None:
