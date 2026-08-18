@@ -723,6 +723,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
                                   f"{swept['retired']} resolved notice(s)")
                     except Exception as exc:  # noqa: BLE001 — never kill the tick
                         print(f"[watch] eu-pending-cases: retirement sweep failed: {exc}")
+                    # …then the joins, which same-number pairing cannot see at all: a
+                    # judgment in joined cases carries only the LEAD case's CELEX, so the
+                    # member cases' notices stay "Pending:" for ever unless CELLAR is
+                    # asked who was joined into whom.
+                    try:
+                        joined = f.retire_joined_pending_notices()
+                        if joined.get("retired"):
+                            print(f"[watch] eu-pending-cases: retired "
+                                  f"{joined['retired']} joined-case notice(s)")
+                    except Exception as exc:  # noqa: BLE001 — never kill the tick
+                        print(f"[watch] eu-pending-cases: joined-case sweep failed: {exc}")
                     started = jobs.start(
                         "harvest-source", "EU pending C/T cases (CELLAR)",
                         {

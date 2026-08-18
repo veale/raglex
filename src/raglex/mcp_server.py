@@ -1443,6 +1443,19 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.maintenance_plan()
 
     @admin
+    def retire_pending_notices(joined: bool = True, limit: int = 5000) -> dict:
+        """Stop fronting decided CJEU cases as live references. Retires every CN/TN notice
+        whose deciding judgment/order is held in full English — first by case number
+        (local, free), then, with ``joined``, by asking CELLAR which cases were JOINED into
+        another and decided under ITS number, which case-number pairing can never see (a
+        joined judgment carries only the lead's CELEX, so C-556/23 stayed "pending" months
+        after the Court answered it). Idempotent; needs network to CELLAR for the joins."""
+        out = {"by_case_number": facade.retire_resolved_pending_notices(limit=limit)}
+        if joined:
+            out["joined_cases"] = facade.retire_joined_pending_notices(limit=limit)
+        return out
+
+    @admin
     def scheduled_tasks() -> dict:
         """List recurring scheduler tasks with their per-task enabled/cadence + the global
         pause state."""

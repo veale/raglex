@@ -2650,6 +2650,53 @@ class Facade:
         return {"examined": len(pairs), "retired": len(retired),
                 "notices": [n for n, _d in retired][:200]}
 
+    def retire_joined_pending_notices(self, *, limit: int = 5000) -> dict:
+        """Retire every notice whose case was JOINED into another and decided under that
+        case's number — the one resolution same-number pairing structurally cannot make.
+
+        A judgment in joined cases carries the lead case's CELEX and no other, so
+        ``retire_resolved_pending_notices`` looks for a 62023CJ0556 that the Publications
+        Office never mints and finds nothing, for ever. C-556/23 (joined with C-555/23,
+        answered 26 June 2025) and C-765/23 and C-766/23 (joined with C-764/23, answered
+        11 September 2025) all sat in the corpus as live references months afterwards, on
+        instruments — the AVMS Directive, the EECC — where a reader counting open
+        questions would have counted them.
+
+        The join is read from CELLAR's own ``case-law_joins_case_court``, never guessed
+        from the "In Joined Cases …" line of the text: the property is authoritative,
+        while the printed line is a translation artefact that varies by language.
+        Retirement then goes through the ordinary guard, so the joined decision must
+        still be HELD in full English before it may close anything.
+        """
+        from .adapters.eu_cellar import celex_case_number, joined_case_decisions
+        with self._open() as (cat, _rs, _ts):
+            live = cat.live_pending_eu_notices(limit=limit)
+        if not live:
+            return {"examined": 0, "joined": 0, "retired": 0, "notices": []}
+        joins = joined_case_decisions(sorted(live))
+        retired: list[dict] = []
+        unheld = 0
+        with self._open() as (cat, _rs, _ts):
+            for notice_celex, leads in joins.items():
+                notice_id = live.get(notice_celex)
+                if not notice_id:
+                    continue
+                for lead in leads:
+                    decision_id = cat.find_document_id(lead)
+                    # The lead judgment is not held (or not yet in English). Counted, not
+                    # silently dropped: a rising number here means the CJEU watch is
+                    # missing the decisions, not that there is nothing to retire.
+                    if not decision_id or not cat.retire_pending_eu_notice(notice_id, decision_id):
+                        unheld += 1
+                        continue
+                    retired.append({"notice": notice_id, "case": celex_case_number(notice_celex),
+                                    "joined_into": lead, "decision": decision_id})
+                    break
+        if retired:
+            self._invalidate_caches()
+        return {"examined": len(live), "joined": len(joins), "retired": len(retired),
+                "unresolvable": unheld, "notices": retired[:200]}
+
     def cited_by_breakdown(self, stable_id: str) -> dict:
         """HONEST facet counts for the cited-by panel: distinct citing documents per
         jurisdiction × kind over the WHOLE resolved incoming set, not the loaded page.

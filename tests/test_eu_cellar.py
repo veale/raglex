@@ -8,6 +8,7 @@ from raglex.adapters.eu_cellar import (
     classify_celex,
     extract_formex,
     extract_formex_text,
+    joined_case_decisions,
     parse_national_judgements,
     pending_formex_title,
     resolve_case_celex,
@@ -404,6 +405,94 @@ def test_sweep_retires_notices_the_feed_never_paired(catalogue):
     assert pairs == [("62024CN0801", "ECLI:EU:C:2026:472")]
     assert catalogue.retire_pending_eu_notice(*pairs[0])
     assert catalogue.get_document("62025CN0100")["search_excluded"] == 0
+
+
+# --- joined cases ----------------------------------------------------------
+# The live shapes, verified against CELLAR on 2026-08-18 for the two joins that were
+# still fronted as pending: C-556/23 (into C-555/23) and C-765/23 + C-766/23 (into
+# C-764/23).  Three URI spellings of the joined case, and joining works that are not
+# the judgment (its _SUM summary, the AG's Opinion).
+def _sparql_stub(rows: list[tuple[str, str]]):
+    class _Resp:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {"results": {"bindings": [
+                {"notice": {"value": n}, "lead": {"value": lead}} for n, lead in rows]}}
+
+    def post(_url, **_kw):
+        return _Resp()
+
+    return post
+
+
+def test_joined_case_decisions_reads_the_lead_through_every_shape(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", _sparql_stub([
+        ("62023CN0556", "62023CJ0555"),          # the judgment itself
+        ("62023CN0556", "62023CJ0555_SUM"),      # …and its summary, same lead
+        ("62023CN0766", "62023CJ0764_SUM"),      # only the summary carries the join here
+        ("62023CN0765", "62023CJ0764"),
+    ]))
+    assert joined_case_decisions(["62023CN0556", "62023CN0765", "62023CN0766"]) == {
+        "62023CN0556": ["62023CJ0555"],
+        "62023CN0766": ["62023CJ0764"],
+        "62023CN0765": ["62023CJ0764"],
+    }
+
+
+def test_joined_case_decisions_never_offers_an_ag_opinion_or_its_own_number(monkeypatch):
+    """The AG's Opinion in joined proceedings carries case-law_joins_case_court too, and
+    it decides nothing — offering it would retire a live reference on a document that
+    does not answer it."""
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", _sparql_stub([
+        ("62023CN0766", "62023CC0764"),          # Opinion of the AG — not a decision
+        ("62023CN0766", "62023CV0764"),          # a View — likewise
+        ("62023CN0100", "62023CJ0100"),          # its own number: ordinary pairing's job
+    ]))
+    assert joined_case_decisions(["62023CN0766", "62023CN0100"]) == {}
+
+
+def test_joined_case_decisions_survives_a_cellar_outage(monkeypatch):
+    """A blip must leave the notices pending, not abort the retirement pass — but it must
+    also never report a join it did not see."""
+    import httpx
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("502 from the SPARQL endpoint")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    assert joined_case_decisions(["62023CN0556"]) == {}
+
+
+def test_a_joined_decision_retires_a_notice_of_a_different_number(catalogue):
+    """The whole point: the deciding judgment's case number is NOT the notice's, so the
+    retirement guard must turn on what the document IS, not on the numbers matching."""
+    catalogue.upsert_document(_notice("62023CN0556"))
+    catalogue.put_alias("62023cj0556", "62023CN0556", source="adapter-alias")
+    judgment = Record(source="eu-cellar", stable_id="ECLI:EU:C:2025:484",
+                      ecli="ECLI:EU:C:2025:484", doc_type=DocType.JUDGMENT,
+                      title="Makeleio", raw_bytes=b"judgment",
+                      text="In Joined Cases C-555/23 and C-556/23", source_language="en",
+                      extra={"celex": "62023CJ0555"})
+    judgment.ensure_payload_hash()
+    catalogue.upsert_document(judgment)
+
+    # Nothing pairs it by number — which is exactly why the notice stayed pending.
+    assert catalogue.resolved_pending_eu_notices() == []
+    assert catalogue.live_pending_eu_notices() == {"62023CN0556": "62023CN0556"}
+
+    assert catalogue.retire_pending_eu_notice("62023CN0556", "ECLI:EU:C:2025:484")
+    assert catalogue.get_document("62023CN0556")["search_excluded"] == 1
+    assert catalogue.live_pending_eu_notices() == {}
+    # …and "C-556/23" now leads to the judgment that answered it, not to the notice.
+    assert catalogue.find_document_id("62023CJ0556") == "ECLI:EU:C:2025:484"
 
 
 def test_fetch_builds_legislation_and_citation_edges():

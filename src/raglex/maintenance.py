@@ -69,7 +69,9 @@ def build_plan(facade, params: dict) -> list[str]:
                 plan.append(f"rescan:{source}")
     # Cheap, idempotent, and it changes what the corpus SHOWS (a pending notice
     # fronting a decided case), so it runs before the roll-ups read the corpus.
-    plan.append("retire-notices")
+    # The joined-case pass asks CELLAR and so is not free — it runs second, over only
+    # what the local pairing could not close.
+    plan += ["retire-notices", "retire-joined-notices"]
     if not params.get("no_rollups"):
         plan += ["analyze", "counts", "authority"]
     return plan
@@ -95,6 +97,8 @@ def _run_step(facade, step: str, params: dict, on_progress: Callable, cancel_che
         return facade.db_maintenance(analyze=True, vacuum=True)
     if kind == "retire-notices":
         return facade.retire_resolved_pending_notices()
+    if kind == "retire-joined-notices":
+        return facade.retire_joined_pending_notices()
     if kind == "counts":
         return facade.rebuild_citation_counts()
     if kind == "authority":

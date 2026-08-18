@@ -1566,6 +1566,24 @@ class Catalogue:
                 pairs.append((notice_id, row["stable_id"]))
         return list(dict.fromkeys(pairs))
 
+    def live_pending_eu_notices(self, limit: int = 5000) -> dict[str, str]:
+        """``{notice CELEX: stable_id}`` for every CN/TN notice still shown as pending.
+
+        The input to any sweep that has to ASK an external service which notices are
+        really still open: same-number pairing (above) is free and local, so it runs
+        first and this returns only what it could not close.
+        """
+        out: dict[str, str] = {}
+        for row in self.conn.execute(
+            "SELECT stable_id, meta_json FROM documents "
+            "WHERE doc_type = 'note' AND search_excluded = 0 AND source = 'eu-cellar' "
+            "LIMIT ?", (limit,)).fetchall():
+            celex = str((_json_meta(row["meta_json"]) or {}).get("celex")
+                        or row["stable_id"]).upper()
+            if re.fullmatch(r"6\d{4}[CTF]N\d{4}", celex):
+                out.setdefault(celex, row["stable_id"])
+        return out
+
     # -- writes ------------------------------------------------------------
     # One body, two codes → the canonical one, applied at write time so every future
     # import converges (and a re-harvest can't resurrect the old code). IEDPC is

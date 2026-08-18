@@ -981,6 +981,93 @@ def harvest_act_relations(celex: str, *, timeout: float = 60.0) -> list[TypedRel
     return out
 
 
+# A decision in JOINED cases is published under the LEAD case number only: the judgment
+# in Joined Cases C-555/23 and C-556/23 is CELEX 62023CJ0555, and 62023CJ0556 is never
+# minted. Same-number pairing (Catalogue.resolved_pending_eu_notices) therefore cannot
+# retire a member case's notice, so C-556/23 read "Pending:" for three months after the
+# Court had answered it — and the reader had no way to tell, because the notice looks
+# exactly like a live reference.
+#
+# CELLAR states the join explicitly, but names the joined case THREE ways and which one
+# a given work uses varies (62023CJ0555 uses the first two; 62023CJ0764 uses the third):
+#   …/resource/case/62023CJ0556          the joined case's would-be decision CELEX
+#   …/resource/case/celex%3A62023CJ0765  the same, colon percent-encoded
+#   …/resource/cellar/<uuid>             the joined case's DOSSIER
+# so the query has to ask by dossier AND by string, or it silently answers for some
+# joins and not others.
+_JOINS_CASE_PREDICATE = "case-law_joins_case_court"
+
+#: Only a judgment or an order closes a case. The joining work is often the judgment's
+#: SUMMARY (62023CJ0555_SUM) rather than the judgment, and an AG's Opinion in the same
+#: joined proceedings (62023CC0764) carries the property too — the suffix is stripped and
+#: the descriptor re-checked so a CC never retires anything.
+_JOINED_LEAD_RE = re.compile(r"^(6\d{4}[CTF][JO]\d{4})(?:_[A-Z]+)?$", re.IGNORECASE)
+
+
+def _joined_cases_query(notice_celexes: tuple[str, ...]) -> str:
+    listed = '", "'.join(notice_celexes)
+    return f"""
+PREFIX cdm: <{CDM}>
+SELECT DISTINCT ?notice ?lead WHERE {{
+  ?n cdm:resource_legal_id_celex ?nc .
+  FILTER(STR(?nc) IN ("{listed}"))
+  BIND(STR(?nc) AS ?notice)
+  {{
+    # the joining work names this case by its dossier
+    ?n cdm:work_part_of_dossier ?dossier .
+    ?w cdm:{_JOINS_CASE_PREDICATE} ?dossier .
+  }} UNION {{
+    # …or by the decision CELEX this case would have had, in either spelling
+    ?w cdm:{_JOINS_CASE_PREDICATE} ?case .
+    FILTER(CONTAINS(STR(?case), "/resource/case/"))
+    FILTER(STRENDS(STR(?case),
+           CONCAT(SUBSTR(STR(?nc), 1, 6), "J", SUBSTR(STR(?nc), 8))))
+  }}
+  ?w cdm:resource_legal_id_celex ?lc .
+  BIND(STR(?lc) AS ?lead)
+}}
+LIMIT {max(200, len(notice_celexes) * 8)}
+"""
+
+
+def joined_case_decisions(notice_celexes: list[str] | tuple[str, ...], *,
+                          batch_size: int = 40,
+                          timeout: float = 90.0) -> dict[str, list[str]]:
+    """``{notice CELEX: [deciding CELEX, …]}`` for pending notices whose case was JOINED
+    into another and decided under that case's number.
+
+    Best-effort per batch — a CELLAR blip skips that batch rather than failing the sweep,
+    because a notice left pending one more day is the status quo, but an exception here
+    would abort the retirement of every other notice in the pass.
+    """
+    import httpx
+
+    wanted = [c.upper() for c in dict.fromkeys(notice_celexes) if c]
+    out: dict[str, list[str]] = {}
+    for i in range(0, len(wanted), batch_size):
+        chunk = tuple(wanted[i: i + batch_size])
+        try:
+            resp = httpx.post(SPARQL_ENDPOINT, data={"query": _joined_cases_query(chunk)},
+                              headers={"Accept": "application/sparql-results+json"},
+                              timeout=timeout)
+            resp.raise_for_status()
+            rows = resp.json().get("results", {}).get("bindings", [])
+        except Exception:  # noqa: BLE001 — see docstring
+            continue
+        for row in rows:
+            notice = str(row.get("notice", {}).get("value") or "").upper()
+            match = _JOINED_LEAD_RE.match(str(row.get("lead", {}).get("value") or "").upper())
+            if not notice or match is None:
+                continue
+            lead = match.group(1)
+            if lead[7:] == notice[7:]:
+                continue        # its own number — ordinary pairing already covers it
+            leads = out.setdefault(notice, [])
+            if lead not in leads:
+                leads.append(lead)
+    return out
+
+
 _PARTY_NOISE = re.compile(
     r",?\s*(?:represented\b|acting as|applicant|applicants|defendant|defendants|appellant|"
     r"appellants|respondent|respondents|supported by|intervening|the other part|"
