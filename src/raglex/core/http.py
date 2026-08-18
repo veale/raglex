@@ -65,6 +65,9 @@ class RateLimitedClient:
         *,
         min_interval: float = 1.0,
         max_retries: int = 5,
+        # Floor under the retry sleep, for a source that throttles for a fixed period
+        # and does not say so with Retry-After. Zero keeps the historical behaviour.
+        min_backoff: float = 0.0,
         user_agent: str = DEFAULT_USER_AGENT,
         timeout: float = 30.0,
         proxy: str | None = None,
@@ -75,6 +78,7 @@ class RateLimitedClient:
         self.source = source
         self.min_interval = min_interval
         self.max_retries = max_retries
+        self.min_backoff = min_backoff
         self._sleep = sleep
         self._last_request_at = 0.0
         # Reservation clock for the pacer: the monotonic time the NEXT request
@@ -178,7 +182,11 @@ class RateLimitedClient:
             return
         # exponential backoff with full jitter, capped
         delay = min(2.0**attempt, 60.0)
-        self._sleep(delay * random.random())
+        # Full jitter is right for spreading a thundering herd, but it makes the FIRST
+        # retries sleep for almost nothing — and a source that throttles for a fixed
+        # period and sends no Retry-After (ENISA: ~30s, no header) can burn every retry
+        # inside its own block. min_backoff is that source's measured floor.
+        self._sleep(max(self.min_backoff, delay * random.random()))
 
 
 #: Markers that a response IS the anti-bot wall rather than the document — the

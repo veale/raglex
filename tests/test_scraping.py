@@ -202,3 +202,38 @@ def test_a_recheck_that_finds_nothing_still_counts_as_a_check():
     assert "note_refetch" in following, "an empty re-check leaves the backoff un-armed"
     # and it is scoped to a deliberate re-check, not every miss
     assert "if refreshed and held_id:" in following
+
+
+def test_a_backoff_floor_outlasts_a_throttle_that_sends_no_retry_after():
+    """Full jitter is right for spreading a herd and wrong for waiting out a fixed
+    block: it makes the first retries sleep for almost nothing. ENISA throttles for
+    ~30s and sends no Retry-After, so every retry was spent inside its own block and
+    two backfills died at 81 and 144 of 594. min_backoff is that measured floor."""
+    import httpx
+
+    from raglex.core.errors import RateLimitException
+    from raglex.core.http import RateLimitedClient
+
+    class _Throttled(httpx.Client):
+        def request(self, *_a, **_kw):
+            return httpx.Response(429, request=httpx.Request("GET", "https://x.invalid"))
+
+    for floor, least in ((0.0, 0.0), (20.0, 20.0)):
+        slept: list[float] = []
+        client = RateLimitedClient(
+            "test", min_interval=0, max_retries=3, min_backoff=floor,
+            client=_Throttled(), sleep=slept.append)
+        with pytest.raises(RateLimitException):
+            client.get("https://x.invalid/y")
+        assert len(slept) == 3
+        assert min(slept) >= least, (floor, slept)
+    # …and an explicit Retry-After still wins outright, floor or no floor.
+    slept = []
+    class _Polite(httpx.Client):
+        def request(self, *_a, **_kw):
+            return httpx.Response(429, headers={"Retry-After": "7"},
+                                  request=httpx.Request("GET", "https://x.invalid"))
+    with pytest.raises(RateLimitException):
+        RateLimitedClient("test", min_interval=0, max_retries=1, min_backoff=20.0,
+                          client=_Polite(), sleep=slept.append).get("https://x.invalid/y")
+    assert slept == [7.0]

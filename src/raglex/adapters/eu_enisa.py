@@ -229,7 +229,13 @@ class ENISAPublicationsAdapter(BaseAdapter):
             self.source, min_interval=self.min_interval, timeout=120,
             # Eight, not five: the 429s come in bursts, and giving up mid-walk costs a
             # whole run's progress on a source with no date cursor to resume from.
-            max_retries=8)
+            max_retries=8,
+            # And each of those eight has to be a real wait. ENISA's throttle clears in
+            # about 30 seconds (measured: 429, 429, 200 immediately after a run died;
+            # all 200 thirty seconds later) and it sends no Retry-After, so the client's
+            # full jitter can spend every retry inside the block — which is exactly what
+            # ended the first two runs, at 81 and 144 of 594.
+            min_backoff=20.0)
         # §1: the stubs report resume_offset, so the constructor MUST take one back, and
         # resume_floor backs off a page — re-reading twelve cards the pipeline already
         # holds costs one request; resuming one card late loses that publication for good.
