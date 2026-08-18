@@ -2242,9 +2242,19 @@ function Reader({ id, incoming, pinpoint, oscola, landingUrl, title }:
   // Live CJEU proceedings, indexed by the provision each one turns on. One fetch for the
   // instrument (the same aggregate the "Before the Court" box at the foot uses, so it is
   // already warm), then read per segment — never a request per article.
-  const [pending] = useAsync<any>(
+  const [pending, , reloadPending] = useAsync<any>(
     () => body?.doc_type === "legislation" ? api.pendingReferences(id) : Promise.resolve(null),
     [id, body?.doc_type]);
+  // A COLD aggregate answers {_warming: true} with an empty list and computes in the
+  // background, and the cache is dropped whenever the citation graph changes — so first
+  // visits are common. Without the poll the provisions of a statute nobody had opened
+  // today simply showed no pending references, which is indistinguishable from there
+  // being none.
+  useEffect(() => {
+    if (!pending?._warming) return;
+    const iv = setInterval(() => reloadPending(), 2500);
+    return () => clearInterval(iv);
+  }, [pending?._warming, reloadPending]);
   const pendingByAnchor = useMemo(() => {
     const by = new Map<string, any[]>();
     for (const r of (pending?.pending || []) as any[]) {
