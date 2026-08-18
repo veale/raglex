@@ -8408,6 +8408,14 @@ class Facade:
                 from .adapters.echr import parse_body_html
                 text, segments = parse_body_html(raw)
                 fmt = "hudoc-html"
+            elif doc["source"] == "coe-treaties":
+                # A treaty's raw is an ordinary PDF, so sniffing loses every article and
+                # numbered paragraph — and the running header and page numbers with them.
+                # Same parser as harvest and as the whole-source reparse.
+                from .formats.coe_treaty_pdf import parse_coe_treaty_pdf
+                parsed_treaty = parse_coe_treaty_pdf(raw)
+                text, segments = parsed_treaty.text, parsed_treaty.segments
+                fmt = "coe-treaty-pdf"
             else:
                 # Older harvests can pre-date (or omit) a byte signature that the
                 # current sniffer knows about.  The importer records the parser format
@@ -8898,6 +8906,14 @@ class Facade:
         # evidence than sniffing them; the only question is whether we still have a
         # parser under that name, which is what the registry answers.
         hints = set(available_formats())
+        # What to parse a document of this SOURCE as when it records no format of its
+        # own. Only for sources whose raw cannot be identified by sniffing into anything
+        # useful: a Treaty Office PDF sniffs as "pdf", and the generic extractor loses
+        # every article and paragraph, so the reparse either flattens the treaty or (as
+        # _would_flatten insists) skips it — and a parser fix reaches nothing already
+        # held. The adapter records the name going forward; this reaches the back
+        # catalogue without a metadata migration.
+        source_format = {"coe-treaties": "coe-treaty-pdf"}.get(source)
 
         with self._open() as (cat, _rs, ts):
             # KEYSET pagination, not one fetchall: a source with millions of rows would
@@ -8927,7 +8943,7 @@ class Facade:
                     with open(r["raw_path"], "rb") as fh:
                         raw = fh.read()
                     meta = _json.loads(r["meta_json"]) if r["meta_json"] else {}
-                    hint = str(meta.get("format") or "").strip().lower()
+                    hint = str(meta.get("format") or source_format or "").strip().lower()
                     fmt = hint if hint in hints else _sniff_format(raw)
                     if fmt is None:
                         return "skip"

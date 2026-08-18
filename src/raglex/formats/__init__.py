@@ -8,6 +8,7 @@ from . import (  # noqa: F401  (register on import)
     akoma_ntoso,
     bwb,
     clml_xml,
+    coe_treaty_pdf,
     eisb_html,
     eisb_xml,
     ep_factsheet,

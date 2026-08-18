@@ -282,6 +282,15 @@ def test_page_furniture_stripping_leaves_a_document_without_any_alone():
     assert strip_page_furniture(text, spans) == (text, spans)
 
 
+def test_the_treaty_parser_is_reachable_as_a_registered_format():
+    """The only route a Treaty Office parser fix can travel to the treaties already
+    held: the PDF is byte-identical, so a re-harvest dedups before the parser runs, and
+    sniffing the raw answers "pdf" and loses the whole article structure."""
+    from raglex.formats import available as available_formats
+
+    assert "coe-treaty-pdf" in available_formats()
+
+
 def test_treaties_mint_official_name_aliases_from_metadata():
     aliases = treaty_aliases("108", {
         "reference": "CETS No. 108",

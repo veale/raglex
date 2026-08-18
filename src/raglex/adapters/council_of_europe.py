@@ -831,6 +831,11 @@ class CouncilOfEuropeTreatiesAdapter(BaseAdapter):
             segments=segments, extracted_via=ExtractedVia.STRUCTURED,
             topic_tags=["council-of-europe", "treaty", detail["reference"]],
             extra={"jurisdiction": "coe", "treaty_number": number,
+                   # Named so a parser fix can reach held treaties from immutable raw:
+                   # sniffing this PDF answers "pdf" and loses the article structure
+                   # entirely, and re-harvesting cannot help because the bytes are
+                   # identical and the pipeline dedups on them (formats.coe_treaty_pdf).
+                   "format": "coe-treaty-pdf",
                    "reference": detail["reference"], "aliases": aliases,
                    "official_title": detail["title"],
                    "short_title": detail["short_title"],
