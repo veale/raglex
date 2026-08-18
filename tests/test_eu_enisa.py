@@ -224,13 +224,35 @@ def test_the_bare_acronyms_are_enisas_alone():
         ("Article 13 of the CRA", "32024R2847"),
         ("Article 8 of DORA", "32022R2554"),
         ("Article 51 of the CSA", "32019R0881"),
-        ("the CER Directive", "32022L2557"),
+        ("Article 4 of the CER Directive", "32022L2557"),
     ):
         got = {c.candidate_id for c in extract_citations(text, aliases=aliases)}
         assert target in got, f"{text} → {got}"
     # …and the bare acronyms assert nothing without them. ("the CER Directive" is
     # deliberately absent from this list: the qualified name is unambiguous anywhere and
     # is mapped corpus-wide; it is the bare "CER" that is scoped.)
-    for text in ("Article 13 of the CRA", "Article 8 of DORA", "Article 51 of the CSA",
-                 "Article 4 of CER"):
+    for text in ("Article 13 of the CRA", "Article 8 of DORA", "Article 51 of the CSA"):
         assert not [c for c in extract_citations(text) if c.candidate_id], text
+
+
+def test_an_alias_that_is_also_an_english_word_is_not_in_the_list():
+    """Aliases match case-insensitively, so a bare acronym that is also a word matches
+    the word. Measured on the live register: "RED" hit "Scores in red", "Red Hat LLC"
+    and "red teaming" and nothing else; "CER" hit the Community of European Railway; and
+    "NIS" hit "NIS sectors", "NIS360" and — worst — the inside of "the Network and
+    Information Systems (NIS) 2 Directive", filing a NIS2 reference against NIS1."""
+    from raglex.citations import extract_citations
+    from raglex.citations.stage import _SOURCE_ALIASES
+
+    aliases = _SOURCE_ALIASES["eu-enisa"]
+    for text in ("Scores in red indicate values below 2.5",
+                 "Dave Russo Red Hat LLC",
+                 "an always-on capability for red teaming",
+                 "expert groups in railway associations (EIM, CER, UNIFE)",
+                 "the agency supported the NIS sectors through sectoral communities",
+                 "ENISA NIS360 latest insights",
+                 "the Network and Information Systems (NIS) 2 Directive",
+                 "referenced in the Implementing Regulation establishing the EUCC"):
+        got = [c.candidate_id for c in extract_citations(text, aliases=aliases)
+               if c.candidate_id in ("32014L0053", "32022L2557", "32016L1148", "32024R2690")]
+        assert not got, f"{text} → {got}"

@@ -786,6 +786,18 @@ del _key
 # Realm Act, "CER" is a Commission enforcement reference, "RED" is a colour. Inside
 # ENISA's own register each can mean nothing else, which is exactly what a source-scoped
 # alias is for.
+# Aliases are matched CASE-INSENSITIVELY, so an entry that is also an ordinary English
+# word matches the word. Measured against the live register before this list was cut:
+#   RED  — 8 matches, 8 wrong: "Scores in red", "Red Hat LLC", "red teaming", "red team".
+#   CER  — 2 matches, 2 wrong: the Community of European Railway, listed beside EIM and
+#          UNIFE. (The qualified "CER Directive" is unambiguous and stays.)
+#   NIS  — every match wrong or worse: "NIS sectors", "NIS360", "NIS Investments", "NIS
+#          Cooperation Group", and one INSIDE "the Network and Information Systems (NIS)
+#          2 Directive", which filed a NIS2 reference against NIS1. The qualified "NIS
+#          Directive" stays.
+#   "the Implementing Regulation" — 2 matches, both the Implementing Regulation
+#          establishing the EUCC (2024/482), not NIS2's (2024/2690). ENISA has many.
+# CRA, CSA, DORA, EUCC and CSoA were all correct in every observed match and stay.
 _ENISA_ALIASES: dict[str, str] = {
     "CRA": "32024R2847",
     "the CRA": "32024R2847",
@@ -794,18 +806,14 @@ _ENISA_ALIASES: dict[str, str] = {
     "the CSA": "32019R0881",
     "CSOA": "32025R0038",
     "DORA": "32022R2554",
-    "CER": "32022L2557",
     "CER Directive": "32022L2557",
-    "NIS": "32016L1148",
     "NIS Directive": "32016L1148",
     # The Implementing Regulation that gives NIS2's Article 21 measures their operative
-    # content for digital infrastructure and digital providers — ENISA's technical
-    # guidance IS a commentary on it, and calls it "the implementing regulation".
+    # content for digital infrastructure and digital providers. Only by its number: the
+    # bare phrase names whichever implementing regulation the publication is about.
     "Implementing Regulation 2024/2690": "32024R2690",
-    "the Implementing Regulation": "32024R2690",
     "EUCC": "32024R0482",
     "EUCC scheme": "32024R0482",
-    "RED": "32014L0053",
     "Radio Equipment Directive": "32014L0053",
     "RED Delegated Regulation": "32022R0030",
     "Machinery Regulation": "32023R1230",
