@@ -216,12 +216,20 @@ def parse_publication(html: bytes | str, page_url: str) -> dict:
 
 class ENISAPublicationsAdapter(BaseAdapter):
     source = "eu-enisa"
-    min_interval = 1.0
+    # ENISA answers roughly one request in six with a 429 and NO Retry-After, so the
+    # backoff has nothing to obey and can only guess. A backfill costs two requests per
+    # publication (the page, then its PDF) — about 1,200 — and at one second apart the
+    # first run exhausted five retries and stopped at 81 of 594. Slower is the whole fix:
+    # this is a once-a-day register, and the walk is not in anybody's way.
+    min_interval = 2.5
 
     def __init__(self, *, client: RateLimitedClient | None = None,
                  start_offset: int | str | None = None) -> None:
         self._client = client or RateLimitedClient(
-            self.source, min_interval=self.min_interval, timeout=120)
+            self.source, min_interval=self.min_interval, timeout=120,
+            # Eight, not five: the 429s come in bursts, and giving up mid-walk costs a
+            # whole run's progress on a source with no date cursor to resume from.
+            max_retries=8)
         # §1: the stubs report resume_offset, so the constructor MUST take one back, and
         # resume_floor backs off a page — re-reading twelve cards the pipeline already
         # holds costs one request; resuming one card late loses that publication for good.
@@ -283,7 +291,13 @@ class ENISAPublicationsAdapter(BaseAdapter):
     def fetch(self, stub: Stub) -> Record | None:
         try:
             response = self._client.get(stub.raw_url)
-        except FetchError:
+        except FetchError as exc:
+            # A dead sitemap entry is a real "not here"; a 429 or a 500 is the site
+            # having a moment, and swallowing it as None would file a publication we
+            # still hold no text for as absent. Only the first is this adapter's to
+            # answer (§3).
+            if exc.transient:
+                raise
             return None
         parsed = parse_publication(response.content, str(response.url))
 

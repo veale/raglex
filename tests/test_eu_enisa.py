@@ -13,7 +13,7 @@ from raglex.adapters.eu_enisa import (
 )
 from raglex.adapters.registry import ADAPTERS, INCREMENTAL_MODE, SOURCE_INFO
 from raglex.core.errors import FetchError
-from raglex.core.models import DocType
+from raglex.core.models import DocType, Stub
 
 # Trimmed from https://www.enisa.europa.eu/publications, 2026-08-18. Note the TRAILING
 # SPACE inside ENISA's own hrefs — it is in the live markup, not a transcription slip.
@@ -101,6 +101,22 @@ def test_publication_page_yields_the_pdf_the_index_never_shows():
     # image link points at the same PDF and must not be listed twice.
     assert [(f["url"].rsplit("/", 1)[-1], f["readable"]) for f in parsed["files"]] == [
         ("ENISA_guidance_v1.0.pdf", True), ("Mapping_table_v1.2.xlsx", False)]
+
+
+def test_a_dead_url_is_absent_but_a_blip_is_not():
+    """§3: "the page is gone" and "the site is having a moment" must not produce the same
+    outcome. Swallowing a 429 as None files a publication we still hold no text for as
+    not-found, and with no date cursor nothing ever goes back for it."""
+    class _Client:
+        def __init__(self, error): self.error = error
+        def get(self, *_a, **_kw): raise self.error
+
+    gone = ENISAPublicationsAdapter(client=_Client(FetchError("404", transient=False)))
+    assert gone.fetch(Stub(stable_id="eu/enisa/x", landing_url="u", raw_url="u")) is None
+
+    blip = ENISAPublicationsAdapter(client=_Client(FetchError("429", transient=True)))
+    with pytest.raises(FetchError):
+        blip.fetch(Stub(stable_id="eu/enisa/x", landing_url="u", raw_url="u"))
 
 
 def test_publication_type_separates_the_agency_accounting_for_itself():
