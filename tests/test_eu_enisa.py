@@ -8,7 +8,6 @@ from raglex.adapters.eu_enisa import (
     ENISAPublicationsAdapter,
     doc_type_for,
     index_rows,
-    last_page,
     parse_publication,
     sitemap_publications,
 )
@@ -86,7 +85,6 @@ def test_index_rows_read_the_card_and_survive_enisas_trailing_space():
     assert rows[1]["title"] == "NIS2 Technical Implementation Guidance"
     assert rows[1]["date"] == date(2025, 6, 26)
     assert "digital infrastructure" in rows[1]["summary"]
-    assert last_page(INDEX_HTML) == 58
 
 
 def test_publication_page_yields_the_pdf_the_index_never_shows():
@@ -155,13 +153,13 @@ def test_the_sitemap_is_the_manifest_and_lists_only_publications():
     assert rows[-1]["lastmod"] is None
 
 
-def test_a_backfill_enumerates_the_sitemap_not_the_broken_pager():
+def test_discovery_enumerates_the_sitemap_not_the_broken_pager():
     """The paged index repeats page 0 for about a third of its page numbers, with a 200
     and a well-formed body, so a deep walk of it stops early and reports itself complete
     — 20 of 593 on the first live run. The sitemap is complete in one request."""
     client = _FakeClient(pages={0: INDEX_HTML})
     stubs = list(ENISAPublicationsAdapter(client=client).discover(None))
-    assert client.sitemap_reads == 1 and client.asked == []
+    assert client.sitemap_reads == 1
     assert [s.stable_id for s in stubs] == [
         "eu/enisa/sme-cra-survey-report",
         "eu/enisa/nis2-technical-implementation-guidance",
@@ -171,6 +169,37 @@ def test_a_backfill_enumerates_the_sitemap_not_the_broken_pager():
     assert all(s.hint_date is None for s in stubs)
 
 
+def test_since_is_ignored_because_a_resumed_backfill_arrives_carrying_one():
+    """The pipeline hands a backfill its recorded FRONTIER as `since`. Branching on it
+    sent a resumed backfill down the keep-current path, which discovered ONE document and
+    reported done — the same silent shortfall in a new costume."""
+    a = list(ENISAPublicationsAdapter(client=_FakeClient()).discover(None))
+    b = list(ENISAPublicationsAdapter(client=_FakeClient()).discover("2026-07-30"))
+    assert [s.stable_id for s in a] == [s.stable_id for s in b] and len(a) == 3
+
+
+def test_the_index_head_supplies_what_the_sitemap_has_not_caught_up_with():
+    """One request to the only page that always answers, so a publication posted this
+    morning is not invisible until the sitemap regenerates."""
+    fresh = INDEX_HTML.replace("sme-cra-survey-report", "brand-new-publication")
+    stubs = list(ENISAPublicationsAdapter(client=_FakeClient({0: fresh})).discover(None))
+    assert stubs[0].stable_id == "eu/enisa/brand-new-publication"
+    # …and it comes with the index's date, which the sitemap cannot give.
+    assert stubs[0].hint_date == date(2026, 5, 4)
+    assert len(stubs) == 4          # the newcomer plus the three in the manifest
+
+
+def test_a_flaky_index_never_fails_a_run_the_manifest_can_answer():
+    class _Broken(_FakeClient):
+        def get(self, url, params=None, **kw):
+            if "sitemap" not in url:
+                raise FetchError("index down", transient=True)
+            return super().get(url, params, **kw)
+
+    stubs = list(ENISAPublicationsAdapter(client=_Broken()).discover(None))
+    assert len(stubs) == 3
+
+
 def test_an_empty_sitemap_is_an_outage_not_an_empty_register():
     client = _FakeClient(sitemap="<urlset></urlset>")
     with pytest.raises(FetchError):
@@ -178,12 +207,8 @@ def test_an_empty_sitemap_is_an_outage_not_an_empty_register():
 
 
 def test_discovery_reports_a_cursor_over_the_whole_feed():
-    """§1: the offset counts the FEED, not the position within a page — a per-page
+    """§1: the offset counts the FEED, not a position within one page — a per-page
     counter restarts a walk in the middle of whichever page it reached."""
-    ad = ENISAPublicationsAdapter(client=_FakeClient({0: INDEX_HTML}))
-    stubs = list(ad.discover("2020-01-01"))
-    assert [s.hints["resume_offset"] for s in stubs] == [0, 1]
-    # …and a backfill's offsets run over the whole manifest.
     back = list(ENISAPublicationsAdapter(client=_FakeClient()).discover(None))
     assert [s.hints["resume_offset"] for s in back] == [0, 1, 2]
 
@@ -201,37 +226,13 @@ def test_a_reported_cursor_is_accepted_back_and_resumes_early():
     assert list(ad2.discover(None)) == []
 
 
-def test_an_empty_index_is_an_outage_not_an_exhausted_feed():
-    """§3/§5c: "the register is broken" and "there is nothing left" must never produce
-    the same outcome — a silently short walk reports a complete keep-current pass."""
-    ad = ENISAPublicationsAdapter(client=_FakeClient({}))
-    with pytest.raises(FetchError):
-        list(ad.discover("2020-01-01"))
-
-
-def test_keep_current_stops_at_the_cursor():
-    ad = ENISAPublicationsAdapter(client=_FakeClient({0: INDEX_HTML, 1: INDEX_HTML}))
-    stubs = list(ad.discover("2026-01-01"))
-    assert [s.stable_id for s in stubs] == ["eu/enisa/sme-cra-survey-report"]
-
-
-def test_a_repeated_page_never_reads_as_the_end_of_the_register():
-    """Measured live: ?page=2 returns page 0's ten newest cards, with a 200, five times
-    running and through a cache-buster. Keep-current must stop rather than loop — but it
-    must never be the thing that decides a backfill is complete, which is why a backfill
-    does not come this way at all."""
-    client = _FakeClient({0: INDEX_HTML, 1: INDEX_HTML, 2: INDEX_HTML})
-    stubs = list(ENISAPublicationsAdapter(client=client).discover("2020-01-01"))
-    assert len(stubs) == 2 and client.asked == [0, 1]
-
-
 def test_enisa_is_registered_with_a_declared_jurisdiction():
     """§2: jurisdiction is declared once, in SourceInfo — a source that omits it falls
     through the legacy prefix table into "Other"."""
     assert ADAPTERS["eu-enisa"] is ENISAPublicationsAdapter
     assert SOURCE_INFO["eu-enisa"].jurisdiction == "EU"
     assert SOURCE_INFO["eu-enisa"].kind == "guidance"
-    assert INCREMENTAL_MODE["eu-enisa"] == "early-stop"
+    assert INCREMENTAL_MODE["eu-enisa"] == "full-walk"
 
 
 def test_the_cybersecurity_acquis_resolves_from_the_names_enisa_writes():

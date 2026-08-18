@@ -3127,7 +3127,11 @@ INCREMENTAL_MODE: dict[str, str] = {
     "nl-acm-publications": "early-stop",
     "nl-ap": "early-stop",
     "nl-rdi": "early-stop",
-    "eu-berec": "early-stop", "eu-enisa": "early-stop",
+    "eu-berec": "early-stop",
+    # No date cursor at all: the paged index repeats page 0 for a third of its
+    # page numbers, so the register is enumerated from its sitemap every run and
+    # the pipeline's held-document skip does the incremental work.
+    "eu-enisa": "full-walk",
     "dma-consultations": "early-stop",
     # Nine pages of JSON, not ordered by date, and a study's page is re-published
     # when a language version or a country note is added. Walk it all.

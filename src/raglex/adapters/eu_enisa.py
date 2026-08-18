@@ -157,20 +157,6 @@ def sitemap_publications(xml: bytes | str) -> list[dict]:
     return out
 
 
-def last_page(html: bytes | str) -> int | None:
-    """The highest ``?page=`` the pager offers (0-based, so 58 means 59 pages)."""
-    soup = BeautifulSoup(html, "html.parser")
-    best: int | None = None
-    for link in soup.select('a[href*="page="]'):
-        query = dict(parse_qsl(urlsplit(str(link.get("href") or "")).query))
-        try:
-            page = int(query.get("page", ""))
-        except ValueError:
-            continue
-        best = page if best is None else max(best, page)
-    return best
-
-
 #: Files worth pulling text out of. ENISA attaches .xlsx mapping tables and .docx
 #: templates beside its PDFs; those are recorded, not read.
 _READABLE = (".pdf",)
@@ -242,90 +228,57 @@ class ENISAPublicationsAdapter(BaseAdapter):
         self.start_offset = resume_floor(option_int(start_offset, 0), PAGE_SIZE)
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        """Every publication (backfill) or just the newest (keep-current).
+        """Every publication in the register, every run, from the site's own sitemap.
 
-        The two jobs use different routes because only one of them CAN be done on the
-        paged index: it repeats page 0 for about a third of its page numbers, so a deep
-        walk of it silently stops early (see the module docstring). A backfill therefore
-        enumerates the sitemap, which is complete in one request; keep-current reads the
-        index's page 0, which is the only page that always answers and is where anything
-        new appears.
+        There is NO date cursor here, deliberately, and ``since`` is ignored. The paged
+        index cannot be walked at all (see the module docstring), and the sitemap carries
+        only node lastmods — which move when a typo is fixed, so early-stopping on one
+        would skip publications whose page simply had not been touched. What makes a full
+        walk cheap instead is the pipeline: a stub whose document is already held falls
+        through on a PK lookup, before any request is made. So the whole manifest costs
+        one request and ~600 lookups a day, and cannot go quietly short.
+
+        (Branching on ``since`` was the first attempt and was wrong twice over: the
+        pipeline hands a backfill its recorded FRONTIER as ``since``, so a resumed
+        backfill silently took the keep-current path and discovered one document.)
         """
-        if since:
-            yield from self._newest(since, max_pages)
-        else:
-            yield from self._everything(max_pages)
-
-    def _everything(self, max_pages: int | None) -> Iterator[Stub]:
-        """The whole register, from the site's own manifest."""
         rows = sitemap_publications(self._client.get(SITEMAP).content)
         if not rows:
             # An empty manifest is a broken sitemap, never an empty register — filing it
             # as "nothing to harvest" is how a source goes quiet without a trace.
             raise FetchError(f"{self.source}: the sitemap listed no publications",
                              transient=True)
-        limit = len(rows) if max_pages is None else min(len(rows), max_pages * PAGE_SIZE)
+        seen = {_slug(r["url"]) for r in rows}
+        # The one cross-check worth making: page 0 of the index is the only page that
+        # always answers, and it carries anything published in the last day or two that
+        # the sitemap has not caught up with. Best-effort — the manifest is the primary,
+        # so a flaky index must not fail the run.
+        head: list[dict] = []
+        try:
+            for row in index_rows(self._client.get(INDEX).content):
+                if _slug(row["url"]) not in seen:
+                    seen.add(_slug(row["url"]))
+                    head.append(row)
+        except FetchError:
+            pass
+        items = [{"url": r["url"], "title": r.get("title"), "date": r.get("date")} for r in head]
+        items += [{"url": r["url"], "title": None, "date": None} for r in rows]
+
+        limit = len(items) if max_pages is None else min(len(items), max_pages * PAGE_SIZE)
         # Skipping EMISSION, not requests: the whole list arrived in the one request
         # already made, so a resume costs nothing and cannot mis-bound anything (§1).
-        for offset in range(min(self.start_offset, len(rows)), limit):
-            row = rows[offset]
+        for offset in range(min(self.start_offset, len(items)), limit):
+            item = items[offset]
             yield Stub(
-                stable_id=f"eu/enisa/{_slug(row['url'])}",
-                landing_url=row["url"], raw_url=row["url"],
-                title=None, court="ENISA",
-                # Deliberately no hint_date: the sitemap's lastmod is when the NODE
-                # changed, and offering it as the publication date would back-date this
-                # year's edits onto a 2012 report. fetch() reads the real one.
-                hints={"resume_offset": offset,
-                       "lastmod": row["lastmod"].isoformat() if row["lastmod"] else None},
+                stable_id=f"eu/enisa/{_slug(item['url'])}",
+                landing_url=item["url"], raw_url=item["url"],
+                title=item["title"], court="ENISA",
+                # A date only where the INDEX gave one. The sitemap's lastmod is when the
+                # node changed, and offering it as the publication date would back-date
+                # this year's edit onto a 2012 report; fetch() reads the real one.
+                hint_date=item["date"],
+                hints={"resume_offset": offset},
             )
-
-    def _newest(self, since: str, max_pages: int | None) -> Iterator[Stub]:
-        """The index, newest-first, stopping at the cursor.
-
-        Bounded to the pages that can be trusted. Page 0 always answers; beyond it a page
-        that repeats one already seen is the register misbehaving, and the walk stops
-        there rather than reading the repeat as the end of the feed — a keep-current pass
-        only has to reach the cursor, and a backfill has the sitemap.
-        """
-        seen: set[str] = set()
-        end: int | None = None
-        for page in range(0, (max_pages if max_pages is not None else 60)):
-            try:
-                response = self._client.get(INDEX, params={"page": page} if page else None)
-            except FetchError:
-                return
-            if end is None:
-                end = last_page(response.content)
-            rows = index_rows(response.content)
-            if not rows:
-                if page == 0:
-                    raise FetchError(f"{self.source}: the index listed no publications",
-                                     transient=True)
-                return
-            ids = [f"eu/enisa/{_slug(r['url'])}" for r in rows]
-            if page and all(i in seen for i in ids):
-                return                      # a repeated page, not the end of the register
-            for index, row in enumerate(rows):
-                published = row.get("date")
-                if since and published and published.isoformat() < since[:10]:
-                    return                  # newest-first: everything below is older
-                seen.add(ids[index])
-                yield Stub(
-                    stable_id=ids[index],
-                    landing_url=row["url"], raw_url=row["url"],
-                    title=row["title"], court="ENISA",
-                    hint_date=published,
-                    hints={
-                        "summary": row.get("summary"),
-                        # Counts the WHOLE feed, not the position within this page, so a
-                        # resume lands where the walk actually stopped.
-                        "resume_offset": page * PAGE_SIZE + index,
-                        "watermark": published.isoformat() if published else None,
-                    },
-                )
-            if end is not None and page >= end:
-                return
 
     def fetch(self, stub: Stub) -> Record | None:
         try:
