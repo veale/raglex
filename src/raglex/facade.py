@@ -2510,7 +2510,8 @@ class Facade:
     #: and returned separately (``stale``), never silently dropped.
     _PENDING_STALE_YEARS = 5
 
-    def pending_references(self, stable_id: str, *, limit: int = 200) -> dict:
+    def pending_references(self, stable_id: str, *, limit: int = 200,
+                           blocking: bool = False) -> dict:
         """Live CJEU proceedings citing this instrument — what is still an open question
         about this statute, and on which provisions.
 
@@ -2523,6 +2524,13 @@ class Facade:
 
         A notice retired by its full English judgment is not here: it is no longer a
         question, and the judgment carries a ``supersedes`` edge to it.
+
+        ``blocking`` is for callers that cannot poll and cannot be wrong: a build that
+        BAKES this answer into a file gets one shot at it, and the warming placeholder
+        it would otherwise receive is indistinguishable from "nothing is pending". The
+        GDPR's identity set spans the base act, its consolidations and its ECLIs, and
+        the scan behind it takes longer than any ``sync_wait`` worth making a click
+        wait for — so the reader's UI polls, and a static build waits.
         """
         def _compute() -> dict:
             from .adapters.eu_cellar import celex_case_number
@@ -2627,7 +2635,12 @@ class Facade:
                     "stale": stale[:limit],
                     "stale_after_years": self._PENDING_STALE_YEARS,
                 }
-        return self._cached(f"pending-references:{stable_id}", 3600, _compute,
+        key = f"pending-references:{stable_id}"
+        if blocking:
+            # No placeholder: _cached computes synchronously and stores under the same
+            # key, so the wait also warms the reader's box.
+            return self._cached(key, 3600, _compute)
+        return self._cached(key, 3600, _compute,
                             placeholder={"stable_id": stable_id, "preliminary": [],
                                          "other": [], "preliminary_count": None,
                                          "other_count": None, "with_ag_opinion": 0},

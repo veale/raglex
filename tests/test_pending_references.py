@@ -191,3 +191,67 @@ def test_a_dated_consolidation_still_links_to_its_uk_counterpart(config):
     counterpart = f.get_document("02016R0679-20160504")["counterpart"]
     assert counterpart["role"] == "uk_assimilated"
     assert counterpart["stable_id"] == "european/regulation/2016/0679"
+
+
+def test_a_slow_instrument_still_gets_its_pending_line_in_a_static_edition(config,
+                                                                          monkeypatch):
+    """The reader's box may show a spinner; a file cannot.
+
+    ``pending_references`` is a stale-while-revalidate cache with a 2.5s ``sync_wait``,
+    so a cold call on an instrument whose scan takes longer returns a placeholder that
+    has no ``pending`` key at all. Read as a list, that is an empty one. The v8 GDPR
+    edition of 2026-08-22 published exactly that way — no pending line, 29 references
+    live before the Court, and every smaller edition in the same build correct, so
+    nothing looked wrong.
+
+    This test costs a few seconds of real waiting because the bug IS the timing: a
+    stall shorter than ``sync_wait`` cannot reproduce it.
+    """
+    import time
+
+    from raglex.static_export import StaticLawExporter
+    from raglex.storage.catalogue import Catalogue
+
+    def _build() -> Facade:
+        f = Facade(config)
+        _store(f, Record(source="eu-legislation", stable_id="32016R0679",
+                         doc_type=DocType.LEGISLATION, title="GDPR", raw_bytes=b"gdpr",
+                         text="Article 22 …", source_language="en"))
+        today = __import__("datetime").date.today()
+        _store(f, _notice("62025CN0100", procedure="PREJ",
+                          date=today.replace(year=today.year - 1).isoformat(),
+                          title="Pending: A v B (C-100/25)",
+                          cites=[("32016R0679", "Article 22")]))
+        return f
+
+    slow = Catalogue.pending_eu_citers
+
+    def _slow(self, ids, **kwargs):
+        time.sleep(3.0)                      # > the 2.5s sync_wait, as the GDPR is
+        return slow(self, ids, **kwargs)
+
+    monkeypatch.setattr(Catalogue, "pending_eu_citers", _slow)
+
+    # The reader's path is unchanged: it gets the placeholder and polls.
+    warming = _build().pending_references("32016R0679")
+    assert warming.get("_warming") and "pending" not in warming
+
+    # The build's path waits, and the edition carries the reference.
+    summary = StaticLawExporter(facade=_build())._pending_summary("32016R0679")
+    assert summary["total"] == 1
+    assert summary["groups"][0]["label"] == "Preliminary reference"
+    assert summary["cases"][0]["case"] == "C-100/25"
+
+
+def test_a_build_that_cannot_see_the_pending_list_refuses_to_publish(config):
+    """Not returning {}: "nothing is pending" and "I could not find out" render the
+    same, and the file is not built again for weeks."""
+    from raglex.static_export import StaticLawExporter
+
+    class _Warming:
+        def pending_references(self, stable_id, *, limit=200, blocking=False):
+            return {"stable_id": stable_id, "preliminary": [], "other": [],
+                    "_warming": True}
+
+    with pytest.raises(RuntimeError, match="not computed"):
+        StaticLawExporter(facade=_Warming())._pending_summary("32016R0679")

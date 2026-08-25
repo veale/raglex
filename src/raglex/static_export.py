@@ -673,11 +673,24 @@ class StaticLawExporter:
         proceeding ("21 preliminary references (4 with an AG opinion), 6 actions for
         annulment…") with the full list behind a dialog that filters to whichever count
         you click. Empty dict when nothing is pending, so the page omits the line.
+
+        Blocking, and it RAISES rather than returning {} — because "nothing is pending"
+        and "I could not find out" render identically, and the edition is a file that
+        will not be built again for weeks. The v8 GDPR edition of 2026-08-22 published
+        with no pending line at all while 29 references were live before the Court: the
+        default call handed back a warming placeholder (2.5s sync_wait; the scan takes
+        3.5s on the GDPR's identity set alone) and the placeholder carries no ``pending``
+        key, so it read as an empty list. Every other edition in that build was small
+        enough to answer in time, which is why nothing looked wrong.
         """
-        try:
-            data = self.facade.pending_references(stable_id, limit=500)
-        except Exception:  # noqa: BLE001 — a static build must not fail on an extra
-            return {}
+        data = self.facade.pending_references(stable_id, limit=500, blocking=True)
+        if data.get("error") == "not found":
+            return {}          # build_data raises its own, clearer KeyError below
+        if data.get("_warming") or "pending" not in data:
+            raise RuntimeError(
+                f"pending proceedings for {stable_id} were not computed "
+                f"(keys: {sorted(data)!r}) — refusing to publish an edition that would "
+                f"read as though nothing is before the Court")
         rows = data.get("pending") or []
         if not rows:
             return {}
