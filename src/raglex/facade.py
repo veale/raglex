@@ -1336,11 +1336,20 @@ class Facade:
         # the data dir; register it so extraction confirms recent acts by name
         from .citations.statute_gazetteer import register_extra_list
         register_extra_list(self.config.data_dir / "statutes_extra.lst")
+        import threading as _threading
         # short-TTL cache for the expensive dashboard aggregates (full scans over the
         # ~1.5M-row relations table). Stale-while-revalidate: once warm, every request is
         # instant — a stale entry is served immediately and refreshed in the background, so
         # no user request ever blocks on the scan (only the very first, cold call does).
+        # Bounded LRU, for the same reason _doc_cache is: it started as a fixed set of
+        # dashboard keys, but it now also holds per-QUERY answers — `citing:{id}:{anchor}:
+        # {sort}:{jurisdiction}:{kind}:{offset}:{limit}:{snippets}` is one entry per
+        # distinct page an agent or reader ever asks for, carrying that page's excerpts —
+        # and nothing was ever evicted (a stale entry is refreshed IN PLACE, never
+        # dropped). Six days of serving took the API process to 9.5GB resident and 1.4GB
+        # swapped on a box already swapping.
         self._cache: dict[str, tuple[float, dict]] = {}
+        self._cache_lock = _threading.Lock()
         self._refreshing: set[str] = set()
         # Per-document view cache (the citator panel: cited-by counts + PageRank-ranked
         # incoming edges). Assembling it for a mega-authority (Data Protection Act 2018 has
@@ -1352,9 +1361,36 @@ class Facade:
         # _invalidate_caches); a short TTL bounds staleness from harvests in the OTHER
         # (scheduler) process, which can't reach this process's cache. Bounded LRU so the
         # cache can't itself grow into the memory pressure it exists to relieve.
-        import threading as _threading
         self._doc_cache: dict[str, tuple[float, dict]] = {}
         self._doc_cache_lock = _threading.Lock()
+
+    #: LRU ceiling on _cache. Sized off what warm_caches() puts there — one drill slice
+    #: per jurisdiction × 5 kind toggles × 2 sorts, ~240 entries for 24 jurisdictions,
+    #: plus the aggregates — so the per-query traffic that follows a restart cannot evict
+    #: the warm set (each of those costs a ~16s cold scan to rebuild). It bounds ENTRIES,
+    #: not bytes: sizing an entry means serialising it, which would put an O(payload) cost
+    #: on the path that exists to be instant. Crude, but it is a ceiling where there was
+    #: none. Raise it only alongside a measurement of what the process actually holds.
+    _CACHE_MAX_ENTRIES = 1200
+
+    def _remember(self, key: str, value: dict, when: float) -> None:
+        """Store, and evict least-recently-USED (not -written) down to the ceiling.
+        Recency is carried by dict insertion order, re-inserting on read — the same
+        idiom _doc_cache uses."""
+        with self._cache_lock:
+            self._cache.pop(key, None)          # re-insert → youngest
+            self._cache[key] = (when, value)
+            while len(self._cache) > self._CACHE_MAX_ENTRIES:
+                evicted = next(iter(self._cache))    # oldest touch first
+                self._cache.pop(evicted, None)
+                self._refreshing.discard(evicted)
+
+    def _touch(self, key: str) -> None:
+        """Mark a hit as recently used, so a busy dashboard key outlives an idle one."""
+        with self._cache_lock:
+            hit = self._cache.pop(key, None)
+            if hit is not None:
+                self._cache[key] = hit
 
     def _cached(self, key: str, ttl: float, fn, *, placeholder: dict | None = None,
                 sync_wait: float = 0.0):
@@ -1372,7 +1408,7 @@ class Facade:
 
             def _run():
                 try:
-                    self._cache[key] = (_t.time(), fn())
+                    self._remember(key, fn(), _t.time())
                 except Exception as exc:  # noqa: BLE001 — keep serving stale / retry next time
                     # NEVER silently: a warm that fails every retry means the UI shows
                     # an empty placeholder forever with no trace anywhere (a KeyError
@@ -1386,6 +1422,7 @@ class Facade:
 
         hit = self._cache.get(key)
         if hit is not None:
+            self._touch(key)
             age = _t.time() - hit[0]
             if age >= ttl and key not in self._refreshing:
                 _compute_async()
@@ -1402,7 +1439,7 @@ class Facade:
                 _t.sleep(0.02)
             return {**placeholder, "_warming": True}
         val = fn()  # synchronous (used for the cheap aggregates)
-        self._cache[key] = (_t.time(), val)
+        self._remember(key, val, _t.time())
         return val
 
     # Aggregates dropped the instant the citation graph changes (harvest/resolve/edit), so
@@ -1419,10 +1456,11 @@ class Facade:
         """Drop the cached dashboard aggregates after an op that changes the citation
         graph (harvest/resolve), so the worklist's per-source "remaining" counts and
         coverage refresh instead of serving the pre-harvest snapshot."""
-        for key in [k for k in self._cache
-                    if k.startswith(self._VOLATILE_CACHE_PREFIXES)]:
-            self._cache.pop(key, None)
-            self._refreshing.discard(key)
+        with self._cache_lock:
+            for key in [k for k in self._cache
+                        if k.startswith(self._VOLATILE_CACHE_PREFIXES)]:
+                self._cache.pop(key, None)
+                self._refreshing.discard(key)
         # A graph change (new citers, re-resolution, an edit) invalidates every cached
         # document view — the cited-by counts and incoming-edge lists it holds may all have
         # moved. Cheap to refill on next access; correctness beats keeping a stale panel.
@@ -1449,19 +1487,20 @@ class Facade:
             # a restart doesn't stampede the pool; each also warms PG's buffers,
             # which is most of a cold drill's cost (16s cold vs 0.3s warm).
             try:
-                self._cache["corpus-shape"] = (_t.time(), self._corpus_shape_uncached())
+                shape = self._corpus_shape_uncached()
+                self._remember("corpus-shape", shape, _t.time())
                 # Warm each jurisdiction's default drill slices — every kind toggle
                 # (all / cases / legislation / guidance / admin decisions) AND both of the
                 # sorts the explore panel lands on first (most authoritative, most cited) — so
                 # switching kind OR sort is instant, not a cold 16s scan. Sequential, so a
                 # restart doesn't stampede the pool; each also warms PG's buffers.
-                for row in self._cache["corpus-shape"][1].get("jurisdictions", []):
+                for row in shape.get("jurisdictions", []):
                     for kind in (None, "cases", "legislation", "guidance", "administrative"):
                         for sort in ("authority", "cited"):
                             key = self._drill_key(row["jurisdiction"], None, kind, None, sort, 25)
                             if key not in self._cache:
-                                self._cache[key] = (_t.time(), self._drill_uncached(
-                                    row["jurisdiction"], kind=kind, sort=sort))
+                                self._remember(key, self._drill_uncached(
+                                    row["jurisdiction"], kind=kind, sort=sort), _t.time())
             except Exception:  # noqa: BLE001 — warming is best-effort
                 pass
         threading.Thread(target=_warm, daemon=True).start()
@@ -1496,7 +1535,8 @@ class Facade:
                     # scratch, so the day starts on freshly-computed figures. This is the one
                     # place the heavy unresolved queue is pre-warmed (1am is quiet enough to
                     # absorb its ~5000 citing sub-queries).
-                    self._cache.clear()
+                    with self._cache_lock:
+                        self._cache.clear()
                     self.warm_caches()
                     try:
                         self.unresolved_references_cached()
@@ -7576,10 +7616,11 @@ class Facade:
         """Force a background recompute of the corpus map — the "↻ refresh table" action.
         Drops the cached snapshot (and the lazy per-category cites) and kicks a fresh
         compute, returning the warming placeholder for the UI to poll."""
-        for key in [k for k in self._cache
-                    if k == "corpus_map" or k.startswith("corpus_cites:")]:
-            self._cache.pop(key, None)
-            self._refreshing.discard(key)
+        with self._cache_lock:
+            for key in [k for k in self._cache
+                        if k == "corpus_map" or k.startswith("corpus_cites:")]:
+                self._cache.pop(key, None)
+                self._refreshing.discard(key)
         return self.corpus_map()
 
     def _corpus_map_uncached(self) -> dict:
