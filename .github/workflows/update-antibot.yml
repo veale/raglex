@@ -31,16 +31,22 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
 
       - name: Record current pins
         id: before
         run: |
-          echo "camoufox=$(uv export --frozen --no-emit-project --extra browser 2>/dev/null | grep -i '^camoufox==' || true)" >> "$GITHUB_OUTPUT"
-          echo "playwright=$(uv export --frozen --no-emit-project --extra browser 2>/dev/null | grep -i '^playwright==' || true)" >> "$GITHUB_OUTPUT"
+          # --no-hashes matters: without it every requirement is a line continuation, so
+          # the grep hands back "camoufox==0.5.4 \" and the trailing backslash escapes the
+          # closing quote of whatever string it is later interpolated into. That is how
+          # this workflow spent a green run — browser driven, suite passed — dying on the
+          # commit step with a shell syntax error.
+          export_pins() { uv export --frozen --no-hashes --no-emit-project --extra browser 2>/dev/null; }
+          echo "camoufox=$(export_pins | grep -i '^camoufox==' || true)" >> "$GITHUB_OUTPUT"
+          echo "playwright=$(export_pins | grep -i '^playwright==' || true)" >> "$GITHUB_OUTPUT"
 
       - name: Upgrade the anti-bot packages together
         run: |
@@ -81,16 +87,25 @@ jobs:
 
       - name: Commit the bump
         if: steps.changed.outputs.changed == 'true'
+        # The pins reach the shell as environment variables, never as ${{ }} spliced into
+        # the script text. Whatever a future uv export decides to emit is then data, and
+        # cannot terminate a quote or run a command.
+        env:
+          BEFORE_CAMOUFOX: ${{ steps.before.outputs.camoufox }}
+          BEFORE_PLAYWRIGHT: ${{ steps.before.outputs.playwright }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add uv.lock
-          git commit -m "Track the current anti-bot stack
-
-          Weekly upgrade of camoufox/playwright/scrapling, resolved together so the
-          camoufox<->playwright pairing stays valid. The suite passed and a real browser
-          opened a real page before this landed; the image rebuild that follows re-fetches
-          the Camoufox binary, which is where the fingerprint patches actually are.
-
-          was: ${{ steps.before.outputs.camoufox }} ${{ steps.before.outputs.playwright }}"
+          {
+            echo "Track the current anti-bot stack"
+            echo
+            echo "Weekly upgrade of camoufox/playwright/scrapling, resolved together so the"
+            echo "camoufox<->playwright pairing stays valid. The suite passed and a real browser"
+            echo "opened a real page before this landed; the image rebuild that follows re-fetches"
+            echo "the Camoufox binary, which is where the fingerprint patches actually are."
+            echo
+            echo "was: ${BEFORE_CAMOUFOX:-?} ${BEFORE_PLAYWRIGHT:-?}"
+          } > /tmp/bump-message.txt
+          git commit -F /tmp/bump-message.txt
           git push
