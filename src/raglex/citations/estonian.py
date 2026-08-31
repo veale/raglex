@@ -194,7 +194,13 @@ def _has_context(text: str, start: int, end: int) -> bool:
 # --- patterns -----------------------------------------------------------------
 #: "§ 199 lg 2 p 1" — and the superscript form, which Estonian writes either as a real
 #: superscript (§ 43¹) or as a hyphenated ASCII fallback (§ 43-1).
-_SECTION = r"\d{1,4}(?:[¹²³⁴⁵⁶⁷⁸⁹]|-\d)?"
+#: The ASCII fallback for a superscript (``§ 43-1`` for ``§ 43¹``) is also how Estonian
+#: writes a RANGE of sections, and the range is far commoner: "(TsMS § 415-416)" was read
+#: as § 415⁴ and produced 122 confident citations of a section TsMS does not have, plus 37
+#: of § 660⁶ from "§ 660-661". A superscript is a single digit, so requiring that nothing
+#: follows it separates the two — the range then resolves to its first section, which is
+#: at least a provision that exists.
+_SECTION = r"\d{1,4}(?:[¹²³⁴⁵⁶⁷⁸⁹]|-\d(?!\d))?"
 #: The level names, **longest first**. Python's alternation is first-match, not
 #: longest-match, so a short name listed before the longer one it prefixes wins and the
 #: trailing ``[a-z]?`` swallows the next letter of the word it just truncated:

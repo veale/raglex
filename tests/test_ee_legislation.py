@@ -275,3 +275,18 @@ def test_an_act_with_no_markup_yields_no_sections_rather_than_a_wrong_one():
     parsed = parse_riigiteataja_xml(xml)
     assert [s for s in parsed.segments if s.level == 2] == []
     assert not (parsed.text or "").strip()
+
+
+@pytest.mark.parametrize("text,expected", [
+    # "§ 415-416" is a RANGE. Read as the ASCII superscript form it became § 415⁴ — a
+    # section TsMS does not have — and 122 judgments were recorded as citing it.
+    ("TsMS § 415-416 järgi", "§ 415"),
+    ("TsMS § 660-661 alusel", "§ 660"),
+    # …while the genuine ASCII superscript still parses.
+    ("TsMS § 43-1 lg 2", "§ 43-1 lg 2"),
+    ("TsMS § 43¹ lg 2", "§ 43-1 lg 2"),
+])
+def test_a_section_range_is_not_a_superscript(text, expected):
+    from raglex.citations.estonian import law_citations
+    (citation,) = [c for c in law_citations(text) if c.entity_kind == "act"]
+    assert citation.pinpoint == expected
