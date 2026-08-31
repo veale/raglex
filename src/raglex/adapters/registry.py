@@ -65,6 +65,7 @@ from .fi_finlex import SERIES as FINLEX_SERIES, FinlexAdapter
 from .se_domstol import SwedishCaseLawAdapter
 from .se_domstol_bulk import SwedishCaseLawBulkAdapter
 from .ee_lahend import EstonianLahendAdapter
+from .ee_riigiteataja import EstonianRiigiTeatajaAdapter
 from .ofcom import OfcomOSAAdapter
 from .ofcom_enforcement import OfcomEnforcementAdapter
 from .eu_legislation import EULegislationAdapter
@@ -509,6 +510,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "se-domstol": SwedishCaseLawAdapter,
     "se-domstol-bulk": SwedishCaseLawBulkAdapter,
     "ee-lahend": EstonianLahendAdapter,
+    "ee-legislation": EstonianRiigiTeatajaAdapter,
     # France bulk seed (no auth): the DILA OPENDATA archives read from local disk. One
     # adapter across funds; the PISTE/Conseil-d'État live adapters handle increments.
     "fr-dila": FrDilaAdapter,  # CASS (Cour de cassation) by default
@@ -2897,6 +2899,26 @@ SOURCE_INFO: dict[str, SourceInfo] = {
          SourceOption("ids", "Case numbers or lahend ids", "3-25-3458/5, ruling:1589986")),
         ("case number (3-25-3458/5)", "lahend ruling id"),
     ),
+    "ee-legislation": SourceInfo(
+        "ee-legislation", "Estonia — consolidated legislation (Riigi Teataja)",
+        "legislation", "EE", False,
+        "The Estonian statute book, and the missing half of the Estonian case law. The "
+        "corpus holds ~393,000 Estonian judgments carrying 4.07 million statutory "
+        "citations that lahend.ee had already resolved to an act abbreviation and a § — "
+        "all of them hanging, because no Estonian legislation was held: 1.94 million "
+        "point at TsMS alone. Riigi Teataja's own backend returns the whole 391-act "
+        "abbreviation index in one request and each act as consolidated Juurakt XML, so "
+        "391 documents resolve 97% of those edges. Sections are segmented on the act's "
+        "own § / lõige / punkt hierarchy, which is exactly the anchor an Estonian "
+        "citation carries. Superscript sections are kept distinct (§ 497 through "
+        "§ 497-22 are twenty-three provisions, not one). The act id is the current "
+        "consolidation, so re-running picks up re-consolidated text as a new version.",
+        (SourceOption("abbreviations", "Only these acts",
+                      "comma-separated, e.g. TsMS,VÕS,KarS — blank harvests all 391"),
+         SourceOption("include_repealed", "Include repealed acts",
+                      "true (default) — judgments cite repealed law constantly")),
+        ("act abbreviation (TsMS, VÕS, KarS)",),
+    ),
     "de-openlegaldata": SourceInfo(
         "de-openlegaldata", "Germany — Länder + federal case law (Open Legal Data)",
         "caselaw", "DE", False,
@@ -3080,6 +3102,10 @@ INCREMENTAL_MODE: dict[str, str] = {
     # Estonia: search_rulings filters on the DECISION date and publication lags it, so a
     # watch re-walks a trailing window rather than cutting at the cursor.
     "ee-lahend": "server",
+    # One request returns the whole 391-act manifest, so every run walks the complete
+    # feed and the pipeline stores only what changed. There is no cursor to narrow it
+    # with and none is needed.
+    "ee-legislation": "full-walk",
     # server-side incremental
     "us-caselaw": "server", "nl-rechtspraak": "server", "nl-legislation": "server",
     "de-neuris": "server", "de-neuris-legislation": "server", "fr-judilibre": "server", "fr-judilibre-ca": "server",
