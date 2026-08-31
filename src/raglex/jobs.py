@@ -40,6 +40,7 @@ SINGLETON_KINDS = frozenset({
     "repair-de-citations", "repair-de-renditions", "repair-eu-repeals",
     "recase-titles",
     "repair-eu-annexes",
+    "repair-ee-superscripts",
     "backfill-eu-stubs",
     "rebuild-citation-counts", "rebuild-authority", "match-reports",
     "rescan", "mine-parallel", "match-legislation", "match-echr", "harvest-echr",
@@ -110,6 +111,7 @@ RESUME_POLICIES = {
     "reanchor-citations": "checkpoint",
     # resumes the local Formex package repair from the last completely reparsed/re-mined act
     "repair-eu-annexes": "checkpoint",
+    "repair-ee-superscripts": "checkpoint",
     # re-derives its scope from the edges each time, then skips what the run already
     # stamped — so a restart re-reads only what it hasn't reached
     "rescan-contested-shorthands": "checkpoint",
@@ -141,7 +143,7 @@ CHAIN_TRIGGER_KINDS = frozenset({
     "import-caselaw-zip", "import-caselaw-dir", "reparse-source", "finish-bulk-postprocess",
     # a phantom prune changes the counts as surely as a harvest does
     "repair-de-citations",
-    "repair-eu-annexes", "sync-eu-consolidations",
+    "repair-eu-annexes", "repair-ee-superscripts", "sync-eu-consolidations",
     "backfill-uk-materials",
 })
 # (follow-up kind, min seconds since its last completion before re-running). embed is cheap
@@ -406,6 +408,11 @@ RUNNERS: dict[str, Callable] = {
     # re-ask CELLAR which "repeals" edges were only implicit ones
     "repair-eu-repeals": lambda f, p, cb, cancel: f.repair_eu_implicit_repeals(**p, on_progress=cb, cancel_check=cancel),
     "repair-eu-annexes": lambda f, p, cb, cancel: f.repair_eu_split_annexes(
+        **{k: v for k, v in p.items() if not k.startswith("_")},
+        on_progress=cb, cancel_check=cancel),
+    # re-point Estonian pinpoints whose superscript the publisher flattened (§ 403⁴ served
+    # as "§ 4034"), keyed on the held act's own section list
+    "repair-ee-superscripts": lambda f, p, cb, cancel: f.repair_estonian_superscript_anchors(
         **{k: v for k, v in p.items() if not k.startswith("_")},
         on_progress=cb, cancel_check=cancel),
     "sync-eu-consolidations": lambda f, p, cb, cancel: f.sync_eu_consolidations(
@@ -1103,6 +1110,13 @@ class JobManager:
                 for key in ("after_relation_id", "tag_start", "resolution_complete"):
                     if checkpoint.get(key) is not None:
                         params[key] = checkpoint[key]
+        # The Estonian anchor repair walks distinct (act, anchor) pairs, so its cursor is
+        # the pair it last committed — and, per AGENTS.md §1, the method that reports it
+        # must accept it back or the resumed attempt raises TypeError and files as done.
+        if row.get("kind") == "repair-ee-superscripts":
+            for key in ("after_dst_id", "after_anchor"):
+                if checkpoint.get(key) is not None:
+                    params[key] = checkpoint[key]
         # A whole-source reparse / re-anchor continues from the last stable_id it committed.
         if (row.get("kind") in ("reparse-source", "reanchor-citations", "repair-eu-annexes")
                 and checkpoint.get("after_stable_id")

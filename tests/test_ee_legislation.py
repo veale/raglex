@@ -290,3 +290,42 @@ def test_a_section_range_is_not_a_superscript(text, expected):
     from raglex.citations.estonian import law_citations
     (citation,) = [c for c in law_citations(text) if c.entity_kind == "act"]
     assert citation.pinpoint == expected
+
+
+# ── the flattened superscript, and the act that disambiguates it ─────────────
+def test_flattened_readings_are_enumerated_longest_stem_first():
+    from raglex.citations.estonian import flattened_superscript_readings
+    # "4034" cannot be 4-034 or 40-34 with a leading zero on the superscript; 403-4 and
+    # 40-34 are the arithmetic candidates, and only the act says which is real.
+    assert flattened_superscript_readings("4034") == ["403-4", "40-34"]
+    # "1-741" is dropped: a three-digit superscript is not a section number.
+    assert flattened_superscript_readings("1741") == ["174-1", "17-41"]
+    # A leading zero on either side is an artefact of the split, not a reading.
+    assert "40-04" not in flattened_superscript_readings("4004")
+    assert flattened_superscript_readings("") == []
+    assert flattened_superscript_readings("abc") == []
+
+
+def test_a_superscript_longer_than_two_digits_is_not_a_reading():
+    from raglex.citations.estonian import flattened_superscript_readings
+    # § 1²³⁴ is not a section anybody numbers; allowing it would invent candidates and
+    # turn an unambiguous repair into an ambiguous one.
+    assert all(len(r.split("-")[1]) <= 2 for r in flattened_superscript_readings("12345"))
+
+
+def test_the_repair_only_fires_when_the_act_settles_it(monkeypatch):
+    """The whole safety of this repair is that the held act decides. A number the act has
+    is left alone; a number it lacks is repaired only if exactly one reading is real."""
+    from raglex.citations.estonian import flattened_superscript_readings
+    held = {"§ 403", "§ 403-4", "§ 174", "§ 174-1", "§ 4034x"}
+
+    def decide(num: str) -> str | None:
+        if f"§ {num}" in held:
+            return None  # lands already
+        cands = [c for c in flattened_superscript_readings(num) if f"§ {c}" in held]
+        return cands[0] if len(cands) == 1 else None
+
+    assert decide("403") is None          # a real section is never rewritten
+    assert decide("4034") == "403-4"      # the only reading the act has
+    assert decide("1741") == "174-1"
+    assert decide("9999") is None         # no candidate — left pending, not guessed

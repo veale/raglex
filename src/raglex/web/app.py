@@ -1062,6 +1062,17 @@ def create_app(config: Config | None = None) -> FastAPI:
                   if k in (payload or {})}
         return _start_job("repair-eu-repeals", "re-type EU repeal edges", params)
 
+    @app.post("/jobs/repair-ee-superscripts")
+    def job_repair_ee_superscripts_ep(payload: dict = Body(default={})) -> dict:
+        """Repair Estonian pinpoints whose superscript the publisher flattened
+        (§ 403⁴ served as "§ 4034"), keyed on the held act's own section list.
+        Dry-run unless ``apply`` is true."""
+        return _start_job(
+            "repair-ee-superscripts",
+            "repair flattened Estonian superscript anchors",
+            {"apply": bool((payload or {}).get("apply")),
+             "limit": int((payload or {}).get("limit") or 200000)})
+
     @app.post("/jobs/repair-eu-annexes")
     def job_repair_eu_annexes_ep(payload: dict = Body(default={})) -> dict:
         """Inspect every held EU Formex ZIP and reparse packages whose annexes were

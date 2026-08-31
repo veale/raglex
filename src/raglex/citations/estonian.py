@@ -79,6 +79,40 @@ def _clean_token(value: str) -> str:
     return " ".join(str(value or "").split())
 
 
+#: A superscript section number survives as a superscript only where the publisher kept
+#: the markup. lahend.ee does not: both its decision Markdown and its structured
+#: ``sections_cited_by_ruling`` index render ``§ 403⁴`` as ``§ 4034``, so the grammar reads
+#: a four-digit section that does not exist. The information is destroyed upstream and
+#: cannot be recovered from the citation alone — but it CAN be recovered against the act,
+#: which is why this lives beside the grammar and is applied by a repair that holds the
+#: statute book open. See ``Facade.repair_estonian_superscript_anchors``.
+_MAX_STEM_DIGITS = 4
+_MAX_SUPERSCRIPT_DIGITS = 2
+
+
+def flattened_superscript_readings(number: str) -> list[str]:
+    """Every ``N-M`` a flattened section number could have been: ``"4034"`` →
+    ``["4-03"…]`` is excluded by the leading-zero rule, leaving ``["40-34", "403-4"]``.
+
+    Ordered longest-stem first, which is the likelier reading, though the repair does not
+    rely on that: it only acts when exactly one candidate exists in the act itself.
+    """
+    digits = (number or "").strip()
+    if not digits.isdigit():
+        return []
+    out: list[str] = []
+    for cut in range(len(digits) - 1, 0, -1):
+        stem, superscript = digits[:cut], digits[cut:]
+        # "§ 0…" is not a section and "§ 40⁰³" is not a superscript; a leading zero on
+        # either side means the split is an artefact of the arithmetic, not a reading.
+        if stem.startswith("0") or superscript.startswith("0"):
+            continue
+        if len(stem) > _MAX_STEM_DIGITS or len(superscript) > _MAX_SUPERSCRIPT_DIGITS:
+            continue
+        out.append(f"{stem}-{superscript}")
+    return out
+
+
 def case_id(number: str) -> str:
     """"3-25-3458/5" → ``ee/lahend/3-25-3458/5``."""
     return "ee/lahend/" + re.sub(r"\s+", "", (number or "").strip())

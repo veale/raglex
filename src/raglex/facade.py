@@ -166,6 +166,11 @@ def _locate_span(text: str, selected: str, context: str | None) -> tuple[int, in
     return matches[0]
 
 
+#: "§ 4034 lg 1 p 2" → the section number and whatever pinpoint follows it. The trailing
+#: part is carried across unchanged, so repairing the section keeps the lõige and punkt.
+_EE_SECTION_ANCHOR_RE = re.compile(r"^§+\s*(?P<num>\d+)(?P<rest>(?:\s.*)?)$")
+
+
 def _progress(cb, **fields) -> None:
     """Report coarse progress to an optional callback (used by the background-job
     runner so the UI can poll "fetching 5/30"). Never lets a callback error break
@@ -8892,6 +8897,127 @@ class Facade:
             "after_stable_id": cursor,
             "remaining": max(0, total - checked),
             "complete": complete,
+        }
+
+    def repair_estonian_superscript_anchors(
+            self, *, apply: bool = False, after_dst_id: str = "", after_anchor: str = "",
+            limit: int = 200000, on_progress=None, cancel_check=None) -> dict:
+        """Re-point Estonian pinpoints whose superscript was flattened by the publisher.
+
+        lahend.ee renders ``§ 403⁴`` as ``§ 4034`` — in its decision Markdown *and* in its
+        structured ``sections_cited_by_ruling`` index, so both the regex-extracted and the
+        structured edges carry it. The grammar then reads a four-digit section, and 115,558
+        held edges point at a provision that does not exist. Nothing detects that from the
+        citation alone: the act is held, the edge resolves, only the pinpoint is wrong.
+
+        It is recoverable against the statute book, which the corpus now holds. For each
+        distinct (act, anchor) whose section is absent from that act, the flattened
+        readings are enumerated and the repair fires **only when exactly one of them is a
+        real section of that act**. On the 52,779 distinct pairs held when this was written
+        that rule was never ambiguous — every repairable anchor had exactly one candidate.
+
+        Keyed on the target, not the citer: the claim is about the act's numbering, so it
+        holds for whoever cited it (Estonian acts cross-reference each other, and Finnish
+        and EU documents cite them too).
+
+        ``raw_citation_string`` is left untouched, so the text as the court wrote it stays
+        on the edge and the repair is auditable rather than silent. Dry-run by default.
+        """
+        from .citations.estonian import flattened_superscript_readings
+
+        with self._open() as (cat, _rs, ts):
+            sections = {
+                row["stable_id"]: {
+                    seg.label for seg in (ts.get_segments(row["payload_hash"]) or [])
+                    if seg.kind == "section"
+                }
+                for row in cat.conn.execute(
+                    "SELECT stable_id, payload_hash FROM documents "
+                    "WHERE source = 'ee-legislation'")
+            }
+        if not sections:
+            # Without the statute book there is nothing to key on, and a repair that
+            # cannot check its answer must not guess one.
+            raise RuntimeError(
+                "no Estonian legislation held: harvest ee-legislation before repairing "
+                "anchors against it")
+
+        cursor_id, cursor_anchor = after_dst_id or "", after_anchor or ""
+        cap = max(1, int(limit or 200000))
+        checked = repaired = edges = ambiguous = unknown = 0
+        complete = True
+        samples: list[dict] = []
+
+        while checked < cap:
+            with self._open() as (cat, _rs, _ts):
+                pairs = [dict(r) for r in cat.conn.execute(
+                    "SELECT dst_id, dst_anchor, count(*) AS n FROM relations "
+                    "WHERE dst_id LIKE 'ee/seadus/%' AND resolution_status = 'resolved' "
+                    "AND dst_anchor LIKE '§%' "
+                    "AND (dst_id, dst_anchor) > (?, ?) "
+                    "GROUP BY dst_id, dst_anchor ORDER BY dst_id, dst_anchor LIMIT 500",
+                    (cursor_id, cursor_anchor)).fetchall()]
+            if not pairs:
+                break
+            for pair in pairs:
+                if checked >= cap or (cancel_check and cancel_check()):
+                    complete = False
+                    break
+                dst_id, anchor = pair["dst_id"], pair["dst_anchor"]
+                cursor_id, cursor_anchor = dst_id, anchor
+                checked += 1
+                held = sections.get(dst_id)
+                if held is None:
+                    unknown += 1
+                    continue
+                match = _EE_SECTION_ANCHOR_RE.match(anchor or "")
+                if not match or f"§ {match.group('num')}" in held:
+                    continue
+                candidates = [c for c in flattened_superscript_readings(match.group("num"))
+                              if f"§ {c}" in held]
+                if len(candidates) != 1:
+                    if len(candidates) > 1:
+                        ambiguous += 1
+                    continue
+                fixed = f"§ {candidates[0]}{match.group('rest')}"
+                repaired += 1
+                edges += int(pair["n"])
+                if len(samples) < 25:
+                    samples.append({"dst_id": dst_id, "was": anchor, "now": fixed,
+                                    "edges": int(pair["n"])})
+                if apply:
+                    with self._open() as (cat, _rs, _ts):
+                        cat.conn.execute(
+                            "UPDATE relations SET dst_anchor = ? "
+                            "WHERE dst_id = ? AND dst_anchor = ? "
+                            "AND resolution_status = 'resolved'",
+                            (fixed, dst_id, anchor))
+                _progress(
+                    on_progress,
+                    stage="repairing flattened Estonian superscripts",
+                    done=checked,
+                    item=f"{dst_id} {anchor}",
+                    repaired=repaired,
+                    edges=edges,
+                    _checkpoint={"phase": "repair", "source": "ee-lahend",
+                                 "after_dst_id": dst_id, "after_anchor": anchor},
+                )
+            if not complete:
+                break
+
+        if apply and repaired:
+            self._invalidate_caches()
+        return {
+            "checked": checked,
+            "anchors_repaired": repaired,
+            "edges_repaired": edges,
+            "ambiguous_left_alone": ambiguous,
+            "acts_not_held": unknown,
+            "applied": bool(apply),
+            "after_dst_id": cursor_id,
+            "after_anchor": cursor_anchor,
+            "complete": complete,
+            "samples": samples,
         }
 
     def sync_eu_consolidations(self, *, stable_id: str, on_progress=None,

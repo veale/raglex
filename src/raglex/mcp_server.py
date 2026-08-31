@@ -1075,6 +1075,22 @@ def build_server(config: Config | None = None) -> MCPServer:
         )
 
     @admin
+    def repair_ee_superscripts(apply: bool = False, limit: int = 200000) -> dict:
+        """Re-point Estonian pinpoints whose superscript the publisher flattened.
+        lahend.ee serves § 403⁴ as "§ 4034" in both its decision text and its structured
+        citation index, so 115,558 held edges name a section that does not exist. Each
+        distinct (act, anchor) is checked against the held act's own section list and
+        repaired ONLY where exactly one flattened reading is a real section of that act.
+        Dry-run unless apply=True; ``raw_citation_string`` is never touched, so the text
+        as the court wrote it stays on the edge."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "repair-ee-superscripts",
+            "repair flattened Estonian superscript anchors",
+            {"apply": bool(apply), "limit": limit},
+        )
+
+    @admin
     def backfill_eu_consolidations(max_pages: Optional[int] = None) -> dict:
         """Start the reverse Cellar sweep over every sector-0 dated expression,
         including future-effective snapshots. Each is linked to its sector-3 base act;
