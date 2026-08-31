@@ -329,3 +329,35 @@ def test_the_repair_only_fires_when_the_act_settles_it(monkeypatch):
     assert decide("4034") == "403-4"      # the only reading the act has
     assert decide("1741") == "174-1"
     assert decide("9999") is None         # no candidate — left pending, not guessed
+
+
+def test_no_literal_jobs_route_is_shadowed_by_the_job_id_route():
+    """Starlette matches on PATH first and stops at the first match, then checks the
+    method. "/jobs/{job_id}" matches every single-segment path under /jobs, so any literal
+    POST /jobs/<name> declared after it answered 405 with `allow: GET` — harvest-source,
+    repair-eu-annexes and backfill-eu-consolidations were all unreachable that way, and the
+    405 read like a caller mistake rather than a missing route."""
+    from raglex.web.app import create_app
+
+    app = create_app()
+    paths = [getattr(r, "path", "") for r in app.routes]
+    shadow = paths.index("/jobs/{job_id}")
+    literal_after = [
+        p for i, p in enumerate(paths)
+        if i > shadow and p.startswith("/jobs/") and "{" not in p
+    ]
+    assert literal_after == [], (
+        f"these /jobs routes are shadowed by /jobs/{{job_id}}: {literal_after}")
+
+
+def test_the_job_routes_this_work_added_are_actually_reachable():
+    from raglex.web.app import create_app
+
+    app = create_app()
+    for path, method in (("/jobs/repair-ee-superscripts", "POST"),
+                         ("/jobs/harvest-source", "POST"),
+                         ("/jobs/abc123", "GET")):
+        matched = [r for r in app.routes
+                   if getattr(r, "path_regex", None) and r.path_regex.match(path)]
+        assert matched, path
+        assert method in (matched[0].methods or set()), (path, matched[0].path)

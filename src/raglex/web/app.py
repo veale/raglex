@@ -1160,12 +1160,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         registry could never see."""
         return jobs.list(limit=limit)
 
-    @app.get("/jobs/{job_id}")
-    def job_status_ep(job_id: str, tail: int = 40) -> dict:
-        """Full status of one job incl. the rolling log (last ``tail`` lines) — polled by
-        the jobs panel for the live, verbose, item-by-item view."""
-        return jobs.get(job_id, tail=tail)
-
     @app.post("/jobs/{job_id}/cancel")
     def job_cancel_ep(job_id: str) -> dict:
         return jobs.cancel(job_id)
@@ -2173,6 +2167,20 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/settings")
     def update_settings(payload: dict = Body(...)) -> dict:
         return facade.update_settings(payload)
+
+    # -- registered LAST, deliberately ------------------------------------
+    # Starlette matches routes in registration order and stops at the first whose PATH
+    # matches, then checks the method. "/jobs/{job_id}" matches every single-segment path
+    # under /jobs, so while it sat above them every literal `POST /jobs/<name>` declared
+    # further down answered 405 Method Not Allowed with `allow: GET` — harvest-source,
+    # repair-eu-annexes, backfill-eu-consolidations and the rest were simply unreachable,
+    # and the 405 read like a client mistake rather than a missing route. Any new literal
+    # /jobs/... route must stay ABOVE this one.
+    @app.get("/jobs/{job_id}")
+    def job_status_ep(job_id: str, tail: int = 40) -> dict:
+        """Full status of one job incl. the rolling log (last ``tail`` lines) — polled by
+        the jobs panel for the live, verbose, item-by-item view."""
+        return jobs.get(job_id, tail=tail)
 
     return app
 
