@@ -46,6 +46,17 @@ The same escaping appears mid-sentence wherever the text cites a superscript sec
 pass would mint a confident citation to. Both cases are folded to the real Unicode
 superscript (``§ 43¹``), which is the form ``citations.estonian._anchor`` already
 normalises to ``-1``.
+
+## There is more than one schema, and one act has no schema at all
+
+An act Riigi Teataja never consolidated is served under the base-act namespace
+``tyviseadus_1_10.02.2010`` with byte-identical element names, so every lookup here
+matches the local name and ignores the namespace. Two acts parsed to empty text — with no
+error and no status to notice — before that was true.
+
+A handful of old repealed acts (RERS, the 1990s state-pensions act) carry no markup at
+all: their ``sisu`` is an ``HTMLKonteiner`` pointing at an attached file. They parse to
+zero sections, and the adapter declines them rather than storing an empty statute.
 """
 
 from __future__ import annotations
@@ -54,12 +65,42 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
 
-from ..core.segmentation import assemble, localname
+from ..core.segmentation import assemble
 from .base import ParsedDoc, register
 
-#: Every element in the tree carries this namespace; the document declares it as the bare
-#: string "Juurakt" rather than a URI, which is unusual but consistent.
-NS = "{Juurakt}"
+#: The consolidated-text schema declares its namespace as the bare string "Juurakt"
+#: rather than a URI. It is **not the only one**: an act Riigi Teataja never consolidated
+#: is served under ``tyviseadus_1_10.02.2010`` — the base-act schema — with byte-identical
+#: element names. Matching the namespace rather than the local name dropped two acts to
+#: empty text and no error, so every lookup here is namespace-agnostic.
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _find(parent: ET.Element | None, name: str) -> ET.Element | None:
+    """The first direct child with this local name, whatever namespace it carries."""
+    if parent is None:
+        return None
+    for child in parent:
+        if _local(child.tag) == name:
+            return child
+    return None
+
+
+def _find_path(root: ET.Element | None, *names: str) -> ET.Element | None:
+    node = root
+    for name in names:
+        node = _find(node, name)
+    return node
+
+
+def _iter(root: ET.Element, name: str):
+    for element in root.iter():
+        if _local(element.tag) == name:
+            yield element
+
 
 #: ``<sup>1</sup>`` arrives as escaped character data rather than as an element, in both
 #: ``kuvatavNr`` and running text. Matched as text because that is what it is.
@@ -105,20 +146,20 @@ def _anchor_number(raw: str) -> str:
 def _section_label(paragraph: ET.Element) -> str | None:
     """The section's citable number, preferring ``kuvatavNr`` — see the module docstring:
     ``paragrahvNr`` cannot tell § 22 from § 22¹."""
-    displayed = _flat(paragraph.find(NS + "kuvatavNr"))
+    displayed = _flat(_find(paragraph, "kuvatavNr"))
     if match := _KUVATAV_SECTION_RE.search(displayed):
         return f"§ {_anchor_number(match.group(1))}"
-    number = _flat(paragraph.find(NS + "paragrahvNr"))
+    number = _flat(_find(paragraph, "paragrahvNr"))
     return f"§ {_anchor_number(number)}" if number else None
 
 
 def _content(element: ET.Element) -> str:
     """The text of one lõige/punkt, prefixed with the number the act displays for it, so
     the flat text reads as the act reads: ``(1) Kohustus tuleb täita…``, ``1) nõuda…``."""
-    displayed = _flat(element.find(NS + "kuvatavNr"))
+    displayed = _flat(_find(element, "kuvatavNr"))
     body_parts: list[str] = []
     for child in element:
-        if localname(child.tag) in {"sisuTekst", "tavatekst"}:
+        if _local(child.tag) in {"sisuTekst", "tavatekst"}:
             body_parts.append(_flat(child))
     body = " ".join(part for part in body_parts if part)
     return f"{displayed} {body}".strip() if displayed else body
@@ -128,18 +169,18 @@ def _section_text(paragraph: ET.Element) -> str:
     """One § as a block: its heading, then each lõige, then each punkt beneath it."""
     lines: list[str] = []
     label = _section_label(paragraph) or ""
-    heading = _flat(paragraph.find(NS + "paragrahvPealkiri"))
+    heading = _flat(_find(paragraph, "paragrahvPealkiri"))
     lines.append(f"{label}. {heading}".strip().rstrip("."))
     # A § with no lõiked carries its text directly; one with lõiked carries it beneath
     # them. Walking the children in document order handles both without a special case.
     for child in paragraph:
-        name = localname(child.tag)
+        name = _local(child.tag)
         if name in {"paragrahvNr", "kuvatavNr", "paragrahvPealkiri"}:
             continue
         if name == "loige":
             if body := _content(child):
                 lines.append(body)
-            for point in child.findall(NS + "alampunkt"):
+            for point in [c for c in child if _local(c.tag) == "alampunkt"]:
                 if text := _content(point):
                     lines.append(text)
         elif name in {"sisuTekst", "tavatekst"}:
@@ -166,28 +207,28 @@ def parse_riigiteataja_xml(data: bytes | str) -> ParsedDoc:
         return ParsedDoc()
     root = ET.fromstring(raw)
 
-    meta_element = root.find(NS + "metaandmed")
-    title = _flat(root.find(f"{NS}aktinimi/{NS}nimi/{NS}pealkiri"))
-    abbrev = _flat(meta_element.find(NS + "lyhend")) if meta_element is not None else ""
+    meta_element = _find(root, "metaandmed")
+    title = _flat(_find_path(root, "aktinimi", "nimi", "pealkiri"))
+    abbrev = _flat(_find(meta_element, "lyhend"))
     adopted = issuer = kind = ""
     if meta_element is not None:
-        issuer = _flat(meta_element.find(NS + "valjaandja"))
-        kind = _flat(meta_element.find(NS + "dokumentLiik"))
-        adopted = _flat(meta_element.find(f"{NS}vastuvoetud/{NS}aktikuupaev"))
+        issuer = _flat(_find(meta_element, "valjaandja"))
+        kind = _flat(_find(meta_element, "dokumentLiik"))
+        adopted = _flat(_find_path(meta_element, "vastuvoetud", "aktikuupaev"))
 
     blocks: list[tuple[str, str, str, int]] = []
     chapter = division = ""
     for element in root.iter():
-        name = localname(element.tag)
+        name = _local(element.tag)
         if name == "peatykk":
-            number = _flat(element.find(NS + "peatykkNr"))
-            heading = _flat(element.find(NS + "peatykkPealkiri"))
+            number = _flat(_find(element, "peatykkNr"))
+            heading = _flat(_find(element, "peatykkPealkiri"))
             chapter = f"{number}. peatükk {heading}".strip()
             if chapter:
                 blocks.append((chapter, "section", chapter, 0))
         elif name == "jagu":
-            number = _flat(element.find(NS + "jaguNr"))
-            heading = _flat(element.find(NS + "jaguPealkiri"))
+            number = _flat(_find(element, "jaguNr"))
+            heading = _flat(_find(element, "jaguPealkiri"))
             division = f"{number}. jagu {heading}".strip()
             if division:
                 blocks.append((division, "section", division, 1))

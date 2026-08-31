@@ -251,3 +251,27 @@ def test_a_declined_level_name_keeps_its_number(text, expected):
     from raglex.citations.estonian import law_citations
     (citation,) = [c for c in law_citations(text) if c.entity_kind == "act"]
     assert citation.pinpoint == expected
+
+
+def test_the_base_act_namespace_parses_too():
+    """An act Riigi Teataja never consolidated arrives under ``tyviseadus_1_10.02.2010``
+    with identical element names. Matching on the namespace dropped two acts to empty
+    text with no error and no status to notice."""
+    xml = _act(_para("3", "§ 3.", "Erastamine", "Tekst.")).replace(
+        b'xmlns="Juurakt"', b'xmlns="tyviseadus_1_10.02.2010"')
+    parsed = parse_riigiteataja_xml(xml)
+    assert [s.label for s in parsed.segments if s.level == 2] == ["§ 3"]
+    assert parsed.metadata["abbreviation"] == "TsMS"
+
+
+def test_an_act_with_no_markup_yields_no_sections_rather_than_a_wrong_one():
+    """Old repealed acts keep their body in an attached HTML file. Zero sections is the
+    honest answer; the adapter declines them rather than storing an empty statute."""
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<oigusakt xmlns="Juurakt"><metaandmed><lyhend>RERS</lyhend></metaandmed>
+<aktinimi><nimi><pealkiri>Riiklike elatusrahade seadus</pealkiri></nimi></aktinimi>
+<sisu><sisuTekst><HTMLKonteiner><fail>x.html</fail></HTMLKonteiner></sisuTekst></sisu>
+</oigusakt>"""
+    parsed = parse_riigiteataja_xml(xml)
+    assert [s for s in parsed.segments if s.level == 2] == []
+    assert not (parsed.text or "").strip()
