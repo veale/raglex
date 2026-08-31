@@ -222,3 +222,32 @@ def test_discovery_resumes_early_and_in_a_stable_order():
     assert resumed[0] == everything[25]
     assert everything[-1] == resumed[-1]
     assert [s.hints["resume_offset"] for s in _Adapter().discover(None)][:3] == [0, 1, 2]
+
+
+# ── the level names, and why their order matters ─────────────────────────────
+@pytest.mark.parametrize("text,expected", [
+    # The bug: `p` listed before `punkti` matched first, and the trailing [a-z]? ate the
+    # "u" of the word it had just truncated. 161 held edges cited a GDPR point (u).
+    ("IKÜM art 6 lg 1 punkti f alusel", "Article 6(1)(f)"),
+    ("IKÜM art 6 lg 1 p f", "Article 6(1)(f)"),
+])
+def test_an_eu_point_is_not_invented_from_the_word_punkti(text, expected):
+    from raglex.citations.estonian import law_citations
+    (citation,) = [c for c in law_citations(text) if c.candidate_id == "32016R0679"]
+    assert citation.pinpoint == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("TsMS § 162 lõike 1 alusel", "§ 162 lg 1"),
+    # `lõige` matched the prefix of "lõiget", [a-z]? ate the "t", and the number was then
+    # never consumed — 96,380 held edges decayed to the bare section this way.
+    ("TsMS § 162 lõiget 1 kohaldades", "§ 162 lg 1"),
+    ("VÕS § 101 punktis 3", "§ 101 p 3"),
+    ("HKMS § 121 lõike 2 punkti 1", "§ 121 lg 2 p 1"),
+    ("KarS § 199 lg 2 p 1", "§ 199 lg 2 p 1"),
+    ("TsMS § 415-4 lõikes 2", "§ 415-4 lg 2"),
+])
+def test_a_declined_level_name_keeps_its_number(text, expected):
+    from raglex.citations.estonian import law_citations
+    (citation,) = [c for c in law_citations(text) if c.entity_kind == "act"]
+    assert citation.pinpoint == expected

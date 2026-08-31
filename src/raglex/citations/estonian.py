@@ -195,7 +195,19 @@ def _has_context(text: str, start: int, end: int) -> bool:
 #: "§ 199 lg 2 p 1" — and the superscript form, which Estonian writes either as a real
 #: superscript (§ 43¹) or as a hyphenated ASCII fallback (§ 43-1).
 _SECTION = r"\d{1,4}(?:[¹²³⁴⁵⁶⁷⁸⁹]|-\d)?"
-_LEVEL = (r"(?:lg|lõige|lõiget|lõikes|lõike|p|punkt|punkti|punktis|lause|lauses|"
+#: The level names, **longest first**. Python's alternation is first-match, not
+#: longest-match, so a short name listed before the longer one it prefixes wins and the
+#: trailing ``[a-z]?`` swallows the next letter of the word it just truncated:
+#:
+#:   ``punkti f``  → ``p`` + ``u``  → "pu",     and the EU anchor became Article 6(1)(**u**)
+#:   ``lõiget 1``  → ``lõige`` + ``t``          and the "1" was never consumed, so the
+#:                                              pinpoint decayed to the bare section
+#:
+#: 103,298 held Estonian edges carried an anchor mangled this way — 96,380 lõiked whose
+#: number was dropped, 6,757 "pu", and 161 citations of a GDPR point (u) that does not
+#: exist. All three are one ordering mistake, and each produced a confident wrong anchor
+#: rather than no anchor, which is why none of them showed up as a failure.
+_LEVEL = (r"(?:lõikes|lõiget|lõike|lõige|lg|punktis|punkti|punkt|p|lauses|lause|"
           r"ls|jj)\s*\.?\s*\d{0,3}[a-z]?")
 _PROVISION = rf"§{{1,2}}\s*{_SECTION}(?:\s+{_LEVEL})*"
 #: "KarS § 199 lg 2" — the abbreviation leads, which is the ordinary Estonian order.
