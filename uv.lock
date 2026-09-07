@@ -238,7 +238,7 @@ wheels = [
 
 [[package]]
 name = "camoufox"
-version = "0.5.4"
+version = "0.5.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "browserforge" },
@@ -258,9 +258,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "ua-parser" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9f/61/8a02a7060caf0e58843906c615970f77fda54be5fc25927734e60efd129b/camoufox-0.5.4.tar.gz", hash = "sha256:a5213a4dd90398fa140cf010fd865129cc97b9cb4a7c2fc71c067f428ce49ddf", size = 1386260, upload-time = "2026-07-16T22:04:31.469Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/8d/0a26fe6e06bec4521f1da81b9b6b3536343b627911b36be3da2b20c1f5fa/camoufox-0.5.6.tar.gz", hash = "sha256:e4ae73ec9133001268ef0765534fda0e54550812a19850f141756cd572fe93b9", size = 1402246, upload-time = "2026-09-06T01:28:01.399Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/67/089c06b3df78638efe4b2c5bd63f37cbb8b2a1fc0ec36399b410dd25a47f/camoufox-0.5.4-py3-none-any.whl", hash = "sha256:c3f5fc4de0416d0f3363c029267c61718a3fda9e2668f526aff982ae36c30703", size = 1397377, upload-time = "2026-07-16T22:04:29.722Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/b3/5f93b720522cbc9e95d8b2a5e47a6a1797b61e45bd1f9a220f9a985af9e1/camoufox-0.5.6-py3-none-any.whl", hash = "sha256:b906836cd952376a466f0e55445f139b8a65adfb9f18ab55cb2cd0c727b11561", size = 1412511, upload-time = "2026-09-06T01:27:59.939Z" },
 ]
 
 [package.optional-dependencies]
@@ -508,11 +508,11 @@ wheels = [
 
 [[package]]
 name = "cssselect"
-version = "1.4.0"
+version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ec/2e/cdfd8b01c37cbf4f9482eefd455853a3cf9c995029a46acd31dfaa9c1dd6/cssselect-1.4.0.tar.gz", hash = "sha256:fdaf0a1425e17dfe8c5cf66191d211b357cf7872ae8afc4c6762ddd8ac47fc92", size = 40589, upload-time = "2026-01-29T07:00:26.701Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8e/5a/6d6fcf922709391fac986f0a03ad4546f4f45b94d10aeb6c1ee041599993/cssselect-1.5.0.tar.gz", hash = "sha256:3cbe82dd7acbee9ba9e5723b5f9e4749826912f1fb31cd7f92aabed5fde15b15", size = 47598, upload-time = "2026-07-27T09:17:34.189Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/0c/7bb51e3acfafd16c48875bf3db03607674df16f5b6ef8d056586af7e2b8b/cssselect-1.4.0-py3-none-any.whl", hash = "sha256:c0ec5c0191c8ee39fcc8afc1540331d8b55b0183478c50e9c8a79d44dbceb1d8", size = 18540, upload-time = "2026-01-29T07:00:24.994Z" },
+    { url = "https://files.pythonhosted.org/packages/60/e9/6734502f67533a752ea8b1c8f7f227c94eecf300252ba8bf23e3e59d8a36/cssselect-1.5.0-py3-none-any.whl", hash = "sha256:1d1aded98e82bdde447ded990a191fd6916177c4f0c914fb62eccd58e2ffcdcc", size = 20797, upload-time = "2026-07-27T09:17:33.04Z" },
 ]
 
 [[package]]
@@ -2257,7 +2257,7 @@ wheels = [
 
 [[package]]
 name = "scrapling"
-version = "0.4.9"
+version = "0.4.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cssselect" },
@@ -2267,9 +2267,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "w3lib" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/34/61b72964fdeed6bcb9528262870b9870c936eac55541f39254ef876985ef/scrapling-0.4.9.tar.gz", hash = "sha256:e08afab736e5bd3337173e524fee99aea3073476e86d44d942af4bef9496a499", size = 156809, upload-time = "2026-06-07T18:42:38.564Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/39/74b4c84e1492e483331631272ef881ea96f9933fa7153fe5a85043b8f737/scrapling-0.4.15.tar.gz", hash = "sha256:72406900f437316209dd05d9853dae04420f1cab0e11071604bb4588b6e2f713", size = 178459, upload-time = "2026-08-23T19:43:49.292Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/e6/03712d0b3240b3b6af6dc8aa19f0f24348fa54f4a4497b09c2d5c511552f/scrapling-0.4.9-py3-none-any.whl", hash = "sha256:00c7fae4641d948fb26486fd1da22143e5296dc86ef821b8426c0c2854c529ef", size = 158609, upload-time = "2026-06-07T18:42:36.775Z" },
+    { url = "https://files.pythonhosted.org/packages/87/68/bdccc7c459eb90d442cbc89a028c893381cf363165c7c58f024307b8d9ed/scrapling-0.4.15-py3-none-any.whl", hash = "sha256:ae66bde9f63afb793ad6f93bd76b451e29f1631347465a553c4e7765c0ecc1f2", size = 180463, upload-time = "2026-08-23T19:43:47.569Z" },
 ]
 
 [[package]]
