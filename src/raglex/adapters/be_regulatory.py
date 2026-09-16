@@ -14,6 +14,7 @@ their born-digital text and use the normal OCR fallback only when it is actually
 from __future__ import annotations
 
 import io
+import logging
 import re
 import unicodedata
 import zipfile
@@ -29,6 +30,8 @@ from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..extraction.ocr import ocr_pdf, text_or_ocr
 from .be_gba_decisions import detect_language, parse_dutch_date, result_total
+
+log = logging.getLogger(__name__)
 
 GBA_BASE = "https://www.gegevensbeschermingsautoriteit.be"
 GBA_SEARCH = f"{GBA_BASE}/burger/zoeken"
@@ -346,7 +349,17 @@ class BIPTPublicationsAdapter(BaseAdapter):
     def _publication_urls(self, url: str, title: str) -> list[tuple[str, str]]:
         if "/operators/topic/" not in url:
             return [(url, title)]
-        return bipt_topic_decisions(self._client.get(url).content)
+        try:
+            return bipt_topic_decisions(self._client.get(url).content)
+        except FetchError as exc:
+            # Dossier containers are incidental index pages. One withdrawn/broken
+            # dossier has returned HTTP 500 on every live watch since August; letting
+            # it abort discovery prevented every later decision in the register from
+            # being seen. Keep the omission explicit in the service logs while
+            # continuing with independently listed publications.
+            log.warning("%s: skipping unavailable BIPT dossier %s: %s",
+                        self.source, url, exc)
+            return []
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         global_page = 0

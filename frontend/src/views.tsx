@@ -7493,6 +7493,10 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   if (!s) return null;
   const links = (ids: string[]) => ids.map((x, i) => (
     <Fragment key={x}>{i > 0 && ", "}<DocLink id={x} onOpen={() => open(x)}>{x}</DocLink></Fragment>));
+  // A Cellar expression may be held as metadata while no English body was available.
+  // Never offer that blank record as the version to read; the status payload keeps it
+  // visible separately as the latest held/applicable expression.
+  const readableApplicable = s.latest_applicable_readable_consolidation;
   const lines: any[] = [];
   if (s.repealed_by?.length) lines.push(<span key="rep"><b>Repealed / recast</b> by {links(s.repealed_by)}</span>);
   if (s.amended_by?.length) lines.push(<span key="am"><b>Amended</b> by {links(s.amended_by)}</span>);
@@ -7507,19 +7511,25 @@ function LegStatusBanner({ id, open }: { id: string; open: (id: string, a?: stri
   } else if (s.version_state === "future_consolidation") {
     versionNotice = <><b>Future consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""}.</b>
       {" "}It is not yet the latest applicable text
-      {s.latest_applicable_consolidation ? <>; latest applicable consolidation held by RagLex: {links([s.latest_applicable_consolidation.stable_id])}</> : "."}</>;
+      {readableApplicable ? <>; latest readable applicable consolidation held by RagLex: {links([readableApplicable.stable_id])}</> : "."}</>;
   } else if (s.version_state === "latest_applicable_consolidation") {
     versionNotice = <><b>Latest applicable consolidation held by RagLex{s.as_at ? ` — ${s.as_at}` : ""}.</b>
-      {s.latest_held_consolidation?.stable_id !== id && <> A newer future snapshot is also held: {links([s.latest_held_consolidation.stable_id])}.</>}</>;
+      {s.latest_held_consolidation?.stable_id !== id && (s.latest_held_consolidation?.readable
+        ? <> A newer future snapshot is also held: {links([s.latest_held_consolidation.stable_id])}.</>
+        : <> A newer future expression is held as metadata only, without readable text.</>)}</>;
   } else if (s.version_state === "historical_consolidation") {
     versionNotice = <><b>Historical consolidated snapshot{s.as_at ? ` — ${s.as_at}` : ""}.</b>
-      {" "}A newer applicable consolidation is held: {links([s.latest_applicable_consolidation.stable_id])}.</>;
+      {readableApplicable?.stable_id !== id
+        ? <> A newer readable applicable consolidation is held: {links([readableApplicable.stable_id])}.</>
+        : <> This is the latest readable applicable consolidation; a newer metadata-only expression is held without text.</>}</>;
   } else if (s.version_state === "unverified_consolidation") {
     versionNotice = <><b>Consolidated snapshot{s.as_at ? ` as at ${s.as_at}` : ""}.</b>
       {" "}RagLex cannot confirm from its held version set that this is the latest.</>;
   } else if (s.version_state === "base_with_consolidation") {
     versionNotice = <><b>This is the base act, not a dated consolidated snapshot.</b>
-      {" "}Latest applicable consolidation held by RagLex: {links([s.latest_applicable_consolidation.stable_id])}.</>;
+      {readableApplicable
+        ? <> Latest readable applicable consolidation held by RagLex: {links([readableApplicable.stable_id])}.</>
+        : <> RagLex holds consolidation metadata but no readable applicable body; a Cellar refresh will run automatically.</>}</>;
   } else if (s.version_state === "revised_in_place") {
     // legislation.gov.uk revises the text in place, so this IS the consolidated text —
     // the question a reader has is not "which snapshot is this" but "how current is it".
@@ -7697,7 +7707,9 @@ export function VersionPanel({ id, open }: { id: string; open: (id: string, a?: 
         {msg && <span className={msg.startsWith("error") ? "err" : "ok"} style={{ fontSize: 12 }}>{msg}</span>}
       </div>}
       {versions.length > 0 && <p className="muted" style={{ marginTop: 6 }}>held versions: {versions.map((v: any) => (
-        <DocLink key={v.stable_id} id={v.stable_id} onOpen={() => open(v.stable_id)} style={{ marginRight: 10 }}>{v.date || v.stable_id}</DocLink>
+        v.readable
+          ? <DocLink key={v.stable_id} id={v.stable_id} onOpen={() => open(v.stable_id)} style={{ marginRight: 10 }}>{v.date || v.stable_id}</DocLink>
+          : <span key={v.stable_id} style={{ marginRight: 10 }} title="Metadata held, but this expression has no readable body">{v.date || v.stable_id} · no text</span>
       ))}</p>}
     </div>
   );

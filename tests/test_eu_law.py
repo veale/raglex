@@ -464,6 +464,12 @@ def test_textless_consolidation_is_never_the_read_target(tmp_path):
     status = f.legislative_status("32016R0679")
     assert newest in status["consolidations"]
     assert status["latest_applicable_consolidation"]["stable_id"] == newest
+    assert status["latest_applicable_readable_consolidation"]["stable_id"] == older
+    assert status["latest_applicable_consolidation"]["readable"] is False
+    listed = {v["stable_id"]: v for v in f.legislation_versions(
+        stable_id="32016R0679")["versions"]}
+    assert listed[older]["readable"] is True
+    assert listed[newest]["readable"] is False
 
     # no readable version at all → the base act itself is the read
     with f._open() as (cat, _r, _t):
@@ -485,6 +491,8 @@ def test_textless_consolidation_is_never_the_read_target(tmp_path):
     assert f.lookup(
         citation="32016R0679", cited_by=False,
         similar=False)["stable_id"] == "32016R0679"
+    assert f.legislative_status("32016R0679")[
+        "latest_applicable_readable_consolidation"] is None
 
 
 def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_path):

@@ -19,6 +19,7 @@ from raglex.adapters.be_regulatory import (
 )
 from raglex.adapters.registry import ADAPTERS, INCREMENTAL_MODE, SOURCE_INFO
 from raglex.core.models import DocType, Stub
+from raglex.core.errors import FetchError
 
 
 GBA = """
@@ -85,6 +86,17 @@ def test_dossier_follows_only_decision_children_and_dedupes():
     <a href='/operators/publication/consultation-a'>Consultation about draft decision</a>"""
     assert bipt_topic_decisions(html) == [
         ("https://www.bipt.be/operators/publication/decision-a", "Decision of 1 May 2024")]
+
+
+def test_one_unavailable_dossier_does_not_abort_the_whole_bipt_register(caplog):
+    class BrokenDossier:
+        def get(self, url, **_kwargs):
+            raise FetchError(f"HTTP 500 for {url}")
+
+    adapter = BIPTDecisionsAdapter(client=BrokenDossier())
+    url = "https://www.bipt.be/operators/topic/broken-dossier"
+    assert adapter._publication_urls(url, "Broken dossier") == []
+    assert "skipping unavailable BIPT dossier" in caplog.text
 
 
 def test_court_typology_from_titles():

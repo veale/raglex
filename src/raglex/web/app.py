@@ -419,7 +419,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
         status = facade.legislative_status(id)
         if (status.get("source") == "eu-legislation"
-                and status.get("version_state") == "base_without_consolidation"
+                and not status.get("latest_applicable_readable_consolidation")
                 and re.fullmatch(r"3\d{4}[RLD]\d{4}", id or "", re.I)):
             checked = status.get("consolidations_checked_at")
             try:

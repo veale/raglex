@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from raglex.adapters.echr import ECHRAdapter, appno_from_ecli, parse_body_html
+from raglex.adapters.echr import ECHRAdapter, _hudoc_json, appno_from_ecli, parse_body_html
 from raglex.citations import extract_citations
 from raglex.citations.snowball import _classify
 
@@ -24,6 +24,33 @@ class _FakeClient:
         class R:
             content = _HTML if "conversion" in url else _RESULTS
         return R()
+
+
+def test_hudoc_browser_fallback_decodes_wrapped_json_and_preserves_failures():
+    from raglex.core.errors import FetchError
+
+    class Blocked:
+        def get(self, _url, **_kw):
+            raise FetchError("HTTP 403", transient=False)
+
+    class WafFetcher:
+        def __init__(self, html): self.html = html
+        def fetch(self, _url):
+            from types import SimpleNamespace
+            return SimpleNamespace(status=200 if self.html else 503, html=self.html)
+
+    wrapped = f"<html><body><pre>{_RESULTS.decode().replace('&', '&amp;')}</pre></body></html>"
+    assert _hudoc_json(wrapped)["resultcount"] == 2
+    ad = ECHRAdapter(ids="58170/13", client=Blocked(), waf_fetcher=WafFetcher(wrapped))
+    assert next(iter(ad.discover(None))).stable_id == "ECLI:CE:ECHR:2021:0525JUD005817013"
+
+    broken = ECHRAdapter(ids="58170/13", client=Blocked(), waf_fetcher=WafFetcher(None))
+    try:
+        list(broken.discover(None))
+    except FetchError as exc:
+        assert "403" in str(exc)
+    else:
+        raise AssertionError("a failed browser fallback must not look like an empty result")
 
 
 def test_appno_from_ecli():

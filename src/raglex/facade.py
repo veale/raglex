@@ -1797,6 +1797,11 @@ class Facade:
                 cons_base = str(meta["consolidation_of"])
                 lineage_base = cons_base
             held_versions = cat.legislative_versions(lineage_base)
+            readable_version_ids = {
+                sid for sid, _version_date in held_versions
+                if (version_doc := cat.get_document(sid)) is not None
+                and bool(version_doc["has_text"])
+            }
             # editorial-lag backlog (UK unapplied effects), if this act is on the re-check queue
             eff = cat.conn.execute(
                 "SELECT outstanding FROM effects_refresh WHERE stable_id = ?", (stable_id,)).fetchone()
@@ -1835,7 +1840,8 @@ class Facade:
         # version message from every held lineage expression so the reader can tell whether
         # this snapshot is historical, future, or the latest one actually held by RagLex.
         consolidation_versions = [
-            {"stable_id": sid, "as_at": version_date}
+            {"stable_id": sid, "as_at": version_date,
+             "readable": sid in readable_version_ids}
             for sid, version_date in held_versions if is_consolidation(sid)
         ]
         # ``is_consolidation`` is a CELEX test (sector 0 + date), so it answers "is this an
@@ -1845,7 +1851,8 @@ class Facade:
         # dated versions in the versions panel while the banner above it said none were
         # held. Keep them, under their own name; they are not consolidations.
         point_in_time_versions = [
-            {"stable_id": sid, "as_at": version_date}
+            {"stable_id": sid, "as_at": version_date,
+             "readable": sid in readable_version_ids}
             for sid, version_date in held_versions if not is_consolidation(sid)
         ]
         consolidations = sorted(set(consolidations) | {
@@ -1857,6 +1864,12 @@ class Facade:
             row for row in consolidation_versions if row["as_at"] <= today
         ]
         latest_applicable = applicable_versions[-1] if applicable_versions else None
+        readable_applicable_versions = [
+            row for row in applicable_versions if row["readable"]
+        ]
+        latest_readable_applicable = (
+            readable_applicable_versions[-1] if readable_applicable_versions else None
+        )
         if pit_match:
             version_state = "point_in_time"
         elif is_cons and (consolidation_date(stable_id) or "") > today:
@@ -1977,6 +1990,11 @@ class Facade:
             "version_state": version_state,
             "latest_held_consolidation": latest_held,
             "latest_applicable_consolidation": latest_applicable,
+            # The held newest expression can be a metadata-only language edition.
+            # Keep reporting it above, but give readers a target that can actually
+            # replace the base text. The status endpoint also uses this absence to
+            # retry Cellar when a previously textless English rendition appears.
+            "latest_applicable_readable_consolidation": latest_readable_applicable,
             "consolidation_versions": consolidation_versions,
             "point_in_time_versions": point_in_time_versions,
             "consolidations_checked_at": meta.get("consolidations_checked_at"),
@@ -9852,6 +9870,7 @@ class Facade:
                     "stable_id": sid,
                     "date": version_date,
                     "title": row["title"] if row is not None else None,
+                    "readable": bool(row is not None and row["has_text"]),
                     "kind": "consolidation" if is_consolidation(sid) else "point_in_time",
                 })
             return {

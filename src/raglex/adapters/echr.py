@@ -122,6 +122,24 @@ def _feed_url(query: str, start: int, length: int) -> str:
             f"&start={start}&length={length}")
 
 
+def _hudoc_json(payload: bytes | str) -> dict:
+    """Decode HUDOC JSON returned directly or rendered inside a browser ``<pre>``.
+
+    Chromium wraps a top-level JSON response in a tiny HTML document. The fallback used
+    for HUDOC's WAF therefore cannot assume that ``page.content()`` is the raw response.
+    Treat malformed success bodies as failures, never as an empty register.
+    """
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8", errors="replace")
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError):
+        data = json.loads(BeautifulSoup(payload or "", "html.parser").get_text())
+    if not isinstance(data, dict):
+        raise ValueError("HUDOC response is not an object")
+    return data
+
+
 def _kpdate(columns: dict) -> str:
     """The ISO date HUDOC sorts and filters on (``2026-07-23T00:00:00`` → ``2026-07-23``).
 
@@ -257,7 +275,7 @@ class ECHRAdapter(BaseAdapter):
     def __init__(self, *, ids: str | tuple[str, ...] | None = None,
                  collections: str | tuple[str, ...] | None = None,
                  query: str | None = None,
-                 client: RateLimitedClient | None = None) -> None:
+                 client: RateLimitedClient | None = None, waf_fetcher=None) -> None:
         if isinstance(ids, str):
             ids = tuple(i.strip() for i in ids.split(",") if i.strip())
         self.ids = tuple(ids) if ids else ()
@@ -266,6 +284,36 @@ class ECHRAdapter(BaseAdapter):
         self.collections = tuple(collections) if collections else _FEED_COLLECTIONS
         self.query = (query or "").strip() or None
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
+        self._waf_fetcher = waf_fetcher
+
+    def _get_json(self, url: str) -> dict:
+        """Fetch one HUDOC API response, escalating its WAF to the shared browser.
+
+        HUDOC began returning 403 to the plain client in September 2026. Returning an
+        empty list here would advance a watch over a broken source; if both transports
+        fail, the original error must propagate so the cursor stays put.
+        """
+        try:
+            payload: bytes | str = self._client.get(url).content
+        except FetchError as exc:
+            if not re.search(r"HTTP\s+(?:403|429|503)\b", str(exc), re.I):
+                raise
+            if self._waf_fetcher is None:
+                from ..scraping.fetcher import get_fetcher
+                # On production the stealth tier is the linked Scrapling MCP service;
+                # unlike a direct local browser it is admitted by HUDOC's current WAF.
+                # It retains the bounded local browser fallback for installations that
+                # do not configure that service.
+                self._waf_fetcher = get_fetcher(
+                    "stealth", source=self.source, min_interval=self.min_interval)
+            page = self._waf_fetcher.fetch(url)
+            if page.status >= 400 or not page.html:
+                raise exc
+            payload = page.html
+        try:
+            return _hudoc_json(payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise FetchError(f"{self.source}: HUDOC returned invalid JSON", transient=True) from exc
 
     def _lookup(self, ident: str) -> dict | None:
         """Resolve an ECLI / app-number / itemid to a HUDOC judgment's metadata columns."""
@@ -289,14 +337,10 @@ class ECHRAdapter(BaseAdapter):
             # it does index docname, so we resolve human-rights cases cited only by name/EHRR
             # via a name search. Fuzzier (inferred), but it's the only handle EHRR gives.
             field, value = "docname", re.sub(r"\bv\b\.?", "v.", ident).strip()
-        try:
-            resp = self._client.get(_hudoc_query(field, value))
-        except FetchError:
-            return []
-        try:
-            rows = json.loads(resp.content)["results"]
-        except (ValueError, KeyError, TypeError):
-            return []
+        data = self._get_json(_hudoc_query(field, value))
+        rows = data.get("results")
+        if not isinstance(rows, list):
+            raise FetchError(f"{self.source}: HUDOC response omitted results", transient=True)
         return _rank_judgments(rows)
 
     def _stub(self, ranked: list[dict]) -> Stub | None:
@@ -364,13 +408,10 @@ class ECHRAdapter(BaseAdapter):
         oldest: str | None = None
         while max_pages is None or pages < max_pages:
             query = _feed_query(self.collections, before=before, extra=self.query)
-            try:
-                resp = self._client.get(_feed_url(query, start, _FEED_PAGE))
-                rows = json.loads(resp.content).get("results") or []
-            except FetchError:
-                raise
-            except (ValueError, KeyError, TypeError):
-                return
+            data = self._get_json(_feed_url(query, start, _FEED_PAGE))
+            rows = data.get("results")
+            if not isinstance(rows, list):
+                raise FetchError(f"{self.source}: HUDOC feed omitted results", transient=True)
             pages += 1
             if not rows:
                 return
