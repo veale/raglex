@@ -53,6 +53,22 @@ def test_hudoc_browser_fallback_decodes_wrapped_json_and_preserves_failures():
         raise AssertionError("a failed browser fallback must not look like an empty result")
 
 
+def test_hudoc_uses_linked_stealth_service_without_logging_an_expected_403(monkeypatch):
+    from types import SimpleNamespace
+
+    class PlainMustNotRun:
+        def get(self, _url, **_kw):
+            raise AssertionError("linked production service should be the first transport")
+
+    class WafFetcher:
+        def fetch(self, _url):
+            return SimpleNamespace(status=200, html=_RESULTS.decode())
+
+    monkeypatch.setenv("RAGLEX_SCRAPLING_MCP_URL", "http://scrapling.example/mcp")
+    ad = ECHRAdapter(ids="58170/13", client=PlainMustNotRun(), waf_fetcher=WafFetcher())
+    assert next(iter(ad.discover(None))).stable_id == "ECLI:CE:ECHR:2021:0525JUD005817013"
+
+
 def test_appno_from_ecli():
     assert appno_from_ecli("ECLI:CE:ECHR:2021:0525JUD005817013") == "58170/13"
     assert appno_from_ecli("ECLI:CE:ECHR:1975:0221JUD000445170") == "4451/70"

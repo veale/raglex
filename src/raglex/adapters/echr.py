@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import date as _date
 from typing import Iterator
@@ -285,6 +286,11 @@ class ECHRAdapter(BaseAdapter):
         self.query = (query or "").strip() or None
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
         self._waf_fetcher = waf_fetcher
+        # HUDOC currently blocks plain requests from production. Going straight through
+        # the already-linked service avoids filing an anti-bot diagnostic on every new
+        # scheduler process even though the fallback succeeds. Developer installs with
+        # no linked service retain the cheap plain-client-first path.
+        self._prefer_waf = bool(os.environ.get("RAGLEX_SCRAPLING_MCP_URL"))
 
     def _get_json(self, url: str) -> dict:
         """Fetch one HUDOC API response, escalating its WAF to the shared browser.
@@ -293,11 +299,16 @@ class ECHRAdapter(BaseAdapter):
         empty list here would advance a watch over a broken source; if both transports
         fail, the original error must propagate so the cursor stays put.
         """
-        try:
-            payload: bytes | str = self._client.get(url).content
-        except FetchError as exc:
-            if not re.search(r"HTTP\s+(?:403|429|503)\b", str(exc), re.I):
-                raise
+        original_error: FetchError | None = None
+        payload: bytes | str | None = None
+        if not self._prefer_waf:
+            try:
+                payload = self._client.get(url).content
+            except FetchError as exc:
+                if not re.search(r"HTTP\s+(?:403|429|503)\b", str(exc), re.I):
+                    raise
+                original_error = exc
+        if payload is None:
             if self._waf_fetcher is None:
                 from ..scraping.fetcher import get_fetcher
                 # On production the stealth tier is the linked Scrapling MCP service;
@@ -306,9 +317,17 @@ class ECHRAdapter(BaseAdapter):
                 # do not configure that service.
                 self._waf_fetcher = get_fetcher(
                     "stealth", source=self.source, min_interval=self.min_interval)
-            page = self._waf_fetcher.fetch(url)
+            try:
+                page = self._waf_fetcher.fetch(url)
+            except Exception as exc:  # noqa: BLE001 — preserve the useful primary failure
+                if original_error is not None:
+                    raise original_error from exc
+                raise FetchError(f"{self.source}: HUDOC stealth fetch failed", transient=True) from exc
             if page.status >= 400 or not page.html:
-                raise exc
+                if original_error is not None:
+                    raise original_error
+                raise FetchError(
+                    f"{self.source}: HUDOC stealth HTTP {page.status}", transient=True)
             payload = page.html
         try:
             return _hudoc_json(payload)

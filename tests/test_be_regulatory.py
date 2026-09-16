@@ -89,6 +89,9 @@ def test_dossier_follows_only_decision_children_and_dedupes():
 
 
 def test_one_unavailable_dossier_does_not_abort_the_whole_bipt_register(caplog):
+    import logging
+
+    caplog.set_level(logging.INFO)
     class BrokenDossier:
         def get(self, url, **_kwargs):
             raise FetchError(f"HTTP 500 for {url}")

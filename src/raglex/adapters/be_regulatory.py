@@ -357,8 +357,8 @@ class BIPTPublicationsAdapter(BaseAdapter):
             # it abort discovery prevented every later decision in the register from
             # being seen. Keep the omission explicit in the service logs while
             # continuing with independently listed publications.
-            log.warning("%s: skipping unavailable BIPT dossier %s: %s",
-                        self.source, url, exc)
+            log.info("%s: skipping unavailable BIPT dossier %s: %s",
+                     self.source, url, exc)
             return []
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
