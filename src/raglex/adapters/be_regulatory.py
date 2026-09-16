@@ -386,8 +386,14 @@ class BIPTPublicationsAdapter(BaseAdapter):
                         break
                     return
                 html = first if page == 0 else self._search(facet, page)
-                links = bipt_listing_links(html, decisions_only=decisions_only)
-                if not links and page * PAGE_SIZE_BIPT < total:
+                all_links = bipt_listing_links(html)
+                links = (bipt_listing_links(html, decisions_only=True)
+                         if decisions_only else all_links)
+                # ``file_reference`` contains consultations and other dossier topics as
+                # well as decisions. A valid page can therefore become empty after the
+                # decision-title filter; only an empty RAW results page means the source
+                # silently stopped inside its advertised total.
+                if not all_links and page * PAGE_SIZE_BIPT < total:
                     raise FetchError(f"{self.source}: {facet} page {page} was unexpectedly empty")
                 for url, listing_title, listed_date in links:
                     for landing, child_title in self._publication_urls(url, listing_title):

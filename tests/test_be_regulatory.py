@@ -102,6 +102,19 @@ def test_one_unavailable_dossier_does_not_abort_the_whole_bipt_register(caplog):
     assert "skipping unavailable BIPT dossier" in caplog.text
 
 
+def test_non_decision_topic_page_is_not_mistaken_for_an_empty_register_page():
+    html = b"""<html><title>1 result found</title><li class="list-group-item">
+      <a href="/operators/topic/consultation-only"><h2>Consultation on fibre tariffs</h2>
+      <time datetime="2026-01-02 00:00">02/01/2026</time></a></li></html>"""
+
+    class Client:
+        def get(self, url, **_kwargs):
+            return SimpleNamespace(content=html, url=url)
+
+    adapter = BIPTDecisionsAdapter(client=Client(), watch_mode=True)
+    assert list(adapter.discover(None, max_pages=1)) == []
+
+
 def test_court_typology_from_titles():
     assert classify_bipt_court("Judgement of the Market Court")[0] == "be-market-court"
     assert classify_bipt_court("Judgement of the Court of Cassation")[0] == "be-cassation"
