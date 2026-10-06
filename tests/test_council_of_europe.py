@@ -123,6 +123,7 @@ ECHR_HTML = """
 <h2>Another topic</h2>
 <a href="/documents/d/echr/FS_Children_ENG">Children's rights</a>
 <a href="/documents/d/echr/FS_Children_FRA">Droits des enfants</a>
+<a href="/documents/d/echr/translations_pending_ENG?download=true">Translations pending</a>
 <h3>Handbook on European data protection law</h3>
 <p><a href="/documents/d/echr/Handbook_data_protection_ENG">English</a> (2018)</p>
 """

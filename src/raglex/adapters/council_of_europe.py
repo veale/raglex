@@ -352,6 +352,11 @@ def parse_echr_publications(html: str | bytes, collection: str) -> list[dict]:
         if "/documents/d/echr/" not in path or not re.search(r"_ENG(?:$|[/?#])", url, re.I):
             continue
         slug = path.rstrip("/").rsplit("/", 1)[-1]
+        # This is a status page saying that some translations are pending, despite its
+        # document-shaped URL and ``_ENG`` suffix. It returns HTML, not a publication.
+        # Treating it as a PDF left the monthly source permanently failing one item.
+        if slug.casefold() == "translations_pending_eng":
+            continue
         if slug.casefold() in seen:
             continue
         seen.add(slug.casefold())
