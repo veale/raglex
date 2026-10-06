@@ -107,6 +107,27 @@ def test_tick_runs_only_due_watches():
     assert f.tick_watches()["ran"] == 0
 
 
+def test_failed_watch_attempt_advances_cadence_instead_of_retrying_every_tick(monkeypatch):
+    f = _facade()
+    w = f.create_watch(name="broken monthly source", spec={"source": "uk-grc"},
+                       cadence_minutes=43200)
+
+    def broken_harvest(*_args, **_kwargs):
+        raise RuntimeError("upstream broke")
+
+    monkeypatch.setattr(f, "harvest", broken_harvest)
+    try:
+        f.run_watch(watch_id=w["watch_id"])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the source failure must still reach the job as a failure")
+
+    refreshed = f.get_watch(w["watch_id"])
+    assert refreshed["last_run_at"] is not None
+    assert w["watch_id"] not in f.due_watch_ids()
+
+
 def test_keyword_seed_docs_unquotes_phrase_keywords():
     """A phrase keyword quoted for the source API ('"data protection"') must still
     post-filter — the quote characters never appear in a document, so the quoted

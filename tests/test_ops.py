@@ -87,6 +87,19 @@ def test_alert_on_stale_source(catalogue):
     assert any(a.code == "no_new_documents" and a.subject == "quiet" for a in alerts)
 
 
+def test_monthly_watch_is_not_called_stale_before_its_next_poll(catalogue):
+    _doc(catalogue, "a", source="quiet")
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    catalogue.conn.execute(
+        "INSERT OR REPLACE INTO sources (key, last_yield_at, consecutive_failures) VALUES ('quiet', ?, 0)",
+        (old,),
+    )
+    catalogue.add_watch("quiet monthly", '{"source":"quiet"}', 43200)
+    catalogue.conn.commit()
+    assert not any(a.code == "no_new_documents" and a.subject == "quiet"
+                   for a in check_alerts(catalogue, AlertThresholds(stale_days=14)))
+
+
 def test_no_alerts_when_healthy(catalogue):
     _doc(catalogue, "a")
     catalogue.record_run("uk-grc", yielded=True, failed=False)

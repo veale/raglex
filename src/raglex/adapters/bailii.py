@@ -14,6 +14,8 @@ the UI — the import then runs entirely locally against their own download.
 
 from __future__ import annotations
 
+import re
+
 # ── jurisdiction mapping ────────────────────────────────────────────────────
 
 _JURIS: dict[str, str] = {
@@ -124,6 +126,7 @@ _LII_SEARCH: dict[str, tuple[str, str]] = {
     "SG": ("CommonLII", "http://www.commonlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
     "HK": ("CommonLII", "http://www.commonlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
     "MY": ("CommonLII", "http://www.commonlii.org/cgi-bin/sinosrch.cgi?method=boolean&query={q}"),
+    "DE": ("dejure", "https://dejure.org/cgi-bin/suche?Suchenach={q}"),
 }
 
 
@@ -161,6 +164,18 @@ def external_link(candidate: str | None, raw: str | None) -> dict | None:
     cite = (raw or candidate or "").strip()
     if not cite:
         return None
+    ecli = re.match(r"(?i)^ECLI:([A-Z]{2}):", candidate or "")
+    if ecli and ecli.group(1).upper() in _LII_SEARCH:
+        name, tmpl = _LII_SEARCH[ecli.group(1).upper()]
+        return {"kind": "search", "url": tmpl.format(q=quote_plus(cite)),
+                "label": f"find on {name} ↗", "can_upload": True}
+    # US slip opinions are cited by docket before they receive a reporter citation.
+    # CourtListener is the relevant search surface; BAILII can never hold them.
+    if re.search(r"(?i)\bNo\.\s*[\w-]+.*\b(?:\d+(?:st|nd|rd|th)|D\.C\.)\s+Cir\.", cite):
+        return {"kind": "search",
+                "url": "https://www.courtlistener.com/?q=" + quote_plus(cite),
+                "label": "find on CourtListener ↗", "can_upload": True,
+                "site": "courtlistener"}
     head = (candidate or "").split("/", 1)[0]
     known = lookup(head) if head else None
     if known and known.jurisdiction in _LII_SEARCH:

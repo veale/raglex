@@ -93,6 +93,24 @@ def test_lookup_unheld_returns_external_links():
     assert any("bailii.org" in l["url"] for l in r["external_links"])
 
 
+def test_unheld_german_ecli_is_not_misclassified_as_british():
+    f = _facade()
+    r = f.lookup(citation="ECLI:DE:VGK:2025:0617.1L1930.22.00", autofetch=False)
+    assert r["jurisdiction"] == "Germany"
+    assert any("dejure.org" in link["url"] for link in r["external_links"])
+    assert not any("bailii.org" in link["url"] for link in r["external_links"])
+
+
+def test_us_slip_opinion_docket_falls_back_to_courtlistener_not_bailii():
+    f = _facade()
+    r = f.lookup(
+        citation="NetChoice, LLC v. Bonta, No. 25-2366 (9th Cir. Mar. 12, 2026)",
+        autofetch=False,
+    )
+    assert any("courtlistener.com" in link["url"] for link in r["external_links"])
+    assert not any("bailii.org" in link["url"] for link in r["external_links"])
+
+
 def test_lookup_empty_is_handled():
     assert "error" in _facade().lookup(citation="   ")
 
@@ -137,6 +155,13 @@ def test_holdings_overview_shape():
     assert uk and uk[0]["held"]["cases"] >= 1
     # fetch-on-demand names the live adapters for the jurisdiction
     assert "uk-caselaw" in uk[0]["fetch_on_demand"]
+
+
+def test_search_coverage_names_sources_fetchable_but_not_yet_held():
+    coverage = _facade().freetext_index_summary()
+    us = [row for row in coverage["fetchable_on_demand"]
+          if row["jurisdiction"] == "United States"]
+    assert us and "us-caselaw" in us[0]["sources"]
 
 
 # -- the MCP server surface --------------------------------------------------

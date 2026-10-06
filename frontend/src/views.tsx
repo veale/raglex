@@ -1643,13 +1643,16 @@ function segBody(text: string, s: { label: string; char_start: number; char_end:
   }
   const num = labelNum(s.label);
   const raw = text.slice(s.char_start, s.char_end);
-  const m = num ? new RegExp(`^(\\s*)(${num})([.)\\]]?)(\\s+)`).exec(raw) : null;
+  // Canadian decisions conventionally use "[43]". The old matcher started at the
+  // digit, so it missed the opening bracket and rendered the segment label plus the
+  // identical inline number ("[43] [43]"). Capture the complete visible marker.
+  const m = num ? new RegExp(`^(\\s*)(\\[?${num}[.)\\]]?)(\\s+)`).exec(raw) : null;
   if (!m) return { showLabel: true, body: renderCited(text, s.char_start, s.char_end, cites, onCite, paraSet, onPara, idPrefix, s.formatting) };
   const numEnd = s.char_start + m[0].length;
   return {
     showLabel: false,
     body: <>
-      <b className="seg-num">{m[2]}{m[3]}</b>{" "}
+      <b className="seg-num">{m[2]}</b>{" "}
       {renderCited(text, numEnd, s.char_end, cites, onCite, paraSet, onPara, idPrefix, s.formatting)}
     </>,
   };

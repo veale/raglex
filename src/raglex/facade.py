@@ -840,6 +840,11 @@ def _candidate_jurisdiction(candidate: str | None) -> str:
     names → "uk"."""
     if not candidate:
         return "uk"
+    ecli = re.match(r"(?i)^ECLI:([A-Z]{2}):", candidate)
+    if ecli:
+        # ECLI states its country explicitly.  Going through the adapter taxonomy loses
+        # adapter-less national courts (and used to call every German ECLI British).
+        return _retrieval_bucket(ecli.group(1))
     from .citations.taxonomy import classify_candidate
 
     return _CATEGORY_JURISDICTION.get(classify_candidate(candidate).category, "uk")
@@ -4217,8 +4222,10 @@ class Facade:
         if not results and "citation_match" not in out:
             out["nothing_found"] = (
                 "No title/citation match. Try fewer/among-title words, a party name, or a "
-                "citation; or overview() to see what jurisdictions are held, then "
-                "list_documents(source=…) to browse.")
+                "citation. If you can find a citation, pass it to lookup(): routable "
+                "authorities can be fetched on demand even when this corpus search is "
+                "empty. Use overview() for held coverage or list_documents(source=…) "
+                "to browse.")
         return out
 
     def list_documents(self, **filters) -> list[dict]:
@@ -4693,9 +4700,10 @@ class Facade:
         form = adapter = None
         if cand:
             form, _juris, adapter = _classify(cand, "case")
+        routable = adapter in _TARGETED_HARVEST
         # 2. silent autofetch when routable but not held
         fetched = False
-        if held_id is None and autofetch and cand and adapter is not None:
+        if held_id is None and autofetch and cand and routable:
             try:
                 hr = self.harvest_reference(ref=raw, candidate=cand)
             except Exception:  # noqa: BLE001 — a fetch failure just falls through to the URL
@@ -4757,9 +4765,9 @@ class Facade:
         bucket = _candidate_jurisdiction(cand) if cand else None
         return {
             "citation": raw, "candidate": cand, "held": False,
-            "form": form, "routable": adapter is not None,
+            "form": form, "routable": routable,
             "jurisdiction": dict(RETRIEVAL_JURISDICTIONS).get(bucket, bucket) if bucket else None,
-            "autofetch_attempted": bool(autofetch and cand and adapter is not None),
+            "autofetch_attempted": bool(autofetch and cand and routable),
             "external_links": links["links"],
             "note": ("Not held, and could not be fetched automatically — read it at one of "
                      "the external links (a free legal-information institute) and, if useful, "
@@ -6063,8 +6071,11 @@ class Facade:
     _DRILL_SORTS = {
         "authority": "pagerank DESC, cited_by DESC, d.decision_date DESC",
         "cited": "cited_by DESC, pagerank DESC, d.decision_date DESC",
-        "newest": "d.decision_date DESC, pagerank DESC",
-        "oldest": "d.decision_date ASC, pagerank DESC",
+        # Postgres puts NULL first for DESC unless told otherwise. Ireland's older
+        # imports include undated decisions, so "newest" used to begin with 1980s/90s
+        # records whose date was null and only then show genuinely recent cases.
+        "newest": "d.decision_date DESC NULLS LAST, pagerank DESC",
+        "oldest": "d.decision_date ASC NULLS LAST, pagerank DESC",
     }
 
     # administrative decisions = regulator output: OSS register rows (court dpa-xx)
@@ -11503,7 +11514,8 @@ class Facade:
         raw_s = (raw or "").strip() or None
         # a slug-shaped ref ("nzsc/2012/12") is a neutral citation we can build direct
         # pages from; a bare name or a raw report citation is not.
-        cand = slug if ("/" in slug and not slug.lower().startswith("http")) else None
+        cand = slug if (("/" in slug and not slug.lower().startswith("http"))
+                        or re.match(r"(?i)^ECLI:[A-Z]{2}:", slug)) else None
         out: list[dict] = []
         for link in lii_links(cand or ""):
             out.append({"site": link.site, "site_name": link.site_name, "url": link.url,
@@ -15342,6 +15354,8 @@ class Facade:
         something it simply has not indexed — so this is the *jurisdictions in the
         index*, not the configuration behind them. Configuring belongs in
         Admin > Search."""
+        from .adapters.registry import JURISDICTION_LABELS, SOURCE_INFO
+
         with self._open() as (cat, _rs, _ts):
             rows = cat.fts_indexed_by_source()
         by_jur: dict[str, int] = {}
@@ -15352,9 +15366,24 @@ class Facade:
             by_jur[jurisdiction] = by_jur.get(jurisdiction, 0) + r["n"]
         out = [{"jurisdiction": j, "documents": n} for j, n in by_jur.items()]
         out.sort(key=lambda x: -x["documents"])
+        fetchable: dict[str, list[str]] = {}
+        for source in _TARGETED_HARVEST:
+            info = SOURCE_INFO.get(source)
+            if not info:
+                continue
+            label = JURISDICTION_LABELS.get(info.jurisdiction or "", info.jurisdiction)
+            fetchable.setdefault(label, []).append(source)
+        fetch_rows = [
+            {"jurisdiction": jurisdiction, "sources": sorted(sources)}
+            for jurisdiction, sources in sorted(fetchable.items())
+        ]
         return {"jurisdictions": out,
                 "documents": sum(x["documents"] for x in out),
-                "sources": len([r for r in rows if r["n"]])}
+                "sources": len([r for r in rows if r["n"]]),
+                "fetchable_on_demand": fetch_rows,
+                "fetchable_note": (
+                    "These sources need not appear in the index or held counts: lookup() "
+                    "can fetch a recognised citation from them on demand.")}
 
     def set_freetext_scope(self, *, sources: list[str] | None = None,
                            note: str | None = None) -> dict:
@@ -16447,6 +16476,14 @@ class Facade:
             w = cat.get_watch(watch_id)
         if w is None:
             return {"error": f"no watch {watch_id}"}
+        # ``last_run_at`` is the scheduler's cadence cursor, not a success stamp. Set it
+        # before touching the network so a broken monthly source is retried next month,
+        # not every 15-minute scheduler tick. BIPT's one bad results page caused 117
+        # retained failed jobs (and 1,300+ duplicate diagnostics) in twenty days because
+        # only successful runs advanced this field. The job row remains the source of
+        # truth about success/failure; ``last_result_json`` remains the last success.
+        with self._open() as (cat, _rs, _ts):
+            cat.update_watch(watch_id, {"last_run_at": _now_iso()})
         spec = json.loads(w["spec_json"] or "{}")
         from .adapters.registry import SOURCE_INFO
 

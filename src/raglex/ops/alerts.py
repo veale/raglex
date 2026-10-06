@@ -16,6 +16,7 @@ to a pluggable notifier (Slack/Discord/email later; a logging notifier now) on:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -75,9 +76,34 @@ def _never_yields_again(source_key: str) -> bool:
     return INCREMENTAL_MODE.get(source_key) in {"closed", "bulk", "targeted"}
 
 
+def _source_stale_days(catalogue: Catalogue, default_days: int) -> dict[str, float]:
+    """Alert windows widened to fit each source's actual polling cadence.
+
+    A monthly watch cannot prove a parser has silently stopped after fourteen days: it
+    has not even been asked to run again. Give watched sources at least one and a half
+    cadence windows, while retaining the global floor for daily/weekly feeds.
+    """
+    limits: dict[str, float] = {}
+    for row in catalogue.list_watches():
+        if not row["enabled"]:
+            continue
+        try:
+            source = json.loads(row["spec_json"] or "{}").get("source")
+        except (TypeError, ValueError):
+            continue
+        if not source:
+            continue
+        limit = max(float(default_days), float(row["cadence_minutes"] or 0) / 1440 * 1.5)
+        # Multiple watches can cover one source; its fastest polling schedule is the
+        # earliest point at which staleness becomes meaningful.
+        limits[source] = min(limits.get(source, limit), limit)
+    return limits
+
+
 def check_alerts(catalogue: Catalogue, thresholds: AlertThresholds | None = None) -> list[Alert]:
     t = thresholds or AlertThresholds()
     alerts: list[Alert] = []
+    stale_days = _source_stale_days(catalogue, t.stale_days)
 
     for sh in source_dashboard(catalogue):
         if sh.consecutive_failures >= t.consecutive_failures:
@@ -95,7 +121,8 @@ def check_alerts(catalogue: Catalogue, thresholds: AlertThresholds | None = None
         # being read at all.
         if sh.documents > 0 and not _never_yields_again(sh.key):
             stale = _days_since(sh.last_yield_at)
-            if stale is not None and stale >= t.stale_days:
+            stale_limit = stale_days.get(sh.key, float(t.stale_days))
+            if stale is not None and stale >= stale_limit:
                 alerts.append(Alert(
                     "no_new_documents", WARNING, sh.key,
                     f"{sh.key} has yielded no new documents in {stale:.0f} days "

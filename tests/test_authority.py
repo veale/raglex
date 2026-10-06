@@ -279,6 +279,21 @@ def test_corpus_shape_and_drill(tmp_path):
                for i in f.jurisdiction_drill("United Kingdom", kind="cases")["items"])
 
 
+def test_newest_drill_puts_undated_cases_last(tmp_path):
+    f = _facade(tmp_path)
+    with f._open() as (cat, _rs, ts):
+        for sid, when in (("iehc/2026/1", date(2026, 1, 2)),
+                          ("iehc/1996/20", None)):
+            rec = Record(source="ie-caselaw", stable_id=sid, doc_type=DocType.JUDGMENT,
+                         title=sid, court="iehc", decision_date=when, text="judgment",
+                         raw_bytes=sid.encode(), extracted_via=ExtractedVia.STRUCTURED)
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, text_path=str(ts.put(rec.payload_hash, rec.text)))
+    rows = f.jurisdiction_drill(
+        "Ireland", court="iehc", kind="cases", sort="newest", limit=10)["items"]
+    assert [row["id"] for row in rows] == ["iehc/2026/1", "iehc/1996/20"]
+
+
 def _cited_by_edge(catalogue, seed, citer):
     # the CELLAR forward-discovery scaffold: stored REVERSED (src=cited seed,
     # dst=citer) because the citer isn't held yet — see facade.find_citing
