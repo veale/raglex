@@ -2203,9 +2203,12 @@ class Catalogue:
         cutoff = str(on_date or date.today().isoformat())[:10]
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
             cutoff = date.today().isoformat()
+        base_doc = self.get_document(base_id)
+        base_language = str(base_doc["source_language"] or "").lower() \
+            if base_doc is not None else ""
         rows = self.conn.execute(
             """
-            SELECT d.stable_id, d.meta_json, d.has_text, r.dst_anchor
+            SELECT d.stable_id, d.meta_json, d.has_text, d.source_language, r.dst_anchor
             FROM relations r JOIN documents d ON d.stable_id = r.src_id
             WHERE (r.dst_id = ? OR r.candidate_id = ?)
               AND r.relationship_type = 'consolidates'
@@ -2216,6 +2219,13 @@ class Catalogue:
             (str(row["stable_id"]), version_date)
             for row in rows
             if row["has_text"]
+            # CELLAR publishes each expression language by language. A French fallback
+            # is useful when opened explicitly, but it must not silently replace an
+            # English base act (the DSA did exactly that after its French consolidation
+            # became the first non-empty expression in the family).
+            and (not base_language
+                 or not str(row["source_language"] or "").lower()
+                 or str(row["source_language"] or "").lower() == base_language)
             and (version_date := self._version_date(row)) and version_date <= cutoff
         }, key=lambda item: (item[1], item[0]))
         return versions[-1] if versions else None
@@ -7017,11 +7027,32 @@ class Catalogue:
         of its family, so relevance ordering upstream still decides the page.
         """
         cutoff = str(on_date or date.today().isoformat())[:10]
+        # A version family can contain a publisher fallback in another language. The
+        # base row establishes what language an ordinary read requested. Keep a French
+        # consolidation directly addressable, but never collapse an English base onto
+        # it merely because the dated row is newer.
+        base_languages: dict[str, str] = {}
+        for row in rows:
+            base, version = cls.version_base_and_date(str(row["stable_id"] or ""))
+            try:
+                language = str(row["source_language"] or "").lower()
+            except (IndexError, KeyError, TypeError):
+                language = ""
+            if version is None and language:
+                base_languages[base] = language
+
         best: dict[str, object] = {}
         rank: dict[str, int] = {}
         for position, row in enumerate(rows):
             base, version = cls.version_base_and_date(str(row["stable_id"] or ""))
             rank.setdefault(base, position)
+            try:
+                language = str(row["source_language"] or "").lower()
+            except (IndexError, KeyError, TypeError):
+                language = ""
+            if language and base_languages.get(base) \
+                    and language != base_languages[base]:
+                continue
             incumbent = best.get(base)
             if incumbent is None or cls._better_version(row, incumbent, cutoff):
                 best[base] = row

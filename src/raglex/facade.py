@@ -1802,11 +1802,23 @@ class Facade:
                 cons_base = str(meta["consolidation_of"])
                 lineage_base = cons_base
             held_versions = cat.legislative_versions(lineage_base)
-            readable_version_ids = {
-                sid for sid, _version_date in held_versions
-                if (version_doc := cat.get_document(sid)) is not None
-                and bool(version_doc["has_text"])
-            }
+            lineage_doc = cat.get_document(lineage_base)
+            lineage_language = str(lineage_doc["source_language"] or "").lower() \
+                if lineage_doc is not None else ""
+            version_languages: dict[str, str | None] = {}
+            readable_version_ids: set[str] = set()
+            for sid, _version_date in held_versions:
+                version_doc = cat.get_document(sid)
+                if version_doc is None:
+                    continue
+                version_language = str(
+                    version_doc["source_language"] or "").lower() or None
+                version_languages[sid] = version_language
+                if bool(version_doc["has_text"]) and (
+                    not lineage_language or not version_language
+                    or version_language == lineage_language
+                ):
+                    readable_version_ids.add(sid)
             # editorial-lag backlog (UK unapplied effects), if this act is on the re-check queue
             eff = cat.conn.execute(
                 "SELECT outstanding FROM effects_refresh WHERE stable_id = ?", (stable_id,)).fetchone()
@@ -1846,7 +1858,8 @@ class Facade:
         # this snapshot is historical, future, or the latest one actually held by RagLex.
         consolidation_versions = [
             {"stable_id": sid, "as_at": version_date,
-             "readable": sid in readable_version_ids}
+             "readable": sid in readable_version_ids,
+             "source_language": version_languages.get(sid)}
             for sid, version_date in held_versions if is_consolidation(sid)
         ]
         # ``is_consolidation`` is a CELEX test (sector 0 + date), so it answers "is this an

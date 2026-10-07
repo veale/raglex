@@ -35,8 +35,9 @@ class _Row(dict):
         return dict.keys(self)
 
 
-def _v(stable_id, has_text=1, as_at=None):
-    row = _Row(stable_id=stable_id, has_text=has_text)
+def _v(stable_id, has_text=1, as_at=None, source_language=None):
+    row = _Row(stable_id=stable_id, has_text=has_text,
+               source_language=source_language)
     if as_at is not None:
         row["meta_json"] = json.dumps({"currency": {"as_at": as_at}})
     return row
@@ -59,6 +60,17 @@ def test_collapse_skips_a_textless_snapshot():
     rows = [_v("x/1@2020-01-01"), _v("x/1@2024-01-01", has_text=0)]
     got = Catalogue.collapse_version_rows(rows, on_date="2026-08-05")
     assert [r["stable_id"] for r in got] == ["x/1@2020-01-01"]
+
+
+def test_collapse_does_not_replace_an_english_base_with_a_french_fallback():
+    """The DSA's dated expression is available in French but not English. It remains
+    directly readable, but an ordinary English DSA search must keep the English base."""
+    rows = [
+        _v("32022R2065", source_language="en"),
+        _v("32022R2065@2022-10-27", source_language="fr"),
+    ]
+    got = Catalogue.collapse_version_rows(rows, on_date="2026-10-07")
+    assert [r["stable_id"] for r in got] == ["32022R2065"]
 
 
 def test_collapse_does_not_jump_to_a_future_consolidation():

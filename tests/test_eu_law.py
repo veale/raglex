@@ -495,6 +495,42 @@ def test_textless_consolidation_is_never_the_read_target(tmp_path):
         "latest_applicable_readable_consolidation"] is None
 
 
+def test_french_consolidation_does_not_replace_english_base_act(tmp_path):
+    """CELLAR has a French DSA consolidation but no English one. The fallback is a
+    valid explicit document, not permission to switch an English reader to French."""
+    from raglex.core.models import ExtractedVia, ResolutionStatus, TypedRelation
+
+    f = _leg_facade(tmp_path)
+    base, version = "32022R2065", "02022R2065-20221027"
+    with f._open() as (cat, _r, _t):
+        cat.upsert_document(Record(
+            source="eu-legislation", stable_id=base,
+            doc_type=DocType.LEGISLATION, title="Digital Services Act",
+            text="Article 1", language="en", source_language="en",
+            extracted_via=ExtractedVia.STRUCTURED,
+        ))
+        cat.upsert_document(Record(
+            source="eu-legislation", stable_id=version,
+            doc_type=DocType.LEGISLATION, title="Règlement sur les services numériques",
+            text="Article premier", language="fr", source_language="fr",
+            extracted_via=ExtractedVia.STRUCTURED,
+            extra={"language_fallback": "en-to-fr"},
+        ))
+        cat.add_relations(version, [TypedRelation(
+            relationship_type=RelationshipType.CONSOLIDATES,
+            raw_citation_string=base, dst_id=base,
+            extracted_via=ExtractedVia.STRUCTURED,
+            resolution_status=ResolutionStatus.RESOLVED,
+        )])
+
+    assert f.canonical_read_target(base)["stable_id"] == base
+    assert f.get_document(version).get("error") is None
+    status = f.legislative_status(base)
+    assert status["latest_applicable_consolidation"]["stable_id"] == version
+    assert status["latest_applicable_consolidation"]["readable"] is False
+    assert status["latest_applicable_readable_consolidation"] is None
+
+
 def test_consolidation_virtualises_base_recitals_for_reader_mcp_and_static(tmp_path):
     from raglex.config import Config
     from raglex.core.models import (
