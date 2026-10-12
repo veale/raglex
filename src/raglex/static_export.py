@@ -1002,6 +1002,10 @@ class StaticLawExporter:
                     "title": row["title"] or source_id,
                     "cite": oscola.get("text") or row["title"] or source_id,
                     "date": _date_text(row["decision_date"]),
+                    # Immutable for new records. On catalogues created before the
+                    # first-seen column, fetched_at is the earliest timestamp RagLex
+                    # retained and is kept as the honest compatibility fallback.
+                    "added": row["first_seen_at"] or row["fetched_at"],
                     "source": row["source"],
                     "source_label": self.facade.source_label(row["source"]),
                     "doc_type": row["doc_type"],
@@ -1384,6 +1388,7 @@ def build_static_export_cache(
 _PAGE_UNUSED_GROUP_FIELDS = frozenset({
     "doc_type", "has_inherited", "has_version_inherited", "target_keys",
     "whole_instrument", "relationships", "has_text", "raw_ext", "source", "mentions",
+    "added",
 })
 _PAGE_UNUSED_SNIPPET_FIELDS = frozenset({"raw"})
 _PAGE_UNUSED_SECTION_FIELDS = frozenset({"kind"})

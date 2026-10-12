@@ -336,6 +336,7 @@ CREATE TABLE IF NOT EXISTS documents (
     upstream_status_at TEXT,
     last_extracted_at TEXT,
     last_extraction_run_id TEXT,
+    first_seen_at    TEXT,
     fetched_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);

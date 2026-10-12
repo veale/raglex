@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS documents (
     upstream_status_at TEXT,
     last_extracted_at TEXT,
     last_extraction_run_id TEXT,
+    -- First insertion into this catalogue. Unlike fetched_at this never advances when
+    -- an upstream document is refreshed, so chronological feeds mean "new to RagLex".
+    first_seen_at    TEXT,
     fetched_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
@@ -976,6 +979,10 @@ class Catalogue:
             # A durable per-pass marker: a resumed citation scan excludes documents
             # already stamped with its root run id, regardless of ordering/new inserts.
             ("documents", "last_extraction_run_id", "TEXT"),
+            # The immutable ingestion clock used by chronological export pages and Atom
+            # feeds. Existing catalogues fall back to fetched_at; new/upserted rows pin
+            # that retained timestamp into this column and never advance it again.
+            ("documents", "first_seen_at", "TEXT"),
             # Retain citation-free regulator items for content-hash dedup/audit, but
             # omit them from retrieval and embedding.
             ("documents", "search_excluded", "INTEGER NOT NULL DEFAULT 0"),
@@ -1604,6 +1611,7 @@ class Catalogue:
         existing = self.get_document(record.stable_id)
         version = record.version
         changed = existing is not None and existing["payload_hash"] != record.payload_hash
+        stored_at = _now()
         # archive-old-version + upsert-doc + rewrite-edges is one atomic unit (so a crash
         # can't leave a doc with half its edges, or a lost version row).
         with self._atomic():
@@ -1620,8 +1628,9 @@ class Catalogue:
                 language, source_language, version, is_latest, landing_url,
                 raw_path, text_path, payload_hash, has_text, search_excluded,
                 extracted_via, added_by,
-                topic_tags, topic_score, upstream_status, fetched_at, meta_json
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                topic_tags, topic_score, upstream_status, first_seen_at, fetched_at,
+                meta_json
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(stable_id) DO UPDATE SET
                 ecli=excluded.ecli, source=excluded.source, doc_type=excluded.doc_type,
                 title=excluded.title, court=excluded.court,
@@ -1643,6 +1652,9 @@ class Catalogue:
                                      ELSE excluded.search_excluded END,
                 extracted_via=excluded.extracted_via,
                 topic_tags=excluded.topic_tags, topic_score=excluded.topic_score,
+                first_seen_at=COALESCE(
+                    documents.first_seen_at, documents.fetched_at,
+                    excluded.first_seen_at),
                 fetched_at=excluded.fetched_at, meta_json=excluded.meta_json
             """,
             (
@@ -1671,7 +1683,8 @@ class Catalogue:
                 json.dumps(record.topic_tags),
                 record.topic_score,
                 str(UpstreamStatus.LIVE),
-                _now(),
+                stored_at,
+                stored_at,
                 json.dumps(record.extra) if record.extra else None,
             ),
         )

@@ -43,6 +43,7 @@ from .static_export import (
     render_cached_export_assets,
     static_export_status,
 )
+from .static_updates import render_cached_updates
 
 
 def _xml(value: str) -> str:
@@ -289,6 +290,9 @@ def load_config(config: Config | None = None) -> dict:
             # whole-instrument edition of it unusable, while its competition Articles
             # alone are an ordinary page.
             "only": _clean_only(entry.get("only")),
+            # A chronological companion page and cases-only Atom feed. They deliberately
+            # stay off the index; the operator chooses where to link this public stream.
+            "updates": bool(entry.get("updates")),
         })
     groups = _clean_groups(data.get("groups"))
     try:
@@ -347,6 +351,7 @@ def save_config(settings, patch: dict, config: Config | None = None) -> dict:
             # whole-instrument edition of it unusable, while its competition Articles
             # alone are an ordinary page.
             "only": _clean_only(entry.get("only")),
+            "updates": bool(entry.get("updates")),
         })
     merged["items"] = items
     merged["groups"] = _clean_groups(merged.get("groups"))
@@ -1420,6 +1425,15 @@ def build_bundle(
         filename = f"{item['slug']}.html"
         files.append((filename, html_bytes))
         files.extend(page_assets.items())
+        updates_files: list[str] = []
+        if item.get("updates"):
+            updates_html, updates_atom = render_cached_updates(
+                status, slug=item["slug"], base_url=base_url)
+            updates_files = [f"{item['slug']}-updates.html", f"{item['slug']}-updates.atom"]
+            files.extend([
+                (updates_files[0], updates_html),
+                (updates_files[1], updates_atom),
+            ])
         entries.append({
             "filename": filename,
             "slug": item["slug"],
@@ -1435,6 +1449,7 @@ def build_bundle(
             "pending": int(status.get("pending") or 0),
             "bytes": len(html_bytes),
             "exported": format_export_date(status.get("generated_at") or started),
+            "updates_files": updates_files,
         })
 
     check_cancelled()
@@ -1468,6 +1483,11 @@ def build_bundle(
         if sources_summary:
             urls.append(("sources.html", "0.7"))
         urls += [(e["filename"], "0.8") for e in entries]
+        # Chronological companions are intentionally absent from index.html, but a
+        # crawler may discover their HTML page through the sitemap. The Atom document
+        # advertises itself from that page and does not belong in the page sitemap.
+        urls += [(e["updates_files"][0], "0.6") for e in entries
+                 if e.get("updates_files")]
         sitemap = ['<?xml version="1.0" encoding="UTF-8"?>',
                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
         for filename, priority in urls:
@@ -1491,6 +1511,9 @@ def build_bundle(
     # directory first, otherwise an obsolete priority pack survives on disk indefinitely.
     for entry in entries:
         shutil.rmtree(out_dir / f"{entry['slug']}.data", ignore_errors=True)
+        if not entry.get("updates_files"):
+            (out_dir / f"{entry['slug']}-updates.html").unlink(missing_ok=True)
+            (out_dir / f"{entry['slug']}-updates.atom").unlink(missing_ok=True)
     if not sources_summary:
         # Turning the optional page off must turn it off on disk too. Leaving the prior
         # file behind would keep publishing stale corpus claims at a known URL.

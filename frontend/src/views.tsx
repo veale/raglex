@@ -4863,6 +4863,12 @@ function StaticExportsPanel({ attribution, onSavedSettings }:
                   onChange={(v) => setItem(i, {
                     only: v.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
                   })} />
+                <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 13,
+                  marginTop: 5 }} title={`Writes ${it.slug || "law"}-updates.html and a sibling .atom feed. Neither is linked from the index.`}>
+                  <input type="checkbox" checked={!!it.updates}
+                    onChange={(e) => setItem(i, { updates: e.target.checked })} />
+                  Citing updates page + Atom feed
+                </label>
               </td>
               <td style={{ whiteSpace: "nowrap" }}>
                 <button className="mini" title="move up" disabled={i === 0} onClick={() => move(i, -1)}>↑</button>{" "}

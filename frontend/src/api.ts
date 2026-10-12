@@ -218,6 +218,9 @@ export interface StaticBundleItem {
   // display one: the TFEU's whole-instrument edition is unbuildably large, four of its
   // Articles is an ordinary page. Empty means the whole instrument.
   only?: string[];
+  // Hidden-from-index chronological companion plus a cases-only Atom feed, written as
+  // <slug>-updates.html and <slug>-updates.atom on every bundle refresh.
+  updates?: boolean;
 }
 // A themed subsection of the index, within a country. The ORDER of this list is the
 // order the subsections appear in — it is an editorial judgement, so it is stored

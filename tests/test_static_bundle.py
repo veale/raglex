@@ -153,6 +153,16 @@ def test_sources_config_is_optional_and_round_trips(tmp_path):
     assert saved["sources_intro"] == "An operator-written introduction."
 
 
+def test_citing_updates_option_round_trips_per_law(tmp_path):
+    config = _config(tmp_path)
+    settings = SettingsStore(config.settings_path)
+    saved = save_config(settings, {"items": [{
+        "stable_id": "32022R2065", "slug": "dsa", "updates": True,
+    }]}, config)
+    assert saved["items"][0]["updates"] is True
+    assert load_config(config)["items"][0]["updates"] is True
+
+
 def test_sources_summary_is_full_text_only_verbose_and_caps_future_years(tmp_path):
     config = _config(tmp_path)
     cat = Catalogue(config.catalogue_path)

@@ -44,6 +44,20 @@ def test_version_bumps_on_changed_payload(catalogue):
     assert catalogue.get_document(rec.stable_id)["version"] == 2
 
 
+def test_first_seen_does_not_advance_when_a_document_is_refreshed(catalogue):
+    rec = make_record()
+    catalogue.upsert_document(rec)
+    first = catalogue.get_document(rec.stable_id)["first_seen_at"]
+    assert first
+
+    rec2 = make_record(raw_bytes=b"<akomaNtoso>updated upstream rendition</akomaNtoso>")
+    rec2.ensure_payload_hash()
+    catalogue.upsert_document(rec2)
+    row = catalogue.get_document(rec.stable_id)
+    assert row["first_seen_at"] == first
+    assert row["fetched_at"] >= first
+
+
 def test_changed_payload_archives_prior_version(catalogue):
     """A document is a series of versions; the prior one is retained (§1.4)."""
     rec = make_record(title="v1")
