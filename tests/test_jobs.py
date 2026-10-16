@@ -238,12 +238,13 @@ def test_startup_auto_resumes_only_declared_safe_kinds(monkeypatch):
     f = _facade()
     with f._open() as (cat, _rs, _ts):
         cat.create_job("scan", "rescan-citations", "scan", {}, origin="api")
+        cat.create_job("fts", "build-fts", "fts", {}, origin="api")
         cat.create_job("rank", "rebuild-authority", "rank", {}, origin="api")
     resumed = []
     mgr = JobManager(f, origin="api")
     monkeypatch.setattr(mgr, "_resume_row", lambda row: resumed.append(row["job_id"]))
-    assert mgr.reap_orphans(auto_resume=True) == 2
-    assert resumed == ["scan"]
+    assert mgr.reap_orphans(auto_resume=True) == 3
+    assert resumed == ["scan", "fts"]
 
 
 def test_reparse_of_one_source_never_runs_beside_itself():

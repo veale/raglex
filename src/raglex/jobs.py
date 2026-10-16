@@ -96,6 +96,10 @@ RESUME_POLICIES = {
     "harvest-source": "deduplicate", "harvest-all": "deduplicate",
     "sync-eu-consolidations": "deduplicate",
     "embed": "deduplicate",
+    # The builder selects the configured source set again and skips every document
+    # already present in doc_fts, so a deploy must not strand a large jurisdiction
+    # backfill merely because its worker lived in the API process.
+    "build-fts": "deduplicate",
     "import-bailii-corpus": "deduplicate", "import-bailii-zip": "deduplicate",
     "import-bailii-dir": "deduplicate", "import-bailii-parquet": "deduplicate",
     "import-indian-sci": "deduplicate", "import-sg-seed": "deduplicate",
