@@ -27,6 +27,31 @@ from .config import Config
 from .core.models import RelationshipType as _RelationshipType
 from .facade import Facade
 
+
+PinpointArg = str | int | list[str | int] | None
+
+
+def _pinpoint_arg(value: PinpointArg) -> str | None:
+    """Undo JSON's eager reading of a conventional ``[31]`` paragraph pinpoint.
+
+    Some MCP clients parse a string-looking bracket form into the JSON array ``[31]``
+    before validating the tool schema. Accepting that wire shape keeps the documented
+    practitioner syntax usable; it does not change the Facade's deliberately simple
+    string contract.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        if not value or len(value) > 2:
+            raise ValueError("a pinpoint list must contain one paragraph or two range endpoints")
+        endpoints = [str(v).strip().strip("[]") for v in value]
+        if any(not endpoint for endpoint in endpoints):
+            raise ValueError("pinpoint endpoints cannot be empty")
+        return "-".join(f"[{endpoint}]" for endpoint in endpoints)
+    if isinstance(value, int):
+        return f"[{value}]"
+    return str(value)
+
 # Tool behaviour hints (MCP spec) — clients read these to decide auto-approval + safety UX.
 # Most of the first-class surface is pure corpus reads. lookup() is special: it can silently
 # FETCH a missing authority from an external source, so it is neither read-only nor
@@ -270,7 +295,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         return facade.jurisdictions()
 
     @mcp.tool(annotations=_FETCHING)
-    def lookup(citation: str, pincite: Optional[str] = None, context: int = 1,
+    def lookup(citation: str, pincite: PinpointArg = None, context: int = 1,
                full: bool = False, cited_by: bool = True, similar: bool = True,
                autofetch: bool = True, original: bool = False,
                outline_kind: Optional[str] = None, as_at: Optional[str] = None) -> dict:
@@ -312,12 +337,12 @@ def build_server(config: Config | None = None) -> MCPServer:
         CourtListener, a UK case/act, an EU/ECHR item) is fetched and returned. Only when it
         can't be fetched do you get an external LII/BAILII URL to read yourself. You rarely
         need to harvest by hand."""
-        return facade.lookup(citation=citation, pincite=pincite, context=context, full=full,
+        return facade.lookup(citation=citation, pincite=_pinpoint_arg(pincite), context=context, full=full,
                              cited_by=cited_by, similar=similar, autofetch=autofetch,
                              original=original, outline_kind=outline_kind, as_at=as_at)
 
     @mcp.tool(annotations=_READ_ONLY)
-    def citing_documents(target: str | list[str], anchor: Optional[str] = None,
+    def citing_documents(target: str | list[str], anchor: PinpointArg = None,
                          mode: str = "union", sort: str = "pagerank",
                          jurisdiction: Optional[str] = None, kind: Optional[str] = None,
                          offset: int = 0, limit: int = 20) -> dict:
@@ -346,7 +371,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         jurisdiction, kind and date; ``facets`` shows the whole citer set so you know what you
         can narrow to. Stateless — call again with the same args to come back to these
         results, or open any row with lookup(its stable_id)."""
-        return facade.citing_documents(target, anchor=anchor, mode=mode, sort=sort,
+        return facade.citing_documents(target, anchor=_pinpoint_arg(anchor), mode=mode, sort=sort,
                                        jurisdiction=jurisdiction, kind=kind,
                                        offset=offset, limit=limit)
 
@@ -1511,6 +1536,26 @@ def build_server(config: Config | None = None) -> MCPServer:
     def set_settings(values: dict) -> dict:
         """Set settings/credentials in the file store (env vars still override)."""
         return facade.update_settings(values)
+
+    @admin
+    def set_freetext_scope(sources: list[str], note: Optional[str] = None) -> dict:
+        """Choose the sources corpus-wide full-text search covers. This only changes
+        scope; call build_freetext_index to backfill held documents already carrying
+        text. Newly harvested documents in scope are indexed automatically."""
+        return facade.set_freetext_scope(sources=sources, note=note)
+
+    @admin
+    def build_freetext_index(sources: Optional[list[str]] = None,
+                             reindex: bool = False, limit: int = 1_000_000) -> dict:
+        """Start a resumable background full-text-index build for selected sources.
+        Already-indexed documents are skipped unless reindex=True; use jobs_list to
+        follow progress rather than running this long operation in the MCP request."""
+        from .jobs import JobManager
+        params: dict = {"reindex": bool(reindex), "limit": int(limit)}
+        if sources:
+            params["sources"] = sources
+        return JobManager(facade, origin="mcp").start(
+            "build-fts", "build full-text index", params)
 
     # -- the single gated entry point for everything that changes the corpus --------
     import inspect as _inspect

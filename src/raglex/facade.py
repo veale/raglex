@@ -3499,13 +3499,28 @@ class Facade:
                     # A provision heading represents its whole family. "Mentions of
                     # Article 22" includes citations pinned to Article 22(1), 22(2), …;
                     # exact string equality made the UI inherit whichever subparagraph
-                    # happened to appear first and hid the rest.
-                    parent = re.sub(r"(?:\([^()]+\))+\s*$", "", anchor).strip()
-                    family = re.compile(rf"^{re.escape(parent)}(?:\([^()]+\))*$",
-                                        re.IGNORECASE)
+                    # happened to appear first and hid the rest. But when the CALLER
+                    # supplies a subdivision, that subdivision is the family root:
+                    # Article 4(6) may include 4(6)(a), never every point of Article 4.
+                    # Stripping the caller's ``(6)`` here caused the live citator to
+                    # report 164 largely unrelated GDPR Article 4 cases.
+                    lead = re.match(
+                        r"^\s*((?:(?:article|art|section|sec|s|rule|r)\.?|§)\s*"
+                        r"\d+[a-z]?(?:\s*\([^()]+\))*)",
+                        anchor, re.IGNORECASE)
+                    root = (lead.group(1) if lead else
+                            re.sub(r"(?:\([^()]+\))+\s*$", "", anchor).strip())
+                    has_subdivision = bool(re.search(r"\([^()]+\)", root))
+
+                    def _family_match(stored: str | None) -> bool:
+                        normal = lambda value: re.sub(r"\s+", "", value or "").lower()
+                        return bool(re.fullmatch(
+                            re.escape(normal(root)) + r"(?:\([^()]+\))*",
+                            normal(stored)))
+
                     matched = [r for r in rows
-                               if family.match((r["dst_anchor"] or "").strip())]
-                    if not matched:
+                               if _family_match(r["dst_anchor"])]
+                    if not matched and not has_subdivision:
                         # The reader's "See all mentions" sends the whole SEGMENT LABEL
                         # ("Article 17 Right to erasure (right to be forgotten)") while
                         # edges pin to the bare unit ("Article 17", "Article 17(2)") —
@@ -3518,6 +3533,9 @@ class Facade:
                         #
                         # Compared as VARIANTS, so a judgment paragraph matches whichever
                         # way each side spelled it ("[110]" against a stored "para 110").
+                        # Never take this unit+number fallback for a requested subdivision:
+                        # _anchor_key deliberately drops subdivisions and would turn
+                        # Article 4(6) back into the whole Article 4 family.
                         keys = _anchor_key_variants(_anchor_key(anchor))
                         if keys:
                             matched = [
@@ -4347,7 +4365,7 @@ class Facade:
         return f"{m.group('stem').strip()} {m.group('noun')[:-1]}"
 
     def search_corpus(self, *, sort: str | None = None, limit: int = 50, offset: int = 0,
-                      facets: bool = True, **filters) -> dict:
+                      facets: bool = True, suggest: bool = False, **filters) -> dict:
         """Unified metadata search: filtered, sortable results plus the facet distribution of
         the whole match set (counts per source / doc_type / court and a year histogram) so the
         sidebar can offer refine tick-boxes with live counts. Each result carries its OSCOLA
@@ -4420,15 +4438,24 @@ class Facade:
                 if r["stable_id"] in shorthand_for:
                     d["matched_shorthand"] = shorthand_for[r["stable_id"]]
                 items.append(d)
-            # Cap the exact total (a common-word match set is millions of rows; counting all
-            # is the only slow part of an otherwise sub-second search). Beyond the cap the UI
-            # shows "N+" via total_capped; an unfiltered browse still gets the exact count.
-            cap = self._SEARCH_COUNT_CAP
-            raw_total = cat.count_documents(cap=cap, **f)
-            total_capped = raw_total > cap
-            out = {"items": items, "total": min(raw_total, cap), "total_capped": total_capped,
+            # Type-ahead consumes ONLY ``items``. It used to pay for a second, capped scan
+            # over the multi-million-row catalogue on every keystroke merely to compute a
+            # total the dropdown never renders. On the live corpus that hidden scan was the
+            # dominant latency and, at 110 ms between requests, needlessly displaced useful
+            # pages from an already-tight Postgres buffer cache. A suggestion response says
+            # only whether this page filled; the explicit Search action still gets a real
+            # (capped) total and facets below.
+            if suggest:
+                raw_total = len(items)
+                total_capped = len(items) >= limit
+            else:
+                cap = self._SEARCH_COUNT_CAP
+                raw_total = cat.count_documents(cap=cap, **f)
+                total_capped = raw_total > cap
+                raw_total = min(raw_total, cap)
+            out = {"items": items, "total": raw_total, "total_capped": total_capped,
                    "limit": limit, "offset": offset, "sort": sort}
-            if facets:
+            if facets and not suggest:
                 out["facets"] = cat.document_facets(**f)
             return out
 
@@ -15617,6 +15644,15 @@ class Facade:
         allowed = sources or self._freetext_selected() or None
         jurisdiction_scope: dict | None = None
         notes: list[str] = []
+        if allowed and not sources and not jurisdictions:
+            # An unscoped query is scoped by configuration nonetheless. Without saying
+            # so, a zero looks like a finding about the whole held corpus — exactly what
+            # happened while 503,709 UK documents were held and none was indexed.
+            notes.append(
+                "Full-text search covers only the configured index sources "
+                f"({', '.join(allowed)}); held documents outside them are invisible. "
+                "Call search_coverage() before treating an unscoped zero as conclusive."
+            )
         if jurisdictions:
             # narrowing THIS search, not the index — the front page's flags.
             #

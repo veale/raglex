@@ -1070,9 +1070,9 @@ function SimpleBar({ filters, setQuery, onSearch, open, semantic, setSemantic }:
   const [openList, setOpenList] = useState(false);
   const ac = useAutosuggest<any>(
     q,
-    (limit) => api.searchCorpus({ query: q.trim(), limit: String(limit), facets: "false" })
+    (limit) => api.searchCorpus({ query: q.trim(), limit: String(limit), facets: "false", suggest: "true" })
       .then((r: any) => r.items || []),
-    { batch: 8, delay: 110, enabled: !semantic });
+    { minChars: 3, batch: 8, delay: 180, enabled: !semantic });
   useEffect(() => { if (ac.items.length) setOpenList(true); }, [ac.items]);
   const pick = (o: any) => { if (o) { open(o.stable_id); setOpenList(false); } };
   const search = () => { setOpenList(false); onSearch(); };   // running a search dismisses the dropdown

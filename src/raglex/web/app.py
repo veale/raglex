@@ -1434,6 +1434,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         year_to: str | None = None, cites: str | None = None, cited_by: str | None = None,
         cites_pinpoint: str | None = None, id_prefix: str | None = None,
         sort: str | None = None, limit: int = 50, offset: int = 0, facets: bool = True,
+        suggest: bool = False,
     ) -> dict:
         """Unified metadata search: filtered + sorted results plus the facet distribution of
         the whole match set (for the refine sidebar + histograms)."""
@@ -1441,7 +1442,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             query=query, source=source, jurisdiction=jurisdiction, doc_type=doc_type, court=court, tag=tag,
             year_from=year_from, year_to=year_to, cites=cites, cited_by=cited_by,
             cites_pinpoint=cites_pinpoint, id_prefix=id_prefix,
-            sort=sort, limit=limit, offset=offset, facets=facets)
+            sort=sort, limit=limit, offset=offset, facets=facets, suggest=suggest)
 
     @app.get("/facet-values")
     def facet_values_ep() -> dict:

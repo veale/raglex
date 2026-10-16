@@ -75,6 +75,25 @@ def test_no_false_match(tmp_path):
     assert _ids(facade.search_corpus(query="entirely unrelated phrase", facets=False)) == set()
 
 
+def test_autocomplete_suggestions_do_not_count_or_build_facets(tmp_path, monkeypatch):
+    """The homepage dropdown renders rows only; hidden aggregate work must not sit on
+    every debounced keystroke of a multi-million-document catalogue."""
+    facade = Facade(_config(tmp_path))
+    _seed(facade)
+
+    def aggregate_must_not_run(*args, **kwargs):
+        raise AssertionError("autocomplete ran a corpus aggregate")
+
+    from raglex.storage.catalogue import Catalogue
+    monkeypatch.setattr(Catalogue, "count_documents", aggregate_must_not_run)
+    monkeypatch.setattr(Catalogue, "document_facets", aggregate_must_not_run)
+    result = facade.search_corpus(
+        query="data protection", limit=8, facets=True, suggest=True)
+    assert [row["stable_id"] for row in result["items"]] == ["iesc/2011/26"]
+    assert result["total"] == 1
+    assert "facets" not in result
+
+
 # ── semantic gating ───────────────────────────────────────────────────────────
 def test_search_engine_skips_vector_when_no_ann_index(monkeypatch):
     from raglex.retrieval import search as search_mod

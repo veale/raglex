@@ -432,3 +432,19 @@ def test_an_unmatched_jurisdiction_filter_returns_nothing_not_everything(tmp_pat
     # …and the ISO code the tool advertises resolves, rather than matching nothing
     assert f._norm_jurisdiction("eu") == "European Union"
     assert f._norm_jurisdiction("gb") == "United Kingdom"
+
+
+def test_unscoped_fulltext_search_warns_that_held_sources_can_be_invisible(tmp_path):
+    """A silent zero must not claim anything about held-but-unindexed jurisdictions."""
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    settings = tmp_path / "s.json"
+    settings.write_text('{"RAGLEX_FTS_SOURCES":"ie-caselaw"}')
+    f = Facade(Config(data_dir=tmp_path, catalogue_path=str(tmp_path / "c.sqlite"),
+                      raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                      settings_path=settings,
+                      embed_provider="local-hashing", embed_model=None))
+    out = f.freetext_search('"relevant filing system"')
+    assert any("held documents outside them are invisible" in n for n in out["notes"])
+    assert any("search_coverage" in n for n in out["notes"])

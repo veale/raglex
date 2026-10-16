@@ -6,7 +6,7 @@ import pytest
 
 from raglex.config import Config
 from raglex.facade import Facade
-from raglex.mcp_server import build_server
+from raglex.mcp_server import _pinpoint_arg, build_server
 
 
 @pytest.fixture
@@ -286,7 +286,8 @@ def test_mcp_core_tools_first_class_mutations_gated(config):
     # …but every one is still reachable and documented via maintenance('help')
     help_res = _unwrap(asyncio.run(server.call_tool("maintenance", {"op": "help"})))
     ops = help_res["ops"]
-    for gated in {"import_pdf_base64", "add_note", "corpus_stats", "resolve_citations"}:
+    for gated in {"import_pdf_base64", "add_note", "corpus_stats", "resolve_citations",
+                  "set_freetext_scope", "build_freetext_index"}:
         assert gated in ops
 
 
@@ -304,6 +305,28 @@ def test_mcp_tool_call_roundtrips_through_maintenance(config):
 
     stats = asyncio.run(server.call_tool("maintenance", {"op": "corpus_stats"}))
     assert "total" in str(stats)
+
+
+@pytest.mark.parametrize(("wire", "pinpoint"), [
+    ([31], "[31]"),
+    ([31, 34], "[31]-[34]"),
+    (31, "[31]"),
+    ("[31]", "[31]"),
+])
+def test_mcp_pinpoint_accepts_json_decoded_bracket_forms(wire, pinpoint):
+    assert _pinpoint_arg(wire) == pinpoint
+
+
+def test_lookup_tool_schema_accepts_client_decoded_bracket_pinpoint(config):
+    """Regression for FastMCP rejecting ``[31]`` before lookup() could run."""
+    import asyncio
+
+    result = asyncio.run(build_server(config).call_tool("lookup", {
+        "citation": "unknown/test/authority",
+        "pincite": [31],
+        "autofetch": False,
+    }))
+    assert "validation error" not in str(result).lower()
 
 
 # -- affecting-side change propagation (§0) ---------------------------------

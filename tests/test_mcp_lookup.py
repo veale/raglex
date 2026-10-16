@@ -266,6 +266,25 @@ def test_citing_documents_filters_by_iso_jurisdiction_and_sorts():
     assert newest["is_floor"] is True and "minimum" in newest["count_note"]
 
 
+def test_citing_documents_keeps_requested_article_subdivision():
+    """Article 4(6) is a provision, not shorthand for every point under Article 4."""
+    f = _facade()
+    _legislation(f, "32016R0679", "Article 4\nDefinitions.",
+                 "General Data Protection Regulation", source="eu-legislation")
+    for sid, anchor in (("case/filing", "Article 4(6)"),
+                        ("case/filing-child", "Article 4(6)(a)"),
+                        ("case/controller", "Article 4(7)"),
+                        ("case/consent", "Article 4(11)"),
+                        ("case/bare", "Article 4")):
+        _citer(f, sid, sid, source="eu-cellar", court=None,
+               dd=date(2024, 1, 1), dst="32016R0679", anchor=anchor)
+
+    got = f.citing_documents("32016R0679", anchor="Article 4(6)")
+    assert {row["stable_id"] for row in got["results"]} == {
+        "case/filing", "case/filing-child"}
+    assert got["total"] == 2
+
+
 def test_gdprhub_court_bucket_uses_the_decision_jurisdiction():
     f = _facade()
     assert f._doc_bucket("gdprhub", "court-nl") == "Netherlands"
