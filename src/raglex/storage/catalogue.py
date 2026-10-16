@@ -7240,7 +7240,11 @@ class Catalogue:
         toks = [t.lower() for t in str(query or "").split() if len(t) > 2]
         if not toks:
             return []
-        where = " AND ".join("lower(alias) LIKE ?" for _ in toks)
+        # ``put_alias`` stores the folded form, and production's trigram GIN is on the
+        # raw ``alias`` column for exactly that reason. Wrapping it in lower() here made
+        # the expression differ from the index and forced a scan of ~5M aliases on every
+        # homepage keystroke (1.8s for a case name; 9.7s for "privacy").
+        where = " AND ".join("alias LIKE ?" for _ in toks)
         rows = self.conn.execute(
             f"SELECT DISTINCT dst_id FROM citation_aliases WHERE {where} LIMIT ?",
             [*(f"%{t}%" for t in toks), limit]).fetchall()

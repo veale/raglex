@@ -94,6 +94,30 @@ def test_autocomplete_suggestions_do_not_count_or_build_facets(tmp_path, monkeyp
     assert "facets" not in result
 
 
+def test_alias_name_lookup_uses_the_indexed_folded_column():
+    """Production indexes ``alias``; lower(alias) is a different expression and made
+    every autocomplete request scan the five-million-row alias table."""
+    from raglex.storage.catalogue import Catalogue
+
+    class _Result:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class _Connection:
+        sql = ""
+
+        def execute(self, sql, params):
+            self.sql = sql
+            return _Result()
+
+    catalogue = object.__new__(Catalogue)
+    catalogue.conn = _Connection()
+    catalogue.documents_by_alias_text("Medical Defence Union")
+    assert "alias LIKE ?" in catalogue.conn.sql
+    assert "lower(alias)" not in catalogue.conn.sql
+
+
 # ── semantic gating ───────────────────────────────────────────────────────────
 def test_search_engine_skips_vector_when_no_ann_index(monkeypatch):
     from raglex.retrieval import search as search_mod
