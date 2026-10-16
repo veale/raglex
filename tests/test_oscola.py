@@ -36,6 +36,41 @@ def test_eu_judgment_from_celex():
     assert _italic(out) == "Schempp v Finanzamt"
 
 
+def test_legacy_eu_judgment_recovers_case_number_from_landing_url():
+    """Old CELLAR rows have no meta_json, but their EUR-Lex URL still names CELEX."""
+    out = cite({
+        "stable_id": "ECLI:EU:C:2003:596", "source": "eu-cellar",
+        "ecli": "ECLI:EU:C:2003:596", "doc_type": "judgment",
+        "court": "Court of Justice", "title": "Criminal proceedings against Bodil Lindqvist",
+        "landing_url": "https://eur-lex.europa.eu/legal-content/EN/ALL/?uri=CELEX:62001CJ0101",
+    })
+    assert out["text"] == (
+        "Case C-101/01 Criminal proceedings against Bodil Lindqvist EU:C:2003:596")
+
+
+def test_eu_joined_cases_keep_every_docket_number():
+    out = cite({
+        "stable_id": "ECLI:EU:C:1996:79", "source": "eu-cellar",
+        "ecli": "ECLI:EU:C:1996:79", "doc_type": "judgment",
+        "court": "Court of Justice",
+        "title": "Brasserie du Pêcheur and Factortame (Joined Cases C-46/93 and C-48/93)",
+        "landing_url": "https://eur-lex.europa.eu/?uri=CELEX:61993CJ0046",
+    })
+    assert out["text"] == (
+        "Joined Cases C-46/93 and C-48/93 Brasserie du Pêcheur and Factortame "
+        "EU:C:1996:79")
+
+
+def test_eu_appeal_docket_without_case_prefix_is_not_duplicated():
+    out = cite({
+        "stable_id": "ECLI:EU:C:2023:1", "source": "eu-cellar",
+        "ecli": "ECLI:EU:C:2023:1", "doc_type": "judgment",
+        "title": "OC (C-479/22P)",
+        "landing_url": "https://eur-lex.europa.eu/?uri=CELEX:62022CJ0479",
+    })
+    assert out["text"] == "Case C-479/22 P OC EU:C:2023:1"
+
+
 def test_eu_ag_opinion_tail():
     out = cite({"stable_id": "ECLI:EU:C:2017:329", "source": "eu-cellar", "ecli": "ECLI:EU:C:2017:329",
                 "doc_type": "opinion", "court": "Advocate General", "title": None},

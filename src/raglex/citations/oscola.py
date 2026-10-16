@@ -109,6 +109,23 @@ def _celex_case_no(celex: str | None) -> str | None:
     return f"{court}-{num}/{year[2:]}"
 
 
+def _eu_case_celex(doc: Mapping, meta: Mapping) -> str | None:
+    """Recover a case CELEX even for legacy rows whose ``meta_json`` is empty.
+
+    Early CELLAR harvests retained the authoritative CELEX only in ``landing_url``.
+    Requiring the later metadata field made their visible citations lose the docket
+    number even though URLs such as ``...?uri=CELEX:62001CJ0101`` still encode it.
+    """
+    celex = str((meta or {}).get("celex") or "").upper()
+    if _celex_case_no(celex):
+        return celex
+    for value in (_get(doc, "landing_url"), _get(doc, "stable_id")):
+        match = re.search(r"6\d{4}[CTF][A-Z]{1,2}\d{4}", str(value or ""), re.I)
+        if match and _celex_case_no(match.group(0).upper()):
+            return match.group(0).upper()
+    return None
+
+
 # An AG opinion's title is frequently the delivery boilerplate ("Opinion of
 # Advocate General Campos Sánchez-Bordona delivered on 15 January 2020") rather
 # than the case name — 6,966 opinions in the corpus. Rendered as-is it lands in
@@ -132,6 +149,10 @@ _EUECJ_TAIL_RE = re.compile(
 _EU_LANG_MARKER_RE = re.compile(r"\s*\b(?:French|German|Italian|Spanish|Dutch)\s+Text\b", re.I)
 _EU_DOCTYPE_MARKER_RE = re.compile(
     r"\s*(?:[-–—]\s*)?\b(?:Judgment|Order|Opinion|Ruling)\b\s*(?=\)|$)", re.I)
+_EU_DOCKET_PAREN_RE = re.compile(
+    r"\s*\((?P<prefix>(?:Joined\s+)?Cases?\s+)?"
+    r"(?P<cases>[CTF][-‑–]?\d+/\d+\s*(?:P|RX)?"
+    r"(?:\s*(?:,|and|to|&)\s*[CTF][-‑–]?\d+/\d+\s*(?:P|RX)?)*)\)", re.I)
 
 
 def _clean_eu_title(title: str) -> tuple[str, str | None]:
@@ -140,10 +161,18 @@ def _clean_eu_title(title: str) -> tuple[str, str | None]:
     Returns the cleaned name and any case number recovered from the stripped tail.
     """
     title = _clean_parenthetical_spacing(title)
-    # party names sometimes end in a redundant docket echo supplied by EUR-Lex.
-    title = re.sub(r"\s*\((?:(?:Joined\s+)?Cases?\s+)?[CTF][-‑–]?\d+/\d+"
-                   r"(?:\s*(?:P|RX))?(?:\s*(?:,|and|to|&)\s*[CTF][-‑–]?\d+/\d+"
-                   r"(?:\s*(?:P|RX))?)*\)", "", title, flags=re.I)
+    docket = None
+    # Preserve the full joined-case identity before removing EUR-Lex's parenthetical
+    # docket echo from the party name. A CELEX encodes only the lead case.
+    docket_match = _EU_DOCKET_PAREN_RE.search(title)
+    if docket_match:
+        cases = re.sub(r"[-‑–]", "-", docket_match.group("cases"))
+        cases = re.sub(r"(?i)(/\d+)\s*(P|RX)\b", r"\1 \2", cases)
+        prefix = (docket_match.group("prefix") or "Case").strip().casefold()
+        label = "Joined Cases" if prefix.startswith("joined") else (
+            "Cases" if prefix == "cases" else "Case")
+        docket = f"{label} {cases}"
+        title = title[:docket_match.start()] + title[docket_match.end():]
     case_no = None
     m = _EUECJ_TAIL_RE.search(title)
     if m:
@@ -159,12 +188,12 @@ def _clean_eu_title(title: str) -> tuple[str, str | None]:
         title = title[lead.end():]
     # a parenthetical emptied by the strip ("(Judgment)" → "()") leaves brackets behind
     title = re.sub(r"\s*\(\s*\)", "", title)
-    return title.strip(" -–—,"), case_no
+    return title.strip(" -–—,"), docket or (f"Case {case_no}" if case_no else None)
 
 
 def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
     ecli = _get(doc, "ecli") or ""
-    celex = (meta or {}).get("celex")
+    celex = _eu_case_celex(doc, meta)
     case_no = _celex_case_no(celex)
     # The BAILII-archive half of the CJEU corpus keys documents by an ECLI *stable_id*
     # while leaving the ecli column null, so read it from either.
@@ -174,9 +203,9 @@ def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
             ecli = sid
     ecli_short = ecli[5:] if ecli.upper().startswith("ECLI:") else ecli
     title = _clean_parenthetical_spacing((_get(doc, "title") or "").strip())
-    title, tail_case_no = _clean_eu_title(title)
-    case_no = case_no or tail_case_no
-    if not case_no and not ecli_short:
+    title, title_docket = _clean_eu_title(title)
+    docket = title_docket or (f"Case {case_no}" if case_no else None)
+    if not docket and not ecli_short:
         return None
     is_opinion = (_get(doc, "doc_type") == "opinion"
                   or _get(doc, "court") == "Advocate General")
@@ -187,8 +216,8 @@ def _eu_case(doc: Mapping, meta: Mapping) -> dict | None:
         ag = ag or bm.group("ag").strip()
         title = ""                       # boilerplate is not the case name
     parts: list[Part] = []
-    if case_no:
-        parts.append(_run(f"Case {case_no} "))
+    if docket:
+        parts.append(_run(f"{docket} "))
     if title:
         parts.append(_run(title, italic=True))
         parts.append(_run(" "))
