@@ -57,6 +57,21 @@ def test_orphan_reaping_only_touches_own_origin():
         assert cat.get_job("sch1")["status"] == "running"
 
 
+def test_web_process_reaps_api_and_mcp_jobs_but_not_scheduler_jobs():
+    from raglex.web.app import _reap_inprocess_jobs
+
+    f = _facade()
+    with f._open() as (cat, _rs, _ts):
+        cat.create_job("api1", "non-resumable", "x", {}, origin="api")
+        cat.create_job("mcp1", "non-resumable", "x", {}, origin="mcp")
+        cat.create_job("sch1", "non-resumable", "x", {}, origin="scheduler")
+    assert _reap_inprocess_jobs(f) == 2
+    with f._open() as (cat, _rs, _ts):
+        assert cat.get_job("api1")["status"] == "interrupted"
+        assert cat.get_job("mcp1")["status"] == "interrupted"
+        assert cat.get_job("sch1")["status"] == "running"
+
+
 def test_cancel_crosses_the_process_boundary():
     f = _facade()
     with f._open() as (cat, _rs, _ts):

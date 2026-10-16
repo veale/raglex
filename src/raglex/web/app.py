@@ -23,6 +23,19 @@ from ..config import Config
 from ..facade import Facade
 from ..jobs import JobManager
 
+
+def _reap_inprocess_jobs(facade: Facade) -> int:
+    """Reap every job whose worker lived inside the replaced API process.
+
+    MCP is a transport mounted in this FastAPI process, not a separate worker. Its jobs
+    nevertheless retain ``origin='mcp'`` so operators can see where they were requested.
+    A deploy therefore kills both API- and MCP-origin threads and must reap/resume both;
+    otherwise MCP backfills remain permanently labelled ``running`` with no worker.
+    """
+    return sum(JobManager(facade, origin=origin).reap_orphans(auto_resume=True)
+               for origin in ("api", "mcp"))
+
+
 def _cors_origins() -> list[str]:
     raw = os.environ.get("RAGLEX_CORS_ORIGINS")
     if raw:
@@ -46,7 +59,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     jobs = JobManager(facade, origin="api")
     # A deploy kills in-process workers. Durable/checkpointed API jobs resume under a
     # new attempt automatically; conservative job kinds remain visibly interrupted.
-    jobs.reap_orphans(auto_resume=True)
+    _reap_inprocess_jobs(facade)
     app = FastAPI(title="RagLex", version="0.1.0", summary="Legal corpus ops + research API")
     # In production the SPA is served from this same origin, so no CORS is exercised;
     # set RAGLEX_CORS_ORIGINS (comma-separated) for a cross-origin front-end, which then
