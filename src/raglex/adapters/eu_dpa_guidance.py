@@ -687,9 +687,22 @@ class _DPAGuidanceAdapter(BaseAdapter):
                 self._bytes_fetcher = get_bytes_fetcher()
             if not self._bytes_fetcher.available():
                 raise
-            blob = self._bytes_fetcher.fetch_bytes(url, referer_url=referer) or b""
-            if not blob:
-                raise exc
+            target = urlsplit(url)
+            source = urlsplit(referer or "")
+            # Browser anti-bot cookies and navigation policy are host-scoped. An
+            # off-site register page (datatilsynet.dk → ft.dk) is not a useful referer;
+            # prime the destination host itself, as the bytes-fetcher contract requires.
+            browser_referer = (
+                referer if source.netloc == target.netloc
+                else f"{target.scheme}://{target.netloc}/"
+            )
+            blob = self._bytes_fetcher.fetch_bytes(
+                url, referer_url=browser_referer) or b""
+            if not blob.lstrip().startswith(b"%PDF"):
+                raise FetchError(
+                    f"{self.source}: browser download did not return a PDF: {url}",
+                    transient=True,
+                ) from exc
             return blob
 
     def fetch(self, stub: Stub) -> Record | None:

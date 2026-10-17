@@ -344,7 +344,7 @@ def test_danish_parliament_pdf_uses_browser_after_plain_client_waf():
             return True
 
         def fetch_bytes(self, url, *, referer_url=None):
-            assert "ft.dk" in url and "datatilsynet.dk" in referer_url
+            assert "ft.dk" in url and referer_url == "https://www.ft.dk/"
             return b"%PDF-browser"
 
     adapter = DatatilsynetGuidanceAdapter(client=Client(), bytes_fetcher=Browser())

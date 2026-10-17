@@ -340,7 +340,10 @@ class Pipeline:
                     # so the run resumes cleanly next time.
                     stats.rate_limited = True
                     stats.notes.append(f"rate limited on stub {stub.stable_id}")
-                    log.warning("rate limited on %s; pausing source queue", adapter.source)
+                    # CourtListener/CanLII have hard quotas. Reaching one is ordinary
+                    # flow control (the cursor is deliberately left in place), not an
+                    # adapter defect for the WARNING-backed feedback queue.
+                    log.info("rate limited on %s; pausing source queue", adapter.source)
                     break
                 except FetchError as exc:
                     if exc.status_code in (404, 410):
