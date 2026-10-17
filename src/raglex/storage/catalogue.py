@@ -3422,6 +3422,23 @@ class Catalogue:
             f"WHERE candidate_id IN ({qs}) GROUP BY candidate_id", ids).fetchall()
         return {r["candidate_id"]: r["occ"] for r in rows}
 
+    def rolled_up_cited_by_counts(self, ids: list[str]) -> dict[str, int]:
+        """Recent distinct-citer counts for display-only authority badges.
+
+        The exact count for the authority being read remains live. The 200 subsidiary
+        citers in each panel use the scheduled citation roll-up: grouping the full
+        relations table for those decorative badges added ~3 seconds to every GDPR
+        open, while the roll-up is rebuilt daily and indexed by candidate_id.
+        """
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {}
+        qs = ",".join("?" * len(ids))
+        rows = self.conn.execute(
+            f"SELECT candidate_id, MAX(documents) AS n FROM citation_counts "
+            f"WHERE candidate_id IN ({qs}) GROUP BY candidate_id", ids).fetchall()
+        return {r["candidate_id"]: int(r["n"] or 0) for r in rows}
+
     # -- citation-network statistics (the authority prior; design §3) --------
     # The ranking graph is the resolved, non-inferred, non-suppressed edge set.
     # Treatment types are deliberately NOT weighted — the classifier isn't

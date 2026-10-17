@@ -150,6 +150,17 @@ def test_cited_by_summary_combines_document_page_counters(catalogue, tmp_path):
     assert direct_only["inferred_documents"] == 0
 
 
+def test_display_citer_badges_use_distinct_document_rollup(catalogue):
+    catalogue.conn.execute(
+        "INSERT INTO citation_counts "
+        "(candidate_id, entity_kind, method, sample, occurrences, documents, rebuilt_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("A", "case", "regex", "A", 19, 7, "2026-10-17"),
+    )
+    catalogue.conn.commit()
+    assert catalogue.rolled_up_cited_by_counts(["A", "missing"]) == {"A": 7}
+
+
 # -- fusion + signals --------------------------------------------------------
 def test_search_signals_and_authority_fusion(catalogue, tmp_path):
     ts = TextStore(tmp_path / "text")

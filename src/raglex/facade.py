@@ -2522,9 +2522,10 @@ class Facade:
         # one grouped aggregate for the whole page, not one query per row — and one
         # batched document read for the same reason: 200 sequential single-row lookups
         # per page view is the N+1 that made get_document time out on a mega-authority.
-        # Keep these exact rather than reading the periodic authority roll-up: a newly
-        # harvested citer must be reflected immediately, before the nightly rebuild.
-        citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
+        # These are quiet, display-only badges on the citing rows. The page's headline
+        # count remains exact; use the daily indexed roll-up here rather than grouping
+        # the full edge table three times (about three seconds on a cold GDPR open).
+        citer_counts = cat.rolled_up_cited_by_counts([sid for sid, _ in page_ids])
         sources = cat.get_documents([sid for sid, _ in page_ids])
         for sid, r in page_ids:
             src = sources.get(sid)
