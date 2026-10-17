@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from ..core.adapter import BaseAdapter
+from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
 from ..core.models import (
     DocType,
@@ -174,6 +175,15 @@ class IrishCCPCMergerAdapter(BaseAdapter):
             return None
         pdf_url = detail["determinations"][-1]
         raw = self._client.get(pdf_url).content
+        # The asset host occasionally answers 200 with an empty body. Passing that to
+        # PyMuPDF raises EmptyFileError, which the pipeline records as an unexpected
+        # parser defect and then advances past the item. It is a transient upstream
+        # download failure: surface it as such so the cursor freezes and retries.
+        if not raw or not raw.lstrip().startswith(b"%PDF"):
+            raise FetchError(
+                f"{self.source}: determination did not return a PDF: {pdf_url}",
+                transient=True,
+            )
         extracted = extract_bytes(raw, ext="pdf", mime="application/pdf")
         text = (extracted.text or "").strip()
         if len(text) < 100:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from raglex.adapters.eu_dpa_guidance import (
     GARANTE_TYPE_IDS,
+    DatatilsynetGuidanceAdapter,
     _slug,
     aepd_stubs,
     cnil_stubs,
@@ -22,6 +23,7 @@ from raglex.adapters.eu_dpa_guidance import (
     month_date,
     pdf_month,
 )
+from raglex.core.errors import FetchError
 from raglex.adapters.registry import ADAPTERS, SOURCE_INFO, get_adapter
 from raglex.citations.extractor import extract_citations
 
@@ -330,6 +332,26 @@ def test_danish_splits_the_regulation_from_the_domestic_acts():
     # a bare "forordningen" is any EU regulation, not this one
     assert not any(c.candidate_id == "32016R0679" for c in extract_citations(
         "Reglerne i artikel 5 i forordningen om markeder for kryptoaktiver."))
+
+
+def test_danish_parliament_pdf_uses_browser_after_plain_client_waf():
+    class Client:
+        def get(self, _url):
+            raise FetchError("HTTP 403", transient=False, status_code=403)
+
+    class Browser:
+        def available(self):
+            return True
+
+        def fetch_bytes(self, url, *, referer_url=None):
+            assert "ft.dk" in url and "datatilsynet.dk" in referer_url
+            return b"%PDF-browser"
+
+    adapter = DatatilsynetGuidanceAdapter(client=Client(), bytes_fetcher=Browser())
+    assert adapter._pdf_bytes(
+        "https://www.ft.dk/ripdf/example.pdf",
+        referer="https://www.datatilsynet.dk/regler-og-vejledning",
+    ) == b"%PDF-browser"
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,16 @@
+from types import SimpleNamespace
+
+import pytest
+
 from raglex.adapters.ie_ccpc_mergers import (
     COMPETITION_ACT_2002,
+    IrishCCPCMergerAdapter,
     competition_act_relations,
     parse_ccpc_detail,
     parse_ccpc_register,
 )
+from raglex.core.errors import FetchError
+from raglex.core.models import Stub
 
 
 REGISTER = r"""
@@ -31,3 +38,17 @@ def test_parse_ccpc_detail_and_single_regime_sections():
     )
     assert relations[0].dst_id == COMPETITION_ACT_2002
     assert relations[1].dst_anchor == "section 18"
+
+
+def test_empty_determination_download_is_transient_not_a_pdf_parser_crash():
+    class Client:
+        def get(self, url):
+            if url.endswith(".pdf"):
+                return SimpleNamespace(content=b"")
+            return SimpleNamespace(content=b'<a href="https://assets.ccpc.ie/x.pdf">Determination</a>')
+
+    stub = Stub(stable_id="ie/ccpc/merger/2024/43", raw_url="https://ccpc.ie/case",
+                hints={"reference": "M/24/043"})
+    with pytest.raises(FetchError, match="did not return a PDF") as exc:
+        IrishCCPCMergerAdapter(client=Client()).fetch(stub)
+    assert exc.value.transient is True

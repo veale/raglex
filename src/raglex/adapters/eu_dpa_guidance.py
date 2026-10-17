@@ -576,7 +576,7 @@ class _DPAGuidanceAdapter(BaseAdapter):
     default_instrument: dict | None = None
 
     def __init__(self, *, start_offset: int | str | None = None,
-                 client: RateLimitedClient | None = None) -> None:
+                 client: RateLimitedClient | None = None, bytes_fetcher=None) -> None:
         # Accepted by every subclass even though only the paged ones report a cursor:
         # ``jobs`` passes it to whichever adapter it is resuming, and one that cannot
         # take the keyword raises TypeError and files the retry as **done**
@@ -584,6 +584,7 @@ class _DPAGuidanceAdapter(BaseAdapter):
         self.start_offset = resume_floor(option_int(start_offset, 0), self.page_size or 1)
         self._client = client or RateLimitedClient(
             self.source, min_interval=self.min_interval, timeout=90)
+        self._bytes_fetcher = bytes_fetcher
 
     def _resume_page(self) -> int:
         """The 0-based index page a resumed walk restarts on."""
@@ -668,6 +669,29 @@ class _DPAGuidanceAdapter(BaseAdapter):
                 out.append(url)
         return out
 
+    def _pdf_bytes(self, url: str, *, referer: str | None) -> bytes:
+        """Download a PDF, escalating known WAF responses to the browser tier.
+
+        Several DPA registers link documents on a different government host. Denmark's
+        Parliament host, for example, returns 403 to the ordinary client even though the
+        register page is public. Treating that as a missing optional attachment silently
+        discarded the whole document when the stub itself was the PDF.
+        """
+        try:
+            return self._client.get(url).content
+        except FetchError as exc:
+            if exc.status_code not in (403, 429, 503):
+                raise
+            if self._bytes_fetcher is None:
+                from ..scraping.fetcher import get_bytes_fetcher
+                self._bytes_fetcher = get_bytes_fetcher()
+            if not self._bytes_fetcher.available():
+                raise
+            blob = self._bytes_fetcher.fetch_bytes(url, referer_url=referer) or b""
+            if not blob:
+                raise exc
+            return blob
+
     def fetch(self, stub: Stub) -> Record | None:
         text, raw, ext = "", None, None
         attachments: list[dict] = []
@@ -686,9 +710,15 @@ class _DPAGuidanceAdapter(BaseAdapter):
                     pdfs.append(url)
         for url in pdfs:
             try:
-                blob = self._client.get(url).content
+                blob = self._pdf_bytes(url, referer=stub.landing_url)
                 extracted = extract_bytes(blob, ext="pdf", mime="application/pdf")
-            except (FetchError, ValueError):
+            except FetchError:
+                # A primary-PDF stub has no landing-page text to fall back to. Retrying
+                # is the only non-lossy outcome; optional attachments may be skipped.
+                if url == stub.raw_url:
+                    raise
+                continue
+            except ValueError:
                 continue
             if not blob.startswith(b"%PDF"):
                 continue
