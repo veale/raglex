@@ -1100,6 +1100,19 @@ def build_server(config: Config | None = None) -> MCPServer:
         )
 
     @admin
+    def repair_eu_opinions(after_stable_id: str = "", workers: int = 12) -> dict:
+        """Start a resumable local repair of held CJEU Advocate General opinions.
+        Re-derive titles, text and numbered paragraph segments from immutable Formex or
+        EUR-Lex HTML raw, then re-anchor citation offsets. No source download required."""
+        from .jobs import JobManager
+        return JobManager(facade, origin="mcp").start(
+            "reparse-source",
+            "repair CJEU Advocate General opinions",
+            {"source": "eu-cellar", "doc_type": "opinion",
+             "after_stable_id": after_stable_id, "workers": workers},
+        )
+
+    @admin
     def repair_ee_superscripts(apply: bool = False, limit: int = 200000) -> dict:
         """Re-point Estonian pinpoints whose superscript the publisher flattened.
         lahend.ee serves § 403⁴ as "§ 4034" in both its decision text and its structured
