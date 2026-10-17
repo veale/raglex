@@ -354,6 +354,7 @@ class Pipeline:
                                 stub.stable_id) is not None:
                             self.catalogue.mark_upstream_status(
                                 stub.stable_id, UpstreamStatus.GONE_404)
+                            self.catalogue.note_refetch(stub.stable_id)
                         stats.notes.append(f"{stub.stable_id}: {exc}")
                         log.info("not found at source for %s: %s", stub.stable_id, exc)
                         continue

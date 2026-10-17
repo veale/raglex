@@ -197,7 +197,10 @@ def test_a_recheck_that_finds_nothing_still_counts_as_a_check():
     from raglex.pipeline.runner import Pipeline
 
     src = inspect.getsource(Pipeline.run)
-    not_found = src.index("stats.not_found += 1")
+    # FetchError 404/410 has its own earlier expected-miss branch. Inspect the
+    # adapter-returned-None path this regression is specifically about.
+    record_none = src.index("if record is None:")
+    not_found = src.index("stats.not_found += 1", record_none)
     following = src[not_found:not_found + 700]
     assert "note_refetch" in following, "an empty re-check leaves the backoff un-armed"
     # and it is scoped to a deliberate re-check, not every miss
