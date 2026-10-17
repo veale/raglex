@@ -2196,8 +2196,6 @@ class Facade:
                 key=lambda r: float(r.get("src_pagerank") or 0.0), reverse=True)
             incoming = self._assemble_cited_by(cat, combined_edges, cap=200)
             collapsed_version_edges = self._collapse_version_citers(cat, version_edges)
-            version_inherited_incoming = self._assemble_cited_by(
-                cat, collapsed_version_edges, cap=200)
             # A dated consolidation can carry hundreds of thousands of inferred
             # ``applicable_version`` occurrence edges projected from its base act. They
             # are internal routing scaffolding, not an extra citator panel (the version
@@ -2282,7 +2280,6 @@ class Facade:
                     inherited_citer_ids - direct_citer_ids),
                 "direct_cited_by_count": cited_by_total,
                 "version_cited_by_count": version_cited_by_total,
-                "version_inherited_incoming": version_inherited_incoming,
                 "version_inherited_cited_by_count": len({
                     row["src_id"] for row in collapsed_version_edges
                 }),
