@@ -1811,9 +1811,9 @@ def _candidate_jurisdiction(candidate_id: str | None) -> str | None:
     if "/" not in cid:
         return None
     head = cid.split("/", 1)[0].lower()
-    if head in ("ca", "us", "au", "nz", "ie", "sg", "hk", "in", "za",
+    if head in ("ca", "us", "uscode", "au", "nz", "ie", "sg", "hk", "in", "za",
                 "at", "sk", "fi", "se", "ee", "de"):
-        return head.upper()
+        return "US" if head == "uscode" else head.upper()
     # The court registry only, and only for a genuinely COURT-SHAPED head. ``classify``
     # falls back to prefix matching, which happily reads "mystery-source-id" as Malaysia
     # — and a wrong jurisdiction here is worse than none, because it lets the gate

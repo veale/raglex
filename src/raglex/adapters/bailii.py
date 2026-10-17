@@ -164,6 +164,29 @@ def external_link(candidate: str | None, raw: str | None) -> dict | None:
     cite = (raw or candidate or "").strip()
     if not cite:
         return None
+    # Reporter candidates are native CourtListener citation routes. They are usable
+    # without API quota and avoid offering BAILII for material BAILII does not hold.
+    us_report = re.fullmatch(r"us/([^/]+)/(\d+)/(\d+)", candidate or "", re.I)
+    if us_report:
+        from ..citations.us_cases import reporter_name
+        reporter = quote_plus(reporter_name(us_report.group(1))).replace("+", "%20")
+        return {
+            "kind": "lii",
+            "url": (f"https://www.courtlistener.com/c/{reporter}/"
+                    f"{us_report.group(2)}/{us_report.group(3)}/"),
+            "label": "CourtListener ↗", "can_upload": True,
+            "site": "courtlistener", "certainty": "constructed",
+        }
+    us_code = re.fullmatch(r"uscode/(\d{1,3})/(\d+[A-Za-z]?(?:-\d+)?)",
+                           candidate or "", re.I)
+    if us_code:
+        return {
+            "kind": "lii",
+            "url": (f"https://www.law.cornell.edu/uscode/text/{us_code.group(1)}/"
+                    f"{us_code.group(2)}"),
+            "label": "Cornell LII ↗", "can_upload": False,
+            "site": "cornell-lii", "certainty": "constructed",
+        }
     ecli = re.match(r"(?i)^ECLI:([A-Z]{2}):", candidate or "")
     if ecli and ecli.group(1).upper() in _LII_SEARCH:
         name, tmpl = _LII_SEARCH[ecli.group(1).upper()]

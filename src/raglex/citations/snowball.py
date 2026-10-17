@@ -205,6 +205,8 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         if len(parts) > 1 and parts[1] in NEVER_MATCHED_SLUGS:
             return "US citation (ambiguous reporter — not routable)", "US", None
         return "US case (reporter)", "US", "us-caselaw"
+    if head == "uscode":
+        return "US Code", "US", None
     m = _NEUTRAL_RE.match(candidate)
     if m:
         court = m.group("court").upper()

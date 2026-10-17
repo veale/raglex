@@ -3,7 +3,12 @@ American-looking text."""
 
 from __future__ import annotations
 
-from raglex.citations.us_cases import looks_american, us_case_citations, us_court_name
+from raglex.citations.us_cases import (
+    looks_american,
+    us_case_citations,
+    us_code_citations,
+    us_court_name,
+)
 from raglex.citations.stage import _allows_us_reporters
 
 
@@ -90,6 +95,16 @@ def test_federal_and_regional_reporters():
     cands = {c.candidate_id for c in us_case_citations(
         "347 F.3d 1200; 550 F. Supp. 2d 100; 12 A.3d 45; 200 P.3d 9")}
     assert {"us/f3d/347/1200", "us/fsupp2d/550/100", "us/a3d/12/45", "us/p3d/200/9"} <= cands
+
+
+def test_us_code_sections_are_statutes_with_subsection_pinpoints():
+    cites = us_code_citations("under 15 U.S.C. § 6504(a)(1) and 42 USC 1983")
+    assert [(c.candidate_id, c.pinpoint, c.entity_kind) for c in cites] == [
+        ("uscode/15/6504", "§ 6504(a)(1)", "act"),
+        ("uscode/42/1983", "§ 1983", "act"),
+    ]
+
+
 def test_official_journal_page_is_not_a_us_pacific_reporter():
     assert us_case_citations("published in OJ L 159 p. 1 and OJ L 143, p. 6") == []
 

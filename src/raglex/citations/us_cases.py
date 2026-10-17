@@ -97,6 +97,16 @@ _US_CITE_RE = re.compile(
 # the same shape, minimal, for the cheap pre-gate
 _US_HINT_RE = re.compile(rf"\b\d{{1,4}}\s+(?:{_REP_ALT})\s+\d{{1,5}}\b", re.IGNORECASE)
 
+# Federal statute citation: ``15 U.S.C. § 6504`` (also the common ``15 USC 6504``).
+# This is deliberately separate from the reporter grammar: ``U.S.`` is a case reporter,
+# while ``U.S.C.`` names the Code and must lead to a statute, not CourtListener.
+_US_CODE_RE = re.compile(
+    r"\b(?P<title>\d{1,3})\s+U\.?\s*S\.?\s*C\.?(?:\s+§{1,2}|\s+)\s*"
+    r"(?P<section>\d+[A-Za-z]?(?:-\d+)?)"
+    r"(?P<tail>(?:\s*\([A-Za-z0-9ivxIVX]+\))*)",
+    re.IGNORECASE,
+)
+
 
 def looks_american(text: str) -> bool:
     """Cheap pre-gate: does the text carry a US reporter citation at all?"""
@@ -202,6 +212,22 @@ def us_case_citations(text: str) -> list[Citation]:
             # the extraction stage keeps the ambiguous ones only in US documents
             method=AMBIGUOUS_METHOD if ambiguous else "us_reporter",
             confidence=0.6 if ambiguous else 0.85,
+        ))
+    return out
+
+
+def us_code_citations(text: str) -> list[Citation]:
+    """Federal U.S. Code provisions, linked at section level to Cornell LII."""
+    out: list[Citation] = []
+    for m in _US_CODE_RE.finditer(text or ""):
+        title, section = m.group("title"), m.group("section")
+        tail = re.sub(r"\s+", "", m.group("tail") or "")
+        out.append(Citation(
+            raw=m.group(0), entity_kind="act",
+            candidate_id=f"uscode/{title}/{section}",
+            pinpoint=f"§ {section}{tail}",
+            char_start=m.start(), char_end=m.end(),
+            method="us_code", confidence=0.98,
         ))
     return out
 

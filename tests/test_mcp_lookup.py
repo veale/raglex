@@ -111,6 +111,26 @@ def test_us_slip_opinion_docket_falls_back_to_courtlistener_not_bailii():
     assert not any("bailii.org" in link["url"] for link in r["external_links"])
 
 
+def test_us_reporter_falls_back_to_direct_courtlistener_citation_route():
+    r = _facade().lookup(citation="702 F. Supp. 3d 809", autofetch=False)
+    assert r["candidate"] == "us/fsupp3d/702/809"
+    assert r["routable"] is True
+    assert r["external_links"] == [{
+        "site": "courtlistener", "site_name": "CourtListener",
+        "url": "https://www.courtlistener.com/c/F.%20Supp.%203d/702/809/",
+        "certainty": "constructed", "kind": "lii", "can_upload": True,
+    }]
+
+
+def test_us_code_section_is_recognised_and_links_to_cornell_lii():
+    r = _facade().lookup(citation="15 U.S.C. § 6504", autofetch=False)
+    assert r["candidate"] == "uscode/15/6504"
+    assert r["form"] == "US Code" and r["jurisdiction"] == "United States"
+    assert r["external_links"][0]["url"] == (
+        "https://www.law.cornell.edu/uscode/text/15/6504")
+    assert not any("bailii.org" in link["url"] for link in r["external_links"])
+
+
 def test_lookup_empty_is_handled():
     assert "error" in _facade().lookup(citation="   ")
 
@@ -339,6 +359,12 @@ def test_find_relaxes_descriptive_party_query_without_widening_questions():
     ) == "Uber OR Ola OR driver OR automated OR decision OR making OR Amsterdam"
     assert Facade._relaxed_find_query("what are the rules on the right of access") is None
     assert Facade._relaxed_find_query("Uber AND Ola") is None
+
+
+def test_find_does_not_relax_a_long_missing_case_title_into_any_term_noise():
+    assert Facade._relaxed_find_query(
+        "In re Social Media Adolescent Addiction/Personal Injury Products Liability Litigation"
+    ) is None
 
 
 def test_mentions_facets_describe_the_whole_set_not_the_loaded_page():

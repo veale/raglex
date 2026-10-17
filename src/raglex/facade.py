@@ -840,6 +840,8 @@ def _candidate_jurisdiction(candidate: str | None) -> str:
     names → "uk"."""
     if not candidate:
         return "uk"
+    if candidate.lower().startswith("uscode/"):
+        return "us"
     ecli = re.match(r"(?i)^ECLI:([A-Z]{2}):", candidate)
     if ecli:
         # ECLI states its country explicitly.  Going through the adapter taxonomy loses
@@ -4148,7 +4150,13 @@ class Facade:
                 continue
             if folded not in {t.casefold() for t in terms}:
                 terms.append(word)
-        if len(terms) < 2:
+        # A recognisable case title is already a precise identifier. Turning all of its words
+        # into OR terms manufactures superficially related material when the named case
+        # is absent (a US MDL title produced EU regulations containing only “social” or
+        # “products”). Relax short descriptive/party queries only; report the miss for a
+        # named title honestly.
+        looks_like_case_title = bool(re.search(r"(?i)^\s*In\s+re\b|/|\bv\.?\s+", query))
+        if len(terms) < 2 or looks_like_case_title:
             return None
         return " OR ".join(terms[:8])
 
@@ -4222,6 +4230,7 @@ class Facade:
                 break
         out["results"] = results
         out["total_shown"] = len(results)
+        out["title_or_citation_match"] = bool(results or out.get("citation_match"))
         # Civil-law sources often title a judgment only by docket/ECLI. If metadata
         # search has no route in, fall back to the indexed body: GDPRhub's translated
         # Facts/Holding text is where party names such as Uber and Ola live.
@@ -4257,6 +4266,10 @@ class Facade:
                     "relaxed indexed body (ranked any-term match)"
                     if out.get("relaxed_query") else
                     "indexed body (title/citation search had no match)"
+                )
+                out["warning"] = (
+                    "No title or citation matched. These are document-body matches, "
+                    "not matches for the named authority."
                 )
         # honest note about what search can and can't do here
         with self._open() as (cat, _rs, _ts):
