@@ -1597,8 +1597,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         return facade.get_provision(id, label=label, char_start=start, char_end=end, context=n)
 
     @app.get("/documents/{stable_id:path}")
-    def document(stable_id: str) -> dict:
-        return facade.get_document(stable_id)
+    def document(stable_id: str, original: bool = False) -> dict:
+        # Resolve a base act BEFORE assembling its expensive citator payload. The old
+        # route spent several seconds building the GDPR base page solely to tell the
+        # browser to request its applicable consolidation, then built that second page
+        # from scratch. Explicit ``original`` keeps the base/enacted-text control intact.
+        target = facade.canonical_read_target(stable_id, original=original)
+        view = facade.get_document(target["stable_id"])
+        if target.get("redirected"):
+            view["read_target"] = target
+        return view
 
     @app.get("/graph/{stable_id:path}")
     def graph(stable_id: str, rel: list[str] | None = Query(default=None)) -> dict:

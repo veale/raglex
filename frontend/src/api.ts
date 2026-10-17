@@ -256,7 +256,8 @@ export const api = {
     const p = new URLSearchParams({ q, k: String(k), ...filters });
     return req<Hit[]>(`/search?${p}`);
   },
-  document: (id: string) => req<any>(`/documents/${encodeURIComponent(id)}`),
+  document: (id: string, original = false) => req<any>(
+    `/documents/${encodeURIComponent(id)}${original ? "?original=true" : ""}`),
   // the stored ORIGINAL file (guidance PDF, styled BAILII page) as a Blob — fetched
   // with auth headers (an <iframe src> can't send them), then shown via an object URL
   fetchRaw: async (id: string) => {

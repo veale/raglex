@@ -127,6 +127,25 @@ def test_cited_by_stats_and_top_citors(catalogue, tmp_path):
     assert len(tops) == 2  # ranked by the citers' own pagerank
 
 
+def test_cited_by_summary_combines_document_page_counters(catalogue, tmp_path):
+    ts = TextStore(tmp_path / "text")
+    _doc(catalogue, ts, "A", when=date(2000, 1, 1))
+    _doc(catalogue, ts, "recent", when=date.today())
+    _doc(catalogue, ts, "old", when=date(2001, 1, 1))
+    _doc(catalogue, ts, "prep", dt=DocType.PREPARATORY, when=date.today())
+    _doc(catalogue, ts, "guess", when=date.today())
+    _edge(catalogue, "recent", "A")
+    _edge(catalogue, "old", "A")
+    _edge(catalogue, "prep", "A")
+    _edge(catalogue, "guess", "A", via="inferred")
+
+    got = catalogue.cited_by_summary(["A"])
+    assert got["documents"] == 3
+    assert got["recent_documents"] == 2
+    assert got["preparatory_documents"] == 1
+    assert got["inferred_documents"] == 1
+
+
 # -- fusion + signals --------------------------------------------------------
 def test_search_signals_and_authority_fusion(catalogue, tmp_path):
     ts = TextStore(tmp_path / "text")

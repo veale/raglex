@@ -196,18 +196,100 @@ _HTML_BLOCK_TAGS = (
 )
 
 
+def html_case_segments(html_bytes: bytes | None, text: str | None) -> list[Segment]:
+    """Paragraph segments from EUR-Lex's stable ``pointN`` anchors.
+
+    HTML is the only rendition available for hundreds of newly delivered opinions.
+    EUR-Lex already marks every numbered reasoning paragraph as ``<a name="point42">``;
+    discarding that structure made those opinions one unpincitable wall of text. The
+    offsets are located in the exact flattened text returned by ``_html_to_text`` so
+    citation and search spans remain aligned with the stored body.
+    """
+    if not html_bytes or not text:
+        return []
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_bytes, "html.parser")
+    except Exception:  # noqa: BLE001 — a missing optional parser must not block harvest
+        return []
+    out: list[Segment] = []
+    cursor = 0
+    seen: set[int] = set()
+    for anchor in soup.find_all("a", attrs={"name": re.compile(r"^point\d+$", re.I)}):
+        match = re.fullmatch(r"point(\d+)", str(anchor.get("name") or ""), re.I)
+        parent = anchor.find_parent(("p", "div"))
+        if not match or parent is None or id(parent) in seen:
+            continue
+        seen.add(id(parent))
+        value = parent.get_text("").strip()
+        start = text.find(value, cursor)
+        if start < 0:
+            # Be tolerant of a block containing explicit line breaks: the flattener
+            # trims each line but otherwise keeps the same characters.
+            value = "\n".join(line.strip() for line in value.splitlines()).strip()
+            start = text.find(value, cursor)
+        if start < 0:
+            continue
+        end = start + len(value)
+        printed = anchor.get_text(" ", strip=True).strip() or f"{match.group(1)}."
+        out.append(Segment(label=printed, char_start=start, char_end=end,
+                           kind="paragraph"))
+        cursor = end
+    return out
+
+
 def html_case_title(html_bytes: bytes | None) -> str | None:
     """Concise title from EUR-Lex's hidden, language-neutral display heading."""
     if not html_bytes:
         return None
     try:
         from bs4 import BeautifulSoup
-        heading = BeautifulSoup(html_bytes, "html.parser").find(id="englishTitle")
+        soup = BeautifulSoup(html_bytes, "html.parser")
+        heading = soup.find(id="englishTitle")
         raw = heading.get_text(" ", strip=True) if heading else ""
     except Exception:  # noqa: BLE001 — title enrichment must not block the body
         return None
     if not raw:
-        return None
+        # Newly delivered opinions often have no ``englishTitle`` metadata yet, but
+        # their visible caption is fully structured: a C38 docket followed by C37
+        # centred party lines and then the C71 subject-matter indicator. This is the
+        # only authoritative case name during that publication window; falling back to
+        # the delivery boilerplate produced titles such as "Opinion of AG … delivered".
+        docket = soup.find(
+            # Restrict to the actual caption line. A containing DIV also contains the
+            # docket text and would be found first; ``find_all_next`` from that outer
+            # node then has no following party lines in some French renditions.
+            lambda tag: tag.name == "p"
+            and re.search(r"\b(?:Case|Affaire)\s+[CTF]\s*[-‑–]\s*\d+/\d+",
+                          tag.get_text(" ", strip=True), re.I)
+        )
+        if docket is None:
+            return None
+        parties: list[str] = []
+        for node in docket.find_all_next(("p", "div"), limit=30):
+            classes = " ".join(node.get("class") or [])
+            if "C71" in classes or node.find("a", attrs={"name": re.compile(r"^point\d+$")}):
+                break
+            if "C37" not in classes:
+                continue
+            value = " ".join(node.get_text(" ", strip=True).split()).strip(" ,")
+            if value:
+                parties.append(value)
+        if not parties:
+            return None
+        separator = next((i for i, value in enumerate(parties)
+                          if re.fullmatch(r"(?:contre|gegen|versus|v\.?|vs\.?)",
+                                          value, re.I)), None)
+        if separator is not None and parties[:separator] and parties[separator + 1:]:
+            joined = f"{', '.join(parties[:separator])} v " \
+                     f"{', '.join(parties[separator + 1:])}"
+        else:
+            joined = " ".join(parties)
+            joined = re.sub(r"\s+(?:contre|gegen|versus|v\.?|vs\.?)\s+", " v ", joined,
+                            flags=re.I)
+        joined = re.sub(r"\s+", " ", joined)
+        return _clean_parties(joined) or None
     if "#" in raw:
         return concise_case_title(raw)
     # OJ result notices use “Case C-…: Judgment … – Parties (subject matter)”.
@@ -704,7 +786,7 @@ def _formex_legislation_blocks(root) -> list[tuple[str, str, str]]:
 
 
 def _formex_judgment_blocks(root) -> list[tuple[str, str, str, int]]:
-    """``(label, kind, text, level)`` blocks for a CJEU judgment, in reading order.
+    """``(label, kind, text, level)`` blocks for a CJEU decision, in reading order.
 
     A judgment's reasoning is not a flat run of numbered paragraphs: Formex groups it into
     nested ``<GR.SEQ>`` sections, each opening with a ``<TITLE>`` — "Legal context" ›
@@ -719,8 +801,12 @@ def _formex_judgment_blocks(root) -> list[tuple[str, str, str, int]]:
     depth, which is what the outline uses. The document's own title block sits outside
     ``CONTENTS.JUDGMENT`` and is not a section heading, so the walk starts inside it.
     """
-    contents = next((e for e in root.iter()
-                     if _localname(e.tag) == "CONTENTS.JUDGMENT"), None)
+    # Opinions use CONTENTS.CONCLUSION and, especially before 2015, number their
+    # reasoning with NP rather than NP.ECR. Treating only the judgment vocabulary as
+    # structural left 5,549 held Formex opinions as one giant section with no pincites.
+    contents = next((e for e in root.iter() if _localname(e.tag) in {
+        "CONTENTS.JUDGMENT", "CONTENTS.CONCLUSION", "CONTENTS.ORDER",
+    }), None)
     if contents is None:
         return []
     blocks: list[tuple[str, str, str, int]] = []
@@ -739,7 +825,7 @@ def _formex_judgment_blocks(root) -> list[tuple[str, str, str, int]]:
                 walk(child, depth + 1)
             elif name == "JURISDICTION":
                 continue        # the operative ruling is appended by the caller, once
-            elif name == "NP.ECR":
+            elif name in ("NP.ECR", "NP"):
                 text = element_text(child)
                 if not text.strip():
                     continue
@@ -915,6 +1001,13 @@ def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
     if not paras:
         paras = blocks_by_localname(
             root, {"NP.ECR"}, kind="paragraph", label_child="NO.P", counter_label="para"
+        )
+    if not paras:
+        # Older Advocate General conclusions use bare NP throughout. Only take it when
+        # NP.ECR is absent: newer packages also use ancillary NP nodes in footnotes and
+        # front matter which are not numbered reasoning paragraphs.
+        paras = blocks_by_localname(
+            root, {"NP"}, kind="paragraph", label_child="NO.P", counter_label="para"
         )
     if not paras:
         paras = blocks_by_localname(root, {"GR.SEQ"}, kind="section", counter_label="section")
@@ -1123,7 +1216,7 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
         return None
-    parties = no_case = header_title = None
+    parties = no_case = header_title = current_title = None
     for e in root.iter():
         ln = _localname(e.tag)
         if ln == "PARTIES" and parties is None:
@@ -1132,6 +1225,8 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
             no_case = " ".join(e.itertext())
         elif ln == "TITLE" and header_title is None:
             header_title = " ".join(t.strip() for t in e.itertext() if t.strip())
+        elif ln == "CURR.TITLE" and current_title is None:
+            current_title = " ".join(t.strip() for t in e.itertext() if t.strip())
     # Modern AG Formex has no <PARTIES>.  Its first TITLE nevertheless contains
     # ``Case C-340/21 VB v Natsionalna… (Request for …)``.  Recover that caption;
     # previously these opinions fell back to a blank title or, worse, their ECLI.
@@ -1149,7 +1244,8 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
         if oj:
             parties = _strip_parenthetical_tail(oj.group("name")).strip(" .,—-")
         else:
-            m = re.search(r"\bCase\s+[CTF]?[-‑–]?\d+/\d+\s*(.+?)(?:\(Request\b|$)",
+            m = re.search(r"\bCase\s+[CTF]?[-‑–]?\d+/\d+(?:\s+(?:P|RX))?\s*"
+                          r"(.+?)(?:\(Request\b|$)",
                           header_title, re.IGNORECASE)
             if m:
                 parties = m.group(1).strip(" .,—-")
@@ -1160,6 +1256,16 @@ def formex_case_title(xml_bytes: bytes) -> str | None:
             # and must not be the OJ reference the endnote leaves behind.
             if not re.search(r"[A-Za-zÀ-ÿ]{2}", parties) or _OJ_REF_ONLY_RE.match(parties):
                 parties = None
+    if not parties and current_title:
+        # Legacy Formex opinions have neither PARTIES nor a party-bearing first TITLE.
+        # CURR.TITLE still prints "… CASE C-121/01 P O'HANNRACHAIN v PARLIAMENT".
+        # Consume the appeal/RX suffix too, or it becomes a bogus leading party "P".
+        m = re.search(
+            r"\b(?:CASE|AFFAIRE)\s+[CTF]?[-‑–]?\d+/\d+(?:\s+(?:P|RX))?\s+(.+)$",
+            " ".join(current_title.split()), re.I)
+        if m:
+            parties = m.group(1).strip(" .,—-")
+            parties = re.sub(r"\s+V\.?\s+", " v ", parties, flags=re.I)
     if not parties:
         return None
     parties = _clean_parties(re.sub(r"\s+", " ", parties))
@@ -2008,7 +2114,7 @@ LIMIT {self.per_page}
                 continue
             text = self._html_to_text(html)
             if text and "requested document does not exist" not in text.lower():
-                return html, "html", text, []
+                return html, "html", text, html_case_segments(html, text)
         return None
 
     def _best_rendition(self, url: str, celex: str):

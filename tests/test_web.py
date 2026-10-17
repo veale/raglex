@@ -62,6 +62,23 @@ def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 
 
+def test_document_route_resolves_consolidation_before_building_page(client, monkeypatch):
+    from raglex.facade import Facade
+
+    calls = []
+
+    def target(self, stable_id, *, original=False):
+        calls.append((stable_id, original))
+        return {"requested_stable_id": stable_id, "stable_id": "ECLI:EU:C:2020:1",
+                "redirected": True, "as_at": "2024-01-01"}
+
+    monkeypatch.setattr(Facade, "canonical_read_target", target)
+    data = client.get("/documents/32016R0679").json()
+    assert data["document"]["stable_id"] == "ECLI:EU:C:2020:1"
+    assert data["read_target"]["requested_stable_id"] == "32016R0679"
+    assert calls == [("32016R0679", False)]
+
+
 def test_stats_endpoint(client):
     data = client.get("/stats").json()
     assert data["total"] == 2

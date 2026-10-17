@@ -2196,7 +2196,8 @@ class Facade:
             collapsed_version_edges = self._collapse_version_citers(cat, version_edges)
             version_inherited_incoming = self._assemble_cited_by(
                 cat, collapsed_version_edges, cap=200)
-            cited_by_total = cat.cited_by_stats(ids_self)["documents"]
+            incoming_summary = cat.cited_by_summary(ids_self)
+            cited_by_total = incoming_summary["documents"]
             version_cited_by_total = cat.cited_by_family_count(
                 [*ids_self, *([version_base] if version_base else [])])
             mapping_rows = [dict(r) for r in cat.provision_mappings(stable_id)]
@@ -2213,8 +2214,8 @@ class Facade:
             for row in mapping_rows:
                 row["mentioned_by_count"] = len(
                     inherited_by_mapping.get(int(row["mapping_id"]), set()))
-            inferred_total = cat.inferred_citer_count(ids_self)
-            preparatory_count = cat.citer_count_by_doc_type(ids_self, "preparatory")
+            inferred_total = incoming_summary["inferred_documents"]
+            preparatory_count = incoming_summary["preparatory_documents"]
             # Summary line: distinct authorities this document cites, split into cases vs
             # statutory material by the citation's entity_kind (OSCOLA's two source families).
             _STATUTE = {"act", "regulation", "directive", "treaty", "eu_instrument"}
@@ -2515,7 +2516,14 @@ class Facade:
         # one grouped aggregate for the whole page, not one query per row — and one
         # batched document read for the same reason: 200 sequential single-row lookups
         # per page view is the N+1 that made get_document time out on a mega-authority.
-        citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
+        # ``doc_authority.in_degree`` is the same distinct resolved src→dst degree and
+        # is rebuilt after corpus-changing jobs. Using its indexed roll-up avoids a
+        # fresh GROUP BY over relations for every one of the three cited-by panels on
+        # a document page (the dominant two seconds of a cold GDPR open).
+        authority = cat.authority_for([sid for sid, _ in page_ids])
+        citer_counts = {
+            sid: int(row.get("in_degree") or 0) for sid, row in authority.items()
+        }
         sources = cat.get_documents([sid for sid, _ in page_ids])
         for sid, r in page_ids:
             src = sources.get(sid)
@@ -2910,6 +2918,13 @@ class Facade:
                         "stable_id": real}
             old_meta = _row_meta(doc)
             celex = str(old_meta.get("celex") or "").upper()
+            if not celex:
+                # Early CELLAR rows kept the CELEX only in their EUR-Lex landing URL.
+                # Those are exactly the rows most likely to be textless placeholders,
+                # so requiring newer meta_json made the repair operation reject them.
+                match = re.search(
+                    r"6\d{4}[CTF][JOVC]\d{4}", str(doc["landing_url"] or ""), re.I)
+                celex = match.group(0).upper() if match else ""
             if not re.fullmatch(r"6\d{4}[CTF][JOVC]\d{4}", celex):
                 return {"error": "document has no refreshable CJEU CELEX identifier",
                         "stable_id": real}
@@ -9125,7 +9140,8 @@ class Facade:
                 cat.set_document_meta(base, meta)
         return {"base_id": base, **result}
 
-    def reparse_source(self, *, source: str, workers: int = 12, after_stable_id: str = "",
+    def reparse_source(self, *, source: str, doc_type: str | None = None,
+                       workers: int = 12, after_stable_id: str = "",
                        on_progress=None, cancel_check=None) -> dict:
         """Re-derive text + segments for a whole SOURCE from its immutable raw, in
         parallel — the background job behind a parser upgrade reaching an already-harvested
@@ -9171,10 +9187,12 @@ class Facade:
             # stable_id cursor at a time (PK-indexed, no OFFSET scan); the cursor doubles
             # as the resume checkpoint.
             # the catalogue Row is keyed by column name (not index), so alias the count
+            type_sql = " AND doc_type=?" if doc_type else ""
+            type_params = [doc_type] if doc_type else []
             total = cat.conn.execute(
                 "SELECT count(*) AS n FROM documents WHERE source=? AND raw_path IS NOT NULL "
-                "AND payload_hash IS NOT NULL AND stable_id > ?",
-                (source, after_stable_id or "")).fetchone()["n"]
+                f"AND payload_hash IS NOT NULL AND stable_id > ?{type_sql}",
+                (source, after_stable_id or "", *type_params)).fetchone()["n"]
             ok = skip = fail = 0
 
             # What went wrong, and where. A bad file must never stop the sweep — but
@@ -9186,25 +9204,49 @@ class Facade:
             # worker threads and written by the main thread with the rest of the batch —
             # only the textstore is safe to write from here.
             pending_currency: dict[str, dict] = {}
+            pending_titles: dict[str, str] = {}
 
             def _work(r: dict) -> str:
                 try:
                     with open(r["raw_path"], "rb") as fh:
                         raw = fh.read()
                     meta = _json.loads(r["meta_json"]) if r["meta_json"] else {}
-                    hint = str(meta.get("format") or source_format or "").strip().lower()
-                    fmt = hint if hint in hints else _sniff_format(raw)
-                    if fmt is None:
-                        return "skip"
-                    pd = parse_format(fmt, raw)
-                    if not pd.text:
-                        return "skip"
+                    if source == "eu-cellar":
+                        # CELLAR decisions have their own Formex vocabulary, while new
+                        # opinions may exist only as EUR-Lex HTML. The generic format
+                        # registry cannot infer either distinction from XML/HTML bytes.
+                        from .adapters.eu_cellar import (
+                            EUCellarAdapter, extract_formex, formex_case_title,
+                            html_case_segments, html_case_title,
+                        )
+                        if raw.lstrip().startswith(b"<") and b"<html" in raw[:2000].lower():
+                            text = EUCellarAdapter._html_to_text(raw)
+                            segments = html_case_segments(raw, text)
+                            title = html_case_title(raw)
+                            fmt = "eurlex-html"
+                        else:
+                            text, segments = extract_formex(raw)
+                            title = formex_case_title(raw)
+                            fmt = "formex-judgment"
+                        if not text:
+                            return "skip"
+                        if title and title != r.get("title"):
+                            pending_titles[r["stable_id"]] = title
+                    else:
+                        hint = str(meta.get("format") or source_format or "").strip().lower()
+                        fmt = hint if hint in hints else _sniff_format(raw)
+                        if fmt is None:
+                            return "skip"
+                        pd = parse_format(fmt, raw)
+                        if not pd.text:
+                            return "skip"
+                        text, segments = pd.text, pd.segments
                     # Never trade real structure for one undifferentiated block — over a
                     # whole source this flattens thousands of documents unseen.
-                    if _would_flatten(ts, r["payload_hash"], pd.segments):
+                    if _would_flatten(ts, r["payload_hash"], segments):
                         return "skip"
-                    ts.put(r["payload_hash"], pd.text)
-                    ts.put_segments(r["payload_hash"], pd.segments)
+                    ts.put(r["payload_hash"], text)
+                    ts.put_segments(r["payload_hash"], segments)
                     # Re-derivable from the same bytes, so take it while the file is open:
                     # the alternative is re-downloading the whole source to learn something
                     # already on disk.
@@ -9226,6 +9268,7 @@ class Facade:
             done = 0
             reanchored = 0
             currency_updated = 0
+            titles_updated = 0
             cursor = after_stable_id or ""
             batch = 2000
             with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
@@ -9233,10 +9276,10 @@ class Facade:
                     if cancel_check and cancel_check():
                         break
                     chunk = [dict(r) for r in cat.conn.execute(
-                        "SELECT stable_id, raw_path, payload_hash, meta_json FROM documents "
+                        "SELECT stable_id, title, raw_path, payload_hash, meta_json FROM documents "
                         "WHERE source=? AND raw_path IS NOT NULL AND payload_hash IS NOT NULL "
-                        "AND stable_id > ? ORDER BY stable_id LIMIT ?",
-                        (source, cursor, batch)).fetchall()]
+                        f"AND stable_id > ?{type_sql} ORDER BY stable_id LIMIT ?",
+                        (source, cursor, *type_params, batch)).fetchall()]
                     if not chunk:
                         break
                     results = list(ex.map(_work, chunk))
@@ -9258,14 +9301,20 @@ class Facade:
                         cat.set_document_meta(sid, meta, commit=False)
                     currency_updated += len(pending_currency)
                     pending_currency.clear()
+                    for sid, title in pending_titles.items():
+                        cat.update_document_fields(sid, {"title": title}, curate=False,
+                                                   commit=False)
+                    titles_updated += len(pending_titles)
+                    pending_titles.clear()
                     cat.commit()
                     cursor = chunk[-1]["stable_id"]
                     _progress(on_progress, stage=f"reparsing {source}", done=done, total=total,
                               item=cursor, _checkpoint={"phase": "reparse", "source": source,
                                                         "after_stable_id": cursor})
-        return {"source": source, "total": total, "reparsed": ok, "skipped": skip,
+        return {"source": source, "doc_type": doc_type, "total": total,
+                "reparsed": ok, "skipped": skip,
                 "failed": fail, "offsets_reanchored": reanchored,
-                "currency_updated": currency_updated,
+                "currency_updated": currency_updated, "titles_updated": titles_updated,
                 # the ids and reasons, so a failure count is something to act on
                 **({"failures": failures[:50]} if failures else {})}
 

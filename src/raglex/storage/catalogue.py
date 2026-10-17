@@ -3250,7 +3250,8 @@ class Catalogue:
     # -- manual corrections (human curation wins, §4a/§1.3a) ----------------
     _DOC_FIELDS = {"doc_type", "title", "court", "source_language"}
 
-    def update_document_fields(self, stable_id: str, fields: dict, *, curate: bool = True) -> bool:
+    def update_document_fields(self, stable_id: str, fields: dict, *, curate: bool = True,
+                               commit: bool = True) -> bool:
         """Update a document's projected metadata (doc_type / title / court / language).
         ``curate`` (default) marks ``added_by='user'`` to record human correction; pass
         ``curate=False`` for system backfills (e.g. fetching a CJEU case name) that
@@ -3264,7 +3265,8 @@ class Catalogue:
             f"UPDATE documents SET {cols}{tail} WHERE stable_id = ?",
             (*sets.values(), stable_id),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return True
 
     def get_relation(self, relation_id: int) -> sqlite3.Row | None:
@@ -3757,6 +3759,47 @@ class Catalogue:
             "AND EXISTS (SELECT 1 FROM documents d WHERE d.stable_id = r.src_id "
             "AND d.decision_date >= ?)", (*ids, cutoff)).fetchone()["n"]
         return {"documents": total, "recent_documents": recent, "recent_years": recent_years}
+
+    def cited_by_summary(self, ids: list[str], *, recent_years: int = 5) -> dict:
+        """All document-page incoming counters in one pass over the target's edges.
+
+        The reader used to scan the same large incoming relation set separately for
+        total, recent, inferred and preparatory counts. On the GDPR each scan costs a
+        visible fraction of a second even with the destination index. Conditional
+        distinct aggregates preserve the existing meanings while paying for one scan.
+        """
+        from datetime import date
+
+        ids = [i for i in dict.fromkeys(ids) if i]
+        if not ids:
+            return {"documents": 0, "recent_documents": 0, "recent_years": recent_years,
+                    "inferred_documents": 0, "preparatory_documents": 0}
+        qs = ",".join("?" * len(ids))
+        cutoff = f"{date.today().year - recent_years:04d}-01-01"
+        row = self.conn.execute(
+            f"""
+            SELECT
+              COUNT(DISTINCT CASE WHEN r.extracted_via <> 'inferred'
+                    AND r.relationship_type <> 'cited_by' THEN r.src_id END) AS documents,
+              COUNT(DISTINCT CASE WHEN r.extracted_via <> 'inferred'
+                    AND r.relationship_type <> 'cited_by' AND d.decision_date >= ?
+                    THEN r.src_id END) AS recent_documents,
+              COUNT(DISTINCT CASE WHEN r.extracted_via = 'inferred'
+                    THEN r.src_id END) AS inferred_documents,
+              COUNT(DISTINCT CASE WHEN r.extracted_via <> 'inferred'
+                    AND r.relationship_type <> 'cited_by' AND d.doc_type = 'preparatory'
+                    THEN r.src_id END) AS preparatory_documents
+            FROM relations r LEFT JOIN documents d ON d.stable_id = r.src_id
+            WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
+              AND r.src_id <> r.dst_id
+            """, (cutoff, *ids)).fetchone()
+        return {
+            "documents": int(row["documents"] or 0),
+            "recent_documents": int(row["recent_documents"] or 0),
+            "recent_years": recent_years,
+            "inferred_documents": int(row["inferred_documents"] or 0),
+            "preparatory_documents": int(row["preparatory_documents"] or 0),
+        }
 
     def source_court_for(self, ids: list[str]) -> dict[str, tuple[str, str]]:
         """``{stable_id: (source, court)}`` for many documents in one query — enough to

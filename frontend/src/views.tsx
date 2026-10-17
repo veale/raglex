@@ -3013,8 +3013,11 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
     setDisplayId(id);
     setShowingOriginal(false);
   }, [id]);
-  const [doc, err, reload] = useAsync(() => api.document(displayId), [displayId]);
-  const canonicalRead = doc?.canonical_read?.stable_id;
+  const [doc, err, reload] = useAsync(
+    () => api.document(displayId, showingOriginal), [displayId, showingOriginal]);
+  const canonicalRead = doc?.read_target?.redirected
+    ? doc.read_target.stable_id
+    : doc?.canonical_read?.stable_id;
   const displayedCitation = String(doc?.oscola?.text || doc?.document?.title || "").trim();
   useEffect(() => {
     if (displayedCitation) onCitation?.(displayedCitation);

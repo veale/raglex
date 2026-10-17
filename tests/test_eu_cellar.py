@@ -90,6 +90,20 @@ def test_html_case_title_uses_eurlex_hidden_heading():
     assert html_case_title(html) == "European Commission v Republic of Bulgaria"
 
 
+def test_html_case_title_falls_back_to_visible_opinion_caption():
+    from raglex.adapters.eu_cellar import html_case_title
+
+    html = b"""<html><body>
+      <p class="C38Centregrasgrandespacement"><b>Case C</b>-<b>829/24</b></p>
+      <p class="C37Centregras"><b>European Commission</b></p>
+      <p class="C37Centregras"><b>v</b></p>
+      <p class="C37Centregras"><b>Hungary</b></p>
+      <p class="C71Indicateur">(Failure of a Member State to fulfil obligations)</p>
+      <p class="C01PointAltN"><a name="point1">1.</a> Reasons.</p>
+    </body></html>"""
+    assert html_case_title(html) == "European Commission v Hungary"
+
+
 def test_extract_formex_text_prefers_ruling_and_reasoning():
     text = extract_formex_text(FORMEX)
     assert "hereby rules" in text  # JURISDICTION (operative)
@@ -655,6 +669,63 @@ def test_formex_ag_title_without_parties_element():
     assert formex_case_title(xml) == "VB v Natsionalna agentsia za prihodite"
 
 
+def test_legacy_formex_opinion_uses_current_title_and_numbered_np():
+    from raglex.adapters.eu_cellar import formex_case_title
+
+    xml = b"""<CONCLUSION>
+      <NO.CASE>C-121/01 P</NO.CASE>
+      <CURR.TITLE>OPINION OF MR GEELHOED - CASE C-121/01 P
+        O'HANNRACHAIN v PARLIAMENT</CURR.TITLE>
+      <CONTENTS.CONCLUSION><GR.SEQ>
+        <TITLE><TI>I - Introduction</TI></TITLE>
+        <NP><NO.P>1</NO.P><TXT>First numbered paragraph.</TXT></NP>
+        <NP><NO.P>2</NO.P><TXT>Second numbered paragraph.</TXT></NP>
+      </GR.SEQ></CONTENTS.CONCLUSION>
+    </CONCLUSION>"""
+    assert formex_case_title(xml) == "O'HANNRACHAIN v PARLIAMENT"
+    text, segments = extract_formex(xml)
+    assert [s.label for s in segments if s.kind == "paragraph"] == ["1", "2"]
+    assert "First numbered paragraph" in text
+
+
+def test_reparse_source_can_repair_only_held_eu_opinions(tmp_path):
+    from raglex.config import Config
+    from raglex.facade import Facade
+
+    xml = b"""<CONCLUSION><CURR.TITLE>OPINION - CASE C-121/01 P
+      O'HANNRACHAIN v PARLIAMENT</CURR.TITLE><CONTENTS.CONCLUSION><GR.SEQ>
+      <NP><NO.P>1</NO.P><TXT>First reason.</TXT></NP>
+      <NP><NO.P>2</NO.P><TXT>Second reason.</TXT></NP>
+      </GR.SEQ></CONTENTS.CONCLUSION></CONCLUSION>"""
+    cfg = Config(data_dir=tmp_path, catalogue_path=tmp_path / "c.sqlite",
+                 raw_dir=tmp_path / "raw", text_dir=tmp_path / "text",
+                 settings_path=tmp_path / "settings.json",
+                 embed_provider="local-hashing", embed_model=None)
+    facade = Facade(cfg)
+    raw_file = tmp_path / "opinion.xml"
+    raw_file.write_bytes(xml)
+    with facade._open() as (cat, _rs, ts):
+        for sid, kind in (("ECLI:EU:C:2002:514", DocType.OPINION),
+                          ("ECLI:EU:C:2002:515", DocType.JUDGMENT)):
+            rec = Record(source="eu-cellar", stable_id=sid, doc_type=kind,
+                         title=sid, text="stale", raw_bytes=xml, raw_ext="xml",
+                         extracted_via=ExtractedVia.STRUCTURED)
+            rec.ensure_payload_hash()
+            cat.upsert_document(rec, raw_path=str(raw_file),
+                                text_path=str(ts.put(rec.payload_hash, rec.text)))
+        cat.commit()
+
+    out = facade.reparse_source(source="eu-cellar", doc_type="opinion", workers=1)
+    assert out["total"] == out["reparsed"] == out["titles_updated"] == 1
+    with facade._open() as (cat, _rs, ts):
+        opinion = cat.get_document("ECLI:EU:C:2002:514")
+        judgment = cat.get_document("ECLI:EU:C:2002:515")
+        segments = ts.get_segments(opinion["payload_hash"])
+    assert opinion["title"] == "O'HANNRACHAIN v PARLIAMENT"
+    assert [s.label for s in segments if s.kind == "paragraph"] == ["1", "2"]
+    assert judgment["title"] == "ECLI:EU:C:2002:515"
+
+
 def test_case_display_title_drops_c_t_and_appeal_docket_suffixes():
     from raglex.adapters.eu_cellar import clean_case_display_title
     assert clean_case_display_title("OC (C-479/22P)") == "OC"
@@ -1208,6 +1279,23 @@ def test_html_fallback_does_not_shred_inline_markup():
     lines = [ln for ln in text.split("\n") if ln.strip()]
     assert any(ln.startswith("1. The first paragraph") for ln in lines)
     assert any(ln.startswith("2. The second paragraph") for ln in lines)
+
+
+def test_html_fallback_uses_point_anchors_as_paragraph_segments():
+    from raglex.adapters.eu_cellar import html_case_segments
+
+    html = (
+        b"<html><body><div id='document1'>"
+        b"<p>Opinion heading</p>"
+        b"<p class='C01PointAltN'><a name='point1'>1.</a> First reason.</p>"
+        b"<p class='C01PointAltN'><a name='point2'>2.</a> Second reason.</p>"
+        b"</div></body></html>"
+    )
+    text = EUCellarAdapter._html_to_text(html)
+    segments = html_case_segments(html, text)
+    assert [s.label for s in segments] == ["1.", "2."]
+    assert [text[s.char_start:s.char_end] for s in segments] == [
+        "1. First reason.", "2. Second reason."]
 
 
 def test_html_fallback_still_breaks_on_block_boundaries():
