@@ -20,9 +20,11 @@ class AdapterError(RaglexError):
 class FetchError(AdapterError):
     """A document fetch failed. ``transient`` decides retry vs skip (§A)."""
 
-    def __init__(self, message: str, *, transient: bool = True) -> None:
+    def __init__(self, message: str, *, transient: bool = True,
+                 status_code: int | None = None) -> None:
         super().__init__(message)
         self.transient = transient
+        self.status_code = status_code
 
 
 class RateLimitException(AdapterError):

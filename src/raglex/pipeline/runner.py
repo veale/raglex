@@ -343,6 +343,20 @@ class Pipeline:
                     log.warning("rate limited on %s; pausing source queue", adapter.source)
                     break
                 except FetchError as exc:
+                    if exc.status_code in (404, 410):
+                        # A source saying “that item is not here” is an expected miss,
+                        # especially for citation-derived candidates. Logging it as an
+                        # adapter error filed hundreds of duplicate review items for
+                        # withdrawn/guessed FCL and legislation.gov.uk URLs. Preserve
+                        # the absence and any held row's upstream status, quietly.
+                        stats.not_found += 1
+                        if stub.stable_id and self.catalogue.get_document(
+                                stub.stable_id) is not None:
+                            self.catalogue.mark_upstream_status(
+                                stub.stable_id, UpstreamStatus.GONE_404)
+                        stats.notes.append(f"{stub.stable_id}: {exc}")
+                        log.info("not found at source for %s: %s", stub.stable_id, exc)
+                        continue
                     stats.errors += 1
                     if exc.transient:
                         stats.errors_transient += 1

@@ -6,7 +6,7 @@ from datetime import date
 from typing import Iterator
 
 from raglex.core.adapter import BaseAdapter
-from raglex.core.errors import RateLimitException
+from raglex.core.errors import FetchError, RateLimitException
 from raglex.core.models import DocType, ExtractedVia, Record, Stub
 from raglex.pipeline import Pipeline
 
@@ -398,6 +398,17 @@ def test_one_malformed_document_does_not_sink_the_run(catalogue, rawstore):
     assert stats.errors == 1 and stats.errors_transient == 1 and stats.errors_fatal == 0
     # and it says which document blew up, and how
     assert any("bad" in n and "Failed to open stream" in n for n in stats.notes)
+
+
+def test_a_source_404_is_an_expected_miss_not_an_error(catalogue, rawstore):
+    class _MissingAdapter(FakeAdapter):
+        def fetch(self, stub):
+            raise FetchError("fake: HTTP 404 for https://example.invalid/missing",
+                             transient=False, status_code=404)
+
+    stats = Pipeline(catalogue, rawstore).run(_MissingAdapter([_rec("missing", "x")]))
+    assert stats.not_found == 1
+    assert stats.errors == stats.errors_fatal == stats.errors_transient == 0
 
 
 class ProvisionalIdAdapter(BaseAdapter):

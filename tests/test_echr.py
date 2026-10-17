@@ -62,11 +62,14 @@ def test_hudoc_uses_linked_stealth_service_without_logging_an_expected_403(monke
 
     class WafFetcher:
         def fetch(self, _url):
-            return SimpleNamespace(status=200, html=_RESULTS.decode())
+            body = _HTML.decode() if "conversion" in _url else _RESULTS.decode()
+            return SimpleNamespace(status=200, html=body)
 
     monkeypatch.setenv("RAGLEX_SCRAPLING_MCP_URL", "http://scrapling.example/mcp")
     ad = ECHRAdapter(ids="58170/13", client=PlainMustNotRun(), waf_fetcher=WafFetcher())
-    assert next(iter(ad.discover(None))).stable_id == "ECLI:CE:ECHR:2021:0525JUD005817013"
+    stub = next(iter(ad.discover(None)))
+    assert stub.stable_id == "ECLI:CE:ECHR:2021:0525JUD005817013"
+    assert "violation" in ad.fetch(stub).text
 
 
 def test_appno_from_ecli():

@@ -170,8 +170,8 @@ class RateLimitedClient:
                 _warn_if_walled(self.source, url, resp)
                 # 404/410 etc. are fatal for this stub — caller decides upstream_status.
                 raise FetchError(
-                    f"{self.source}: HTTP {resp.status_code} for {url}",
-                    transient=False,
+                    f"{self.source}: HTTP {resp.status_code} for {url}", transient=False,
+                    status_code=resp.status_code,
                 )
             _warn_if_walled(self.source, url, resp)
             return resp

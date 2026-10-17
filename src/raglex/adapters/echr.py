@@ -483,13 +483,45 @@ class ECHRAdapter(BaseAdapter):
 
     def _body(self, itemid: str) -> bytes | None:
         """One HUDOC rendition's HTML, or None if it converts to nothing. HUDOC answers
-        204 No Content for an item it holds but cannot render — not an error, just empty."""
-        resp = self._client.get(f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}")
-        return resp.content or None
+        204 No Content for an item it holds but cannot render — not an error, just empty.
+
+        Metadata and bodies sit behind the same HUDOC WAF. The metadata path already
+        escalated to the linked stealth browser, but fetch() still used the plain client
+        for the body, so every otherwise-successful discovery ended in HTTP 403 and the
+        source went 36 days without a new judgment. Use the same transport policy here.
+        """
+        url = f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}"
+        original_error: FetchError | None = None
+        if not self._prefer_waf:
+            try:
+                return self._client.get(url).content or None
+            except FetchError as exc:
+                if not re.search(r"HTTP\s+(?:403|429|503)\b", str(exc), re.I):
+                    raise
+                original_error = exc
+        if self._waf_fetcher is None:
+            from ..scraping.fetcher import get_fetcher
+            self._waf_fetcher = get_fetcher(
+                "stealth", source=self.source, min_interval=self.min_interval)
+        try:
+            page = self._waf_fetcher.fetch(url)
+        except Exception as exc:  # noqa: BLE001 — retain primary transport diagnosis
+            if original_error is not None:
+                raise original_error from exc
+            raise FetchError(f"{self.source}: HUDOC body stealth fetch failed",
+                             transient=True) from exc
+        if page.status >= 400:
+            if original_error is not None:
+                raise original_error
+            raise FetchError(f"{self.source}: HUDOC body stealth HTTP {page.status}",
+                             transient=True)
+        if not page.html:
+            return None
+        return page.html.encode() if isinstance(page.html, str) else bytes(page.html)
 
     def fetch(self, stub: Stub) -> Record | None:
         try:
-            resp = self._client.get(stub.raw_url)
+            raw = self._body(stub.hints.get("itemid"))
         except FetchError as exc:
             # A transient failure (transport error, 5xx after retries) is NOT an
             # absence — returning None here files a routable reference onto the 90-day
@@ -498,7 +530,6 @@ class ECHRAdapter(BaseAdapter):
             if exc.transient:
                 raise
             return None
-        raw = resp.content
         text, segments = parse_body_html(raw) if raw else (None, [])
         lang = "en"
         if not text:
