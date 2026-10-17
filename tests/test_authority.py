@@ -144,6 +144,10 @@ def test_cited_by_summary_combines_document_page_counters(catalogue, tmp_path):
     assert got["recent_documents"] == 2
     assert got["preparatory_documents"] == 1
     assert got["inferred_documents"] == 1
+    direct_only = catalogue.cited_by_summary(["A"], include_inferred=False)
+    assert direct_only["documents"] == 3
+    assert direct_only["preparatory_documents"] == 1
+    assert direct_only["inferred_documents"] == 0
 
 
 # -- fusion + signals --------------------------------------------------------

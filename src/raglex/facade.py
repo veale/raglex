@@ -2196,7 +2196,13 @@ class Facade:
             collapsed_version_edges = self._collapse_version_citers(cat, version_edges)
             version_inherited_incoming = self._assemble_cited_by(
                 cat, collapsed_version_edges, cap=200)
-            incoming_summary = cat.cited_by_summary(ids_self)
+            # A dated consolidation can carry hundreds of thousands of inferred
+            # ``applicable_version`` occurrence edges projected from its base act. They
+            # are internal routing scaffolding, not an extra citator panel (the version
+            # family count below is the reader-facing number). Counting their distinct
+            # sources delayed opening the GDPR by ~2 seconds for a value never shown.
+            incoming_summary = cat.cited_by_summary(
+                ids_self, include_inferred=not bool(version_base))
             cited_by_total = incoming_summary["documents"]
             version_cited_by_total = cat.cited_by_family_count(
                 [*ids_self, *([version_base] if version_base else [])])
@@ -2516,14 +2522,9 @@ class Facade:
         # one grouped aggregate for the whole page, not one query per row — and one
         # batched document read for the same reason: 200 sequential single-row lookups
         # per page view is the N+1 that made get_document time out on a mega-authority.
-        # ``doc_authority.in_degree`` is the same distinct resolved src→dst degree and
-        # is rebuilt after corpus-changing jobs. Using its indexed roll-up avoids a
-        # fresh GROUP BY over relations for every one of the three cited-by panels on
-        # a document page (the dominant two seconds of a cold GDPR open).
-        authority = cat.authority_for([sid for sid, _ in page_ids])
-        citer_counts = {
-            sid: int(row.get("in_degree") or 0) for sid, row in authority.items()
-        }
+        # Keep these exact rather than reading the periodic authority roll-up: a newly
+        # harvested citer must be reflected immediately, before the nightly rebuild.
+        citer_counts = cat.cited_by_counts([sid for sid, _ in page_ids])
         sources = cat.get_documents([sid for sid, _ in page_ids])
         for sid, r in page_ids:
             src = sources.get(sid)

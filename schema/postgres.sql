@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS relations (
 CREATE INDEX IF NOT EXISTS relations_src_idx ON relations (src_id);
 CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
+CREATE INDEX IF NOT EXISTS relations_resolved_direct_dst_src_idx
+    ON relations (dst_id, src_id)
+    WHERE resolution_status = 'resolved' AND extracted_via <> 'inferred'
+      AND relationship_type <> 'cited_by';
 
 -- Editorial provision lineage. Unlike citation aliases, these mappings do not rewrite
 -- what a source cited: they let previous, functionally similar provisions be traversed

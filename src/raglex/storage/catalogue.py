@@ -634,6 +634,13 @@ _POST_MIGRATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS relations_lineage_pending_candidate_idx "
     "ON relations (candidate_id) WHERE resolution_status = 'pending' AND dst_id IS NULL "
     "AND relationship_type IN ('consolidates', 'point_in_time_of')",
+    # Citator totals and panels ask for distinct direct citers of one destination. The
+    # plain dst index also contains every inferred applicable-version occurrence (472k
+    # rows on the GDPR alone), so even an empty direct panel paid to read all of them.
+    # Build CONCURRENTLY by hand on a large live table before deploying this declaration.
+    "CREATE INDEX IF NOT EXISTS relations_resolved_direct_dst_src_idx "
+    "ON relations (dst_id, src_id) WHERE resolution_status = 'resolved' "
+    "AND extracted_via <> 'inferred' AND relationship_type <> 'cited_by'",
     # Search resolves a typed abbreviation against the shorthand store on every
     # keystroke (documents_by_shorthand). The primary key is (shorthand, candidate_id)
     # and cannot serve lower(shorthand), so without this each autocomplete keystroke
@@ -3760,7 +3767,8 @@ class Catalogue:
             "AND d.decision_date >= ?)", (*ids, cutoff)).fetchone()["n"]
         return {"documents": total, "recent_documents": recent, "recent_years": recent_years}
 
-    def cited_by_summary(self, ids: list[str], *, recent_years: int = 5) -> dict:
+    def cited_by_summary(self, ids: list[str], *, recent_years: int = 5,
+                         include_inferred: bool = True) -> dict:
         """All document-page incoming counters in one pass over the target's edges.
 
         The reader used to scan the same large incoming relation set separately for
@@ -3776,6 +3784,12 @@ class Catalogue:
                     "inferred_documents": 0, "preparatory_documents": 0}
         qs = ",".join("?" * len(ids))
         cutoff = f"{date.today().year - recent_years:04d}-01-01"
+        inferred_sql = ("COUNT(DISTINCT CASE WHEN r.extracted_via = 'inferred' "
+                        "THEN r.src_id END)" if include_inferred else "0")
+        # When inferred projections are irrelevant, exclude them in WHERE rather than
+        # merely inside CASE. PostgreSQL can then use the resolved-direct partial index
+        # and avoid reading a consolidation's enormous applicable-version projection.
+        direct_only = "" if include_inferred else " AND r.extracted_via <> 'inferred'"
         row = self.conn.execute(
             f"""
             SELECT
@@ -3784,14 +3798,13 @@ class Catalogue:
               COUNT(DISTINCT CASE WHEN r.extracted_via <> 'inferred'
                     AND r.relationship_type <> 'cited_by' AND d.decision_date >= ?
                     THEN r.src_id END) AS recent_documents,
-              COUNT(DISTINCT CASE WHEN r.extracted_via = 'inferred'
-                    THEN r.src_id END) AS inferred_documents,
+              {inferred_sql} AS inferred_documents,
               COUNT(DISTINCT CASE WHEN r.extracted_via <> 'inferred'
                     AND r.relationship_type <> 'cited_by' AND d.doc_type = 'preparatory'
                     THEN r.src_id END) AS preparatory_documents
             FROM relations r LEFT JOIN documents d ON d.stable_id = r.src_id
             WHERE r.dst_id IN ({qs}) AND r.resolution_status = 'resolved'
-              AND r.src_id <> r.dst_id
+              AND r.src_id <> r.dst_id{direct_only}
             """, (cutoff, *ids)).fetchone()
         return {
             "documents": int(row["documents"] or 0),
