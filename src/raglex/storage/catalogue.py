@@ -634,13 +634,6 @@ _POST_MIGRATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS relations_lineage_pending_candidate_idx "
     "ON relations (candidate_id) WHERE resolution_status = 'pending' AND dst_id IS NULL "
     "AND relationship_type IN ('consolidates', 'point_in_time_of')",
-    # Citator totals and panels ask for distinct direct citers of one destination. The
-    # plain dst index also contains every inferred applicable-version occurrence (472k
-    # rows on the GDPR alone), so even an empty direct panel paid to read all of them.
-    # Build CONCURRENTLY by hand on a large live table before deploying this declaration.
-    "CREATE INDEX IF NOT EXISTS relations_resolved_direct_dst_src_idx "
-    "ON relations (dst_id, src_id) WHERE resolution_status = 'resolved' "
-    "AND extracted_via <> 'inferred' AND relationship_type <> 'cited_by'",
     # Search resolves a typed abbreviation against the shorthand store on every
     # keystroke (documents_by_shorthand). The primary key is (shorthand, candidate_id)
     # and cannot serve lower(shorthand), so without this each autocomplete keystroke

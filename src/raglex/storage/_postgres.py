@@ -370,9 +370,6 @@ CREATE INDEX IF NOT EXISTS relations_dst_idx ON relations (dst_id);
 -- find 4,519, ~9s inside every GDPR page load.
 CREATE INDEX IF NOT EXISTS relations_candidate_idx ON relations (candidate_id);
 CREATE INDEX IF NOT EXISTS idx_relations_status ON relations (resolution_status);
-CREATE INDEX IF NOT EXISTS relations_resolved_direct_dst_src_idx ON relations (dst_id, src_id)
-    WHERE resolution_status = 'resolved' AND extracted_via <> 'inferred'
-      AND relationship_type <> 'cited_by';
 
 CREATE TABLE IF NOT EXISTS provision_mappings (
     mapping_id          BIGSERIAL PRIMARY KEY,
