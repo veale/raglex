@@ -406,6 +406,10 @@ tbody tr:hover { background: var(--surface-2); }
 .doc-title-row { display: flex; align-items: flex-start; gap: var(--sp-4); }
 .doc-title { flex: 1; min-width: 0; font-size: 1.6rem; line-height: 1.25; font-weight: 600; }
 .doc-title i { font-style: italic; }
+.doc-export-button { flex: 0 0 auto; padding: .38rem .7rem; background: transparent;
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  white-space: nowrap; }
+.doc-export-button:hover { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .doc-action-menu { position: relative; flex: 0 0 auto; }
 .doc-action-menu > summary {
   list-style: none; min-width: 2rem; padding: 0 .35rem .2rem; cursor: pointer;
@@ -428,6 +432,61 @@ tbody tr:hover { background: var(--surface-2); }
 }
 .doc-action-sheet p { margin: var(--sp-2) var(--sp-1) 0; font-size: .78rem; line-height: 1.4; }
 .doc-action-sheet p + p { padding-top: var(--sp-2); border-top: 1px dotted var(--line); }
+/* Multi-provision casebook export. The component list is the only scrolling region, so
+   the pasted-reference input and output actions stay reachable on a long EU act. */
+.export-scrim { position: fixed; inset: 0; z-index: 90; padding: max(16px, 4vh) 16px;
+  display: flex; justify-content: center; align-items: flex-start; overflow-y: auto;
+  background: color-mix(in srgb, #000 48%, transparent); }
+.export-dialog { width: min(820px, 100%); max-height: 92vh; display: flex; flex-direction: column;
+  padding: var(--sp-5); background: var(--surface); border: 1px solid var(--text);
+  box-shadow: 8px 8px 0 color-mix(in srgb, #000 28%, transparent); }
+.export-head { display: flex; gap: var(--sp-4); align-items: flex-start; margin-bottom: var(--sp-4); }
+.export-head > div { flex: 1; }
+.export-head h3, .export-head p { margin: 0; }
+.export-head p { margin-top: var(--sp-1); color: var(--subtext); font-size: .82rem; }
+.export-reference-box { padding: var(--sp-3); margin-bottom: var(--sp-3);
+  border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.export-reference-box > label { display: block; margin-bottom: var(--sp-2); font-size: .85rem; }
+.export-reference-row { display: flex; gap: var(--sp-2); align-items: stretch; }
+.export-reference-row textarea { flex: 1; resize: vertical; min-height: 3.6rem; font-family: inherit; }
+.export-reference-row button { flex: 0 0 auto; }
+.export-unmatched { margin: var(--sp-2) 0 0; color: var(--warn); font-size: .78rem; }
+.export-picker-tools { display: flex; gap: var(--sp-2); align-items: center; margin-bottom: var(--sp-2); }
+.export-picker-tools input { flex: 1; }
+.export-picker-tools .muted { margin-left: auto; white-space: nowrap; font-size: .78rem; }
+.export-component-list { flex: 1 1 auto; min-height: 160px; max-height: 43vh; overflow-y: auto;
+  border: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, var(--inset)); }
+.export-component { padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--line-faint); }
+.export-component:last-child { border-bottom: 0; }
+.export-component label { cursor: pointer; }
+.export-component input[type="checkbox"] { width: auto; flex: 0 0 auto; }
+.export-component-parent { display: flex; align-items: baseline; gap: var(--sp-2); line-height: 1.35; }
+.export-kind { min-width: 4.7rem; color: var(--subtext); font-size: .68rem; text-transform: uppercase;
+  letter-spacing: .04em; }
+.export-kind-article, .export-kind-section { color: var(--accent); }
+.export-kind-recital { color: var(--note); }
+.export-subparts { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 2px var(--sp-3); margin: var(--sp-2) 0 0 6.9rem; }
+.export-subparts label { display: flex; align-items: center; gap: var(--sp-2); color: var(--subtext);
+  font-size: .78rem; white-space: nowrap; }
+.export-subparts label:has(input:checked) { color: var(--text); }
+.export-options { display: grid; grid-template-columns: minmax(240px, 2fr) minmax(100px, 1fr) auto auto;
+  gap: var(--sp-3); align-items: end; padding: var(--sp-3) 0; }
+.export-options > label:not(.toggle-row) { display: grid; gap: 3px; color: var(--subtext); font-size: .72rem; }
+.export-options select, .export-options input { width: 100%; }
+.export-options .toggle-row { padding-bottom: .55rem; white-space: nowrap; }
+.export-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center;
+  padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.export-actions .ok, .export-actions .err { flex: 1; min-width: 180px; font-size: .78rem; }
+@media (max-width: 700px) {
+  .doc-title-row { flex-wrap: wrap; }
+  .doc-export-button { order: 2; }
+  .export-scrim { padding: 0; }
+  .export-dialog { min-height: 100vh; max-height: none; padding: var(--sp-4); border: 0; }
+  .export-options { grid-template-columns: 1fr 1fr; }
+  .export-subparts { margin-left: var(--sp-5); grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .export-kind { min-width: 3.8rem; }
+}
 /* deciding court, jurisdiction, date and the outbound source link */
 .doc-provenance { font-size: .8125rem; margin-top: var(--sp-2); }
 .doc-provenance a { color: var(--subtext); }

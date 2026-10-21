@@ -5,6 +5,7 @@ import { useAuth } from "./auth";
 import { DocLink, docHref, opensNewTab } from "./links";
 import { FacetRail, INFLUENCE_EXPLAINER, InfoDot, dimsFromCorpus } from "./results";
 import { ACTIONS, CADENCE_META, GROUP_ORDER, type Action as MaintAction } from "./maintenance";
+import { buildExportModel, ExportFormat, makeDocx, parseSelectionList, renderExport } from "./documentExport";
 
 // pdf.js is ~700 kB — split it out so it loads only when an original-PDF pane opens
 const PdfPane = lazy(() => import("./pdfpane").then((m) => ({ default: m.PdfPane })));
@@ -3000,6 +3001,181 @@ function StaticExportMenu({ id }: { id: string }) {
   );
 }
 
+const EXPORT_FORMATS: { value: ExportFormat; label: string; help: string }[] = [
+  { value: "rich", label: "Rich text", help: "Best for Word, Pages and Google Docs" },
+  { value: "markdown", label: "Markdown", help: "Headings and clean source text" },
+  { value: "plain", label: "Plain text", help: "Portable, with no markup" },
+  { value: "latex", label: "LaTeX", help: "Escaped and ready to typeset" },
+  { value: "rtf", label: "RTF", help: "Rich Text Format for compatible editors" },
+];
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function safeFilename(title: string, extension: string): string {
+  const stem = title.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim().slice(0, 100) || "RagLex export";
+  return `${stem}.${extension}`;
+}
+
+function DocumentExportButton({ id, title, citation }: { id: string; title: string; citation: string }) {
+  const [open, setOpen] = useState(false);
+  const [body, err] = useAsync(() => open ? api.documentBody(id) : Promise.resolve(null), [open, id]);
+  const model = useMemo(() => body ? buildExportModel(body) : null, [body]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [format, setFormat] = useState<ExportFormat>("rich");
+  const [references, setReferences] = useState("");
+  const [unmatched, setUnmatched] = useState<string[]>([]);
+  const [gapMarker, setGapMarker] = useState("[..]");
+  const [includeTitle, setIncludeTitle] = useState(true);
+  const [includeCitation, setIncludeCitation] = useState(true);
+  const [status, setStatus] = useState("");
+  const [filter, setFilter] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setSelected(new Set()); setReferences(""); setUnmatched([]); setStatus(""); setFilter("");
+  }, [id]);
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setOpen(false); }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => { document.body.style.overflow = previous; window.removeEventListener("keydown", closeOnEscape); };
+  }, [open]);
+  const options = { title, citation, gapMarker, includeTitle, includeCitation };
+  const parentItems = (model?.items || []).filter((item) => item.line == null);
+  const visible = parentItems.filter((item) => !filter.trim()
+    || `${item.label} ${item.reference} ${item.kind}`.toLowerCase().includes(filter.trim().toLowerCase()));
+  const children = (parentId: string) => (model?.items || []).filter((item) => item.parentId === parentId);
+  const toggle = (itemId: string, parentId?: string) => setSelected((old) => {
+    const next = new Set(old);
+    if (next.has(itemId)) next.delete(itemId);
+    else {
+      next.add(itemId);
+      if (parentId) next.delete(parentId);
+      else children(itemId).forEach((item) => next.delete(item.id));
+    }
+    return next;
+  });
+  const applyReferences = () => {
+    if (!model) return;
+    const parsed = parseSelectionList(references, model.items);
+    setSelected(parsed.ids); setUnmatched(parsed.unmatched);
+    setStatus(parsed.ids.size ? `Selected ${parsed.ids.size} component${parsed.ids.size === 1 ? "" : "s"}.` : "No matching components found.");
+  };
+  const copy = async () => {
+    if (!model || !selected.size) return;
+    setBusy(true); setStatus("");
+    try {
+      const payload = renderExport(format, model, selected, options);
+      let ok = false;
+      if (format === "rtf" && payload.rtf && navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({
+            "text/rtf": new Blob([payload.rtf], { type: "text/rtf" }),
+            "text/plain": new Blob([payload.text], { type: "text/plain" }),
+          })]);
+          ok = true;
+        } catch { /* browsers that reject text/rtf fall through to compatible rich HTML */ }
+      }
+      if (!ok && format === "rtf") {
+        const rich = renderExport("rich", model, selected, options);
+        ok = await copyRich({ text: rich.text, html: rich.html || "" });
+      } else if (!ok && payload.html) ok = await copyRich({ text: payload.text, html: payload.html });
+      else if (!ok) {
+        try { await navigator.clipboard.writeText(payload.text); ok = true; } catch { ok = false; }
+      }
+      setStatus(ok ? `Copied ${selected.size} component${selected.size === 1 ? "" : "s"} as ${EXPORT_FORMATS.find((f) => f.value === format)?.label}.` : "The browser blocked clipboard access.");
+    } finally { setBusy(false); }
+  };
+  const downloadDocx = async () => {
+    if (!model || !selected.size) return;
+    setBusy(true); setStatus("Building Word document…");
+    try {
+      saveBlob(await makeDocx(model, selected, options), safeFilename(title, "docx"));
+      setStatus("Downloaded Word document.");
+    } catch { setStatus("The Word document could not be built."); }
+    finally { setBusy(false); }
+  };
+  const downloadRtf = () => {
+    if (!model || !selected.size) return;
+    const payload = renderExport("rtf", model, selected, options);
+    saveBlob(new Blob([payload.rtf || ""], { type: "application/rtf" }), safeFilename(title, "rtf"));
+    setStatus("Downloaded RTF document.");
+  };
+  return <>
+    <button type="button" className="doc-export-button" onClick={() => setOpen(true)}>
+      ⇩ Export
+    </button>
+    {open && <div className="export-scrim" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) setOpen(false);
+    }}>
+      <section className="export-dialog" role="dialog" aria-modal="true" aria-label="Export document components">
+        <header className="export-head">
+          <div><h3>Export selected text</h3><p>Assemble a clean extract without links or citation widgets.</p></div>
+          <button type="button" className="tray-x" onClick={() => setOpen(false)} aria-label="Close export">✕</button>
+        </header>
+        {err ? <p className="err">{err}</p> : !model ? <p className="muted loading-pulse">Loading document structure…</p> : <>
+          <div className="export-reference-box">
+            <label htmlFor="export-reference-list"><b>Paste a list of provisions</b></label>
+            <div className="export-reference-row">
+              <textarea id="export-reference-list" value={references} onChange={(event) => setReferences(event.target.value)}
+                placeholder="recitals 3, 4, 5; articles 3, 6(3), 9 — or arts. 5–6, 9" rows={2} />
+              <button type="button" onClick={applyReferences} disabled={!references.trim()}>Select</button>
+            </div>
+            {unmatched.length > 0 && <p className="export-unmatched">Not found: {unmatched.join(", ")}. Check the labels below.</p>}
+          </div>
+          <div className="export-picker-tools">
+            <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter components" aria-label="Filter components" />
+            <button type="button" className="mini" onClick={() => setSelected(new Set(parentItems.map((item) => item.id)))}>select all</button>
+            <button type="button" className="mini" onClick={() => setSelected(new Set())}>clear</button>
+            <span className="muted">{selected.size} selected</span>
+          </div>
+          <div className="export-component-list" role="group" aria-label="Document components">
+            {visible.map((item) => {
+              const subs = children(item.id);
+              return <div className="export-component" key={item.id}>
+                <label className="export-component-parent">
+                  <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)} />
+                  <span className={`export-kind export-kind-${item.kind}`}>{item.kind}</span>
+                  <span>{item.label}</span>
+                </label>
+                {subs.length > 0 && <div className="export-subparts">
+                  {subs.map((sub) => <label key={sub.id}>
+                    <input type="checkbox" checked={selected.has(sub.id)} disabled={selected.has(item.id)}
+                      onChange={() => toggle(sub.id, item.id)} />
+                    <span>{sub.reference}</span>
+                  </label>)}
+                </div>}
+              </div>;
+            })}
+          </div>
+          <div className="export-options">
+            <label>Format<select value={format} onChange={(event) => setFormat(event.target.value as ExportFormat)}>
+              {EXPORT_FORMATS.map((item) => <option key={item.value} value={item.value}>{item.label} — {item.help}</option>)}
+            </select></label>
+            <label>Gap marker<input value={gapMarker} onChange={(event) => setGapMarker(event.target.value)} /></label>
+            <label className="toggle-row"><input type="checkbox" checked={includeTitle} onChange={(event) => setIncludeTitle(event.target.checked)} /> include title</label>
+            <label className="toggle-row"><input type="checkbox" checked={includeCitation} onChange={(event) => setIncludeCitation(event.target.checked)} /> include citation</label>
+          </div>
+          <footer className="export-actions">
+            <button type="button" className="primary" disabled={busy || !selected.size} onClick={copy}>{busy ? "Working…" : `Copy as ${EXPORT_FORMATS.find((item) => item.value === format)?.label}`}</button>
+            <button type="button" disabled={busy || !selected.size} onClick={downloadDocx}>Download .docx</button>
+            {format === "rtf" && <button type="button" disabled={busy || !selected.size} onClick={downloadRtf}>Download .rtf</button>}
+            {status && <span className={status.startsWith("The ") || status.startsWith("No ") ? "err" : "ok"}>{status}</span>}
+          </footer>
+        </>}
+      </section>
+    </div>}
+  </>;
+}
+
 export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
   id: string;
   open: (id: string, a?: string, replace?: boolean) => void;
@@ -3047,6 +3223,9 @@ export function DocumentView({ id, open, openGraph, pinpoint, onCitation }: {
       <div className="panel">
         <div className="doc-title-row">
           <h2 className="doc-title" style={{ marginTop: 0 }}><Oscola c={doc.oscola} fallback={d.title || d.stable_id} /></h2>
+          {(d.doc_type === "legislation" || CASE_DOC_TYPES.has(d.doc_type)) &&
+            <DocumentExportButton id={d.stable_id} title={d.title || d.stable_id}
+              citation={String(doc.oscola?.text || d.title || d.stable_id)} />}
           {canWrite && d.doc_type === "legislation" && <StaticExportMenu id={d.stable_id} />}
         </div>
         {/* who decided this, and where — "Court of Appeal (Civil Division) ·
