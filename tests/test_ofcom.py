@@ -9,6 +9,7 @@ from raglex.adapters.ofcom import (
     OfcomHTTP,
     OfcomOSAAdapter,
     OSA_ID,
+    PAGE_URLS,
     parse_page,
     supersession_edges,
     _slug,
@@ -52,6 +53,38 @@ def test_supersession_edges_link_current_to_superseded():
     edges = supersession_edges(parse_page(PAGE))
     assert edges == {"ofcom/updates/register-of-risks":
                      ["ofcom/illegal-harms/register-of-risks"]}
+
+
+def test_collapsed_accordions_include_plain_links_and_title_only_anchors():
+    docs = parse_page('''
+      <h2 class="section">Statement</h2>
+      <div class="accordion-item">
+        <h3 class="accordion-head">Volume 4</h3>
+        <div class="accordion-collapse collapse">
+          <a href='/siteassets/children/volume-4.pdf?v=42&amp;download=1'
+             class='external-link'><strong>Mitigating harms (PDF, 5,227 KB)</strong></a>
+          <a href="https://www.ofcom.org.uk/siteassets/children/volume-4.pdf?v=42">Again</a>
+          <a title="Overview" href="/siteassets/children/overview.pdf?v=43"></a>
+          <a href="https://example.org/other.pdf">External</a>
+        </div>
+      </div>''')
+    assert len(docs) == 2
+    assert docs[0].title == "Mitigating harms"
+    assert docs[0].version == "42" and docs[0].category == "Volume 4"
+    assert docs[1].title == "Overview"
+
+
+def test_draft_filename_does_not_overwrite_issued_code():
+    assert _slug("/siteassets/main-document/code-.pdf") != _slug(
+        "/siteassets/main-document/code.pdf")
+
+
+def test_hub_misspelled_superseded_label_keeps_version_chain():
+    docs = parse_page('''
+      <a href="/siteassets/upcoming/code.pdf?v=2">Issued Children Code</a>
+      <a href="/siteassets/main/code.pdf?v=1">SUPERSEEDED Children Code</a>''')
+    assert docs[1].status == "superseded"
+    assert supersession_edges(docs) == {"ofcom/upcoming/code": ["ofcom/main/code"]}
 
 
 class _Resp:
@@ -131,6 +164,33 @@ def test_discover_yields_versioned_stubs_with_supersession():
     assert upd.hints["contenthash"] == "419946"          # version token = change signal
     assert upd.hints["supersedes"] == ["ofcom/illegal-harms/register-of-risks"]
     assert upd.raw_url.endswith("register-of-risks.pdf?v=419946")
+
+
+def test_discover_scans_all_inventories_despite_watch_page_limit():
+    class Pages:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, headers=None):
+            self.urls.append(url)
+            n = PAGE_URLS.index(url)
+            return _Resp(PAGE if n == 0 else PAGE + (
+                f'<div class="accordion-collapse collapse"><a href="/siteassets/statement/volume-{n}.pdf?v=1">'
+                f'Volume {n}</a></div>'))
+
+    client = Pages()
+    stubs = list(OfcomOSAAdapter(client=client).discover("2026-11-01", max_pages=1))
+    assert client.urls == list(PAGE_URLS)
+    assert len(stubs) == len(parse_page(PAGE)) + 2
+    assert len({s.stable_id for s in stubs}) == len(stubs)
+    assert stubs[-1].landing_url == PAGE_URLS[-1]
+
+
+def test_discover_rejects_success_status_with_missing_inventory():
+    from raglex.core.errors import FetchError
+
+    with pytest.raises(FetchError, match="no PDF links"):
+        list(OfcomOSAAdapter(client=_FakeClient("<html>Access denied</html>")).discover(None))
 
 
 def test_fetch_links_to_osa_and_supersedes_and_titles_it():

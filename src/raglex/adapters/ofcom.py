@@ -6,7 +6,9 @@ the **Online Safety Act 2023** (``ukpga/2023/50``):
 
     https://www.ofcom.org.uk/online-safety/illegal-and-harmful-content/online-safety-regulatory-documents
 
-The page is plain server-rendered HTML: documents sit under H2 category headings as
+The hub and both protecting-children / illegal-harms statement pages are scanned.
+Collapsed accordions contain ordinary PDF links as well as download widgets.
+The pages are server-rendered HTML: documents also sit under category headings as
 ``<a class="file-download" href="…/foo.pdf?v=NNNNNN">Title (status) • PDF • size •
 date</a>``. Two signals drive supersession, exactly as the page presents it:
 
@@ -39,7 +41,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterator
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
@@ -57,15 +59,16 @@ from ..core.models import (
 BASE_URL = "https://www.ofcom.org.uk"
 PAGE_URL = (BASE_URL + "/online-safety/illegal-and-harmful-content/"
             "online-safety-regulatory-documents")
+PAGE_URLS = (
+    PAGE_URL,
+    BASE_URL + "/online-safety/illegal-and-harmful-content/statement-protecting-children-from-harms-online",
+    BASE_URL + "/online-safety/illegal-and-harmful-content/statement-protecting-people-from-illegal-harms-online",
+)
 OSA_ID = "ukpga/2023/50"  # the Online Safety Act 2023
 
 _HEADERS = {"User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) "
                            "Gecko/20100101 Firefox/152.0")}
 
-_DOWNLOAD = re.compile(
-    r'<a[^>]+class="file-download"[^>]+href="(?P<href>/[^"]+?\.pdf)(?:\?v=(?P<v>\d+))?"[^>]*>'
-    r'(?P<body>.*?)</a>', re.S)
-_H2 = re.compile(r"<h2>(?P<h>.*?)</h2>", re.S)
 _MONTHS = {m: i for i, m in enumerate(
     ["january", "february", "march", "april", "may", "june", "july", "august",
      "september", "october", "november", "december"], start=1)}
@@ -153,12 +156,6 @@ class OfcomHTTP:
         return response
 
 
-def _clean(fragment: str) -> str:
-    import html as _html
-
-    return re.sub(r"\s+", " ", _html.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
-
-
 @dataclass(frozen=True, slots=True)
 class OfcomDoc:
     href: str            # site-relative PDF path (no query)
@@ -193,7 +190,7 @@ def _parse_title(raw: str) -> tuple[str, str, str, str | None]:
     title = re.split(r"\s*•\s*", raw)[0]
     title = re.sub(r"\s*\(PDF,[^)]*\)\s*", " ", title).strip()
     low = title.lower()
-    if "superseded" in low:
+    if "superseded" in low or "superseeded" in low:
         status = "superseded"
     elif title.lstrip().upper().startswith("DRAFT"):
         status = "draft"
@@ -201,7 +198,9 @@ def _parse_title(raw: str) -> tuple[str, str, str, str | None]:
         status = "current"
     # base title for grouping: strip trailing status qualifiers and a bare "(ICJG)" etc.
     base = re.sub(r"\s*\((?:updated|superseded|icjg|pdf[^)]*)\)\s*", " ", title, flags=re.IGNORECASE)
-    base = re.sub(r"^\s*(?:DRAFT|Issued|Final|Updated)\s+", "", base, flags=re.IGNORECASE)
+    # The hub also uses a bare, misspelled SUPERSEEDED prefix on issued codes.
+    base = re.sub(r"^\s*(?:DRAFT|Issued|Final|Updated|Superseded|Superseeded)\s+", "", base,
+                  flags=re.IGNORECASE)
     base = re.sub(r"\s+", " ", base).strip(" -–—")
     return title.strip(), base, status, size
 
@@ -209,33 +208,33 @@ def _parse_title(raw: str) -> tuple[str, str, str, str | None]:
 def parse_page(html: str) -> list[OfcomDoc]:
     """Every regulatory document on the page (pure), each with its version token,
     status, size, date, category heading and any OSA Part it names."""
-    # map each download's position to the nearest preceding H2 (its category)
-    headings = [(m.start(), _clean(m.group("h"))) for m in _H2.finditer(html)]
+    from bs4 import BeautifulSoup
 
-    def category_at(pos: int) -> str | None:
-        cat = None
-        for start, h in headings:
-            if start <= pos:
-                cat = h
-            else:
-                break
-        return cat
-
+    # Accordion bodies are present in the source HTML even when collapsed. Ordinary
+    # rich-text links carry most statement volumes; file-download alone loses them.
+    soup = BeautifulSoup(html, "html.parser")
     out: list[OfcomDoc] = []
     seen: set[str] = set()
-    for m in _DOWNLOAD.finditer(html):
-        href, ver = m.group("href"), m.group("v")
+    for anchor in soup.select("a[href]"):
+        url = urlsplit(anchor["href"])
+        if url.netloc and url.netloc.lower() != "www.ofcom.org.uk":
+            continue
+        href = url.path
+        if not href.startswith("/") or not href.lower().endswith(".pdf"):
+            continue
+        ver = (parse_qs(url.query).get("v") or [None])[0]
         if href in seen:
             continue
-        seen.add(href)
-        raw = _clean(m.group("body"))
+        raw = anchor.get_text(" ", strip=True) or str(anchor.get("title") or "").strip()
         if not raw:
-            continue
+            raw = href.rsplit("/", 1)[-1][:-4].replace("-", " ")
+        seen.add(href)
+        heading = anchor.find_previous(["h2", "h3", "h4"])
         title, base, status, size = _parse_title(raw)
         out.append(OfcomDoc(
             href=href, version=ver, raw_title=raw, title=title, base_title=base,
             status=status, size=size, published=_parse_date(raw),
-            category=category_at(m.start()),
+            category=heading.get_text(" ", strip=True) if heading else None,
             parts=tuple(dict.fromkeys(re.sub(r"\s+", " ", p).title()
                                       for p in _PART.findall(raw))),
         ))
@@ -249,7 +248,9 @@ def _slug(href: str) -> str:
     parts = [p for p in href.split("?")[0].split("/") if p]
     tail = parts[-2:] if len(parts) >= 2 else parts
     stem = re.sub(r"\.pdf$", "", "/".join(tail), flags=re.IGNORECASE)
-    return "ofcom/" + re.sub(r"[^a-z0-9/]+", "-", stem.lower()).strip("-")
+    # Ofcom publishes both x.pdf and x-.pdf for issued and draft codes. Keeping
+    # the path's trailing hyphen prevents the draft overwriting the issued text.
+    return "ofcom/" + re.sub(r"[^a-z0-9/]+", "-", stem.lower()).lstrip("-")
 
 
 def supersession_edges(docs: list[OfcomDoc]) -> dict[str, list[str]]:
@@ -282,15 +283,26 @@ class OfcomOSAAdapter(BaseAdapter):
         )
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
-        resp = self._client.get(PAGE_URL, headers=_HEADERS)
-        html = resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content)
-        docs = parse_page(html)
+        docs: list[OfcomDoc] = []
+        landing_pages: dict[str, str] = {}
+        # These are complementary inventories, not pagination. A watch configured
+        # with max_pages=1 must still examine all three, including older volumes.
+        for page_url in PAGE_URLS:
+            resp = self._client.get(page_url, headers=_HEADERS)
+            html = resp.content.decode("utf-8", "replace") if isinstance(resp.content, bytes) else str(resp.content)
+            page_docs = parse_page(html)
+            if not page_docs:
+                raise FetchError(f"{self.source}: no PDF links found on {page_url}")
+            for d in page_docs:
+                if d.href not in landing_pages:
+                    docs.append(d)
+                    landing_pages[d.href] = page_url
         supersedes = supersession_edges(docs)
         for d in docs:
             sid = _slug(d.href)
             yield Stub(
                 stable_id=sid,
-                landing_url=PAGE_URL,
+                landing_url=landing_pages[d.href],
                 raw_url=BASE_URL + d.href + (f"?v={d.version}" if d.version else ""),
                 hint_date=d.published,
                 title=d.title,
@@ -342,7 +354,7 @@ class OfcomOSAAdapter(BaseAdapter):
             decision_date=d.published,
             language="en",
             source_language="en",
-            landing_url=PAGE_URL,
+            landing_url=stub.landing_url,
             raw_bytes=raw,
             raw_ext="pdf",
             text=text or None,

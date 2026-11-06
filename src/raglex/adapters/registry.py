@@ -1380,7 +1380,8 @@ SOURCE_INFO: dict[str, SourceInfo] = {
     "ofcom-osa": SourceInfo(
         "ofcom-osa", "Ofcom online-safety documents (Online Safety Act)", "guidance", "GB", False,
         "Ofcom's regulatory documents implementing the Online Safety Act 2023 — Codes of "
-        "Practice, risk-assessment guidance, registers of risks. Version chains are "
+        "Practice, risk-assessment guidance, registers of risks, and the children/illegal-harms "
+        "statement volumes and annexes (including collapsed accordions). Version chains are "
         "tracked: an updated document supersedes the old one (kept, marked superseded). "
         "Each links to the OSA sections/parts it implements, both ways.",
         (),
