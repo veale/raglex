@@ -295,7 +295,7 @@ class CanLIIAdapter(BaseAdapter):
         resp = self._client.request("GET", f"{self.base_url}{path}", params=query,
                                     raise_for_4xx=False)
         if resp.status_code == 404:
-            raise FetchError(f"{self.source}: not found: {path}", transient=False)
+            raise FetchError(f"{self.source}: not found: {path}", transient=False, status_code=404)
         if resp.status_code >= 400:
             # never echo the URL: it carries the API key as a query parameter
             raise FetchError(f"{self.source}: HTTP {resp.status_code} from {path}",

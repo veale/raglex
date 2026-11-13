@@ -68,6 +68,8 @@ MAX_CONCURRENT_JOBS = 6
 # SAME category still dedup, and the nightly whole-queue drain (no adapter → distinct params)
 # dedups against a second whole-queue drain but no longer blocks the per-category buttons.
 DEDUP_KINDS = frozenset({
+    "case-admin",
+    "audit-domsdatabasen", "materialize-fr-legislation",
     "run-watch", "gap-scan", "harvest-source", "harvest-all", "static-export",
     "static-bundle", "sync-eu-consolidations",
 })
@@ -362,6 +364,14 @@ def _static_bundle(facade, params, on_progress, cancel_check):
 
 
 RUNNERS: dict[str, Callable] = {
+    "case-admin": lambda f, p, cb, cancel: __import__(
+        "raglex.case_admin", fromlist=["run_action"]
+    ).run_action(f, **p, on_progress=cb, cancel_check=cancel),
+    "audit-domsdatabasen": lambda f, p, cb, cancel: __import__(
+        "raglex.danish_inventory", fromlist=["audit_inventory"]
+    ).audit_inventory(f, on_progress=cb, cancel_check=cancel),
+    "materialize-fr-legislation": lambda f, p, cb, cancel: f.materialize_fr_legislation(
+        parent_ids=p["parent_ids"], on_progress=cb, cancel_check=cancel),
     "static-export": _static_export,
     "static-bundle": _static_bundle,
     "backfill-uk-materials": lambda f, p, cb, cancel: __import__(

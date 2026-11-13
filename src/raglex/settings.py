@@ -174,6 +174,8 @@ KNOWN_SETTINGS: tuple[SettingSpec, ...] = (
                 "costs 1 request, +2-3 with the citator"),
     SettingSpec("EURLEX_USERNAME", "EUR-Lex webservice user", False, "Sources"),
     SettingSpec("EURLEX_PASSWORD", "EUR-Lex webservice password", True, "Sources"),
+    SettingSpec("DOMSDATABASEN_EMAIL", "Domsdatabasen email", True, "Sources"),
+    SettingSpec("DOMSDATABASEN_PASSWORD", "Domsdatabasen password", True, "Sources"),
     # PISTE (piste.gouv.fr) OAuth2 client-credentials — one app can subscribe to
     # BOTH Judilibre (fr-judilibre) and Légifrance (fr-legislation), so the two
     # French adapters share these. Register a free app at piste.gouv.fr, subscribe

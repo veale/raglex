@@ -312,7 +312,17 @@ class FrLegislationAdapter(BaseAdapter):
             for v in doc.versions
         ]
 
-        extra = {"legifrance_id": text_id, "fond": fond}
+        extra = {"legifrance_id": text_id, "fond": fond, "format": "legifrance-json"}
+        extra["aliases"] = list(dict.fromkeys(x for x in (text_id, doc.cid, doc.eli) if x))
+        # Preserve publisher-supplied gazette coordinates; never infer a print page
+        # from a text number, or substitute a consolidated text for the JORF original.
+        for key in ("nor", "numParution", "datePubli", "datePublication", "numTexte",
+                    "numSequence", "pageDebut", "pageFin", "urlPdf", "eli",
+                    "dateParution", "textNumber", "pagePdf", "fileName", "filePath",
+                    "jorfFileMetadata", "hasSinglePdf"):
+            value = raw_text.get(key) or body.get(key)
+            if value not in (None, "", [], {}):
+                extra[key] = value
         if doc.cid:
             extra["cid"] = doc.cid
         if doc.eli:

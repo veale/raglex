@@ -811,7 +811,9 @@ def create_app(config: Config | None = None) -> FastAPI:
     def freetext_coverage_ep() -> dict:
         """What the free-text index currently covers, by jurisdiction — for the note
         under the search box. Cheap: it walks the index, not the corpus."""
-        return facade.freetext_index_summary()
+        return facade._cached("fts-ui-coverage", 600, facade.freetext_index_summary,
+                              placeholder={"warming": True, "jurisdictions": [],
+                                           "documents": None})
 
     @app.get("/freetext/scope")
     def freetext_scope_ep() -> dict:
@@ -906,7 +908,8 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.post("/feedback/{feedback_id}/status")
     def set_feedback_ep(feedback_id: int, payload: dict = Body(default={})) -> dict:
         return facade.resolve_feedback(
-            feedback_id=feedback_id, status=(payload or {}).get("status", "resolved"))
+            feedback_id=feedback_id, status=(payload or {}).get("status", "resolved"),
+            response=(payload or {}).get("response"))
 
     @app.post("/unresolved/retry-failed")
     def retry_failed_ep() -> dict:
@@ -1161,7 +1164,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         anything."""
         p = payload or {}
         params = {k: p[k] for k in ("limit", "min_citing", "adapter", "leg_kind",
-                                    "retry_cooled") if k in p}
+                                    "retry_cooled", "references") if k in p}
         return _start_job("harvest-all", "harvest all routable references", params,
                           queue=bool(p.get("queue")))
 
@@ -1278,6 +1281,46 @@ def create_app(config: Config | None = None) -> FastAPI:
             since=payload.get("since"), max_pages=payload.get("max_pages", 1),
             options=payload.get("options"),
         )
+
+    @app.get("/case-admin/preview")
+    def case_admin_preview_ep(citation: str) -> dict:
+        from ..case_admin import preview
+        return preview(facade, citation)
+
+    @app.post("/case-admin/action")
+    def case_admin_action_ep(payload: dict = Body(...)) -> dict:
+        from ..case_admin import preview
+        action = payload.get("action")
+        if action not in {"purge", "refetch"}:
+            return {"error": "action must be purge or refetch"}
+        match = preview(facade, str(payload.get("citation") or ""))
+        if match.get("error"):
+            return match
+        if payload.get("expected_id") != match["stable_id"]:
+            return {"error": "Review the matched case before applying this action"}
+        if not match["can_purge" if action == "purge" else "can_refetch"]:
+            return {"error": "This action is unavailable for the matched case"}
+        return _start_job("case-admin", f"{action} case {match['stable_id']}",
+                          {"citation": match["citation"], "expected_id": match["stable_id"],
+                           "action": action})
+
+    @app.post("/documents/withdraw-publication")
+    def withdraw_document_publication_ep(payload: dict = Body(...)) -> dict:
+        return facade.withdraw_document_publication(stable_id=payload["stable_id"],
+                                                    reason=payload["reason"])
+
+    @app.post("/jobs/audit-domsdatabasen")
+    def audit_domsdatabasen_ep() -> dict:
+        return _start_job("audit-domsdatabasen", "reconcile Danish public portal inventory")
+
+    @app.post("/jobs/materialize-fr-legislation")
+    def materialize_fr_legislation_ep(payload: dict = Body(...)) -> dict:
+        parents = payload.get("parent_ids")
+        if not isinstance(parents, list) or not parents or not all(
+                isinstance(p, str) and re.fullmatch(r"LEGITEXT\d+", p) for p in parents):
+            return {"error": "parent_ids must contain LEGITEXT identifiers"}
+        return _start_job("materialize-fr-legislation", "assemble French statute articles",
+                          {"parent_ids": parents})
 
     @app.post("/jobs/harvest-source")
     def job_harvest_source_ep(payload: dict = Body(...)) -> dict:

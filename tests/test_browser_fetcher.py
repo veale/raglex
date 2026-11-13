@@ -67,3 +67,47 @@ def test_browser_html_tolerates_cloudflare_redirect_context_destruction():
     fetcher._ensure = lambda: _Browser(page)
     assert fetcher._fetch_html("https://example.test") == REAL
     assert page.reads == 3
+
+
+def test_dead_mcp_endpoint_is_not_retried_for_every_tool_and_page(monkeypatch):
+    import httpx
+    from raglex.scraping import fetcher as mod
+    from raglex.embeddings import remote
+    calls=[]
+    class Remote:
+        def __init__(self,*a,**kw):pass
+        def call_tool(self,*a):
+            calls.append(a)
+            response=httpx.Response(401,request=httpx.Request('POST','https://scraper.test/mcp'))
+            raise httpx.HTTPStatusError('invalid token',request=response.request,response=response)
+    class Local:
+        def available(self):return True
+        def fetch_html(self,url):return REAL
+    monkeypatch.setattr(remote,'MCPToolClient',Remote)
+    monkeypatch.setattr(mod,'get_bytes_fetcher',lambda:Local())
+    monkeypatch.setattr(mod.ScraplingMcpFetcher,'_unavailable_until',{})
+    f=mod.ScraplingMcpFetcher(url='https://scraper.test/mcp',api_key='old')
+    assert f.fetch('https://example.test/1').html==REAL
+    assert f.fetch('https://example.test/2').html==REAL
+    assert len(calls)==1
+    # Credential rotation gets an immediate fresh attempt, not the old token's cooldown.
+    g=mod.ScraplingMcpFetcher(url='https://scraper.test/mcp',api_key='new')
+    g.fetch('https://example.test/3')
+    assert len(calls)==2
+
+
+def test_browser_failure_does_not_fan_out_as_tool_name_discovery(monkeypatch):
+    from raglex.scraping import fetcher as mod
+    from raglex.embeddings import remote
+    calls=[]
+    class Remote:
+        def __init__(self,*a,**kw):pass
+        def call_tool(self,*a):
+            calls.append(a)
+            raise RuntimeError('browser process limit reached')
+    monkeypatch.setattr(remote,'MCPToolClient',Remote)
+    f=mod.ScraplingMcpFetcher(url='https://scraper.test/mcp',api_key='key')
+    import pytest
+    with pytest.raises(RuntimeError,match='process limit'):
+        f._mcp_fetch('https://example.test')
+    assert len(calls)==1

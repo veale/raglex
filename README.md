@@ -63,6 +63,11 @@ Court, the Federal Court, and New South Wales. New Zealand, Singapore, Hong Kong
 are held for legislation or through bulk case-law imports. Adding a jurisdiction or a source
 means writing an adapter; nothing else in the system changes.
 
+Denmark's selected court publications are available through the credentialed
+`dk-domsdatabasen` KAPI v2 adapter. Judgments and summaries retain separate identities;
+updates include revisions and withdrawals. See [Domsdatabasen setup and completeness
+audit](docs/domsdatabasen.md) before starting the initial backfill.
+
 Regulatory decisions from data-protection authorities are treated as their own kind of
 material, distinct from both case law and guidance, and are attributed to the country whose
 authority made them rather than to the register that happens to publish them.

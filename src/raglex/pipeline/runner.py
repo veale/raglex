@@ -191,6 +191,25 @@ class Pipeline:
                     cancelled = True
                     break
                 stats.discovered += 1
+                # A change feed may explicitly retract a document while retaining
+                # its identity. Keep the archive, record the withdrawal before the
+                # held-document fast path, and never ingest the retracted body.
+                if stub.hints.get("upstream_withdrawn"):
+                    prefix = stub.hints.get("withdrawn_prefix")
+                    ids = [held_id] if held_id else []
+                    if prefix:
+                        # A case-level tombstone applies only to this adapter's
+                        # namespace; substr avoids treating publisher IDs as LIKE patterns.
+                        ids = [r["stable_id"] for r in self.catalogue.conn.execute(
+                            "SELECT stable_id FROM documents WHERE source=? "
+                            "AND substr(stable_id,1,?)=?",
+                            (adapter.source, len(prefix), prefix))]
+                        stats.notes.append(f"withdrawn case {stub.stable_id}: {len(ids)} held documents")
+                    for ident in ids:
+                        self.catalogue.mark_upstream_status(ident, UpstreamStatus.WITHDRAWN)
+                        self.catalogue.note_refetch(ident)
+                    stats.not_found += 1
+                    continue
                 # Heartbeat so a long crawl (the EDPB backfill fetches hundreds of PDFs
                 # at a slow, WAF-safe pace) keeps the job alive and shows live progress,
                 # instead of looking frozen behind one silent "harvesting" line.

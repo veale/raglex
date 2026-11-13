@@ -411,6 +411,10 @@ LIMIT {self.page_size} OFFSET {offset}
             raw = self._fetch_formex(stub.raw_url, language)
             parsed = parse("formex-legislation", raw) if raw else None
             raw_ext = "zip"
+            if primary and parsed and not any(s.kind == "article" for s in parsed.segments):
+                # The Charter stem can negotiate the OJ cover even as Formex. A
+                # successful parse of that cover is not the instrument's articles.
+                parsed = None
             if not parsed or not parsed.text:
                 # A treaty is addressed by its CELEX STEM (12016E) but EUR-Lex only
                 # serves the text under the /TXT expression. The stem alone answers with
@@ -542,7 +546,8 @@ LIMIT {self.page_size} OFFSET {offset}
         for attempt in range(3):
             try:
                 r = self._client.get(url, headers=headers)
-                if getattr(r, "status_code", 200) == 200 and len(r.content or b"") > 500:
+                if (getattr(r, "status_code", 200) == 200 and len(r.content or b"") > 500
+                        and b"the requested document does not exist" not in r.content.lower()):
                     return r.content
             except FetchError:
                 break

@@ -44,7 +44,9 @@ def _pinpoint_arg(value: PinpointArg) -> str | None:
     if isinstance(value, list):
         if not value or len(value) > 2:
             raise ValueError("a pinpoint list must contain one paragraph or two range endpoints")
-        endpoints = [str(v).strip().strip("[]") for v in value]
+        import re
+        endpoints = [re.sub(r"^(?:paras?\.?|paragraphs?)\s*", "",
+                            str(v).strip().strip("[]"), flags=re.I) for v in value]
         if any(not endpoint for endpoint in endpoints):
             raise ValueError("pinpoint endpoints cannot be empty")
         return "-".join(f"[{endpoint}]" for endpoint in endpoints)
@@ -345,7 +347,7 @@ def build_server(config: Config | None = None) -> MCPServer:
     def citing_documents(target: str | list[str], anchor: PinpointArg = None,
                          mode: str = "union", sort: str = "pagerank",
                          jurisdiction: Optional[str] = None, kind: Optional[str] = None,
-                         offset: int = 0, limit: int = 20) -> dict:
+                         offset: int = 0, limit: int = 20, compact: bool = False) -> dict:
         """The browsable list of documents that CITE ``target`` — the results list you page,
         filter and sort, and return to. ``target`` is a citation or a stable_id.
 
@@ -366,6 +368,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         • ``jurisdiction``: an ISO code ("fr", "gb", "eu") or a name — narrow to one place
         • ``kind``: "cases" | "administrative" (DPA/regulator decisions) | "legislation" | "guidance"
         • ``offset`` / ``limit``: page through (the reply's ``how_to_browse`` gives the next offset)
+        • ``compact=true``: only case id, date, court and a short snippet per row for larger pages
 
         Each row carries an inline snippet of where it cites, its OSCOLA cite, court,
         jurisdiction, kind and date; ``facets`` shows the whole citer set so you know what you
@@ -373,7 +376,7 @@ def build_server(config: Config | None = None) -> MCPServer:
         results, or open any row with lookup(its stable_id)."""
         return facade.citing_documents(target, anchor=_pinpoint_arg(anchor), mode=mode, sort=sort,
                                        jurisdiction=jurisdiction, kind=kind,
-                                       offset=offset, limit=limit)
+                                       offset=offset, limit=limit, compact=compact)
 
     @mcp.tool(annotations=_READ_ONLY)
     def list_documents(source: Optional[str] = None, doc_type: Optional[str] = None,
@@ -757,9 +760,15 @@ def build_server(config: Config | None = None) -> MCPServer:
                                       metadata=metadata)
 
     @admin
-    def resolve_feedback(feedback_id: int, status: str = "resolved") -> dict:
-        """Mark a feedback item handled (status: resolved | open)."""
-        return facade.resolve_feedback(feedback_id=feedback_id, status=status)
+    def withdraw_document_publication(stable_id: str, reason: str) -> dict:
+        """Explicit maintainer takedown: stop serving body/raw and remove search text; retain archive."""
+        return facade.withdraw_document_publication(stable_id=stable_id, reason=reason)
+
+    @admin
+    def resolve_feedback(feedback_id: int, status: str = "resolved",
+                         response: str | None = None) -> dict:
+        """Record an investigation response; resolve only after verification, else keep open."""
+        return facade.resolve_feedback(feedback_id=feedback_id, status=status, response=response)
 
     @admin
     def decide_match_suggestion(ref: str, suggested_id: str, accept: bool = True) -> dict:

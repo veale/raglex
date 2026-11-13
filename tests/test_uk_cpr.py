@@ -163,3 +163,22 @@ def test_cpr_rule_and_pd_lists_emit_every_pinpoint():
         ("uk/cpr/pd/3c", "paragraph 3.1"),
         ("uk/cpr/pd/3c", "paragraph 3.2"),
     ]
+
+
+def test_rule_number_and_list_continuations_belong_to_the_citable_unit():
+    from raglex.adapters.uk_cpr import parse_page
+    html = '''<article><div class="rich-text">
+    <h3>Final remedy</h3><p><strong>27.3</strong> The court may grant any final remedy.</p>
+    <p>(1) Including an injunction.</p><h3>Next rule</h3><p>27.4</p><p>Other powers.</p>
+    </div></article>'''
+    page = page_identity('PART 27 SMALL CLAIMS', '/part27')
+    text, segs, _, _ = parse_page(html, page)
+    rule = next(s for s in segs if s.label == 'rule 27.3')
+    assert 'any final remedy' in text[rule.char_start:rule.char_end]
+    assert 'Including an injunction' in text[rule.char_start:rule.char_end]
+    html = '''<article><div class="rich-text"><p>7.3 The amounts are:</p>
+    <ol><li>£95 per day</li><li>£750 experts fees</li></ol><p>7.4 The next paragraph.</p>
+    </div></article>'''
+    text, segs, _, _ = parse_page(html, page_identity('PRACTICE DIRECTION 27A', '/pd27a'))
+    rule = next(s for s in segs if s.label == 'paragraph 7.3')
+    assert '£750' in text[rule.char_start:rule.char_end]

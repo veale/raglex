@@ -149,3 +149,16 @@ def test_zotero_import_maps_items_and_extracts_citations(catalogue, tmp_path):
     # ECLI + CELEX in the abstract became dangling commentary edges (§5b)
     cites = {r["raw_citation_string"] for r in catalogue.relations_for("zotero:ABCD1234")}
     assert "ECLI:EU:C:2020:559" in cites and "32016R0679" in cites
+
+
+def test_url_content_type_overrides_misleading_suffix():
+    from raglex.imports.service import _url_filename_and_ext
+    assert _url_filename_and_ext('https://x/download.aspx', 'application/pdf') == ('download.pdf', 'pdf')
+
+
+def test_empty_import_is_rejected_before_storage(catalogue, tmp_path):
+    import pytest
+    rs, ts = _stores(tmp_path)
+    with pytest.raises(ValueError, match='no readable text'):
+        import_file(catalogue, rs, ts, data=b'', filename='blocked.html')
+    assert catalogue.conn.execute('SELECT count(*) AS n FROM documents').fetchone()['n'] == 0

@@ -309,3 +309,19 @@ def test_harvest_all_endpoints_ignore_arguments_that_are_not_the_drains(tmp_path
     assert r.status_code == 200 and "job_id" in r.json()
     r2 = c.post("/unresolved/harvest-all", json={"limit": 1, "queue": True})
     assert r2.status_code == 200 and "error" not in r2.json()
+
+
+def test_outage_retry_uses_exact_failure_list_without_global_ranking(monkeypatch):
+    f = _facade()
+    def global_worklist(*args, **kwargs):
+        raise AssertionError('explicit outage recovery scanned the global worklist')
+    monkeypatch.setattr(f, 'unresolved_references', global_worklist)
+    seen = []
+    def fetch(self, cat, rs, ts, *, ref, candidate):
+        seen.append(candidate)
+        return {'candidate': candidate, 'adapter': 'uk-legislation', 'stored': 0,
+                'outcome': 'transient', 'error': 'publisher still unavailable'}
+    monkeypatch.setattr(Facade, '_fetch_reference', fetch)
+    result = f.harvest_all_references(references=['ukpga/2018/12', 'ukpga/2018/12'], retry_cooled=True)
+    assert seen == ['ukpga/2018/12']
+    assert result['attempted'] == 1

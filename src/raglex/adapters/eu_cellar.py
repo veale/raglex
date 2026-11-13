@@ -522,6 +522,10 @@ def _is_wrapper(blob: bytes) -> bool:
     return bool(_PUBLICATION_ROOT.search(head) or _DOC_MANIFEST_ROOT.search(head))
 
 
+def _is_hearing_report(blob: bytes) -> bool:
+    return bool(re.search(rb"<REPORT\.HEARING(?:\s|>)", blob[:2000], re.I))
+
+
 def unzip_formex(raw: bytes) -> bytes | None:
     """CELLAR returns Formex as a zip; unpack the DOCUMENT member (pure). Returns
     the raw XML bytes, or None if the payload isn't a usable Formex archive.
@@ -552,7 +556,7 @@ def unzip_formex(raw: bytes) -> bytes | None:
                                 continue
                             seen.add(name)
                             nxt = zf.read(name)
-                            if not _is_wrapper(nxt):
+                            if not _is_wrapper(nxt) and not _is_hearing_report(nxt):
                                 return nxt
                             deeper = _follow(nxt, seen)
                             if deeper is not None:
@@ -561,7 +565,11 @@ def unzip_formex(raw: bytes) -> bytes | None:
 
                 # The ordinary archive holds exactly one member that is not apparatus.
                 # Reading the roots settles it without trusting a naming convention.
-                content = [n for n in names if not _is_wrapper(zf.read(n))]
+                # Older ECR packages put the Report for the Hearing beside the
+                # judgment. The report's plausible title and paragraphs do not
+                # make it the Court's reasoning (feedback #619, Case 215/88).
+                content = [n for n in names if not _is_wrapper(zf.read(n))
+                           and not _is_hearing_report(zf.read(n))]
                 if len(content) == 1:
                     return zf.read(content[0])
                 first = zf.read(names[0])
@@ -971,6 +979,8 @@ def extract_formex(xml_bytes: bytes) -> tuple[str | None, list[Segment]]:
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError:
+        return None, []
+    if _localname(root.tag) == "REPORT.HEARING":
         return None, []
 
     # Legislation: reliable article/recital/legal-basis structure from the act itself.
@@ -2148,6 +2158,11 @@ LIMIT {self.per_page}
         try:
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html_bytes, "html.parser")
+            words = soup.get_text(" ", strip=True).lower()
+            if (soup.find(id="errorDocumentView") is not None
+                    or "requested document does not exist" in words
+                    or ("javascript is disabled" in words and "not a robot" in words)):
+                return None
             for junk in soup(["script", "style", "nav", "header", "footer"]):
                 junk.decompose()
             # EUR-Lex judgment HTML puts the text in one of these containers:

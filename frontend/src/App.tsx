@@ -26,8 +26,12 @@ function ApiStatus() {
   const [up, setUp] = useReactState<boolean | null>(null);
   useEffect(() => {
     let live = true;
+    let inFlight = false;
     const ping = async () => {
+      if (inFlight || !live) return;
+      inFlight = true;
       try { await api.health(); if (live) setUp(true); } catch { if (live) setUp(false); }
+      finally { inFlight = false; }
     };
     ping();
     const iv = setInterval(ping, 5000);

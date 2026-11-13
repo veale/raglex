@@ -427,6 +427,9 @@ export const api = {
     req<any>(`/refinement-flags/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),
   submitFeedback: (body: { kind: string; message: string; page?: string; url?: string; metadata?: Record<string, unknown> }) =>
     req<{ submitted?: boolean; feedback_id?: number; error?: string }>("/feedback", { method: "POST", body: JSON.stringify(body) }),
+  caseAdminPreview: (citation: string) => req<any>(`/case-admin/preview?citation=${encodeURIComponent(citation)}`),
+  caseAdminAction: (citation: string, expected_id: string, action: "purge" | "refetch") =>
+    req<any>("/case-admin/action", { method: "POST", body: JSON.stringify({ citation, expected_id, action }) }),
   feedback: (status = "open") => req<any[]>(`/feedback?status=${encodeURIComponent(status)}`),
   setFeedback: (id: number, status = "resolved") =>
     req<any>(`/feedback/${id}/status`, { method: "POST", body: JSON.stringify({ status }) }),

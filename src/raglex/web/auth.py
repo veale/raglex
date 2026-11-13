@@ -92,6 +92,7 @@ READER_WRITE_ALLOW = frozenset({
 # surface. Prefix match. The rest of the read surface (search, documents, graph, citator…)
 # stays open to readers.
 ADMIN_ONLY_READ_PREFIXES = (
+    "/case-admin",
     "/settings",
     "/jobs",
     "/watches",

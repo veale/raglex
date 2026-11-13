@@ -1,5 +1,6 @@
 # Keep the build context small and reproducible.
 .git
+.scratch/
 data/
 **/__pycache__/
 *.pyc

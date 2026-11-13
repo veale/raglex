@@ -64,7 +64,7 @@ _PD_NAMED = re.compile(
 )
 _RULE_NUMBER = re.compile(
     r"(?m)^\s*(?P<n>\d+[A-Z]?\.\d+[A-Z]?(?:\([A-Za-z0-9]+\))*)"
-    r"\s*(?:$|[.—–-])",
+    r"(?=\s|$|[.—–-])",
 )
 _PD_PARAGRAPH = re.compile(
     r"(?m)^\s*(?P<n>\d+(?:\.\d+)*[A-Z]?)(?:\.(?=\s|$)|(?=\s))",
@@ -228,6 +228,12 @@ def parse_page(html: str, page: CPRPage) -> tuple[str, list[Segment], date | Non
             label, kind = value, "section"
         if label:
             segments.append(Segment(label=label, char_start=start, char_end=end, kind=kind))
+
+    # Rule numbers and list continuations are often separate HTML blocks. A
+    # citable unit owns the text up to the next unit, including its list items.
+    from dataclasses import replace
+    segments = [replace(s, char_end=(segments[i + 1].char_start if i + 1 < len(segments)
+                                     else len(text))) for i, s in enumerate(segments)]
 
     # Common printed forms are aliases as well as grammar targets.  The generic
     # aliases help imported citations that were normalised before the CPR grammar

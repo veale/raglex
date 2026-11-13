@@ -418,6 +418,9 @@ class ScraplingMcpFetcher:
     (``stealthy_fetch`` / ``fetch`` / ``get``) returning the page HTML."""
 
     name = "scrapling-mcp"
+    # Shared by adapter instances: a dead endpoint or rotated credential must
+    # not cost eight doomed MCP calls and one warning for every harvested page.
+    _unavailable_until: dict[tuple[str, str], float] = {}
 
     def __init__(self, *, url: str | None = None, api_key: str | None = None,
                  proxy: str | None = None) -> None:
@@ -470,6 +473,12 @@ class ScraplingMcpFetcher:
                 try:
                     res = self._client.call_tool(tool, arguments)
                 except Exception as exc:  # noqa: BLE001 — wrong tool/arg shape; try the next
+                    import httpx
+                    if isinstance(exc, (httpx.HTTPError,)):
+                        raise  # another tool name cannot repair transport/authentication
+                    if not any(marker in str(exc).lower() for marker in (
+                            "unknown tool", "tool not found", "validation error", "invalid arguments")):
+                        raise  # a real browser failure is not a schema discovery failure
                     last_exc = exc
                     continue
                 html = _extract_html(res)
@@ -481,15 +490,24 @@ class ScraplingMcpFetcher:
         return None
 
     def fetch(self, url: str, *, headers: dict | None = None) -> FetchedPage:
-        if self.url:
+        import hashlib
+        import time
+        import httpx
+
+        key = (self.url or "", hashlib.sha256((self.api_key or "").encode()).hexdigest())
+        if self.url and time.monotonic() >= self._unavailable_until.get(key, 0):
             try:
                 html = self._mcp_fetch(url)
                 if html:
                     return FetchedPage(url=url, status=200, html=html, engine=self.name)
                 log.warning("scrapling-mcp: no html for %s; trying the local browser", url)
             except Exception as exc:  # noqa: BLE001 — fall back to the local browser
-                log.warning("scrapling-mcp: %s failed (%s); trying the local browser",
-                            url, str(exc)[:160])
+                cooldown = (300 if isinstance(exc, httpx.HTTPStatusError)
+                            and exc.response.status_code in (401, 403, 404) else 60)
+                self._unavailable_until[key] = time.monotonic() + cooldown
+                self._client = None  # a restarted server invalidates old MCP sessions
+                log.warning("scrapling-mcp: %s failed (%s); using local browser for %ss before retry",
+                            url, str(exc)[:160], cooldown)
         # The shared service can be down or wedged — it spent four days answering every
         # request "[Errno 11] Resource temporarily unavailable" — so this fallback has to
         # be real. Camoufox directly, not Scrapling's StealthyFetcher, which needs a

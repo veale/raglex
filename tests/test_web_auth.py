@@ -165,3 +165,10 @@ def test_session_ttl_defaults_to_thirty_days(monkeypatch):
     assert authmod._session_ttl() == 3600
     monkeypatch.setenv("RAGLEX_SESSION_TTL", "garbage")
     assert authmod._session_ttl() == 30 * 24 * 3600
+
+
+def test_case_admin_is_denied_to_readers(build):
+    c=build(RAGLEX_ADMIN_PASSWORD='admin',RAGLEX_READER_PASSWORD='reader')
+    session=c.post('/auth/login',json={'password':'reader'}).json()
+    assert c.get('/case-admin/preview',params={'citation':'[2026] EWHC 2776 (KB)'}).status_code==403
+    assert c.post('/case-admin/action',json={'action':'purge'},headers={'x-raglex-csrf':session['csrf']}).status_code==403

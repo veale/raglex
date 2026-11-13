@@ -29,6 +29,7 @@ from . import (  # noqa: F401  (register on import)
     nz_pco_xml,
     rii_xml,
     rtf,
+    uk_cpr_html,
 )
 from .base import ParsedDoc, available, parse, register
 

@@ -5957,6 +5957,7 @@ export function MaintainView({ open, navigate }:
         <DbSizeStat />
       </div>
       <JobsQueuePanel />
+      <CaseAdminPanel />
       <KeepCurrentDashboard navigate={navigate} />
       <KeepCurrentPanel />
       <MaintenanceActionsPanel />
@@ -6125,6 +6126,79 @@ function useRevealer(limit = 12) {
 // table nothing displayed, so the only way to read them was psql — which is a good way to
 // never read them. Each row carries the page it was sent from, so a report about a document
 // opens that document.
+function CaseAdminPanel() {
+  const { role } = useAuth();
+  const [citation, setCitation] = useState("");
+  const [match, setMatch] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmPurge, setConfirmPurge] = useState(false);
+  const [error, setError] = useState("");
+  const [jobId, setJobId] = useState("");
+  const [job, setJob] = useState<any>(null);
+  useEffect(() => {
+    if (!jobId) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const result = await api.jobStatus(jobId);
+        if (!active) return;
+        setJob(result);
+        if (["running", "queued"].includes(result.status)) timer = setTimeout(poll, 1500);
+      } catch (e) { if (active) setError(String(e)); }
+    };
+    void poll();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [jobId]);
+  if (role !== "admin") return null;
+  const running = jobId && (!job || ["running", "queued"].includes(job.status));
+  const inspect = async () => {
+    setBusy(true); setError(""); setMatch(null); setConfirmPurge(false);
+    try {
+      const result = await api.caseAdminPreview(citation.trim());
+      if (result.error) setError(result.error); else setMatch(result);
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  const act = async (action: "purge" | "refetch") => {
+    setBusy(true); setError(""); setConfirmPurge(false);
+    try {
+      const result = await api.caseAdminAction(match.citation, match.stable_id, action);
+      if (result.error) setError(result.error);
+      else { setJob(null); setJobId(result.job_id); setMatch(null); }
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  return <div className="panel">
+    <h3 style={{ marginTop: 0 }}>Remove or refresh a case</h3>
+    <p className="muted">Use a case citation to handle a publisher correction or removal request.</p>
+    <form onSubmit={(e) => { e.preventDefault(); void inspect(); }} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <input aria-label="Case citation" placeholder="e.g. [2026] EWHC 2776 (KB)" value={citation}
+        disabled={busy || !!running} style={{ flex: "1 1 280px" }}
+        onChange={(e) => { setCitation(e.target.value); setMatch(null); setConfirmPurge(false); }} />
+      <button disabled={busy || !!running || !citation.trim()}>Find case</button>
+    </form>
+    {match && <div style={{ marginTop: 12 }}>
+      <strong>{match.title || match.citation}</strong>
+      <div className="muted">{match.stable_id} · {match.held ? "stored in RagLex" : "not currently stored"}</div>
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <button disabled={busy || !match.can_refetch} onClick={() => void act("refetch")}>Force refetch</button>
+        <button disabled={busy || !match.can_purge} onClick={() => setConfirmPurge(true)}>Purge case…</button>
+      </div>
+      {!match.can_refetch && <p className="muted">This source does not support fetching an individual case.</p>}
+      {confirmPurge && <div role="alert" style={{ marginTop: 12 }}>
+        <p>Permanently remove this case and its stored versions from RagLex? References in other documents remain. If the publisher republishes the case, a future harvest can import it again.</p>
+        <button disabled={busy} onClick={() => void act("purge")}>Confirm purge</button>{" "}
+        <button onClick={() => setConfirmPurge(false)}>Cancel</button>
+      </div>}
+    </div>}
+    {job && <p role="status">{job.status === "done"
+      ? (job.result?.purged ? "Case purged." : job.result?.refetched ? "Case refreshed from the publisher." : "Case action finished.")
+      : `${job.status}: ${job.progress?.stage || "waiting"}`}
+      {job.result?.error && <span className="err"> {job.result.error}</span>}
+    </p>}
+    {error && <p className="err" role="alert">{error}</p>}
+  </div>;
+}
+
 function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
   const [status, setStatus] = useState("open");
   const [items, err, reload] = useAsync(() => api.feedback(status), [status]);
@@ -6160,7 +6234,12 @@ function FeedbackPanel({ open }: { open: (id: string, a?: string) => void }) {
               <tr key={f.feedback_id}>
                 <td><span className="tag">{f.kind}</span>
                   <div className="muted" style={{ fontSize: 10 }}>{String(f.created_at).slice(0, 16).replace("T", " ")}</div></td>
-                <td style={{ whiteSpace: "pre-wrap" }}>{f.message}</td>
+                <td style={{ whiteSpace: "pre-wrap" }}>{f.message}
+                  {f.metadata?.responses?.map((r: any, i: number) => <div key={i} style={{ marginTop: 8 }}>
+                    <strong>Maintainer response</strong> <span className="muted">{String(r.created_at).slice(0, 10)}</span>
+                    <div>{r.message}</div>
+                  </div>)}
+                </td>
                 <td className="muted" style={{ fontSize: 12 }}>
                   {doc
                     ? <DocLink id={doc} onOpen={() => open(doc)}>{doc}</DocLink>
@@ -6398,9 +6477,13 @@ export function JobsPanel() {
   const [collapsed, setCollapsed] = useState(() =>
     typeof window !== "undefined" && window.innerWidth <= 640);
   const anyRunning = jobs.some((j) => j.status === "running");
+  const openRunning = jobs.find((j) => j.id === openId)?.status === "running";
   useEffect(() => {
     let live = true;
+    let inFlight = false;
     const tick = async () => {
+      if (inFlight || !live) return;
+      inFlight = true;
       try {
         const j = await api.jobsList();
         if (!live) return;
@@ -6408,7 +6491,7 @@ export function JobsPanel() {
         // auto-open the newest running job so its log is visible without a click
         const running = j.find((x: any) => x.status === "running");
         setOpenId((cur) => cur && j.some((x: any) => x.id === cur) ? cur : (running?.id ?? null));
-      } catch { /* ignore */ }
+      } catch { /* ignore */ } finally { inFlight = false; }
     };
     tick();
     // Poll fast while something runs, slowly when idle: the panel used to hit /jobs every
@@ -6420,13 +6503,19 @@ export function JobsPanel() {
   useEffect(() => {
     if (!openId) { setDetail(null); return; }
     let live = true;
-    const tick = async () => { try { const d = await api.jobStatus(openId); if (live) setDetail(d); } catch { /* ignore */ } };
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight || !live) return;
+      inFlight = true;
+      try { const d = await api.jobStatus(openId); if (live) setDetail(d); }
+      catch { /* ignore */ } finally { inFlight = false; }
+    };
     tick();
-    // only worth fast-polling a job that's actually moving
-    const openRunning = jobs.find((j) => j.id === openId)?.status === "running";
+    // Never overlap a slow poll or restart it on every jobs-list refresh: queued
+    // requests otherwise consume the browser's connections and delay admin actions.
     const iv = setInterval(tick, openRunning ? 1200 : 8000);
     return () => { live = false; clearInterval(iv); };
-  }, [openId, jobs]);
+  }, [openId, openRunning]);
 
   const active = jobs.filter((j) => j.status === "running");
   // Queued jobs are their own thing, not history. Lumped in with the finished ones they

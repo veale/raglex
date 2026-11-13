@@ -299,6 +299,15 @@ def _row_meta(row) -> dict:
         return {}
 
 
+def _eu_error_body(source: str, text: str | None) -> bool:
+    if source not in {"eu-legislation", "eu-cellar", "eu-preparatory"} or not text or len(text) > 20000:
+        return False
+    folded = text.casefold()
+    return ("the requested document does not exist" in folded
+            or "the request could not be processed, please try again later" in folded
+            or ("javascript is disabled" in folded and "not a robot" in folded))
+
+
 def _match_segment(segs, anchor: str) -> int:
     """Index of the segment a citable label names — the server-side twin of the
     reader's ``matchSegIndex``: paragraph pinpoints ("para 80", "[80]") match by
@@ -311,7 +320,7 @@ def _match_segment(segs, anchor: str) -> int:
     para = _re.search(r"para\.?\s*(\d+)|^\[?(\d+)\]?$", anchor.strip(), _re.IGNORECASE)
     num = para and (para.group(1) or para.group(2))
     if num:
-        pat = _re.compile(rf"^\[?{num}[.\]]?\b")
+        pat = _re.compile(rf"^(?:paras?\.?\s*|paragraph\s*|\[)?{num}(?![\w])", _re.I)
         for i, s in enumerate(segs):
             if pat.match((s.label or "").strip()):
                 return i
@@ -1000,6 +1009,14 @@ def _targeted_nl_legislation(candidate: str):
                        version_date=m.group(2), use_sru=False)
 
 
+def _targeted_fr_legislation(candidate: str):
+    if not re.fullmatch(r"(?:LEGI|JORF)(?:TEXT|ARTI)\d+", candidate, re.I):
+        return None
+    from .adapters.registry import get_adapter
+    return get_adapter("fr-legislation", ids=candidate.upper(),
+                       fond="JORF" if candidate.upper().startswith("JORF") else "LEGI")
+
+
 # adapter key (from the snowball classifier) → a builder that returns a one-item
 # adapter run for a given candidate id. Extend as adapters gain id-fetch support.
 _TARGETED_HARVEST = {
@@ -1014,6 +1031,7 @@ _TARGETED_HARVEST = {
     "nl-legislation": _targeted_nl_legislation,
     "us-caselaw": _targeted_us_caselaw,
     "ca-canlii": _targeted_ca_canlii,
+    "fr-legislation": _targeted_fr_legislation,
 }
 # The worklist decides what to offer the drain from the same set (a citation whose
 # source has no id-fetch is reported, but never queued) — keep the two in step.
@@ -2151,6 +2169,9 @@ class Facade:
             if doc is None:
                 return {"error": "not found", "stable_id": stable_id}
             meta = cat.document_meta(stable_id)  # adapter extras (celex, origin_country, …)
+            if meta.get("publication_withdrawn"):
+                return {"document": dict(doc), "publication_withdrawn": True,
+                        "text_available": False, "notice": "Publication withdrawn"}
             version_base = (
                 cat.consolidation_base_for(stable_id)
                 if doc["doc_type"] == "legislation" else None
@@ -2893,6 +2914,8 @@ class Facade:
             doc = cat.get_document(real)
             if doc is None or not doc["raw_path"]:
                 return None
+            if _row_meta(doc).get("publication_withdrawn"):
+                return None
             path = doc["raw_path"]
             ext = path.rsplit(".", 1)[-1].lower() if "." in path else "bin"
             return {"path": path, "ext": ext, "title": doc["title"], "stable_id": real}
@@ -3183,6 +3206,10 @@ class Facade:
         """
         with self._open() as (cat, _rs, ts):
             doc = cat.get_document(stable_id)
+            if doc is not None and _row_meta(doc).get("publication_withdrawn"):
+                return {"stable_id": stable_id, "text": None, "segments": [],
+                        "doc_type": doc["doc_type"], "text_available": False,
+                        "error": "Publication withdrawn; document body unavailable"}
             if doc is None or not doc["payload_hash"]:
                 return {"text": None, "segments": [], "doc_type": doc["doc_type"] if doc else None}
             ph = doc["payload_hash"]
@@ -3190,6 +3217,10 @@ class Facade:
                 text = ts.get(ph)
             except OSError:
                 text = None
+            if _eu_error_body(doc["source"], text):
+                return {"stable_id": stable_id, "text": None, "segments": [],
+                        "doc_type": doc["doc_type"], "text_available": False,
+                        "error": "Stored EUR-Lex error page; document body unavailable; re-harvest required"}
             if segments_only:
                 from .core.segmentation import recover_numbered_segments
                 segments, synthesised = recover_numbered_segments(
@@ -3324,6 +3355,15 @@ class Facade:
                 citations = [c for c in citations
                              if (c["char_end"] or 0) > start
                              and (c["char_start"] or 0) < end]
+                # A single article can span most of an act. Its line metadata must
+                # follow the requested window too, or a tiny read still overflows MCP.
+                for s in segs:
+                    if "lines" in s:
+                        s["lines"] = [line for line in s["lines"]
+                                      if line["end"] > start and line["start"] < end]
+                if flat_lines is not None:
+                    flat_lines = [line for line in flat_lines
+                                  if line["end"] > start and line["start"] < end]
                 text = text[start:end]
             # The truncation signal sits at the TOP level as well as inside ``window``.
             # A reader scanning the keys of a body response sees ``text`` and reads it;
@@ -3883,7 +3923,7 @@ class Facade:
                          sort: str = "pagerank", jurisdiction: str | None = None,
                          kind: str | None = None, offset: int = 0,
                          limit: int | None = None, snippets: bool = True,
-                         mode: str = "union") -> dict:
+                         mode: str = "union", compact: bool = False) -> dict:
         """The browsable list of who cites ``target`` — optionally pinned to ONE provision
         (``anchor`` = "Article 15", "s. 45", "[42]") so you get exactly the documents that
         cite THAT article, not the whole instrument. Sortable, filterable by jurisdiction
@@ -3891,12 +3931,24 @@ class Facade:
         counts telling you what you can narrow to. Re-callable with the same arguments — this
         IS the results list to come back to; there is no hidden state."""
         limit = limit or self._CITING_PAGE
+        def present(result):
+            if not compact:
+                return result
+            rows = []
+            for row in result.get("results", []):
+                item = {k: row[k] for k in ("stable_id", "date", "court") if k in row}
+                snippet = row.get("snippet")
+                if isinstance(snippet, dict):
+                    item["snippet"] = {"where": snippet.get("where"),
+                                       "text": str(snippet.get("text") or "")[:160]}
+                rows.append(item)
+            return {**result, "compact": True, "results": rows}
         if isinstance(target, (list, tuple)):
             if mode != "intersection":
                 return {"error": "multiple targets require mode='intersection'"}
-            return self._citing_intersection(
+            return present(self._citing_intersection(
                 list(target), sort=sort, jurisdiction=jurisdiction, kind=kind,
-                offset=offset, limit=limit)
+                offset=offset, limit=limit))
         held, cand = self._resolve_held_id(target)
         if held is None:
             return {"target": target, "held": False,
@@ -3914,7 +3966,7 @@ class Facade:
                 held, anchor, sort, jurisdiction, kind, offset, limit, snippets)
             result["read_target"] = read_target
             return result
-        return self._cached(key, 180, build)
+        return present(self._cached(key, 180, build))
 
     def _citing_intersection(self, targets: list[str], *, sort: str,
                              jurisdiction: str | None, kind: str | None,
@@ -4942,12 +4994,19 @@ class Facade:
             "jurisdiction": doc.get("jurisdiction"), "court": doc.get("court_label"),
             "date": str(d.get("decision_date"))[:10] if d.get("decision_date") else None,
             "doc_type": d.get("doc_type"), "source": doc.get("source_label"),
+            "text_available": bool(d.get("has_text")),
             # every way this authority is cited — parallel citations & shorthands
             "also_cited_as": doc.get("also_cited_as"),
             "cited_by_count": doc.get("cited_by_count"),
             "original_act": doc.get("original_act"),
             "inherited_recitals": doc.get("inherited_recitals"),
         }
+        if not out["text_available"]:
+            out["text_note"] = "Metadata held; the document body is unavailable in this corpus."
+        if d.get("source") == "eu-legislation" and re.fullmatch(r"3\d{4}[A-Z]\d{4}", held_id):
+            out["currency_warning"] = (
+                "This is the original/base act. Check legislative_status() and its "
+                "consolidations before relying on it as current law.")
         # text: the pincited passage (+ context scale), a capped full read, or — by
         # default — a short preview plus the structural outline, so the agent decides what
         # to pull rather than paying for the whole document up front.
@@ -4959,9 +5018,15 @@ class Facade:
                                "whole instrument instead, pass full=true or omit the "
                                "article/section from the citation.")
             out["passage"] = self.get_provision(held_id, label=pincite, context=context)
+            if "body unavailable" in out["passage"].get("error", ""):
+                out["text_available"] = False
+                out["text_note"] = out["passage"]["error"]
         else:
             body = self.document_body(held_id)
             text = body.get("text") or ""
+            out["text_available"] = bool(text)
+            if body.get("error"):
+                out["text_note"] = body["error"]
             segs = body.get("segments") or []
             inherited_recitals = body.get("inherited_recitals")
             held_recitals = [s for s in segs
@@ -5181,12 +5246,18 @@ class Facade:
         the search UI's show-context expander."""
         with self._open() as (cat, _rs, ts):
             doc = cat.get_document(stable_id)
+            if doc is not None and _row_meta(doc).get("publication_withdrawn"):
+                return {"stable_id": stable_id,
+                        "error": "Publication withdrawn; document body unavailable"}
             if doc is None or not doc["payload_hash"]:
                 return {"error": "not found or no text", "stable_id": stable_id}
             try:
                 text = ts.get(doc["payload_hash"])
             except OSError:
                 return {"error": "text unavailable", "stable_id": stable_id}
+            if _eu_error_body(doc["source"], text):
+                return {"error": "Stored EUR-Lex error page; document body unavailable; re-harvest required",
+                        "stable_id": stable_id}
             from .core.segmentation import recover_numbered_segments
             segs, _synthesised = recover_numbered_segments(
                 text, ts.get_segments(doc["payload_hash"]))
@@ -5204,6 +5275,14 @@ class Facade:
                         if segs[i].char_start <= char_start:
                             idx = i
                             break
+            idx_end = idx
+            if label:
+                span = re.fullmatch(r"\s*\[(\d+)\]\s*[-–—]\s*\[(\d+)\]\s*", label)
+                if span:
+                    idx = _match_segment(segs, span[1])
+                    idx_end = _match_segment(segs, span[2])
+                    if idx_end < idx or idx_end < 0:
+                        idx = -1
             if idx < 0 and label and re.match(r"^\s*recitals?\b", label, re.I):
                 inherited = self._inherited_recitals(
                     cat, ts, stable_id, include_citations=False)
@@ -5269,19 +5348,23 @@ class Facade:
                         missing["recitals"] = {"status": "not_part_of_instrument"}
                 return missing
             if not segs:
+                if label:
+                    return {"error": "no matching segment", "stable_id": stable_id,
+                            "requested": label, "segmentation": "none"}
                 lo = max(0, (char_start or 0) - 400)
-                hi = min(len(text), (char_end or len(text)) + 400)
+                hi = min(len(text), (char_end if char_end is not None else
+                                    char_start if char_start is not None else len(text)) + 400)
                 return {"stable_id": stable_id, "title": doc["title"], "segments": [
                     {"label": None, "kind": "block", "level": 0, "focus": True,
                      "char_start": lo, "char_end": hi, "text": text[lo:hi]}], "path": []}
-            lo, hi = max(0, idx - context), min(len(segs), idx + context + 1)
+            lo, hi = max(0, idx - context), min(len(segs), idx_end + context + 1)
             out_segs = []
             for i in range(lo, hi):
                 s = segs[i]
                 out_segs.append({
                     "label": s.label, "kind": s.kind, "level": s.level,
                     "char_start": s.char_start, "char_end": s.char_end,
-                    "focus": i == idx, "text": text[s.char_start:s.char_end].strip(),
+                    "focus": idx <= i <= idx_end, "text": text[s.char_start:s.char_end].strip(),
                 })
             # ancestor path: nearest preceding segments of strictly shallower level
             path: list[str] = []
@@ -8571,6 +8654,11 @@ class Facade:
                 parsed_treaty = parse_coe_treaty_pdf(raw)
                 text, segments = parsed_treaty.text, parsed_treaty.segments
                 fmt = "coe-treaty-pdf"
+            elif doc["source"] == "uk-cpr":
+                from .adapters.uk_cpr import page_identity, parse_page
+                page = page_identity(doc["title"], doc["landing_url"] or "")
+                text, segments, _updated, _aliases = parse_page(raw.decode("utf-8"), page)
+                fmt = "uk-cpr-html"
             else:
                 # Older harvests can pre-date (or omit) a byte signature that the
                 # current sniffer knows about.  The importer records the parser format
@@ -9190,7 +9278,7 @@ class Facade:
         # _would_flatten insists) skips it — and a parser fix reaches nothing already
         # held. The adapter records the name going forward; this reaches the back
         # catalogue without a metadata migration.
-        source_format = {"coe-treaties": "coe-treaty-pdf"}.get(source)
+        source_format = {"coe-treaties": "coe-treaty-pdf", "uk-cpr": "uk-cpr-html"}.get(source)
 
         with self._open() as (cat, _rs, ts):
             # KEYSET pagination, not one fetchall: a source with millions of rows would
@@ -9639,6 +9727,7 @@ class Facade:
     def harvest_all_references(self, *, limit: int = 25, min_citing: int = 1,
                                adapter: str | None = None, leg_kind: str | None = None,
                                retry_cooled: bool = False,
+                               references: list[str] | None = None,
                                on_progress=None, cancel_check=None) -> dict:
         """Drain the routable part of the hanging-reference queue in one go: for every
         reference that is high-enough confidence *and* has a targeted adapter, fetch
@@ -9660,14 +9749,24 @@ class Facade:
         # routable/cooled filtering below; the long tail is reached over successive ticks
         # (and by the nightly harvest-all). `limit=None` (nightly "everything") still scans
         # all — that's its job, and it runs when the box is idle.
-        scan = None if limit is None else max(limit * 60, 2000)
-        candidates = [r for r in self.unresolved_references(limit=scan)
-                      if r.get("fetchable") and r["confidence"] != "low"
-                      and r["citing_count"] >= min_citing and not r["needs_identifier"]
-                      # optional category filter: harvest just one source, and within UK
-                      # legislation just primary / secondary / assimilated
-                      and (not adapter or r["suggested_adapter"] == adapter)
-                      and (not leg_kind or r.get("leg_kind") == leg_kind)]
+        if references is not None:
+            # Outage recovery uses an explicit recorded failure list, not a fresh
+            # global ranking that can spend its limit retrying unrelated authorities.
+            from .citations.snowball import _classify
+            candidates = []
+            for ident in dict.fromkeys(str(x).strip() for x in references if str(x).strip()):
+                _form, _country, key = _classify(ident, "case")
+                if key in _TARGETED_HARVEST and (not adapter or key == adapter):
+                    candidates.append({"ref": ident, "candidate": ident, "suggested_adapter": key})
+        else:
+            scan = None if limit is None else max(limit * 60, 2000)
+            candidates = [r for r in self.unresolved_references(limit=scan)
+                          if r.get("fetchable") and r["confidence"] != "low"
+                          and r["citing_count"] >= min_citing and not r["needs_identifier"]
+                          # optional category filter: harvest just one source, and within UK
+                          # legislation just primary / secondary / assimilated
+                          and (not adapter or r["suggested_adapter"] == adapter)
+                          and (not leg_kind or r.get("leg_kind") == leg_kind)]
         # Skip references we recently established are ABSENT (a pre-digital UK case, a
         # CELLAR rendition that doesn't exist) so a re-run doesn't re-stall on the same
         # dead item. Two cooldowns, because the two failures mean different things:
@@ -9855,7 +9954,7 @@ class Facade:
         if adapter is None:
             # The builder positively established the item isn't there (e.g. absent from
             # CELLAR under every case-CELEX descriptor) — a genuine absence.
-            return {"error": f"could not build a {adapter_key} fetch for {cand!r}",
+            return {"error": f"could not build a {adapter_key} fetch for {cand!r}; use upload / scrape / link instead",
                     "candidate": cand, "outcome": "absent"}
         # The builder may have resolved the citation to a DIFFERENT real id (a guessed
         # …CJ… descriptor, or a joined case published under its lead number). If we
@@ -10070,9 +10169,8 @@ class Facade:
             subject_title = re.sub(
                 r"(?i)^loi\s+n(?:o|°)\s*\d{2,4}-\d+\s+du\s+"
                 r"\d{1,2}\s+\S+\s+\d{4}\s+", "Loi ", title).strip()
-            aliases = [x for x in (exemplar.jorf_cid,
-                                    text_alias(exemplar.text_number)
-                                    if exemplar.text_number else None) if x]
+            aliases = [x for x in [text_alias(exemplar.text_number)
+                                   if exemplar.text_number else None] if x]
             text = "".join(chunks) or None
             record = Record(
                 source="fr-dila", stable_id=parent, doc_type=DocType.LEGISLATION,
@@ -10119,10 +10217,18 @@ class Facade:
             made.append(parent)
         return made
 
-    def materialize_fr_legislation(self, *, parent_ids: list[str]) -> dict:
+    def materialize_fr_legislation(self, *, parent_ids: list[str], on_progress=None,
+                                   cancel_check=None) -> dict:
         """Public targeted repair/backfill for full French statute nodes."""
         with self._open() as (cat, _rs, ts):
-            made = self._materialize_fr_legislation_parents_open(cat, ts, parent_ids)
+            made = []
+            for i, parent in enumerate(parent_ids):
+                if cancel_check and cancel_check():
+                    return {"cancelled": True, "materialized": len(made)}
+                if on_progress:
+                    on_progress(stage="assembling French statute articles", done=i,
+                                total=len(parent_ids), item=parent)
+                made.extend(self._materialize_fr_legislation_parents_open(cat, ts, [parent]))
             from .citations import extract_corpus
             for stable_id in made:
                 extract_corpus(cat, ts, stable_id=stable_id)
@@ -14121,7 +14227,10 @@ class Facade:
             if cancelled:
                 return {"documents": docs, "citations": cites, "cancelled": True, "resolved_edges": 0}
             _progress(on_progress, stage="resolving citations", done=0, total=0)
-            resolved = Resolver(cat).run()
+            # Targeted reader repairs must not turn into a whole-graph resolve
+            # (millions of unrelated pending edges can exceed the SQL timeout).
+            resolved = (Resolver(cat).run_for_documents(ids, cancel_check=cancel_check)
+                        if document_ids is not None or target_ids else Resolver(cat).run())
             stats = {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
         self._invalidate_caches()  # re-scan changed edges → dashboards + doc views are stale
         return stats
@@ -14143,6 +14252,27 @@ class Facade:
         return {"tag": tag, "documents": len(doc_ids), "written": n}
 
     # -- corrections (fix misclassification; human curation wins) -----------
+    def withdraw_document_publication(self, *, stable_id: str, reason: str) -> dict:
+        """Apply an explicit maintainer takedown, retaining the immutable archive."""
+        if not reason.strip():
+            raise ValueError("A withdrawal reason is required")
+        with self._open() as (cat, _, _ts):
+            doc = cat.get_document(stable_id)
+            if doc is None:
+                return {"error": "not found", "stable_id": stable_id}
+            meta = _row_meta(doc)
+            meta.update(publication_withdrawn=True, withdrawal_reason=reason,
+                        withdrawn_at=datetime.now(timezone.utc).isoformat())
+            with cat._atomic():
+                cat.conn.execute("UPDATE documents SET meta_json=?, search_excluded=1, "
+                                 "upstream_status='withdrawn', has_embedding=0 WHERE stable_id=?",
+                                 (json.dumps(meta), stable_id))
+                # Both search indexes retain text independently of the body store.
+                cat.conn.execute("DELETE FROM doc_fts WHERE doc_id=?", (stable_id,))
+                cat.conn.execute("DELETE FROM embeddings WHERE doc_id=?", (stable_id,))
+        self._invalidate_caches()
+        return {"stable_id": stable_id, "publication_withdrawn": True, "archive_retained": True}
+
     def update_document(self, *, stable_id: str, doc_type: str | None = None,
                         title: str | None = None, court: str | None = None,
                         source_language: str | None = None) -> dict:
@@ -15623,9 +15753,8 @@ class Facade:
             written = written[1:-1].strip()
         if not written:
             return {"stable_id": stable_id, "error": "empty query"}
-        if re.search(r"(?i)\b(?:AND|OR|NOT|NEAR\s*/\s*\d+)\b|[()|&]", written):
-            return {"stable_id": stable_id,
-                    "error": "search_within_document is literal; pass one phrase or term"}
+        # This endpoint has no boolean grammar: drafting words and punctuation are
+        # literal input too ("does not prevent", "section 4(2)", "and/or").
         words = re.findall(r"\d+(?:[./]\d+)+|[^\W_]+(?:['’][^\W_]+)*",
                            written, flags=re.UNICODE)
         if not words:
@@ -15633,6 +15762,9 @@ class Facade:
         matcher = _literal_re(Phrase(words))
         with self._open() as (cat, _rs, ts):
             doc = cat.get_document(stable_id)
+            if doc is not None and _row_meta(doc).get("publication_withdrawn"):
+                return {"stable_id": stable_id,
+                        "error": "Publication withdrawn; document body unavailable"}
             if not doc or not doc["payload_hash"]:
                 return {"stable_id": stable_id, "error": "not found or no text"}
             try:
@@ -16171,8 +16303,9 @@ class Facade:
         """Build (or extend) the free-text index over the gated scope."""
         from .fulltext import index as fts
 
-        scope = self.freetext_scope()
-        targets = sources or scope["selected"]
+        # Starting a bounded index job needs the configured source list, not a
+        # coverage aggregate over millions of documents and existing index parts.
+        targets = sources or self._freetext_selected()
         if not targets:
             return {"error": "no sources selected — set the free-text scope first"}
         with self._open() as (cat, _rs, ts):
@@ -16385,9 +16518,10 @@ class Facade:
                     pass
         return rows
 
-    def resolve_feedback(self, *, feedback_id: int, status: str = "resolved") -> dict:
+    def resolve_feedback(self, *, feedback_id: int, status: str = "resolved",
+                         response: str | None = None) -> dict:
         with self._open() as (cat, _rs, _ts):
-            return {"updated": cat.set_feedback_status(feedback_id, status)}
+            return {"updated": cat.set_feedback_status(feedback_id, status, response)}
 
     def mine_parallel_citations(self, *, limit_docs: int | None = None, coref: bool = True,
                                 on_progress=None, cancel_check=None) -> dict:

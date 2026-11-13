@@ -62,6 +62,7 @@ from .de_datenschutzarchiv import DatenschutzArchivReportsAdapter
 from .at_ris import APPLICATIONS as RIS_APPLICATIONS, AustrianRISAdapter
 from .sk_ress import SlovakRESSAdapter
 from .fi_finlex import SERIES as FINLEX_SERIES, FinlexAdapter
+from .dk_domsdatabasen import DomsdatabasenAdapter
 from .se_domstol import SwedishCaseLawAdapter
 from .se_domstol_bulk import SwedishCaseLawBulkAdapter
 from .ee_lahend import EstonianLahendAdapter
@@ -413,6 +414,7 @@ ADAPTERS: dict[str, Callable[..., Adapter]] = {
     "es-aepd-resoluciones": AEPDResolutionsAdapter,
     # Spain's AI supervisor: the sandbox guides to the AI Act's Chapter III duties
     "es-aesia-guias": AESIAGuidesAdapter,
+    "dk-domsdatabasen": DomsdatabasenAdapter,
     "dk-datatilsynet": DatatilsynetGuidanceAdapter,
     "de-dsk": DSKGuidanceAdapter,
     "be-gba": GBAGuidanceAdapter,
@@ -892,6 +894,15 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         (SourceOption("ocr", "OCR a PDF with no text layer", "true"),
          SourceOption("max_ocr_pages", "Page ceiling for one OCR pass", "300")),
         ("AESIA guide slug", "05-guia-de-gestion-de-riesgos"),
+    ),
+    "dk-domsdatabasen": SourceInfo(
+        "dk-domsdatabasen", "Domsdatabasen (Danish courts)", "caselaw", "DK", False,
+        "Official judgments and separate summaries from KAPI v2. Requires Domsdatabasen "
+        "email and password in Settings. Complete initial case walk, then inclusive "
+        "change feed covering new documents, revisions and withdrawals. Selected "
+        "published decisions; not all Danish court decisions.",
+        (SourceOption("start_offset", "Resume case offset", "0"),),
+        (),
     ),
     "dk-datatilsynet": SourceInfo(
         "dk-datatilsynet", "Datatilsynet guidance (Denmark)", "guidance", "DK", False,
@@ -3165,6 +3176,7 @@ INCREMENTAL_MODE: dict[str, str] = {
     "eu-euipo": "full-walk",
     "dma-annual-reports": "full-walk",
     "fr-cnil-guidance": "full-walk", "es-aepd-guias": "full-walk",
+    "dk-domsdatabasen": "server",
     "dk-datatilsynet": "full-walk", "de-dsk": "full-walk",
     "be-gba": "full-walk",
     # The Garante's search takes a real dataInizio/dataFine window (verified against an

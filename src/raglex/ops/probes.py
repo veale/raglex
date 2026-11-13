@@ -62,10 +62,12 @@ def _one(cat, sql: str, params=()) -> int:
 # text trips psycopg's placeholder scan (see PgConnShim.execute).
 _CASE_PARA_CF = """
 FROM citations c2
-JOIN citations c1 ON c1.src_id = c2.src_id
-  AND c1.entity_kind IN ('case', 'opinion')
-  AND c2.char_start - c1.char_end BETWEEN 0 AND 10
 WHERE c2.method = 'carry_forward' AND LOWER(c2.raw) LIKE ?
+  AND EXISTS (
+    SELECT 1 FROM citations c1 WHERE c1.src_id = c2.src_id
+      AND c1.entity_kind IN ('case', 'opinion')
+      AND c1.char_end BETWEEN c2.char_start - 10 AND c2.char_start
+  )
 """
 _PARA_PAT = ("para%",)
 

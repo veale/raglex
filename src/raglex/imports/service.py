@@ -267,7 +267,13 @@ def import_file(
     point at that citation resolve onto this upload.
     """
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    # Redirect downloads often have an HTML-looking path or no suffix at all.
+    # PDF magic is stronger evidence than the caller's filename.
+    if data.lstrip().startswith(b"%PDF-"):
+        ext = "pdf"
     extracted = extract_bytes(data, ext=ext)
+    if not (extracted.text or "").strip() and not extracted.needs_ocr:
+        raise ValueError("Import returned no readable text; no document was stored")
     payload_hash = sha256_bytes(data)
     stable_id = _surrogate_id(doc_type, payload_hash)
     structure = structure if structure in STRUCTURE_KEYS else "auto"
@@ -351,17 +357,22 @@ def import_file(
 
 def _url_filename_and_ext(url: str, ctype: str = "") -> tuple[str, str]:
     """Derive (filename, extension) from a URL, inferring the extension from the URL
-    *path* only. A query/fragment ("file.pdf?dl=1") must be stripped first — otherwise
+    path, preferring a recognised response content type. A query/fragment ("file.pdf?dl=1") must be stripped first — otherwise
     the extension comes out "pdf?dl=1", matching no extractor and falling through to the
     HTML fallback. Falls back to the content-type, then HTML, when the path has none."""
     from urllib.parse import urlsplit
 
     last = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
     ext = last.rsplit(".", 1)[-1].lower() if "." in last else ""
+    response_ext = {"application/pdf": "pdf", "text/html": "html"}.get(ctype.lower())
+    if response_ext:
+        ext = response_ext
     if not ext:
-        ext = {"application/pdf": "pdf", "text/html": "html"}.get(ctype, "html")
+        ext = "html"
     filename = last or "download"
-    if "." not in filename:
+    if response_ext and "." in filename:
+        filename = filename.rsplit(".", 1)[0] + "." + ext
+    elif "." not in filename:
         filename = f"{filename}.{ext}"
     return filename, ext
 

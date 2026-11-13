@@ -107,6 +107,14 @@ def parse_eurlex_html(data: bytes) -> ParsedDoc:
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(data, "html.parser")
+    # EUR-Lex sometimes serves its missing-document page with HTTP 200.
+    # Persisting the navigation chrome makes an absent act look readable.
+    body_words = soup.get_text(" ", strip=True).lower()
+    if (soup.find(id="errorDocumentView") is not None
+            or "the requested document does not exist" in body_words
+            or ("javascript is disabled" in body_words and "not a robot" in body_words)):
+        from ..core.errors import FetchError
+        raise FetchError("EUR-Lex returned an error or browser-challenge page", transient=True)
     for tag in soup(["script", "style"]):
         tag.decompose()
 

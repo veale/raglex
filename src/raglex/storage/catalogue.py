@@ -1609,6 +1609,14 @@ class Catalogue:
         row (full version history lands with the versioning step).
         """
         existing = self.get_document(record.stable_id)
+        # A publisher refresh cannot reverse an explicit maintainer takedown.
+        # Search exclusion is already sticky below; the body/raw gate must be too.
+        if existing is not None:
+            old_meta = _json_meta(existing["meta_json"]) or {}
+            if old_meta.get("publication_withdrawn"):
+                for key in ("publication_withdrawn", "withdrawal_reason", "withdrawn_at"):
+                    if key in old_meta:
+                        record.extra[key] = old_meta[key]
         version = record.version
         changed = existing is not None and existing["payload_hash"] != record.payload_hash
         stored_at = _now()
@@ -2773,12 +2781,12 @@ class Catalogue:
         unused_indexes = rows(
             """
             SELECT relname AS table, indexrelname AS index, idx_scan AS scans,
-                   pg_size_pretty(pg_relation_size(indexrelid)) AS size
+                   pg_size_pretty(pg_relation_size(s.indexrelid)) AS size
             FROM pg_stat_user_indexes s
             JOIN pg_index i ON i.indexrelid = s.indexrelid
             WHERE idx_scan < 50 AND NOT i.indisunique AND NOT i.indisprimary
-              AND pg_relation_size(indexrelid) > 5 * 1024 * 1024
-            ORDER BY pg_relation_size(indexrelid) DESC LIMIT 12
+              AND pg_relation_size(s.indexrelid) > 5 * 1024 * 1024
+            ORDER BY pg_relation_size(s.indexrelid) DESC LIMIT 12
             """)
         conns = one(
             "SELECT count(*) AS total, "
@@ -5444,7 +5452,19 @@ class Catalogue:
         params.append(limit)
         return self.conn.execute(sql, params).fetchall()
 
-    def set_feedback_status(self, feedback_id: int, status: str) -> int:
+    def set_feedback_status(self, feedback_id: int, status: str, response: str | None = None) -> int:
+        if status not in {"open", "resolved"}:
+            raise ValueError("feedback status must be open or resolved")
+        if response is not None:
+            row = self.conn.execute("SELECT metadata FROM feedback WHERE feedback_id = ?",
+                                    (feedback_id,)).fetchone()
+            if row is None:
+                return 0
+            metadata = json.loads(row["metadata"] or "{}")
+            metadata.setdefault("responses", []).append({"message": response,
+                                                         "created_at": _now()})
+            self.conn.execute("UPDATE feedback SET metadata = ? WHERE feedback_id = ?",
+                              (json.dumps(metadata), feedback_id))
         cur = self.conn.execute(
             "UPDATE feedback SET status = ? WHERE feedback_id = ?", (status, feedback_id))
         self.conn.commit()

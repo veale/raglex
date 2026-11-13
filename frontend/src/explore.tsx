@@ -372,9 +372,23 @@ export function FreeTextSearch({ open, full, initialQuery, onNavigate }:
   // announced "no sources" and searched all of them. Its job here is to manage
   // expectations, so it states the jurisdictions actually searchable.
   const [cov, setCov] = useState<any>(null);
+  const [covError, setCovError] = useState(false);
   const [only, setOnly] = useState<string[]>([]);
 
-  useEffect(() => { api.freetextCoverage().then(setCov).catch(() => {}); }, []);
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = async () => {
+      try {
+        const value = await api.freetextCoverage();
+        if (!active) return;
+        setCov(value);
+        if (value.warming) timer = setTimeout(read, 3000);
+      } catch { if (active) setCovError(true); }
+    };
+    void read();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, []);
   const ranInitial = useRef(false);
   useEffect(() => {
     if (full && initialQuery && !ranInitial.current) { ranInitial.current = true; run(); }
@@ -421,7 +435,9 @@ export function FreeTextSearch({ open, full, initialQuery, onNavigate }:
           default; clicking a jurisdiction narrows THIS SEARCH, and never the index —
           building the index lives in Admin > Search. */}
       <div className="ft-note muted">
-        {totalIndexed > 0 ? (
+        {covError ? <>Index coverage is unavailable. Search is still available; an empty result may reflect incomplete indexing.</>
+        : !cov || cov.warming ? <>Checking full-text index coverage…</>
+        : totalIndexed > 0 ? (
           <>
             Searching the full text of {FMT(totalIndexed)} documents —{" "}
             {jurs.map((j: any) => (

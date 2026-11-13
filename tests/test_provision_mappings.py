@@ -539,7 +539,7 @@ def test_lookup_says_when_the_held_text_has_been_struck_out(tmp_path):
     assert struck["struck_out_ratio"] > 0.4
 
     ordinary = f.lookup(citation="ukpga/2018/12", cited_by=False, similar=False)
-    assert "text_available" not in ordinary                           # no false alarm
+    assert ordinary["text_available"] is True                         # no false alarm
 
 
 def test_inherited_mentions_cross_the_version_and_punctuation_gap(tmp_path):

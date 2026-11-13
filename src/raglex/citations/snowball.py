@@ -52,6 +52,7 @@ _NL_BWB_RE = re.compile(r"^BWBR\d{7}(?:@\d{4}-\d{2}-\d{2})?$", re.I)
 TARGETED_ADAPTERS = frozenset({
     "uk-legislation", "eu-legislation", "eu-preparatory", "uk-caselaw", "uk-hol",
     "eu-cellar", "echr", "nl-rechtspraak", "nl-legislation", "us-caselaw", "ca-canlii",
+    "fr-legislation",
 })
 
 

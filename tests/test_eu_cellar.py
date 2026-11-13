@@ -1388,3 +1388,19 @@ def test_note_refetch_never_overwrites_a_known_language(catalogue):
     catalogue.upsert_document(rec)
     catalogue.note_refetch(rec.stable_id, source_language="fr")
     assert catalogue.get_document(rec.stable_id)["source_language"] == "en"
+
+
+def test_hearing_report_does_not_replace_the_judgment_in_an_ecr_package():
+    hearing = b'<?xml version="1.0"?><REPORT.HEARING><CONTENTS>Report only</CONTENTS></REPORT.HEARING>'
+    judgment = b'<?xml version="1.0"?><JUDGMENT><CONTENTS.JUDGMENT><NP.ECR><NO.P>31</NO.P><TXT>A recital cannot constitute such a rule.</TXT></NP.ECR></CONTENTS.JUDGMENT></JUDGMENT>'
+    import io, zipfile
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w') as z:
+        z.writestr('report.xml', hearing)
+        z.writestr('judgment.xml', judgment)
+    assert unzip_formex(out.getvalue()) == judgment
+    from raglex.adapters.eu_cellar import extract_formex
+    assert extract_formex(hearing) == (None, [])
+    text, segments = extract_formex(judgment)
+    assert 'cannot constitute' in text
+    assert any('31' in s.label for s in segments)

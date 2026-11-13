@@ -12,6 +12,7 @@ services:
     ports: ["55432:5432"]
 
   raglex-api:
+    init: true
     build: .
     command: ["raglex", "serve", "--host", "0.0.0.0", "--port", "8000"]
     ports: ["8000:8000"]
@@ -43,6 +44,7 @@ services:
   # A separate service so it survives API restarts. Tune the tick interval; each
   # watch has its own cadence, so a short tick just checks more often.
   raglex-scheduler:
+    init: true
     build: .
     command: ["raglex", "watch", "serve", "--interval", "900"]
     depends_on: [db]
