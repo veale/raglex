@@ -313,6 +313,9 @@ class FrLegislationAdapter(BaseAdapter):
         ]
 
         extra = {"legifrance_id": text_id, "fond": fond, "format": "legifrance-json"}
+        from ..formats.french_provenance import api_provenance
+        provenance = api_provenance(body)
+        if provenance:extra["article_provenance"] = provenance
         extra["aliases"] = list(dict.fromkeys(x for x in (text_id, doc.cid, doc.eli) if x))
         # Preserve publisher-supplied gazette coordinates; never infer a print page
         # from a text number, or substitute a consolidated text for the JORF original.

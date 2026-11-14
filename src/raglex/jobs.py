@@ -413,6 +413,9 @@ def _result_error(result):
 
 
 RUNNERS: dict[str, Callable] = {
+    "purge-invalid-shorthands": lambda f,p,cb,cancel: f.purge_shorthands(
+        dry_run=bool(p.get("dry_run", True)), include_local=False,
+        on_progress=cb, cancel_check=cancel),
     "case-admin": lambda f, p, cb, cancel: __import__(
         "raglex.case_admin", fromlist=["run_action"]
     ).run_action(f, **p, on_progress=cb, cancel_check=cancel),

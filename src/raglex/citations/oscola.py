@@ -106,6 +106,10 @@ def _celex_case_no(celex: str | None) -> str | None:
     if not m:
         return None
     year, court, num = m.group(1), m.group(2), int(m.group(3))
+    # The C-/T- distinction followed the creation of the Court of First Instance
+    # in 1989; CELLAR's court code must not retrofit C- onto earlier dockets.
+    if court == "C" and int(year) < 1989:
+        return f"{num}/{year[2:]}"
     return f"{court}-{num}/{year[2:]}"
 
 
@@ -393,6 +397,22 @@ def _belgian_case(doc: Mapping, meta: Mapping) -> dict | None:
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
+def _french_legislation(doc, meta):
+    title = _get(doc, "title") or _get(doc, "stable_id")
+    from ..formats.legifrance_json import _epoch_ms_to_date
+    raw_date = meta.get("datePubli") or meta.get("datePublication") or meta.get("publication_date") or meta.get("dateParution")
+    published = _epoch_ms_to_date(raw_date)
+    if not published:return None
+    coordinates = ["Journal officiel"]
+    if meta.get("numParution"):coordinates.append("n° " + str(meta["numParution"]))
+    coordinates.append(_fmt_date(published.isoformat()))
+    number = meta.get("numTexte") or meta.get("numSequence") or meta.get("textNumber")
+    if number:coordinates.append("texte n° " + str(number))
+    # pagePdf is an extract's physical PDF page, never the printed JORF page.
+    if meta.get("pageDebut"):coordinates.append("p " + str(meta["pageDebut"]))
+    return _pack([_run(str(title) + ", " + ", ".join(coordinates))])
+
+
 def cite(doc: Mapping, meta: Mapping | None = None) -> dict:
     """Structured OSCOLA citation for a held document: ``{"parts": [...], "text": str}``.
 
@@ -407,6 +427,8 @@ def cite(doc: Mapping, meta: Mapping | None = None) -> dict:
         out = _eu_case(doc, meta)
     elif source in ("uk-caselaw", "uk-hol"):
         out = _uk_case(doc)
+    elif source.startswith("fr-") and doc_type == "legislation":
+        out = _french_legislation(doc, meta)
     elif source == "echr":
         out = _echr_case(doc, meta)
     elif source in ("be-rvsce", "be-const-court", "be-market-court-gba",

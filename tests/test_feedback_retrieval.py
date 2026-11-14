@@ -159,3 +159,21 @@ def test_danish_source_grammar_rescan_does_not_resolve_whole_corpus(monkeypatch)
     monkeypatch.setattr(Resolver,'run',lambda *a,**k:(_ for _ in ()).throw(AssertionError('unbounded resolution')))
     result=f.apply_rules(source='dk-domsdatabasen')
     assert result['documents']==1 and result['citations']>=2
+
+
+def test_resumed_source_scan_still_resolves_previously_extracted_documents(monkeypatch):
+    from tests.test_mcp_lookup import _facade, _doc
+    from raglex.resolve import Resolver, ResolveStats
+    f = _facade()
+    sid = 'dk/domsdatabasen/1/2'
+    _doc(f, sid, 'forordning (EU) 2024/1689.', 'Danish')
+    with f._open() as (cat, _, __):
+        cat.conn.execute("UPDATE documents SET source='dk-domsdatabasen', has_text=1 WHERE stable_id=?", (sid,))
+        cat.conn.commit()
+    seen=[]
+    monkeypatch.setattr(Resolver,'run_for_documents',lambda self,ids,**kwargs: (seen.extend(ids) or ResolveStats()))
+    first=f.apply_rules(source='dk-domsdatabasen',run_id='resume-test')
+    seen.clear()
+    second=f.apply_rules(source='dk-domsdatabasen',run_id='resume-test')
+    assert first['documents']==1 and second['documents']==0
+    assert seen==[sid]

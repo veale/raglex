@@ -488,3 +488,17 @@ def test_every_declared_option_is_accepted_by_the_constructor(key):
     adapter = registry.get_adapter(key, **kwargs)
     assert adapter.source == key
     assert adapter.min_interval > 0
+
+
+def test_ris_explicitly_requests_decisions_as_well_as_headnotes():
+    from types import SimpleNamespace
+    calls=[]
+    class Client:
+        def get(self,url,**kwargs):
+            calls.append(kwargs['params'])
+            return SimpleNamespace(status_code=200,json=lambda:{'OgdSearchResult':{'OgdDocumentResults':{'Hits':{'#text':'0'}}}})
+    AustrianRISAdapter(application='Vwgh',client=Client())._get({})
+    assert calls[-1]['Dokumenttyp.SucheInEntscheidungstexten']=='true'
+    assert calls[-1]['Dokumenttyp.SucheInRechtssaetzen']=='true'
+    AustrianRISAdapter(application='Vwgh',document_type='Entscheidungstext',client=Client())._get({})
+    assert calls[-1]['Dokumenttyp.SucheInRechtssaetzen']=='false'

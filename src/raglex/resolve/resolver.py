@@ -140,7 +140,8 @@ class Resolver:
         """
         stats = ResolveStats()
         seen: set[str] = set()
-        for sid in ids:
+        # Concurrent watches visit shared document/alias sets in the same order.
+        for sid in sorted({sid for sid in ids if sid}):
             if not sid or sid in seen:
                 continue
             seen.add(sid)

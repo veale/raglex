@@ -265,6 +265,8 @@ def parse_formex_legislation(raw: bytes) -> ParsedDoc:
         return ParsedDoc(text=text or None, segments=segments, title=title)
 
     title = _instrument_title(roots)
+    from .verified_errata import apply_verified_deletions
+    corrections = apply_verified_deletions(raw, root)
 
     articles = _act_articles(root)
     # recitals first (preamble), then the enacting articles — in document order
@@ -276,7 +278,8 @@ def parse_formex_legislation(raw: bytes) -> ParsedDoc:
         blocks = [(title or "document", "section", element_text(root))]
 
     text, segments = assemble(blocks)
-    return ParsedDoc(text=text or None, segments=segments, title=title)
+    return ParsedDoc(text=text or None, segments=segments, title=title,
+                     metadata={"editorial_corrections": corrections} if corrections else {})
 
 
 register("formex-legislation", parse_formex_legislation)

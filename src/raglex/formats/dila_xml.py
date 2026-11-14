@@ -177,6 +177,7 @@ class DilaArticle:
     text: str | None = None
     segments: list[Segment] = field(default_factory=list)
     relations: list[TypedRelation] = field(default_factory=list)
+    provenance: dict = field(default_factory=dict)
 
 
 def _article_context(root: ET.Element) -> dict:
@@ -245,6 +246,7 @@ def parse_dila_article(root: ET.Element) -> DilaArticle:
     label = f"Article {num}" if num else (_text(root, "ID") or "article")
     text, segments = assemble([(label, "article", body)] if body else [])
     context = _article_context(root)
+    from .french_provenance import dila_provenance
     return DilaArticle(
         art_id=_text(root, "ID"),
         num=num,
@@ -255,6 +257,7 @@ def parse_dila_article(root: ET.Element) -> DilaArticle:
         text=text or None,
         segments=segments,
         relations=_article_relations(root),
+        provenance=dila_provenance(root),
     )
 
 

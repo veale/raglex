@@ -341,14 +341,33 @@ class AustrianRISAdapter(BaseAdapter):
             if ident.upper().startswith("ECLI:"):
                 params = {"Suchworte": ident}
             elif re.match(r"^[A-Z]{2,8}[TR]?_", ident):
-                params = {"Dokumentnummer": ident}
+                # Dokumentnummer is not an API search parameter; unknown keys are
+                # silently ignored and return the entire court catalogue.
+                params = {"Suchworte": ident}
             else:
                 params = {"Geschaeftszahl": ident}
-            payload = self._get(params)
-            for ref in _references(payload):
-                stub = self._stub(ref, changed_after=None)
-                if stub is not None:
-                    yield stub
+            page = 1
+            seen_pages = set()
+            while True:
+                payload = self._get({**params, "Seitennummer": str(page), "DokumenteProSeite": _PAGE_SIZE})
+                refs = list(_references(payload))
+                if not refs:
+                    break
+                signature = tuple(_clean((r.get("Data") or {}).get("Metadaten", {}).get("Technisch", {}).get("ID")) for r in refs)
+                if signature in seen_pages:
+                    raise FetchError("RIS repeated a targeted result page", transient=True)
+                seen_pages.add(signature)
+                for ref in refs:
+                    meta = (ref.get("Data") or {}).get("Metadaten") or {}
+                    if re.match(r"^[A-Z]{2,8}[TR]?_", ident):
+                        if _clean((meta.get("Technisch") or {}).get("ID")) != ident:
+                            raise FetchError("RIS ignored the requested document identifier", transient=True)
+                    stub = self._stub(ref, changed_after=None)
+                    if stub is not None:
+                        yield stub
+                if page * _PER_PAGE >= _hits(payload):
+                    break
+                page += 1
 
     def _search(self, lo: date, hi: date, *, page: int) -> dict:
         params = {
@@ -357,8 +376,6 @@ class AustrianRISAdapter(BaseAdapter):
             "DokumenteProSeite": _PAGE_SIZE,
             "Seitennummer": str(page),
         }
-        if self.document_type:
-            params["Dokumenttyp"] = self.document_type
         if self.query:
             params["Suchworte"] = self.query
         if self.norm:
@@ -368,7 +385,12 @@ class AustrianRISAdapter(BaseAdapter):
         return self._get(params)
 
     def _get(self, params: dict) -> dict:
-        query = {"Applikation": self.application, **params}
+        # RIS defaults to Rechtssätze only. The string Dokumenttyp filter is ignored;
+        # the documented nested flags must explicitly include full decisions.
+        kind = (self.document_type or "").casefold()
+        flags = {"Dokumenttyp.SucheInRechtssaetzen": "false" if kind in {"entscheidungstext", "entscheidungstexte", "te"} else "true",
+                 "Dokumenttyp.SucheInEntscheidungstexten": "false" if kind in {"rechtssatz", "rechtssaetze", "rs"} else "true"}
+        query = {"Applikation": self.application, **flags, **params}
         try:
             resp = self._client.get(API, params=query,
                                     headers={"Accept": "application/json"},
@@ -466,6 +488,17 @@ class AustrianRISAdapter(BaseAdapter):
             edges, treatments = _rechtssatz_relations(specific)
             relations += edges
         relations += _stammrechtssatz_relations(specific)
+        # The publisher supplies the parent link; do not infer it from a headnote ECLI.
+        parent_url = _clean(judicature.get("EntscheidungstextUrl"))
+        if is_rechtssatz and parent_url:
+            from urllib.parse import urlsplit, parse_qs
+            parent_id = parse_qs(urlsplit(parent_url).query).get("Dokumentnummer", [None])[0]
+            if parent_id and re.fullmatch(r"[A-Z0-9_]+", parent_id) and parent_id != document_id:
+                relations.append(TypedRelation(
+                    relationship_type=RelationshipType.SUMMARISES,
+                    raw_citation_string=parent_url, dst_id=f"at/ris/{parent_id}",
+                    extracted_via=ExtractedVia.STRUCTURED,
+                    resolution_status=ResolutionStatus.PENDING))
 
         title = _title(court, doc_type_label, dockets, rs_numbers,
                        specific.get("Leitsatz") or specific.get("Kurzinformation"))
@@ -496,6 +529,7 @@ class AustrianRISAdapter(BaseAdapter):
                 "application": application,
                 "document_type": doc_type_label or None,
                 "is_rechtssatz": True if is_rechtssatz else None,
+                "parent_judgment_url": parent_url if is_rechtssatz else None,
                 "geschaeftszahl": dockets or None,
                 "rechtssatz_numbers": rs_numbers or None,
                 "disposition": _clean(specific.get("Entscheidungsart")) or None,

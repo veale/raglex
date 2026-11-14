@@ -462,3 +462,17 @@ def test_a_case_sensitive_abbreviation_is_not_folded():
     assert stage._matches_case_insensitively("PACE", abbrev=True) is False
     assert stage._matches_case_insensitively("Pace", abbrev=False) is True
     assert stage._matches_case_insensitively("the 1981 Act", abbrev=True) is True
+
+
+def test_invalid_cleanup_preserves_blocked_rules_and_reports_cancellation(catalogue):
+    _seed(catalogue)
+    invalid = next(r['shorthand'] for r in catalogue.conn.execute('SELECT shorthand FROM learned_shorthands') if not __import__('raglex.citations.extractor',fromlist=['valid_shorthand']).valid_shorthand(r['shorthand']))
+    catalogue.conn.execute('UPDATE learned_shorthands SET blocked=1 WHERE shorthand=?',(invalid,))
+    catalogue.conn.commit()
+    before=catalogue.count_learned_shorthands()
+    cancelled=catalogue.purge_invalid_learned_shorthands(dry_run=False,batch=1,cancel_check=lambda:True)
+    assert cancelled['cancelled'] and cancelled['deleted']==0
+    assert catalogue.count_learned_shorthands()==before
+    done=catalogue.purge_invalid_learned_shorthands(dry_run=False)
+    assert done['deleted']==2
+    assert catalogue.conn.execute('SELECT blocked FROM learned_shorthands WHERE shorthand=?',(invalid,)).fetchone()['blocked']==1

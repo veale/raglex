@@ -238,7 +238,7 @@ def test_held_cover_does_not_hide_its_english_guidance_annex(monkeypatch):
     monkeypatch.setattr('raglex.adapters.eu_digital_strategy.PdfExtractor.extract',
                         lambda *a,**k:SimpleNamespace(text='Substantive guidelines. '*20))
     ad=DigitalStrategyAttachmentsAdapter([row],client=Client())
-    stubs=list(ad.discover(None));assert len(stubs)==1
+    stubs=list(ad.discover(None));assert len(stubs)==2
     assert stubs[0].stable_id.startswith(row['stable_id']+'/attachment/')
     record=ad.fetch(stubs[0]);assert 'Substantive guidelines' in record.text
     assert record.relations[0].dst_id==row['stable_id']

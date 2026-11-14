@@ -2125,6 +2125,19 @@ LIMIT {self.per_page}
             text = self._html_to_text(html)
             if text and "requested document does not exist" not in text.lower():
                 return html, "html", text, html_case_segments(html, text)
+        if re.match(r"6\d{4}[CTF][JO]", celex or "", re.I):
+            from ._cellar_pdf import fetch_pdf
+            from ..extraction import extract_bytes
+            from ..imports.service import structure_segments
+            pdf = fetch_pdf(self._client, url, language, judgment=True)
+            if pdf:
+                extracted = extract_bytes(pdf, ext="pdf")
+                head = (extracted.text or "")[:1200]
+                if (re.search(r"report\s+for\s+the\s+hearing", head, re.I)
+                        or not re.search(r"(?:judgment|order) of the|arrêt de|ordonnance de",head,re.I)):
+                    return None
+                if extracted.text and not extracted.needs_ocr:
+                    return pdf, "pdf", extracted.text, structure_segments("paragraphs",DocType.JUDGMENT,extracted)
         return None
 
     def _best_rendition(self, url: str, celex: str):

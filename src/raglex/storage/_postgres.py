@@ -226,6 +226,25 @@ class PgConnShim:
     def commit(self) -> None:
         self.raw.commit()  # no-op under autocommit; kept so the shared code path is happy
 
+    def run_transaction(self, operation, *, attempts=3, sleep=None):
+        """Replay the complete DB-only operation after a rolled-back 40P01/40001.
+
+        Retrying just the failed UPDATE loses earlier writes in an aborted transaction.
+        A nested caller cannot roll back its owner's work, so it propagates instead.
+        """
+        import random
+        import time
+        if self.raw.info.transaction_status != 0:
+            return operation()
+        for attempt in range(attempts):
+            try:
+                with self.raw.transaction():
+                    return operation()
+            except Exception as exc:
+                if getattr(exc, 'sqlstate', None) not in {'40P01', '40001'} or attempt + 1 == attempts:
+                    raise
+                (sleep or time.sleep)(random.uniform(.05, .15) * (2 ** attempt))
+
     def transaction(self):
         """An explicit all-or-nothing block for multi-statement writes (the connection is
         otherwise autocommit, so each statement commits on its own)."""

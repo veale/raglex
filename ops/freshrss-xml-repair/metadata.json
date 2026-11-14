@@ -1,0 +1,1 @@
+{"name":"Publisher XML Repair","author":"RagLex maintenance","description":"Repair unescaped ampersands in the Rest of World publisher RSS feed only.","version":"1.0.0","entrypoint":"XmlFeedRepair","type":"user","minimum_freshrss_version":"1.24.0"}

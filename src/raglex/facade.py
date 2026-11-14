@@ -5382,6 +5382,11 @@ class Facade:
             if note:
                 out["anchor_exact"] = False
                 out["anchor_note"] = note
+            provenance = _row_meta(doc).get("article_provenance") or {}
+            focused_label = re.match(r"Article\s+([^\s,]+)", segs[idx].label or "", re.I)
+            if focused_label:
+                evidence = provenance.get("Article " + focused_label[1])
+                if evidence:out["article_provenance"] = evidence
             return out
 
     def decide_suggestions(self, *, items: list[dict]) -> dict:
@@ -7519,6 +7524,14 @@ class Facade:
             for r in out:
                 r["suggestions"] = sugg.get(r["ref"], [])
             if with_citing:
+                # A name beside a missing UK citation helps acquisition; it must never
+                # mint an edge or match a similarly named judgment automatically.
+                from .citations.acquisition_labels import reference_names
+                text_cache = {}
+                for row in out[:50]:
+                    if row["suggested_adapter"] == "uk-caselaw" and row["cooling_reason"]:
+                        row["acquisition_name_hints"] = reference_names(cat, _ts, row["ref"], text_cache=text_cache)
+                        row["acquisition_note"] = "Context labels only; verify identity and use an authorised import route."
                 citing = cat.citing_documents_for([r["ref"] for r in out])
                 for r in out:
                     r["citing_documents"] = citing.get(r["ref"], [])
@@ -8625,12 +8638,27 @@ class Facade:
                 raw = Path(doc["raw_path"]).read_bytes()
             except OSError:
                 return {"stable_id": stable_id, "reparsed": False, "reason": "raw missing"}
+            projection_metadata = {}
             # CJEU judgments use the bespoke Formex judgment parser (NP.ECR/GR.SEQ grounds
             # + ruling), NOT the legislation Formex parser the format registry would pick.
             if doc["source"] == "eu-cellar":
                 from .adapters.eu_cellar import extract_formex
-                text, segments = extract_formex(raw)
-                fmt = "formex-judgment"
+                if raw.startswith(b"%PDF-"):
+                    from .extraction import extract_bytes
+                    from .imports.service import structure_segments
+                    extracted = extract_bytes(raw, ext="pdf")
+                    text = extracted.text
+                    segments = structure_segments("paragraphs", DocType.JUDGMENT, extracted)
+                    fmt = "pdf-judgment"
+                else:
+                    text, segments = extract_formex(raw)
+                    fmt = "formex-judgment"
+            elif doc["source"] == "eu-legislation" and raw.startswith(b"%PDF-"):
+                from .extraction import extract_bytes
+                from .adapters.eu_legislation import pdf_legislation_segments
+                extracted = extract_bytes(raw, ext="pdf")
+                text, segments = extracted.text, pdf_legislation_segments(extracted)
+                fmt = "cellar-official-pdf"
             elif doc["source"] == "uk-caselaw":
                 # Find Case Law stores LegalDocML judgments.  Byte sniffing sees the
                 # Akoma Ntoso envelope and would otherwise send these through the
@@ -8693,6 +8721,7 @@ class Facade:
                 else:
                     pd = parse_format(fmt, raw)
                 text, segments = pd.text, pd.segments
+                projection_metadata = pd.metadata
             if not text:
                 return {"stable_id": stable_id, "reparsed": False, "reason": "parser produced no text"}
             if _would_flatten(ts, doc["payload_hash"], segments):
@@ -8700,6 +8729,10 @@ class Facade:
                         "reason": "would flatten held structure", "segments": len(segments)}
             ts.put(doc["payload_hash"], text)            # overwrite (same hash → same path)
             ts.put_segments(doc["payload_hash"], segments)
+            if projection_metadata.get("editorial_corrections"):
+                meta = dict(cat.document_meta(stable_id) or {})
+                meta["editorial_corrections"] = projection_metadata["editorial_corrections"]
+                cat.set_document_meta(stable_id, meta)
             # Currency facts the raw carries but an earlier harvest did not read. The raw
             # is canonical (§1.2), so these are re-derivable exactly like text and
             # segments — and re-deriving them here is the difference between one local
@@ -10127,7 +10160,9 @@ class Facade:
             # open-ended sentinel, not a publication date; substantive text wins before
             # recency so an empty historical shell cannot erase the article.
             by_num: dict[str, tuple] = {}
+            provenance = {}
             for row, art in parsed:
+                provenance.setdefault(f"Article {art.num}", []).append(art.provenance)
                 num = art.num or row["stable_id"]
                 key = (bool((art.text or "").strip()), art.etat == "VIGUEUR",
                        art.date_debut.isoformat() if art.date_debut and art.date_debut.year < 2999 else "")
@@ -10182,6 +10217,8 @@ class Facade:
                 text=text, segments=segments, relations=relations,
                 extracted_via=ExtractedVia.STRUCTURED,
                 extra={"fond": "LEGI", "materialized_from_articles": len(parsed),
+                       "article_provenance": provenance,
+                       "publication_date": exemplar.publication_date.isoformat() if exemplar.publication_date else None,
                        "jorf_cid": exemplar.jorf_cid,
                        "text_number": exemplar.text_number,
                        "nature": exemplar.nature, "aliases": aliases},
@@ -14229,7 +14266,17 @@ class Facade:
             _progress(on_progress, stage="resolving citations", done=0, total=0)
             # Source-scoped grammar and targeted reader repairs must not turn into a whole-graph resolve
             # (millions of unrelated pending edges can exceed the SQL timeout).
-            resolved = (Resolver(cat).run_for_documents(ids, cancel_check=cancel_check)
+            # Extraction checkpoints must not erase unfinished resolution work. On a
+            # resumed source scan all texts may already carry this run_id, while the
+            # previous worker failed resolving their edges.
+            resolve_ids = ids
+            if run_id and source and document_ids is None and not target_ids:
+                resolve_ids = cat.text_document_ids(source=source)
+            elif run_id and target_ids:
+                resolve_ids = cat.text_document_ids_citing(
+                    target_ids, sources=sources or ([source] if source else None),
+                    source_prefix=source_prefix)
+            resolved = (Resolver(cat).run_for_documents(resolve_ids, cancel_check=cancel_check)
                         if document_ids is not None or target_ids or source else Resolver(cat).run())
             stats = {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
         self._invalidate_caches()  # re-scan changed edges → dashboards + doc views are stale
@@ -16439,13 +16486,14 @@ class Facade:
             return {"deleted": cat.delete_learned_shorthand(shorthand, candidate_id)}
 
     def purge_shorthands(self, *, dry_run: bool = True,
-                         include_local: bool = False) -> dict:
+                         include_local: bool = False, on_progress=None, cancel_check=None) -> dict:
         """Delete stored shorthands that would not be learned today; with
         ``include_local``, also those below the ≥3-document threshold (the bulk of the
         store, including the report boilerplate that reads as a plausible name)."""
         with self._open() as (cat, _rs, _ts):
             return cat.purge_invalid_learned_shorthands(
-                dry_run=dry_run, include_local=include_local)
+                dry_run=dry_run, include_local=include_local,
+                on_progress=on_progress, cancel_check=cancel_check)
 
     def backfill_shorthand_doc_counts(self, *, dry_run: bool = True,
                                       on_progress=None) -> dict:

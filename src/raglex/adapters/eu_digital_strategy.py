@@ -261,30 +261,37 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                 return None
             item = parse_item_page(page, item)
 
+        asset_only = False
         text, raw, raw_ext, doc_title = None, None, "html", stub.title
         if item.files:
             first = item.files[0]
             try:
-                blob = self._client.get(first["url"]).content
+                response = self._client.get(first["url"])
+                blob = response.content
             except FetchError as exc:
                 if exc.transient or attachment:
                     raise
                 blob = None
+            if attachment and blob:
+                from ..extraction.attachments import read_attachment
+                text, raw_ext, asset_only = read_attachment(
+                    blob, url=first["url"], headers=getattr(response, "headers", {}))
+                raw, doc_title = blob, first["title"] or stub.title
             # the redirection endpoint answers with Content-Type "/" — trust the bytes
-            if blob and blob[:5] == b"%PDF-":
+            if not attachment and blob and blob[:5] == b"%PDF-":
                 extracted = PdfExtractor().extract(blob, ext="pdf", mime="application/pdf")
                 text, raw, raw_ext = (extracted.text or "").strip(), blob, "pdf"
                 doc_title = first["title"] or stub.title
-        if attachment and (not text or len(text) < 200):
-            raise FetchError(f"{self.source}: advertised attachment has no readable PDF: {attachment['url']}",
+        if attachment and not asset_only and not (text or "").strip():
+            raise FetchError(f"{self.source}: advertised attachment has no readable content: {attachment['url']}",
                              transient=True)
-        if not text or len(text) < 200:
+        if not attachment and (not text or len(text) < 200):
             # no readable attachment — keep the item page itself, which carries the
             # Commission's own summary of what was published
             from ..extraction import extract_bytes
             text = (extract_bytes(page, ext="html", mime="text/html").text or "").strip()
             raw, raw_ext = page, "html"
-        if len(text) < 200:
+        if not attachment and len(text) < 200:
             return None
 
         return Record(
@@ -294,13 +301,13 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
             title=doc_title or stub.stable_id,
             court="European Commission",
             decision_date=item.published,
-            language="en",
-            source_language="en",
+            language="en" if not attachment or raw_ext == "pdf" or re.search(r"(?i)english", doc_title or "") else None,
+            source_language="en" if not attachment or raw_ext == "pdf" or re.search(r"(?i)english", doc_title or "") else None,
             landing_url=stub.landing_url,
             raw_bytes=raw,
             raw_ext=raw_ext,
             text=text,
-            segments=synthesise_numbered_segments(text),
+            segments=synthesise_numbered_segments(text) if text else [],
             extracted_via=ExtractedVia.SCRAPE,
             relations=([TypedRelation(RelationshipType.RELATED_TO,
                         dst_id=stub.hints["attachment_of"],
@@ -320,6 +327,9 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                 ),
                 "download_url": item.files[0]["url"] if item.files else None,
                 "attachment_of": stub.hints.get("attachment_of"),
+                "asset_only": True if asset_only else None,
+                "extraction_status": "binary asset retained; dedicated extraction required" if asset_only else None,
+                "attachment_format": raw_ext if attachment else None,
                 "library_page": stub.hints.get("library_page"),
                 # the annexes published alongside, so a later pass can pull them
                 "other_files": [{"title": f["title"], "url": f["url"]}
@@ -346,8 +356,6 @@ class DigitalStrategyAttachmentsAdapter(DigitalStrategyLibraryAdapter):
                 language = _LANG_SUFFIX_RE.search(title)
                 if language and language.group(1).lower() != "english":
                     continue
-                if re.search(r"\b(?:DOCX?|XLSX?|ZIP)\b", title, re.I):
-                    continue  # the advertised non-PDF asset remains in parent metadata
                 url = str(file.get("url") or "")
                 if not url:
                     continue
@@ -357,4 +365,5 @@ class DigitalStrategyAttachmentsAdapter(DigitalStrategyLibraryAdapter):
                            landing_url=url, raw_url=url,
                            title=title, hint_date=day, court="European Commission",
                            hints={"attachment": file, "attachment_of": row["stable_id"],
+                                  "metadata_only_complete": True,
                                   "kind": meta.get("library_type"), "library_page": row["landing_url"]})

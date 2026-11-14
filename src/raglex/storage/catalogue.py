@@ -4387,7 +4387,7 @@ class Catalogue:
             ).fetchall():
                 existing[str(row["alias"])] = (str(row["dst_id"]), row["source"])
         minted = 0
-        for base, sid in wanted.items():
+        for base, sid in sorted(wanted.items()):
             was = existing.get(base)
             # Never overwrite a mapping somebody else owns — only our own, and only when
             # a newer consolidation has actually superseded it.
@@ -4418,12 +4418,24 @@ class Catalogue:
             self.conn.commit()
         return minted
 
+    def _run_resolution_passes(self, passes, *, before=None):
+        """Each resolver unit commits completely or retries completely on PostgreSQL."""
+        def operation():
+            if before:
+                before()
+            total = 0
+            for sql, params in passes:
+                total += max(self.conn.execute(sql, params).rowcount, 0)
+            return total
+        if self.backend == "postgres":
+            return self.conn.run_transaction(operation)
+        with self._atomic():
+            return operation()
+
     def resolve_pending(self) -> int:
         """Flip every pending edge whose target is now a node. Returns the number
         resolved. Idempotent and safe to re-run after each ingest — that is how a
         citation to a freshly-harvested target becomes a live edge (§5b)."""
-        self.refresh_version_aliases(commit=False)
-        total = 0
         # pass 4: the de-dotted report-citation match (fold vs fold_citation mismatch),
         # built per-backend so it can't live in the static _RESOLVE_PASSES tuple.
         dedot_pass = f"""
@@ -4436,11 +4448,9 @@ class Catalogue:
               AND a.alias = {self._dedot_sql('relations.raw_fold')}
               AND a.alias <> relations.raw_fold
         """
-        with self._atomic():
-            for sql in (*self._RESOLVE_PASSES, dedot_pass):
-                cur = self.conn.execute(sql)
-                total += max(cur.rowcount, 0)
-        return total
+        return self._run_resolution_passes(
+            [(sql, ()) for sql in (*self._RESOLVE_PASSES, dedot_pass)],
+            before=lambda: self.refresh_version_aliases(commit=False))
 
     def pending_relation_batch(self, after_id: int, *, through_id: int,
                                batch_size: int = 50000) -> tuple[int, int] | None:
@@ -4517,12 +4527,7 @@ class Catalogue:
               AND a.alias <> relations.raw_fold
             """,
         )
-        total = 0
-        with self._atomic():
-            for sql in passes:
-                cur = self.conn.execute(sql, (first_id, last_id))
-                total += max(cur.rowcount, 0)
-        return total
+        return self._run_resolution_passes([(sql, (first_id, last_id)) for sql in passes])
 
     def resolve_pending_for(self, stable_id: str, ecli: str | None = None) -> int:
         """The incremental case: only edges pointing at THIS document (just harvested)
@@ -4568,12 +4573,7 @@ class Catalogue:
                 (stable_id, *keys),
             ),
         )
-        total = 0
-        with self._atomic():
-            for sql, params in passes:
-                cur = self.conn.execute(sql, params)
-                total += max(cur.rowcount, 0)
-        return total
+        return self._run_resolution_passes(passes)
 
     def resolve_pending_from(self, stable_id: str) -> int:
         """Resolve pending outgoing edges from one newly extracted document.
@@ -4611,12 +4611,7 @@ class Catalogue:
               AND a.alias = relations.raw_fold
             """,
         )
-        total = 0
-        with self._atomic():
-            for sql in passes:
-                cur = self.conn.execute(sql, (stable_id,))
-                total += max(cur.rowcount, 0)
-        return total
+        return self._run_resolution_passes([(sql, (stable_id,)) for sql in passes])
 
     def backfill_edge_keys(self, *, batch: int = 20000, on_progress=None) -> int:
         """Populate ``candidate_id``/``raw_fold`` on edges written before those columns
@@ -6148,7 +6143,7 @@ class Catalogue:
 
     def purge_invalid_learned_shorthands(self, *, dry_run: bool = True,
                                          batch: int = 5000,
-                                         include_local: bool = False) -> dict:
+                                         include_local: bool = False, on_progress=None, cancel_check=None) -> dict:
         """Delete every stored shorthand that would not be learned today.
 
         The read path already skips these, so this is housekeeping rather than a fix —
@@ -6169,15 +6164,21 @@ class Catalogue:
         local = 0
         for r in self.conn.execute(
                 "SELECT shorthand, candidate_id, COALESCE(doc_count, 0) AS doc_count "
-                "FROM learned_shorthands"):
+                "FROM learned_shorthands WHERE COALESCE(blocked,0)=0"):
             seen += 1
+            if seen % batch == 0:
+                if on_progress:on_progress(stage="reviewing invalid shorthand rules",done=seen)
+                if cancel_check and cancel_check():return {"cancelled":True,"scanned":seen,"deleted":0}
             unlearnable = not valid_shorthand(r["shorthand"])
             below = r["doc_count"] < SHORTHAND_MIN_DOCS
             local += bool(below and not unlearnable)
             if unlearnable or (below and include_local):
                 doomed.append((r["shorthand"], r["candidate_id"]))
         if not dry_run:
+            doomed.sort()
             for i in range(0, len(doomed), batch):
+                if cancel_check and cancel_check():
+                    return {"cancelled":True,"scanned":seen,"deleted":deleted}
                 chunk = doomed[i:i + batch]
                 self.conn.executemany(
                     "DELETE FROM learned_shorthands "
@@ -6186,7 +6187,8 @@ class Catalogue:
                     "DELETE FROM learned_shorthand_docs "
                     "WHERE shorthand = ? AND candidate_id = ?", chunk)
                 self.conn.commit()
-            deleted = len(doomed)
+                deleted += len(chunk)
+                if on_progress:on_progress(stage="removing invalid shorthand rules",done=deleted,total=len(doomed))
         return {"scanned": seen, "invalid": len(doomed), "deleted": deleted,
                 "document_local": local, "threshold": SHORTHAND_MIN_DOCS,
                 "include_local": include_local, "dry_run": dry_run}

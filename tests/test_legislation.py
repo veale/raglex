@@ -967,3 +967,28 @@ def test_a_reparse_failure_says_which_document_and_why(tmp_path):
     assert out["failed"] == 1
     assert out["failures"][0]["stable_id"] == "32000L0031"
     assert "FileNotFoundError" in out["failures"][0]["error"]
+
+
+def test_eurlex_oj_index_cannot_block_official_pdf_fallback(monkeypatch):
+    from types import SimpleNamespace
+    import raglex.adapters.eu_legislation as module
+    from raglex.adapters import _cellar_pdf
+    ad=EULegislationAdapter(celex='32006R1907',client=_FakeClient(b''))
+    monkeypatch.setattr(ad,'_fetch_formex',lambda *a:None)
+    monkeypatch.setattr(ad,'_fetch_html',lambda *a:b'<html>OJ index</html>')
+    monkeypatch.setattr(ad,'_transposition_edges',lambda *a:[])
+    monkeypatch.setattr(module,'parse',lambda *a:SimpleNamespace(text='EUR-Lex - Official Journal of the European Union\nofficial_journal\nSeries L',segments=[]))
+    attempts=[]
+    monkeypatch.setattr(_cellar_pdf,'fetch_pdf',lambda *a,**k:attempts.append(1))
+    stub=next(ad.discover(None))
+    record=ad.fetch(stub)
+    assert attempts==[1] and not record.text
+
+
+def test_official_pdf_article_heads_ignore_wrapped_cross_references():
+    from types import SimpleNamespace
+    from raglex.adapters.eu_legislation import pdf_legislation_segments
+    text='Article 1\nFirst.\nArticle 3.\nArticle 2\nSecond.\nArticle 3\nThird.\nArticle 2, applies.\nANNEX I\nTechnical content.'
+    segments=pdf_legislation_segments(SimpleNamespace(text=text,page_spans=[]))
+    assert [s.label for s in segments]==['Article 1','Article 2','Article 3','Annex I']
+    assert text[segments[2].char_start:segments[2].char_end].endswith('applies.\n')

@@ -160,6 +160,7 @@ class FrDilaAdapter(BaseAdapter):
             extracted_via=ExtractedVia.STRUCTURED,
             extra={k: v for k, v in {
                 "fond": "LEGI", "etat": art.etat, "code_cid": art.code_cid,
+                "article_provenance": {f"Article {art.num}": [art.provenance]},
                 "parent_title": art.full_title, "jorf_cid": art.jorf_cid,
                 "text_number": art.text_number,
                 "signature_date": art.signature_date.isoformat() if art.signature_date else None,

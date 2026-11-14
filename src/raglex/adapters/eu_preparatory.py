@@ -236,8 +236,9 @@ SELECT DISTINCT ?title ?proposalCelex ?adopted ?adoptedRelated WHERE {{
         while True:
             try:
                 rows = self._sparql(self._enumerate_query(since, offset))
-            except Exception:
-                return
+            except Exception as exc:
+                from ..core.errors import FetchError
+                raise FetchError("EU preparatory SPARQL enumeration failed", transient=True) from exc
             if not rows:
                 return
             grouped: OrderedDict[str, dict] = OrderedDict()

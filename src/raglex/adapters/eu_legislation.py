@@ -106,6 +106,29 @@ def celex_title(celex: str) -> str | None:
     return None
 
 
+def pdf_legislation_segments(extracted):
+    """Whole-line headings exclude wrapped references such as 'Article 31.'."""
+    from ..core.models import Segment
+    marks = []
+    previous = 0
+    for match in re.finditer(r"^Article[ \t]+(\d+)[ \t]*$", extracted.text or "", re.M):
+        number = int(match.group(1))
+        if number == previous + 1:
+            marks.append((f"Article {number}", match.start(), "article"))
+            previous = number
+    if len(marks) < 3:
+        from ..imports.service import structure_segments
+        return structure_segments("sections", DocType.LEGISLATION, extracted)
+    # Annexes bound the last article; don't swallow the technical appendices into it.
+    for match in re.finditer(r"^ANNEX[ \t]+([IVX]+)[ \t]*$", extracted.text or "", re.M):
+        if match.start() > marks[-1][1]:
+            marks.append((f"Annex {match.group(1)}", match.start(), "annex"))
+    return [Segment(label=label, char_start=start,
+                    char_end=marks[i+1][1] if i+1<len(marks) else len(extracted.text),
+                    kind=kind, level=1)
+            for i,(label,start,kind) in enumerate(marks)]
+
+
 def _is_generic_title(t: str | None) -> bool:
     return not t or bool(_GENERIC_TITLE.match(t))
 
@@ -365,8 +388,8 @@ LIMIT {self.page_size} OFFSET {offset}
         while True:
             try:
                 rows = self._sparql(self._enumerate_query(since, offset))
-            except Exception:
-                return  # a SPARQL hiccup ends the crawl; the cursor doesn't advance past it
+            except Exception as exc:
+                raise FetchError("EU legislation SPARQL enumeration failed", transient=True) from exc
             if not rows:
                 return
             for row in rows:
@@ -409,7 +432,10 @@ LIMIT {self.page_size} OFFSET {offset}
         chosen = None
         for language in ("en", "fr"):
             raw = self._fetch_formex(stub.raw_url, language)
-            parsed = parse("formex-legislation", raw) if raw else None
+            try:
+                parsed = parse("formex-legislation", raw) if raw else None
+            except FetchError:
+                parsed = None
             raw_ext = "zip"
             if primary and parsed and not any(s.kind == "article" for s in parsed.segments):
                 # The Charter stem can negotiate the OJ cover even as Formex. A
@@ -424,9 +450,17 @@ LIMIT {self.page_size} OFFSET {offset}
                 # the corpus resolved to a document with no Article 267 in it.
                 raw = self._fetch_html(
                     f"{stub.stable_id}/TXT" if primary else stub.stable_id, language)
-                parsed = parse("eurlex-html", raw) if raw else None
+                try:
+                    parsed = parse("eurlex-html", raw) if raw else None
+                except FetchError:
+                    parsed = None
                 raw_ext = "html"
             if not parsed or not parsed.text:
+                continue
+            # EUR-Lex may redirect an instrument URL to today's OJ index with
+            # HTTP 200. Its valid HTML is not the requested legal instrument.
+            if (re.search(r"EUR-Lex\s*[-–]\s*Official Journal", parsed.text, re.I)
+                    and not any(s.kind == "article" for s in parsed.segments)):
                 continue
             detected = _rendition_language(parsed.text)
             candidate = (raw, raw_ext, parsed, detected or language)
@@ -457,12 +491,31 @@ LIMIT {self.page_size} OFFSET {offset}
                 raw_bytes=raw, raw_ext=raw_ext,
                 text=parsed.text, segments=parsed.segments, relations=parsed.relations + trans,
                 extracted_via=ExtractedVia.STRUCTURED,
-                extra={"format": "formex-legislation" if is_formex else "eurlex-html",
+                extra={**parsed.metadata, "format": "formex-legislation" if is_formex else "eurlex-html",
                        "celex": stub.stable_id,
                        "eli": primary.get("eli") if primary else None, "aliases": aliases,
                        **({"language_fallback": "en-to-fr"}
                           if source_language == "fr" else {})},
             ), base_celex=stub.hints.get("consolidation_of"))
+        from ._cellar_pdf import fetch_pdf
+        from ..extraction import extract_bytes
+        from ..imports.service import structure_segments
+        pdf = fetch_pdf(self._client, stub.raw_url or f"{CELEX_BASE}/{stub.stable_id}")
+        if pdf:
+            extracted = extract_bytes(pdf, ext="pdf")
+            if extracted.text and not extracted.needs_ocr:
+                segments = pdf_legislation_segments(extracted)
+                if primary and not any(seg.label.startswith("Article ") for seg in segments):
+                    raise FetchError("EU primary-law PDF has no article structure")
+                return self._decorate_currency(Record(
+                    source=self.source, stable_id=stub.stable_id, doc_type=DocType.LEGISLATION,
+                    title=str(primary["title"]) if primary else celex_title(stub.stable_id),
+                    language="en", source_language="en", landing_url=stub.landing_url,
+                    raw_bytes=pdf, raw_ext="pdf", text=extracted.text, segments=segments,
+                    relations=trans, extracted_via=ExtractedVia.STRUCTURED,
+                    extra={"format":"cellar-official-pdf", "celex":stub.stable_id,
+                           "aliases":aliases, "eli":primary.get("eli") if primary else None}),
+                    base_celex=stub.hints.get("consolidation_of"))
         # Neither Formex nor HTML parsed — register a metadata stub so the (often
         # heavily-cited) instrument is still a real, clickable node and its citations
         # resolve (§5b); text can be backfilled later.
