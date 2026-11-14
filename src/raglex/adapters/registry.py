@@ -2175,10 +2175,12 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "FR", False,
         "The administrative court order (Conseil d'État, cours administratives d'appel, "
         "tribunaux administratifs) from opendata.justice-administrative.fr — the "
-        "complete set, ECLI-native (ECLI:FR:CE:…). Where most data-protection and "
+        "ECLI-native administrative decisions. Exact historical Conseil d’État ECLIs "
+        "are fetched from official ArianeWeb. Where most data-protection and "
         "public-law litigation sits. The search endpoint is undocumented, so it is read "
         "defensively; verify live before a backfill.",
-        (), ("ECLI:FR:CE:…", "numéro de dossier"),
+        (SourceOption("ids", "Conseil d’État ECLIs (ArianeWeb)", ""),),
+        ("ECLI:FR:CESSR:2012:351163.20121126",),
     ),
     "de-bt-drucksachen": SourceInfo(
         "de-bt-drucksachen", "Bundestagsdrucksachen — legislative history",

@@ -52,7 +52,7 @@ _NL_BWB_RE = re.compile(r"^BWBR\d{7}(?:@\d{4}-\d{2}-\d{2})?$", re.I)
 TARGETED_ADAPTERS = frozenset({
     "uk-legislation", "eu-legislation", "eu-preparatory", "uk-caselaw", "uk-hol",
     "eu-cellar", "echr", "nl-rechtspraak", "nl-legislation", "us-caselaw", "ca-canlii",
-    "fr-legislation",
+    "fr-legislation", "fr-conseil-etat",
 })
 
 
@@ -163,6 +163,8 @@ def _classify(candidate: str, kind: str) -> tuple[str, str | None, str | None]:
         # cassation and below) by fr-judilibre. The Conseil constitutionnel lives in
         # Légifrance's CONSTIT fund.
         if country == "FR":
+            if court.startswith(("CE", "CAA", "TA")):
+                return f"ECLI judgment (FR:{court})", country, "fr-conseil-etat"
             adapter = {"CE": "fr-conseil-etat", "CAA": "fr-conseil-etat",
                        "TA": "fr-conseil-etat", "CC": "fr-legislation"}.get(
                            court, "fr-judilibre")

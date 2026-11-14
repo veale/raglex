@@ -100,3 +100,26 @@ def test_canadian_lexum_http_escalates_blocked_html_to_scrapling():
         "ca-test", min_interval=0, session=_BlockedSession(), fetcher=_Stealth()
     ).get("https://norma.lexum.com/decision")
     assert response.content == b"<html>decision</html>"
+
+
+def test_captcha_is_a_source_cooldown_not_missing_case_or_browser_retry():
+    import pytest
+    from raglex.core.errors import RateLimitException
+    class Session:
+        def get(self,*args,**kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(status_code=403,content=b'<img src="/robocop/captcha/image.do">')
+    client=CanadianLexumHTTP('ca-fc-live',min_interval=0,session=Session())
+    with pytest.raises(RateLimitException) as exc:client.get('https://norma.lexum.com/example')
+    assert exc.value.retry_after==3600
+
+
+def test_html_challenge_cannot_look_like_an_empty_register():
+    import pytest
+    from types import SimpleNamespace
+    from raglex.adapters.ca_lexum import CanadianLexumAdapter
+    from raglex.core.errors import FetchError
+    class Client:
+        def get(self,*args,**kwargs):return SimpleNamespace(content=b'<html>Challenge</html>')
+    for court in ['fc','fca']:
+        with pytest.raises(FetchError):list(CanadianLexumAdapter(court=court,client=Client()).discover(None,max_pages=1))

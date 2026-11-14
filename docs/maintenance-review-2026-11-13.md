@@ -14,6 +14,7 @@ remain outside Git. Rendering and scraper checks use Scrapling on Asahi.
 | Reader issues | Fixed bracketed paragraph labels/ranges, literal phrases containing and/or/not, bounded character windows, unsegmented provision focus and compact citer output. Reparsed 234 CPR documents and reanchored 536 offsets; verified rule 27.3 and PD27A 7.3. Recovered DPA 2018 section 164A. |
 | REACH stub | Added official CELLAR PDF negotiation when structured renditions are unusable. The first retry exposed a misleading HTTP-200 OJ index; the final guard rejects it. Live recovery `34e88cdc` stored 965,351 characters, 141 articles and 17 annexes with zero errors. Article 31 was verified readable (5,273 characters). This is the original instrument, not a claim of current consolidated law. |
 | Casa Fleisch hearing report | CELLAR's HTTP 300 manifest contains both the judgment and hearing report. Select the unambiguous judgment PDF and reject report/opinion items. Live recovery `f8db82e7` restored `ECLI:EU:C:1989:331`, date 13 July 1989 and party title, with zero errors. PDF reparsing retains judgment structure. Earlier-than-1989 dockets no longer acquire a fabricated C- prefix. |
+| Charter authoritative text | `566ca950` recovered the official 2012 Formex bundle through its exact CELLAR work identity, using STR on CDM’s typed CELEX value. Holds 18,079 characters and all 54 articles. Verified Articles 8, 47 and 54 live. This is the 2012 text; no 2000 substitute or OJ cover was imported. |
 | AI Act Article 10(5) | Verified Article 1(9)(b) of [Regulation (EU) 2026/1744](https://eur-lex.europa.eu/eli/reg/2026/1744/oj). The held 27 July consolidation contains the stale paragraph. An exact-payload-hash erratum now displays an explicit deletion/editorial correction, retains its authority and leaves the raw publisher bytes unchanged. Reparsed live; original SHA-256 remains `655c4c6c957d1484426e1eb859a4fc65ad58978c1edd4d3a936fee87e4bf153b`. No blanket paragraph deletion is applied to other editions. |
 | Austrian missing full judgment | RIS defaults to headnotes and silently ignores the old text-valued Dokumenttyp parameter. Use documented `Dokumenttyp.SucheInRechtssaetzen` and `Dokumenttyp.SucheInEntscheidungstexten` flags. Targeted job `d2e38506` stored all 31 results for Ro 2025/04/0007, including `ECLI:AT:VWGH:2026:RO2025040007.J00`, with zero errors. Headnotes link to the publisher's parent judgment identifier; no guessed ECLI. Exact RIS-ID fetches validate returned identity instead of accepting ignored filters. |
 | PostgreSQL watch deadlocks | Reproduced a genuine server deadlock in an isolated schema. The victim's complete transaction is rolled back and replayed, with bounded jitter and three attempts for SQLSTATE 40P01/40001. Verified final values were incremented once by each worker. Nested transactions and non-retryable failures propagate; consistent document/alias ordering reduces contention. This does not claim every slow query or future contention is eliminated. |
@@ -44,20 +45,21 @@ OCR may run during the day. A nightly verified full acquisition is enabled; `af1
 is durably queued outside the window. Pacing, token renewal and Retry-After handling are
 documented in [domsdatabasen.md](domsdatabasen.md).
 
-The grammar rescan `efb12de0` completed extraction but failed during resolution on a
-statement timeout. Fixed resumed scans so extraction checkpoints cannot omit unfinished
-resolution. Its continuation `2ee32bba` is running in Jobs; it must not be described as a fully
-completed graph refresh until that job finishes.
+The grammar rescan `efb12de0` completed extraction but initially failed during resolution.
+Its continuation **`2ee32bba` completed**, resolving another 2,579 edges without repeating
+extraction. Resumed scans retain unfinished resolution work. Incoming-alias resolution
+now materialises the small alias list before indexed edge updates, and reports the
+document being processed rather than spending a quiet phase on a whole pending-edge join.
 
 ## Corpus work running or queued
 
 | Work | Durable tracking / completion criterion |
 | --- | --- |
 | Austrian full decisions | Fresh backfills requesting decision texts: VwGH `c4694ba1`, BVwG `cb4bec34`, LVwG `ce3b1a17`. Start at zero with `force_full`; old headnote/frontier offsets cannot establish decision-text coverage. These are substantial backfills, not completed acquisitions. |
-| National free-text expansion | `587fa9ab` indexes registered DE/FR/NL/BE/AT case-law and legislation plus legacy DILA. Search scope retains existing selected sources and explicitly says coverage is partial. Resumed as `3dbb8b62`; the redundant smaller-scope build was cancelled. Use live per-source indexed counts; do not infer absence from an unfinished index. |
+| National free-text expansion | The broad job `3dbb8b62` failed loading global index state. Replaced the corpus-wide DISTINCT body/headings join with source/ID keysets and indexed EXISTS probes over batches of 500. Each document commits atomically; failures and unreadable bodies prevent a false complete result. New per-source jobs run without a million-row ceiling; bounded builds exclude completed documents before applying the limit. The first live builds indexed thousands of additional Austrian records. Remaining source jobs are queued and coverage stays explicitly partial. |
 | Annex format recovery | `e0484b15` stored 98 further items with format-aware extraction, leaving seven transient failures and one unavailable attachment. The job correctly reports error. Previous sweep recovered 649 attachments and retained 80 failures. ZIP/images are assets, not recovered readable documents. |
 | AI Act citation refresh | `b9149946` completed: one document, 1,042 citations, 424 resolved edges after the correction. Raw authenticity and the corrected reader projection were checked separately. |
-| Outage references | Preserved 344-reference worklist: 214 recovered/already held, 117 requiring retry and 13 absent/uncertain in the earlier completed run. Do not blanket-clear failure evidence or guess malformed ECLIs. |
+| Outage references | Preserved the 344-reference result: 214 recovered/already held, 117 requiring retry and 13 absent/uncertain. Retried 74 structurally valid references in `0bd90385`: all 74 returned no exact publisher match and none had a transport recovery. These now require authority/identity review rather than repeated infrastructure retries. Retained 43 references that failed shape/date validation for identity review (examples include letter O in digit fields, truncated dates, and a possible revision suffix). No guessed corrections or blanket miss clearing. |
 
 ## FreshRSS follow-through
 
@@ -79,19 +81,35 @@ manifests are retained privately on Asahi under `raglex-outage-recovery-20261114
 service data directories. The follow-through worker completed; it is not an unmonitored
 promise to retry forever.
 
-The final live error list contains nine feeds, including a newly failing Kingsley Napley
-feed: Afripoli Digital Agenda, Berkeley Technology Law Journal, Kingsley Napley data
-protection, EDPB, Fairwork, Google TAG, KICTANet, Light Blue Touchpaper and Euractiv.
-Observed causes include removed 404/410 routes, expired publisher TLS, 403/503 responses
-and Euractiv's redirect to Rapporteur. A homepage redirect is not proof of an equivalent
-feed. Verified canonical replacements or source-specific HTML feeds remain necessary;
-changing topic scope or silently disabling these feeds would not repair them.
+The next review repaired eight of those nine remaining feeds:
+
+| Feed | Verified repair |
+| --- | --- |
+| APRI Digital Agenda | Publisher's RSS directory gives `/rss-feeds/feed/category/africas-digital-agenda`: six entries, same topic; healthy refresh, already-held articles preserved. |
+| Fairwork | Research blog moved to `fairwork.oii.ox.ac.uk/en/fw/blog/feed/`: 12 entries imported. The old domain now serves the certification business. |
+| Berkeley Technology Law Journal | Existing sidecar retrieves the native publisher feed: six entries imported. |
+| EDPB | Sidecar generates Atom from the official `/news_en` article cards, preserving article dates/links: 16 entries imported. |
+| Kingsley Napley data protection | Publisher redirects the old blog to its filtered `insights_category=data-protection` listing. Saved selectors retain that filter: 12 entries imported. The advertised generic RSS route misleadingly redirected to a medical-negligence article and was rejected. |
+| KICTANet | Its native feed returned 410 and its blog feed was empty. Saved selectors on the official blog recover ten dated article entries; imported all ten. |
+| Google TAG | The publisher's Threat Intelligence listing advertises its new FeedBurner feed. Verified the TAG/Mandiant successor from Google's own explanation; renamed the feed accordingly and imported 20 entries. Did not substitute the broader consumer Security feed. |
+| Euractiv / Rapporteur Tech | The native Tech feed works through Asahi Scrapling HTTP impersonation. Added a persistent [RSS Bridge adapter](../ops/rssbridge/README.md), retaining native publisher dates/links and closing MCP transport sessions. Verified/imported 100 entries. No paid article body was fetched. |
+
+The latest FreshRSS error list contains **only Light Blue Touchpaper**, whose publisher
+certificate is expired. TLS verification remains enabled; certificate renewal is an
+external publisher action. Optional EDPS/Rapporteur homepage/favicon fetches can still
+receive 403 even though the substantive feeds import successfully.
+
+The sidecar's unused local stealth backend was also diagnosed: it lacks Scrapling's
+`curl_cffi` dependency and returns empty content on import failure. Repaired feeds use
+the tested HTTP backend or Asahi MCP, so they do not depend on that broken fallback.
+Native sidecar dependency/error-propagation repair remains a separate service issue;
+it has not been represented as installed or fixed. Selector configurations are retained
+without credentials in [verified-feed-sources.json](../ops/rssbridge/verified-feed-sources.json).
 
 ## Remaining findings and limits
 
 | Finding | Evidence and required next step |
 | --- | --- |
-| Charter authoritative text | Tested official routes returned missing/challenge content; no reliable replacement was imported. Recover the correct edition from an official readable rendition. Do not substitute the 2000 Charter for the 2012 instrument or store a challenge page. |
 | Old Commission / HUDOC conversions | Some records genuinely lack usable bodies. Group remaining failures by publisher identifier and distinguish absent conversions, translation placeholders, invalid identifiers and transport failures before retrying. Aggregate feedback stays open. |
 | Historical UK report-only authorities | Worklists now offer explicitly inferred context names for acquisition, without creating aliases or identifying cases by party-name guess. Missing licensed bodies still require an authorised ICLR/Westlaw/Lexis export or a verified public source. |
 | French completeness | Publisher article links are preserved where supplied; absent historical amendment chains, missing print pages and unverified Conseil d'État examples remain coverage gaps. No fabricated page numbers or inferred amendment direction. |
@@ -101,7 +119,7 @@ changing topic scope or silently disabling these feeds would not repair them.
 
 ## Validation and operation
 
-The final release's full Python suite passed **3,165 tests, 112 skipped**, with no
+The final follow-through release's full Python suite passed **3,177 tests, 113 skipped**, with no
 failures, including the scan-resume, blocked-rule and misleading OJ-index regressions.
 A real PostgreSQL deadlock test
 used an isolated temporary schema and cleaned it up. Production tables were not used
@@ -114,10 +132,60 @@ index builds and cleanup run through durable RagLex jobs. Feedback is resolved o
 where its whole reported issue has been verified; aggregate/coverage reports retain
 responses describing remaining gaps.
 
-Final deployment: `raglex:open-findings-20261114-final` for API and scheduler.
+Earlier deployment: `raglex:open-findings-20261114-final`; superseded by the final follow-through image below.
 Verified the rendered sign-in page through Asahi Scrapling (HTTP 200); no browser
 sessions remain. VwGH/BVwG/LVwG backfill continuations after deployment are
 `27718c78`, `8e9c3261`, `065a1ad3`. Another 20 stale-source warnings now have bounded
 one-page diagnostic harvests queued, with persisted results and normal source-conflict
 guards. These diagnose silent emptiness; queued probes are not successful coverage.
 The separate Danish authority stale-feed warning remains for nighttime investigation.
+
+## Further source diagnostics — 14 November
+
+The 20 bounded stale-source checks recovered two German DSK documents, five Belgian
+GBA decisions, two BIPT opinions and five EDPS opinions. Factsheets checked 73
+publications without changed text; DMA checked three held reports; several other
+registers yielded held or no newer items. These results do not establish an exhaustive
+inventory. The Council of Europe catalogue check was interrupted during a publisher cooldown. A live probe returned HTTP 503 with Retry-After 3600; source-specific requests now surface that cooldown immediately rather than sleeping through five hour-long retries in a worker. No complete catalogue acquisition is claimed.
+
+Canadian live feeds exposed a separate silent-incompleteness bug: Lexum's Norma
+CAPTCHA could be treated as empty discovery or a missing judgment. The adapter now
+pauses the source for an hour on a CAPTCHA/429, preserves HTTP status classifications,
+and rejects invalid RSS, missing register markup and unreadable published decisions.
+Tests cover the distinction. The court's CAPTCHA still blocks those bodies; no
+human-verification bypass or false not-found completion is claimed.
+
+## Final follow-through verification
+
+Charter recovery `566ca950` completed with one stored document and zero errors.
+The annex retry `72752a18` recovered five more advertised attachments, including
+Commission work-programme material and the two DMA Commission documents routed by
+exact COM/CELEX identity. A final OCR sweep `bae49791` then recovered both scanned PDFs: `122408` has nine pages and 22,722 extracted characters; `122373` has eight pages and 6,210 extracted characters. OCR covers every page, records engine/language/page provenance and refuses an over-limit prefix. The sweep finished with zero extraction errors and one publisher 404 (`131214`), which remains visible. The latter scan is a Swedish PTS report: its source language was corrected to `sv` after reading the publisher cover. The stored OCR provenance truthfully records the English recognition model; Swedish-language OCR quality review remains appropriate.
+
+The resumed index builds exposed a concurrent-write race: a harvest and a builder
+could both delete an absent index row then collide inserting its replacement.
+Storage now locks the shared document row and atomically replaces body plus headings
+on PostgreSQL, including heading-only upgrades. A real two-writer test in an isolated
+temporary schema verified one coherent final body/heading version and successful
+commits by both writers. The optional regression is
+`tests/test_fts_concurrency_postgres.py`; production tables were not modified by it.
+
+Current deployed API/scheduler image: `raglex:remaining-maintenance-20261114-release`.
+The prior image and compose/env backups remain available for rollback. Per-source
+index work remains resumable and explicitly partial; source jobs and recovery results
+are preserved in Jobs, including cancelled index workers that yielded slots to the
+bounded reported-document repairs.
+
+The optional PostgreSQL integration test accounts for the additional skip in the
+default local suite; its real two-writer equivalent was also run successfully in
+an isolated temporary schema against the live PostgreSQL engine. Final focused
+checks passed for OCR completeness and the publisher one-hour cooldown.
+
+Still outside a verified complete result: the Danish publisher-total discrepancy
+(and the gated daily change watch), running full acquisitions/index builds, missing
+licensed UK bodies, French historical publication/formatting gaps, damaged reference
+identities, the RIS duplicate-ECLI publication, Light Blue Touchpaper's expired
+certificate, the removed Commission link and publisher CAPTCHA/cooldown responses.
+Their evidence and next actions remain above; none was hidden or labelled recovered.
+
+Final live checks: MCP lookup returned Charter Article 47 with its correct 572-character provision; Asahi Scrapling rendered the live sign-in page with HTTP 200 and left no browser sessions. The deployed Python module hashes match this checkout. Feedback responses record verified fixes while aggregate coverage reports remain open.

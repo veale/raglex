@@ -301,3 +301,38 @@ def test_attachment_language_labels_include_publisher_typos_and_punctuation():
          'decision_date':None,'meta_json':json.dumps({'other_files':[
              {'title':title,'url':f'https://example.org/{i}'} for i,title in enumerate(titles)]})}
     assert [s.title for s in DigitalStrategyAttachmentsAdapter([row]).discover(None)]==titles[:1]
+
+
+def test_commission_work_link_is_fetched_by_exact_celex(monkeypatch):
+    from raglex.adapters.eu_preparatory import EUPreparatoryAdapter
+    from raglex.core.models import Record, DocType, ExtractedVia, Stub
+    seen=[]
+    def fetch(self,stub):
+        seen.append(stub.stable_id)
+        return Record(source='eu-preparatory',stable_id=stub.stable_id,doc_type=DocType.PREPARATORY,
+                      title='DMA report',text='Authoritative substantive body',raw_bytes=b'publisher',
+                      extracted_via=ExtractedVia.STRUCTURED)
+    monkeypatch.setattr(EUPreparatoryAdapter,'fetch',fetch)
+    url='https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=COM:2025:166:FIN'
+    stub=Stub('cover/attachment/x',landing_url=url,hints={'attachment':{'url':url,'title':'DMA report'},'attachment_of':'cover'})
+    rec=DigitalStrategyLibraryAdapter().fetch(stub)
+    assert seen==['52025DC0166'] and rec.stable_id==stub.stable_id
+    assert rec.extra['canonical_celex']=='52025DC0166'
+    assert {r.dst_id for r in rec.relations}=={'cover','52025DC0166'}
+
+
+def test_shared_document_uuid_can_recover_from_commission_download_host(monkeypatch):
+    from types import SimpleNamespace
+    from raglex.core.models import Stub
+    from raglex.extraction import attachments
+    calls=[]
+    class Client:
+        def get(self,url,**kwargs):
+            calls.append(url)
+            return SimpleNamespace(content=b'%PDF-official' if '://commission.' in url else b'<html>Not found</html>',headers={})
+    monkeypatch.setattr(attachments,'read_attachment',lambda data,**kwargs:('Full annex','pdf',False))
+    url='https://digital-strategy.ec.europa.eu/document/download/7617998c-86e6-4a74-b33c-249e8a7938cd_en?filename=annex.pdf'
+    stub=Stub('cover/attachment/x',landing_url=url,hints={'attachment':{'url':url,'title':'Annex'},'attachment_of':'cover'})
+    rec=DigitalStrategyLibraryAdapter(client=Client()).fetch(stub)
+    assert rec.raw_bytes==b'%PDF-official' and rec.text=='Full annex'
+    assert calls==[url,url.replace('digital-strategy.ec.europa.eu','commission.europa.eu')]

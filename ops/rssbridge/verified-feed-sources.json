@@ -1,0 +1,60 @@
+[
+  {
+    "name": "APRI Africa’s Digital Agenda",
+    "url": "https://afripoli.org/rss-feeds/feed/category/africas-digital-agenda",
+    "strategy": "rss",
+    "verified_entries": 6
+  },
+  {
+    "name": "Fairwork blogs",
+    "url": "https://fairwork.oii.ox.ac.uk/en/fw/blog/feed/",
+    "strategy": "rss",
+    "verified_entries": 12
+  },
+  {
+    "name": "Google Threat Intelligence (formerly TAG)",
+    "url": "https://feeds.feedburner.com/threatintelligence/pvexyqv7v0v",
+    "strategy": "rss",
+    "publisher_listing": "https://cloud.google.com/blog/topics/threat-intelligence",
+    "verified_entries": 20
+  },
+  {
+    "url": "https://btlj.org/feed/",
+    "strategy": "rss",
+    "fresh_rss_id": 114
+  },
+  {
+    "url": "https://www.edpb.europa.eu/news_en",
+    "strategy": "xpath",
+    "selectors": {
+      "item": "//div[contains(@class,'node-article-card__content')]",
+      "item_title": ".//h3",
+      "item_link": ".//a[contains(@class,'node-article-card__link')]/@href",
+      "item_timestamp": ".//time/@datetime"
+    },
+    "fresh_rss_id": 331
+  },
+  {
+    "url": "https://www.kingsleynapley.co.uk/our-insights/articles/?insights_category=data-protection",
+    "strategy": "xpath",
+    "selectors": {
+      "item": "//a[contains(concat(' ',normalize-space(@class),' '),' insight-item ')]",
+      "item_title": ".//h3",
+      "item_link": "./@href",
+      "item_timestamp": ".//div[contains(@class,'insight-item__date')]"
+    },
+    "fresh_rss_id": 415
+  },
+  {
+    "url": "https://www.kictanet.or.ke/blog/",
+    "strategy": "xpath",
+    "selectors": {
+      "item": "//article[contains(@class,'et_pb_post_id_')]",
+      "item_title": ".//h2/a",
+      "item_link": ".//h2/a/@href",
+      "item_timestamp": ".//span[contains(@class,'published')]",
+      "item_content": ".//div[contains(@class,'post-content')]"
+    },
+    "fresh_rss_id": 390
+  }
+]

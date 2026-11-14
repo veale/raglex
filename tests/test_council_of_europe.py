@@ -406,3 +406,17 @@ def test_sources_are_registered_with_truthful_incremental_modes():
     assert all(INCREMENTAL_MODE[k] == "full-walk" for k in keys - {"coe-edoc"})
     catalog = {row["key"]: row for row in source_catalog()}
     assert all(catalog[k]["group_label"] == "Council of Europe" for k in keys)
+
+
+def test_edoc_publisher_hour_cooldown_does_not_sleep_in_a_worker():
+    import httpx
+    import pytest
+    from raglex.adapters.council_of_europe import CouncilOfEuropeEdocAdapter, EDOC_HOME
+    from raglex.core.errors import RateLimitException
+    adapter=CouncilOfEuropeEdocAdapter(catalog=True)
+    adapter._client._client.close()
+    adapter._client._client=httpx.Client(transport=httpx.MockTransport(
+        lambda request:httpx.Response(503,headers={'Retry-After':'3600'},text='Publisher busy')))
+    adapter._client._sleep=lambda seconds: (_ for _ in ()).throw(AssertionError('slept in worker'))
+    with pytest.raises(RateLimitException) as exc:adapter._html(EDOC_HOME)
+    assert exc.value.retry_after==3600

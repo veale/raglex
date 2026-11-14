@@ -4542,37 +4542,27 @@ class Catalogue:
         direct pass hits relations_pending_candidate_idx, and the alias passes
         nested-loop from this document's few aliases (citation_aliases_dst_idx) into
         the pending lower(candidate_id)/raw_fold indexes."""
-        keys = [k for k in (stable_id, ecli) if k]
+        keys = sorted({k for k in (stable_id, ecli) if k})
         qs = ",".join("?" * len(keys))
-        passes = (
-            (
-                f"""
-                UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
-                WHERE resolution_status = 'pending' AND candidate_id IN ({qs})
-                """,
-                (stable_id, *keys),
-            ),
-            (
-                f"""
-                UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
-                FROM citation_aliases a
-                WHERE a.dst_id IN ({qs})
-                  AND relations.resolution_status = 'pending'
-                  AND lower(relations.candidate_id) = a.alias
-                """,
-                (stable_id, *keys),
-            ),
-            (
-                f"""
-                UPDATE relations SET dst_id = ?, resolution_status = 'resolved'
-                FROM citation_aliases a
-                WHERE a.dst_id IN ({qs})
-                  AND relations.resolution_status = 'pending'
-                  AND relations.raw_fold = a.alias
-                """,
-                (stable_id, *keys),
-            ),
-        )
+        # A join can make PostgreSQL scan every pending edge even when this
+        # document has no aliases. Materialise the small indexed alias lookup
+        # first so each UPDATE has literal indexed probe keys.
+        aliases = sorted({r["alias"] for r in self.conn.execute(
+            f"SELECT alias FROM citation_aliases WHERE dst_id IN ({qs})", keys)})
+        passes = [(
+            f"UPDATE relations SET dst_id = ?, resolution_status = 'resolved' "
+            f"WHERE resolution_status = 'pending' AND candidate_id IN ({qs})",
+            (stable_id, *keys),
+        )]
+        for offset in range(0, len(aliases), 500):
+            chunk = aliases[offset:offset + 500]
+            marks = ",".join("?" * len(chunk))
+            for column in ("lower(candidate_id)", "raw_fold"):
+                passes.append((
+                    f"UPDATE relations SET dst_id = ?, resolution_status = 'resolved' "
+                    f"WHERE resolution_status = 'pending' AND {column} IN ({marks})",
+                    (stable_id, *chunk),
+                ))
         return self._run_resolution_passes(passes)
 
     def resolve_pending_from(self, stable_id: str) -> int:
@@ -5589,7 +5579,20 @@ class Catalogue:
     FTS_PART_CHARS = 120_000
     FTS_PART_WORDS = 10_000
 
-    def put_doc_fts(
+    def put_doc_fts(self, doc_id: str, text: str, *, headings=None, commit: bool = True) -> int:
+        if self.backend != "postgres":
+            return self._put_doc_fts(doc_id, text, headings=headings, commit=commit)
+        # A watch and an index build can select the same document before either
+        # inserts its first part. DELETE alone locks no row in that case. Lock
+        # their shared document identity and replace body+headings atomically.
+        with self.conn.transaction():
+            self.conn.execute("SELECT stable_id FROM documents WHERE stable_id=? FOR UPDATE", (doc_id,))
+            count = self._put_doc_fts(doc_id, text, headings=headings, commit=False)
+        if commit:
+            self.conn.commit()
+        return count
+
+    def _put_doc_fts(
         self, doc_id: str, text: str, *, headings: list[tuple[str, int]] | None = None,
         commit: bool = True,
     ) -> int:
@@ -5623,7 +5626,17 @@ class Catalogue:
             self.conn.commit()
         return len(parts)
 
-    def put_doc_headings(
+    def put_doc_headings(self, doc_id: str, headings, *, commit: bool = True) -> int:
+        if self.backend != "postgres":
+            return self._put_doc_headings(doc_id, headings, commit=commit)
+        with self.conn.transaction():
+            self.conn.execute("SELECT stable_id FROM documents WHERE stable_id=? FOR UPDATE", (doc_id,))
+            count = self._put_doc_headings(doc_id, headings, commit=False)
+        if commit:
+            self.conn.commit()
+        return count
+
+    def _put_doc_headings(
         self, doc_id: str, headings: list[tuple[str, int]], *, commit: bool = True,
     ) -> int:
         """Replace only a document's structural-label index, preserving body FTS."""

@@ -36,3 +36,30 @@ def test_short_csv_keeps_quoted_fields_and_empty_columns():
 
 def test_html_error_is_not_stored_as_pdf_attachment():
  with pytest.raises(FetchError):read_attachment(b'<html>error</html>',url='https://example.org/file.pdf')
+
+
+def test_scanned_attachment_ocr_covers_all_pages_or_refuses_partial(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from raglex.extraction import attachments, ocr
+    from raglex.core.errors import FetchError
+    import pytest
+    monkeypatch.setattr(attachments.PdfExtractor,'extract',lambda *a,**k:SimpleNamespace(text='',needs_ocr=True))
+    class Pages:
+        count=9
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def __len__(self):return self.count
+    pages=Pages()
+    monkeypatch.setitem(sys.modules,'fitz',SimpleNamespace(open=lambda **k:pages))
+    calls=[]
+    def recognize(data,**options):calls.append(options);return 'Readable complete scan. '*15
+    monkeypatch.setattr(ocr,'ocr_pdf',recognize)
+    info={}
+    text,extension,asset=attachments.read_attachment(b'%PDF-scan',url='https://publisher.test/scan.pdf',extraction_info=info)
+    assert len(text)>120 and extension=='pdf' and not asset
+    assert calls[0]['max_pages']==9 and info['pages']==9 and info['ocr']
+    pages.count=81
+    with pytest.raises(FetchError,match='dedicated OCR'):
+        attachments.read_attachment(b'%PDF-scan',url='https://publisher.test/scan.pdf')
+    assert len(calls)==1

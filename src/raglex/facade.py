@@ -1009,6 +1009,14 @@ def _targeted_nl_legislation(candidate: str):
                        version_date=m.group(2), use_sru=False)
 
 
+def _targeted_fr_conseil_etat(candidate: str):
+    from .adapters.fr_conseil_etat import _ARIANE_ECLI
+    if not _ARIANE_ECLI.fullmatch(candidate):
+        return None
+    from .adapters.registry import get_adapter
+    return get_adapter("fr-conseil-etat", ids=candidate)
+
+
 def _targeted_fr_legislation(candidate: str):
     if not re.fullmatch(r"(?:LEGI|JORF)(?:TEXT|ARTI)\d+", candidate, re.I):
         return None
@@ -1032,6 +1040,7 @@ _TARGETED_HARVEST = {
     "us-caselaw": _targeted_us_caselaw,
     "ca-canlii": _targeted_ca_canlii,
     "fr-legislation": _targeted_fr_legislation,
+    "fr-conseil-etat": _targeted_fr_conseil_etat,
 }
 # The worklist decides what to offer the drain from the same set (a citation whose
 # source has no id-fetch is reported, but never queued) — keep the two in step.
@@ -8659,6 +8668,10 @@ class Facade:
                 extracted = extract_bytes(raw, ext="pdf")
                 text, segments = extracted.text, pdf_legislation_segments(extracted)
                 fmt = "cellar-official-pdf"
+            elif doc["source"] == "fr-conseil-etat" and _row_meta(doc).get("format") == "arianeweb":
+                from .adapters.fr_conseil_etat import parse_ariane
+                parsed = parse_ariane(raw, stable_id)
+                text, segments, fmt = parsed.text, parsed.segments, "arianeweb"
             elif doc["source"] == "uk-caselaw":
                 # Find Case Law stores LegalDocML judgments.  Byte sniffing sees the
                 # Akoma Ntoso envelope and would otherwise send these through the
@@ -14276,7 +14289,7 @@ class Facade:
                 resolve_ids = cat.text_document_ids_citing(
                     target_ids, sources=sources or ([source] if source else None),
                     source_prefix=source_prefix)
-            resolved = (Resolver(cat).run_for_documents(resolve_ids, cancel_check=cancel_check)
+            resolved = (Resolver(cat).run_for_documents(resolve_ids, cancel_check=cancel_check, on_progress=on_progress)
                         if document_ids is not None or target_ids or source else Resolver(cat).run())
             stats = {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
         self._invalidate_caches()  # re-scan changed edges → dashboards + doc views are stale
@@ -16345,7 +16358,7 @@ class Facade:
         return out
 
     def build_freetext_index(self, *, sources: list[str] | None = None,
-                             reindex: bool = False, limit: int = 1_000_000,
+                             reindex: bool = False, limit: int | None = 1_000_000,
                              on_progress=None, cancel_check=None) -> dict:
         """Build (or extend) the free-text index over the gated scope."""
         from .fulltext import index as fts

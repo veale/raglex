@@ -386,67 +386,86 @@ def _text_of(cat, ts, doc_id: str) -> str | None:
 
 
 # -- building ------------------------------------------------------------------
-def build(cat, ts, *, sources: list[str] | None = None, limit: int = 1_000_000,
+def build(cat, ts, *, sources: list[str] | None = None, limit: int | None = 1_000_000,
           reindex: bool = False, on_progress=None, cancel_check=None) -> dict:
-    """Index the gated scope. Resumable: a document already indexed is skipped unless
-    ``reindex``, so an interrupted run continues rather than starting over."""
+    """Walk source/ID keysets; index-state probes never leave the current batch.
+
+    A corpus-wide DISTINCT body/headings join both exploded its intermediate rows
+    and timed out before progress. Completed documents are excluded in SQL so a
+    bounded resumed run also advances beyond the first million documents.
+    """
     st = {"scanned": 0, "indexed": 0, "headings_only": 0, "parts": 0,
-          "skipped": 0, "unreadable": 0, "chars": 0}
-    where = "WHERE has_text = 1 AND search_excluded = 0"
-    params: list[object] = []
-    if sources:
-        where += f" AND source IN ({','.join('?' * len(sources))})"
-        params.extend(sources)
-    rows = cat.conn.execute(
-        f"SELECT stable_id, payload_hash, title FROM {'documents'} {where} "
-        "ORDER BY stable_id LIMIT ?", params + [limit]).fetchall()
-    done = set() if reindex else cat.fts_indexed_ids()
-    body_done = set() if reindex else cat.fts_body_indexed_ids()
-    total = len(rows)
-    for n, r in enumerate(rows, 1):
-        if cancel_check and cancel_check():
-            break
-        sid = r["stable_id"]
-        st["scanned"] += 1
-        if n % 500 == 0 and on_progress:
-            # on documents SEEN: a resumed build skips everything already indexed,
-            # and reporting only on new work makes a healthy job look dead
-            on_progress(stage="building free-text index", done=n, total=total, item=sid)
-        if sid in done:
-            st["skipped"] += 1
-            continue
-        if not r["payload_hash"]:
-            continue
-        try:
-            text = ts.get(r["payload_hash"])
-            segments = ts.get_segments(r["payload_hash"])
-        except OSError:
-            st["unreadable"] += 1
-            continue
-        if not text.strip():
-            continue
-        try:
-            labels = [(str(r["title"] or sid), 0)]
-            labels.extend((segment.label, segment.char_start) for segment in segments
-                          if segment.label and segment.label != r["title"])
-            if sid in body_done:
-                # One-time structural-label upgrade: the authoritative body index is
-                # already valid. Rebuilding its tsvector merely to add headings turned
-                # a minutes-long migration into hours on the live EU corpus.
-                cat.put_doc_headings(sid, labels, commit=False)
-                st["headings_only"] += 1
-            else:
-                st["parts"] += cat.put_doc_fts(
-                    sid, text,
-                    headings=labels,
-                    commit=False,
-                )
-        except Exception:  # noqa: BLE001 — one bad document must not end the run
-            log.warning("[fts] %s failed to index", sid, exc_info=True)
-            continue
-        st["indexed"] += 1
-        st["chars"] += len(text)
-        if st["indexed"] % 500 == 0:
-            cat.conn.commit()
-    cat.conn.commit()
-    return st
+          "skipped": 0, "unreadable": 0, "chars": 0, "errors": 0}
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive or None")
+    body = "EXISTS (SELECT 1 FROM doc_fts f WHERE f.doc_id=d.stable_id)"
+    headings = "EXISTS (SELECT 1 FROM doc_headings h WHERE h.doc_id=d.stable_id)"
+    for source in sorted(set(sources)) if sources else [None]:
+        after = ""
+        while True:
+            if cancel_check and cancel_check():
+                return dict(st, cancelled=True, complete=False)
+            if limit is not None and st["scanned"] >= limit:
+                return dict(st, limit_reached=True, complete=False)
+            if on_progress:
+                on_progress(stage="selecting free-text index batch", done=st["scanned"],
+                            item=f"{source or 'all sources'} after {after or 'start'}")
+            where = "d.has_text=1 AND d.search_excluded=0 AND d.stable_id > ?"
+            params = [after]
+            if source:
+                where += " AND d.source=?"
+                params.append(source)
+            if not reindex:
+                where += f" AND NOT ({body} AND {headings})"
+            size = min(500, limit-st["scanned"]) if limit is not None else 500
+            rows = cat.conn.execute(
+                f"SELECT d.stable_id,d.payload_hash,d.title,{body} AS body_indexed "
+                f"FROM documents d WHERE {where} ORDER BY d.stable_id LIMIT ?",
+                params+[size]).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                if cancel_check and cancel_check():
+                    return dict(st, cancelled=True, complete=False)
+                sid = row["stable_id"]
+                after = sid
+                st["scanned"] += 1
+                if on_progress and (st["scanned"] == 1 or st["scanned"] % 100 == 0):
+                    on_progress(stage="building free-text index", done=st["scanned"], item=sid)
+                if not row["payload_hash"]:
+                    st["unreadable"] += 1
+                    continue
+                try:
+                    text = ts.get(row["payload_hash"])
+                    segments = ts.get_segments(row["payload_hash"])
+                except OSError:
+                    st["unreadable"] += 1
+                    continue
+                if not text.strip():
+                    st["unreadable"] += 1
+                    continue
+                labels = [(str(row["title"] or sid), 0)]
+                labels.extend((seg.label, seg.char_start) for seg in segments
+                              if seg.label and seg.label != row["title"])
+                try:
+                    # A failed document must roll back both its body and headings;
+                    # swallowing an SQL error otherwise poisons all later writes.
+                    with cat._atomic():
+                        if row["body_indexed"] and not reindex:
+                            cat.put_doc_headings(sid, labels, commit=False)
+                            parts = 0
+                        else:
+                            parts = cat.put_doc_fts(sid, text, headings=labels, commit=False)
+                except Exception:
+                    st["errors"] += 1
+                    log.warning("[fts] %s failed to index", sid, exc_info=True)
+                    continue
+                st["headings_only"] += bool(row["body_indexed"] and not reindex)
+                st["parts"] += parts
+                st["indexed"] += 1
+                st["chars"] += len(text)
+    if on_progress:
+        on_progress(stage="building free-text index", done=st["scanned"], total=st["scanned"])
+    if st["errors"] or st["unreadable"]:
+        return dict(st, complete=False, error="Free-text build has failed or unreadable documents; inspect counts")
+    return dict(st, complete=True)

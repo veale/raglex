@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Iterator
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, parse_qs
 
 from bs4 import BeautifulSoup
 
@@ -250,6 +250,29 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                            kind=stub.hints.get("kind"), published=stub.hint_date,
                            summary=stub.hints.get("summary"))
         page = None
+        if attachment and urlsplit(attachment["url"]).hostname == "eur-lex.europa.eu":
+            uri = parse_qs(urlsplit(attachment["url"]).query).get("uri", [""])[0]
+            match = re.fullmatch(r"COM:(\d{4}):(\d+):FIN", uri, re.I)
+            if match:
+                # Some advertised 'downloads' are EUR-Lex work links, not files.
+                # Fetch the exact Commission identity through CELLAR, retaining
+                # both this advertised attachment and its canonical identity.
+                from .eu_preparatory import EUPreparatoryAdapter
+                celex = f"5{match[1]}DC{int(match[2]):04d}"
+                canonical = Stub(celex, raw_url=f"https://publications.europa.eu/resource/celex/{celex}",
+                                 landing_url=attachment["url"], hints={"title": attachment.get("title")})
+                record = EUPreparatoryAdapter(celex=celex, client=self._client).fetch(canonical)
+                if record is None or not record.text:
+                    raise FetchError(f"{self.source}: CELLAR has no readable body for {celex}", transient=True)
+                record.source, record.stable_id = self.source, stub.stable_id
+                record.landing_url = stub.landing_url
+                record.extra = {k:v for k,v in record.extra.items() if k != "aliases"}
+                record.extra.update(canonical_celex=celex, attachment_of=stub.hints.get("attachment_of"),
+                                    library_page=stub.hints.get("library_page"), attachment_url=attachment["url"])
+                record.relations.extend(TypedRelation(RelationshipType.RELATED_TO, dst_id=target,
+                    raw_citation_string=target, extracted_via=ExtractedVia.STRUCTURED)
+                    for target in [celex, stub.hints.get("attachment_of")] if target)
+                return record
         if attachment:
             item.files = [attachment]
         else:
@@ -262,12 +285,24 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
             item = parse_item_page(page, item)
 
         asset_only = False
+        extraction_info = {}
         text, raw, raw_ext, doc_title = None, None, "html", stub.title
         if item.files:
             first = item.files[0]
             try:
                 response = self._client.get(first["url"])
                 blob = response.content
+                if (attachment and not blob.startswith((b"%PDF-", b"PK"))
+                        and urlsplit(first["url"]).hostname == "digital-strategy.ec.europa.eu"
+                        and re.fullmatch(r"/document/download/[0-9a-f-]{36}_[a-z]{2}", urlsplit(first["url"]).path)):
+                    # Commission document UUIDs are shared across the migrated
+                    # download hosts. Accept this alternate only as a real PDF;
+                    # an error/challenge page never becomes an attachment body.
+                    alternative = first["url"].replace("https://digital-strategy.ec.europa.eu/",
+                                                        "https://commission.europa.eu/", 1)
+                    alternate = self._client.get(alternative)
+                    if alternate.content.startswith(b"%PDF-"):
+                        response, blob = alternate, alternate.content
             except FetchError as exc:
                 if exc.transient or attachment:
                     raise
@@ -275,7 +310,8 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
             if attachment and blob:
                 from ..extraction.attachments import read_attachment
                 text, raw_ext, asset_only = read_attachment(
-                    blob, url=first["url"], headers=getattr(response, "headers", {}))
+                    blob, url=first["url"], headers=getattr(response, "headers", {}),
+                    extraction_info=extraction_info)
                 raw, doc_title = blob, first["title"] or stub.title
             # the redirection endpoint answers with Content-Type "/" — trust the bytes
             if not attachment and blob and blob[:5] == b"%PDF-":
@@ -330,6 +366,7 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                 "asset_only": True if asset_only else None,
                 "extraction_status": "binary asset retained; dedicated extraction required" if asset_only else None,
                 "attachment_format": raw_ext if attachment else None,
+                "attachment_extraction": extraction_info or None,
                 "library_page": stub.hints.get("library_page"),
                 # the annexes published alongside, so a later pass can pull them
                 "other_files": [{"title": f["title"], "url": f["url"]}

@@ -992,3 +992,24 @@ def test_official_pdf_article_heads_ignore_wrapped_cross_references():
     segments=pdf_legislation_segments(SimpleNamespace(text=text,page_spans=[]))
     assert [s.label for s in segments]==['Article 1','Article 2','Article 3','Annex I']
     assert text[segments[2].char_start:segments[2].char_end].endswith('applies.\n')
+
+
+def test_primary_law_falls_back_to_exact_cellar_work_not_cover(monkeypatch):
+    from types import SimpleNamespace
+    import raglex.adapters.eu_legislation as module
+    ad=EULegislationAdapter(celex='12012P',client=_FakeClient(b''))
+    work='https://publications.europa.eu/resource/cellar/verified-work'
+    calls=[]
+    monkeypatch.setattr(ad,'_transposition_edges',lambda *a:[])
+    monkeypatch.setattr(ad,'_sparql',lambda query:[{'work':work}])
+    def fetch(url,*args):
+        calls.append(url)
+        return b'full' if url==work else b'cover'
+    monkeypatch.setattr(ad,'_fetch_formex',fetch)
+    monkeypatch.setattr(module,'parse',lambda fmt,raw:SimpleNamespace(
+        text='Human dignity' if raw==b'full' else 'OJ cover',
+        segments=[SimpleNamespace(kind='article',label='Article 1')] if raw==b'full' else [],
+        title='Charter',relations=[],metadata={}))
+    rec=ad.fetch(next(ad.discover(None)))
+    assert rec.text=='Human dignity' and rec.stable_id=='12012P'
+    assert work in calls

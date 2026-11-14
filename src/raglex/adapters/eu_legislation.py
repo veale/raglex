@@ -22,6 +22,7 @@ cursor, no page cap) walks the whole series. ``types=`` picks the descriptors,
 from __future__ import annotations
 
 import re
+import json
 import time
 from datetime import date
 from typing import Iterator
@@ -441,6 +442,22 @@ LIMIT {self.page_size} OFFSET {offset}
                 # The Charter stem can negotiate the OJ cover even as Formex. A
                 # successful parse of that cover is not the instrument's articles.
                 parsed = None
+            if primary and not parsed:
+                # Slash-bearing primary-law CELEX paths do not reliably negotiate
+                # their work. The stem can be an OJ cover. Resolve the exact /TXT
+                # identity through CDM instead of guessing a CELLAR manifestation.
+                identifier = stub.stable_id.removesuffix("/TXT") + "/TXT"
+                rows = self._sparql(
+                    f"PREFIX cdm: <{CDM}> SELECT DISTINCT ?work WHERE {{ "
+                    f"?work cdm:resource_legal_id_celex ?celex . "
+                    f"FILTER(STR(?celex) = {json.dumps(identifier)}) }} LIMIT 2")
+                if len(rows) == 1:
+                    work_url = rows[0].get("work", "").replace("http://", "https://", 1)
+                    if work_url.startswith("https://publications.europa.eu/resource/cellar/"):
+                        raw = self._fetch_formex(work_url, language)
+                        parsed = parse("formex-legislation", raw) if raw else None
+                        if parsed and not any(s.kind == "article" for s in parsed.segments):
+                            parsed = None
             if not parsed or not parsed.text:
                 # A treaty is addressed by its CELEX STEM (12016E) but EUR-Lex only
                 # serves the text under the /TXT expression. The stem alone answers with

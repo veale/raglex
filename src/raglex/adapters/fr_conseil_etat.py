@@ -23,11 +23,13 @@ Every endpoint MUST be re-verified live before a real backfill.
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Iterator
 
 from ..core.adapter import BaseAdapter
 from ..core.http import RateLimitedClient
+from ..core.errors import FetchError
 from ..core.models import DocType, ExtractedVia, Record, Stub
 from ..core.segmentation import synthesise_numbered_segments
 
@@ -87,14 +89,52 @@ def parse_hit(src: dict) -> Record | None:
     )
 
 
+_ARIANE_ECLI = re.compile(r"^ECLI:FR:CE[A-Z]*:(\d{4}):(\d+)\.(\d{8})$", re.I)
+
+
+def ariane_url(ecli):
+    match = _ARIANE_ECLI.fullmatch(ecli)
+    if not match:
+        raise ValueError("ArianeWeb targeting needs a Conseil d'État ECLI with a dated docket")
+    day = date.fromisoformat(f"{match[3][:4]}-{match[3][4:6]}-{match[3][6:]}")
+    if str(day.year) != match[1]:
+        raise ValueError("ECLI year and decision date differ")
+    return f"https://www.conseil-etat.fr/fr/arianeweb/CE/decision/{day.isoformat()}/{match[2]}"
+
+
+def parse_ariane(raw, expected_ecli):
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(raw, "html.parser")
+    body = soup.select_one(".article__main .ezrichtext-field")
+    if body is None:
+        raise FetchError("ArianeWeb returned no decision body")
+    identifiers = set(re.findall(r"ECLI:FR:CE[A-Z]*:\d{4}:\d+\.\d{8}", body.get_text(), re.I))
+    if identifiers != {expected_ecli}:
+        raise FetchError("ArianeWeb decision identity differs from the requested ECLI", transient=False)
+    for br in body.find_all("br"):
+        br.replace_with("\n")
+    text = body.get_text("", strip=False)
+    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    match = _ARIANE_ECLI.fullmatch(expected_ecli)
+    record = parse_hit({"ecli":expected_ecli, "numero":match[2], "texte_integral":text,
+                        "date_lecture":f"{match[3][:4]}-{match[3][4:6]}-{match[3][6:]}",
+                        "url":ariane_url(expected_ecli)})
+    record.raw_bytes, record.raw_ext = raw, "html"
+    record.extra["format"] = "arianeweb"
+    return record
+
+
 class FrConseilEtatAdapter(BaseAdapter):
     source = "fr-conseil-etat"
     min_interval = 0.5
     requires_js = False
     requires_proxy = False
 
-    def __init__(self, *, per_page: int = 50, client: RateLimitedClient | None = None) -> None:
+    def __init__(self, *, per_page: int = 50, ids: str | list[str] | None = None, client: RateLimitedClient | None = None) -> None:
         self.per_page = per_page
+        self.ids = [x.strip().upper() for x in ids.split(",") if x.strip()] if isinstance(ids, str) else [x.upper() for x in (ids or [])]
+        for identifier in self.ids:
+            ariane_url(identifier)
         self._client = client or RateLimitedClient(self.source, min_interval=self.min_interval)
 
     def _search(self, since: str | None, offset: int) -> dict:
@@ -113,13 +153,18 @@ class FrConseilEtatAdapter(BaseAdapter):
                                     headers={"Accept": "application/json"},
                                     raise_for_4xx=False)
         if resp.status_code >= 400:
-            return {}
+            raise FetchError(f"{self.source}: search HTTP {resp.status_code}", status_code=resp.status_code)
         try:
             return resp.json()
-        except (json.JSONDecodeError, ValueError):
-            return {}
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise FetchError(f"{self.source}: search returned invalid JSON") from exc
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
+        if self.ids:
+            for identifier in self.ids:
+                yield Stub(identifier, landing_url=ariane_url(identifier), raw_url=ariane_url(identifier),
+                           hints={"ariane_ecli":identifier})
+            return
         offset = 0
         pages = 0
         while True:
@@ -145,6 +190,8 @@ class FrConseilEtatAdapter(BaseAdapter):
                 return
 
     def fetch(self, stub: Stub) -> Record | None:
+        if stub.hints.get("ariane_ecli"):
+            return parse_ariane(self._client.get(stub.raw_url).content, stub.hints["ariane_ecli"])
         src = stub.hints.get("source_doc")
         if src is None:
             # targeted harvest by id — query the one document

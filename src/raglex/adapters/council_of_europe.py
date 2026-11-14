@@ -210,7 +210,10 @@ class CouncilOfEuropeEdocAdapter(BaseAdapter):
         self.max_category_pages = max(1, option_int(max_category_pages, 500))
         self.start_offset = resume_floor(start_offset, self.PAGE_SIZE)
         self._client = client or RateLimitedClient(
-            self.source, min_interval=self.min_interval, timeout=120)
+            # Edoc's 503 asks for a one-hour Retry-After. Sleeping through five
+            # such retries pins a job slot and looks like a stalled discovery.
+            # Surface the publisher cooldown; a later durable run resumes safely.
+            self.source, min_interval=self.min_interval, timeout=120, max_retries=0)
 
     def _html(self, url: str) -> str:
         response = self._client.get(url)

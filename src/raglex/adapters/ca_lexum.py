@@ -20,7 +20,7 @@ from urllib.parse import urljoin
 from xml.etree import ElementTree as ET
 
 from ..core.adapter import BaseAdapter
-from ..core.errors import FetchError
+from ..core.errors import FetchError, RateLimitException
 from ..core.http import RateLimitedClient
 from ..core.models import DocType, ExtractedVia, Record, Segment, Stub
 
@@ -71,7 +71,11 @@ class CanadianLexumHTTP:
                 return self._fallback.get(url, **kwargs)
             self._session = creq.Session(impersonate="chrome124", timeout=90)
         response = self._session.get(url, **kwargs)
-        if response.status_code in {403, 429, 503}:
+        if response.status_code == 429 or b"/robocop/captcha/" in response.content.lower():
+            # Norma's human-verification wall is not an absent case. Stop this
+            # source rather than repeatedly escalating each RSS entry to a browser.
+            raise RateLimitException(self.source, retry_after=3600)
+        if response.status_code in {403, 503}:
             if self._fetcher is None:
                 from ..scraping.fetcher import get_fetcher
 
@@ -80,6 +84,8 @@ class CanadianLexumHTTP:
                     requires_js=True,
                 )
             page = self._fetcher.fetch(url, headers=kwargs.get("headers"))
+            if page.html and "/robocop/captcha/" in page.html.lower():
+                raise RateLimitException(self.source, retry_after=3600)
             if page.status < 400 and page.html:
                 @dataclass(slots=True)
                 class _Response:
@@ -90,7 +96,8 @@ class CanadianLexumHTTP:
         if response.status_code >= 400:
             raise FetchError(
                 f"{self.source}: HTTP {response.status_code} for {url}",
-                transient=response.status_code >= 500,
+                transient=response.status_code == 403 or response.status_code >= 500,
+                status_code=response.status_code,
             )
         return response
 
@@ -245,16 +252,26 @@ class CanadianLexumAdapter(BaseAdapter):
         # The official channel is a bounded rolling list, not a pageable back catalogue.
         # It deliberately includes old decisions whose translation/correction changed.
         if self.rss_url:
-            items = parse_rss(self._client.get(self.rss_url).content)
+            raw = self._client.get(self.rss_url).content
+            try:
+                root = ET.fromstring(raw)
+                valid = root.tag == "rss" and root.find("channel") is not None
+            except ET.ParseError:
+                valid = False
+            if not valid:
+                raise FetchError(f"{self.source}: publisher returned no valid RSS channel")
+            items = parse_rss(raw)
         else:
             items = []
             page_limit = min(max_pages or 4, 4)
             for page in range(1, page_limit + 1):
                 url = self.recent_url + (f"&page={page}" if page > 1 else "")
-                batch = parse_recent_additions(
-                    self._client.get(url).content, self.recent_url
-                )
+                raw = self._client.get(url).content
+                batch = parse_recent_additions(raw, self.recent_url)
                 if not batch:
+                    from bs4 import BeautifulSoup
+                    if BeautifulSoup(raw, "html.parser").select_one(".collectionItemList") is None:
+                        raise FetchError(f"{self.source}: recent-additions page has no decision register")
                     break
                 items.extend(batch)
                 if since and batch[-1]["changed"] and batch[-1]["changed"] <= since:
@@ -293,7 +310,7 @@ class CanadianLexumAdapter(BaseAdapter):
         )
         stable_id = neutral_slug(neutral) or stub.stable_id
         if len(text) < 100:
-            return None
+            raise FetchError(f"{self.source}: published decision {stub.stable_id} has no readable judgment body")
         decision_date = _iso(meta.get("date")) or stub.hint_date
         landing = stub.landing_url
         language = str(stub.hints.get("language") or "en")

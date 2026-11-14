@@ -47,7 +47,7 @@ def spreadsheet_text(data):
         return '\n'.join(parts)
 
 
-def read_attachment(data, *, url, headers=None):
+def read_attachment(data, *, url, headers=None, extraction_info=None):
     """Return (text, extension, asset-only). Unsupported binary assets retain raw bytes."""
     headers=headers or {}
     disposition=headers.get('content-disposition','')
@@ -55,7 +55,25 @@ def read_attachment(data, *, url, headers=None):
     name=unquote(match[1]) if match else parse_qs(urlsplit(url).query).get('filename',[urlsplit(url).path])[0]
     ext=name.rsplit('.',1)[-1].lower() if '.' in name else ''
     if data.startswith(b'%PDF-'):
-        return (PdfExtractor().extract(data,ext='pdf',mime='application/pdf').text or '').strip(),'pdf',False
+        extracted = PdfExtractor().extract(data,ext='pdf',mime='application/pdf')
+        text = (extracted.text or '').strip()
+        from .ocr import looks_unocrd
+        page_count = len(getattr(extracted, "page_spans", None) or [])
+        if getattr(extracted, "needs_ocr", not bool(text)) or (page_count > 1 and looks_unocrd(text, page_count)):
+            import fitz
+            from .ocr import ocr_pdf, DEFAULT_MAX_PAGES
+            with fitz.open(stream=data, filetype='pdf') as document:
+                pages = len(document)
+            # The shared OCR helper caps its walk; do not publish that partial
+            # prefix as a complete annex when the source has more pages.
+            if pages > DEFAULT_MAX_PAGES:
+                raise FetchError(f'Attachment scan has {pages} pages; dedicated OCR required', transient=False)
+            text = (ocr_pdf(data, max_pages=pages, language='eng') or '').strip()
+            if len(text) < 120:
+                raise FetchError('Attachment scan OCR produced no readable text', transient=True)
+            if extraction_info is not None:
+                extraction_info.update(ocr=True, engine='tesseract', recognition_language='eng', pages=pages)
+        return text,'pdf',False
     if data.startswith(b'PK\x03\x04'):
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:names=set(z.namelist())

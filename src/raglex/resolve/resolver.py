@@ -127,7 +127,7 @@ class Resolver:
         can have become resolvable, so the whole-graph pass is wasted work on ingest."""
         return self.catalogue.resolve_pending_for(stable_id, ecli)
 
-    def run_for_documents(self, ids, *, cancel_check=None) -> ResolveStats:
+    def run_for_documents(self, ids, *, cancel_check=None, on_progress=None) -> ResolveStats:
         """Bounded resolution after a targeted fetch of a KNOWN document set.
 
         Exactly two edge populations can have become resolvable: the edges these
@@ -141,15 +141,22 @@ class Resolver:
         stats = ResolveStats()
         seen: set[str] = set()
         # Concurrent watches visit shared document/alias sets in the same order.
-        for sid in sorted({sid for sid in ids if sid}):
+        ordered = sorted({sid for sid in ids if sid})
+        for index, sid in enumerate(ordered):
             if not sid or sid in seen:
                 continue
             seen.add(sid)
             if cancel_check and cancel_check():
                 break
+            if on_progress:
+                on_progress(stage="resolving document citations", done=index,
+                            total=len(ordered), item=sid)
             doc = self.catalogue.get_document(sid)
             if doc is None:
                 continue
             stats.resolved += self.catalogue.resolve_pending_from(sid)
             stats.resolved += self.catalogue.resolve_pending_for(sid, doc["ecli"])
+        if on_progress and not (cancel_check and cancel_check()):
+            on_progress(stage="resolving document citations", done=len(ordered),
+                        total=len(ordered))
         return stats
