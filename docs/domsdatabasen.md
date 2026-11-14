@@ -91,3 +91,64 @@ one-result count difference requires classification; an earlier walk's differenc
 40 was not stable. None of these differences authorises deleting documents or declaring
 complete coverage. The subsequent targeted recovery and its automatic audit remain
 visible in Jobs; the daily watch stays disabled pending successful full verification.
+
+## Access window and recurring full acquisition
+
+All new requests to `domsdatabasen.dk`, including authentication, public-PDF fallbacks,
+redirects and independent inventory requests, are restricted to **01:00 inclusive until
+06:00 exclusive in `Europe/Copenhagen`**. This uses the IANA timezone, not a fixed UTC
+hour, and follows Danish summer/winter time. Requests already in flight may complete;
+no subsequent request or retry is sent after the window closes. Local parsing, OCR and
+citation extraction do not contact the publisher and can continue outside this window.
+
+The supplied technical guide specifies a maximum of 25 cases per KAPI page and five-hour
+tokens. No numerical requests-per-second limit or clock restriction was found in the
+supplied guide/access letter. The adapter and audit use a conservative one-second minimum
+interval between requests per client and the shared Retry-After/backoff handling. The
+nighttime restriction is the operator's explicit instruction.
+
+`danish-acquisition` is an opt-in scheduler task, enabled on this instance. During the
+window it queues one full KAPI acquisition per Danish calendar night while the daily
+watch remains disabled. The completed inventory audit gates enabling that watch. A
+verified full acquisition bypasses any old backfill frontier so it does not accidentally
+walk only `/sagsaendringer`. Once verification succeeds, the enabled watch handles daily
+inclusive changes within the same enforced access window.
+
+Queue admission prevents full acquisitions, audits and Danish watches from starting
+outside the window. A request-time check also stops a running walk at the boundary: its
+job returns to `queued`, retaining the checkpoint and unfinished extraction work. It does
+not spend a retry attempt or hold a worker slot until the next night. The queue's promotion
+loop rechecks the window; a restart or manual start cannot bypass it.
+
+On 14 November 2026, full verified acquisition **`af13d1b8`** was queued for the next
+permitted window. Local citation rescan **`efb12de0`** applies the expanded grammar to
+already held Danish documents. The preceding recovery's audit found **10,844 readable
+held documents, zero missing and zero held-only documents** against the enumerated public
+inventory. Its advertised-total difference of one remains visible; coverage verification
+has not been declared complete.
+
+## Danish citation grammar
+
+The production extraction pipeline includes Danish numbered EU regulations, directives
+and decisions, preserving `artikel`, `stk.`, `litra` and `nr.` as canonical EU Article
+anchors. It uses the shared CELEX year/number checks, including older number/year forms and numbered instruments followed by their Danish adoption date.
+CJEU case numbers and ECLIs are recognised by the shared grammar; Danish `præmis`,
+paragraph lists joined by `og`, and ranges joined by `til` now attach case pinpoints.
+`TEU`/`TEUF` and their article references are recognised too.
+
+Explicit definitions such as `(herefter AI-forordningen)`, `(i det følgende …)` and
+`(efterfølgende benævnt …)` bind later Danish references to the named authority. Generic
+`forordningen`, `direktivet` and `loven` bindings stay document-local and never become
+corpus-wide shorthand rules. Case short names need a paragraph pinpoint. Bare EU articles
+carry forward from the preceding instrument and retain Danish subdivisions.
+
+Existing named data-protection-act provisions are retained. Domestic docket forms resolve
+through the adapter's docket aliases. UfR references are recognised as report candidates;
+recognition alone does not establish a report-to-judgment alias or acquire a report that
+is not held. This is not complete Danish statute-name coverage or universal equivalence
+to the mature UK grammars.
+
+Regression tests cover the production extractor, exact offsets, year ambiguity, authority
+switches, shorthand leakage, DST boundaries, queue deferral, checkpoints, retries and
+redirects. A deployed MCP detection check recognised the Danish GDPR reference,
+`C-311/18` and the AI Act as routable authorities already held by RagLex.

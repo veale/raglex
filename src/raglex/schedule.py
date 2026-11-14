@@ -35,6 +35,8 @@ class TaskSpec:
 # tick when enabled (the fast, self-throttling drains); a number = a minimum interval.
 TASKS: tuple[TaskSpec, ...] = (
     TaskSpec("watches", True, None, "run due saved keyword watches"),
+    TaskSpec("danish-acquisition", False, None,
+             "Danish full acquisition until verified; 01:00–06:00 Europe/Copenhagen"),
     TaskSpec("nightly-harvest", True, None, "02:00 full drain of the routable worklist"),
     TaskSpec("auto-embed", True, None, "index newly-texted documents into the embedding family each tick"),
     TaskSpec("canlii-enrich", True, None, "drain the rate-limited CanLII enrichment queue"),

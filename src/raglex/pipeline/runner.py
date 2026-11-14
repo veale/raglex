@@ -12,6 +12,8 @@ the step-1 ingest path.
 
 from __future__ import annotations
 
+from ..acquisition_window import AcquisitionWindowClosed
+
 import logging
 import os
 import re
@@ -399,6 +401,8 @@ class Pipeline:
                     stats.notes.append(f"{stub.stable_id}: {exc}")
                     log.warning("fetch failed for %s: %s", stub.stable_id, exc)
                     continue
+                except AcquisitionWindowClosed:
+                    raise  # defer the whole job; do not advance a partial-feed watermark
                 except Exception as exc:  # noqa: BLE001
                     # ONE malformed document must never sink a whole source run. A parser
                     # blowing up on a corrupt PDF ("Failed to open stream"), a surprise

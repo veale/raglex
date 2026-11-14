@@ -482,6 +482,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                             jobs.promote_queued()
                     except Exception as exc:  # noqa: BLE001
                         print(f"[watch] hygiene error: {exc}")
+                if _sched_on("danish-acquisition"):
+                    from .danish_acquisition import schedule_acquisition
+                    schedule_acquisition(f, jobs)
                 # Start a background job per due watch (so each shows in the Jobs panel
                 # with progress) instead of running them inline where nothing can see them.
                 due = f.due_watch_ids() if _sched_on("watches") else []

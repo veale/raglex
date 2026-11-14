@@ -21,6 +21,8 @@ which is why the UI can cancel a job running inside the scheduler.
 
 from __future__ import annotations
 
+from .acquisition_window import AcquisitionWindowClosed, job_window_open
+
 import json
 import logging
 import os
@@ -368,6 +370,10 @@ def _harvest_source(facade, params, progress, cancel):
     if verify and (params.get("options") or {}).get("case_ids"):
         raise ValueError("Inventory verification requires the complete KAPI feed, not selected cases")
     options = {k: v for k, v in params.items() if k != "verify_inventory"}
+    if verify:
+        # A previous backfill frontier normally turns backfill into a delta. A
+        # requested full verification must walk /sager, not only recent changes.
+        options["force_full"] = True
     result = facade.harvest(**options, on_progress=progress, cancel_check=cancel)
     recovery = (params.get("source") == "dk-domsdatabasen"
                 and bool((params.get("options") or {}).get("case_ids")))
@@ -706,7 +712,7 @@ class JobManager:
                 params["_resume_run_id"] = root
             at_capacity = (self._slots_used(running) >= self._max_concurrent()
                            and kind not in QUEUE_EXEMPT_KINDS)
-            status = "queued" if (queue or at_capacity) else "running"
+            status = "queued" if (queue or at_capacity or not job_window_open(kind, params, cat)) else "running"
             cat.create_job(job_id, kind, label, params, origin=self.origin,
                            root_job_id=root, resumed_from=resumed_from,
                            resume_policy=policy, attempt=attempt, checkpoint=checkpoint,
@@ -738,6 +744,8 @@ class JobManager:
             picked = None
             for q in cat.queued_jobs():
                 p = json.loads(q["params_json"] or "{}")
+                if not job_window_open(q["kind"], p, cat):
+                    continue
                 if self._blocked_by_running(q["kind"], p, running):
                     blocked.append(f"{q['job_id']}({q['kind']})")
                     continue
@@ -881,7 +889,8 @@ class JobManager:
             # Universal first event: even a runner that has not yet reached its own
             # first callback is visibly alive and names what is starting.
             on_progress(stage=f"starting {kind}", done=0)
-            result = RUNNERS[kind](self.facade, params, on_progress, cancel_check)
+            result = RUNNERS[kind](self.facade, {k: v for k, v in params.items()
+                                                if k != "_acquisition_window"}, on_progress, cancel_check)
             error = _result_error(result)
             status = "cancelled" if state["cancel"] else "error" if error else "done"
             if error and not state["cancel"]:
@@ -889,6 +898,17 @@ class JobManager:
                 from .ops.errorlog import report_job_failure
                 report_job_failure(self.facade, kind=kind, error=error, job_id=job_id)
             state["log"].append(f"— {status} —")
+        except AcquisitionWindowClosed as exc:
+            status, result = "queued", {"deferred": str(exc)}
+            params["_acquisition_window"] = "domsdatabasen"
+            if kind == "harvest-source":
+                params["resume_unfinished"] = True
+                checkpoint = state["checkpoint"] or {}
+                if checkpoint.get("resume_offset") is not None:
+                    params["options"] = dict(params.get("options") or {},
+                                             start_offset=checkpoint["resume_offset"])
+            state["progress"] = {"stage": str(exc), "done": 0}
+            state["log"].append(str(exc))
         except Exception as exc:  # noqa: BLE001 — surface to the poller, don't crash
             result, status = {"error": str(exc)}, "error"
             state["log"].append(f"✗ error: {exc}")
@@ -909,7 +929,10 @@ class JobManager:
                 if state["progress"]:
                     cat.heartbeat_job(job_id, state["progress"], state["log"],
                                       checkpoint=state["checkpoint"])
-                cat.finish_job(job_id, status, result, state["log"])
+                if status == "queued":
+                    cat.defer_job(job_id, params, result, state["log"])
+                else:
+                    cat.finish_job(job_id, status, result, state["log"])
                 finished = dict(cat.get_job(job_id))
         except Exception:  # noqa: BLE001
             log.exception("could not record completion of job %s", job_id)

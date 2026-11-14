@@ -222,3 +222,37 @@ Danish recovery/audit, job-status and attachment checks passed **59 tests** afte
 adding the automatic selected-case audit. Frontend build and all **5 frontend tests**
 passed. Deployed API/scheduler use the delivery image with process init; source hashes
 were checked against the checkout. `git diff --check` passed. No credentials are staged.
+
+## Danish grammar and nighttime acquisition follow-up
+
+Added and tested general Danish EU instrument references, Danish case paragraph cues,
+TEU/TEUF articles, explicit shorthand definitions and Danish Article subdivisions in
+carry-forward references. A local source-scoped citation rescan (`efb12de0`) applies the
+new grammar to held Danish text; its resolution is bounded to that source's documents.
+
+Enforced 01:00–06:00 `Europe/Copenhagen` at both queue and HTTP levels, with DST-aware
+boundary, retry and redirect tests. At 06:00 a walk is deferred with its checkpoint,
+without consuming a retry attempt or keeping a worker slot. Added/enabled the recurring
+Danish bootstrap task and queued full verified acquisition `af13d1b8`; the old backfill
+frontier cannot silently turn a verified full walk into a change-feed-only run.
+
+The earlier targeted recovery completed with zero extraction errors and its independent
+comparison now finds all **10,844 enumerated public documents readable**, with no missing
+or held-only documents. The one-result advertised-total discrepancy remains unresolved;
+the daily change watch stays gated pending successful verification. See the Danish source
+documentation for the operational schedule and grammar coverage limitations.
+
+The final grammar was also checked through live MCP against references in held Danish
+judgments: Article 15(2) of Regulation (EEC) No 3821/85 and Regulation (EC) No 882 of
+29 April 2004 now resolve to `31985R3821` and `32004R0882`. The initial local rescan
+`c5642e72` was cancelled while still queued and replaced with `efb12de0` so it uses
+this final grammar. The full acquisition `af13d1b8` remains queued outside the window;
+the local rescan is running. The deployed image is
+`raglex:danish-grammar-night-20261114`; deployed grammar/window/job source hashes match
+the checkout.
+
+Final Danish release validation: **3,144 passed, 112 skipped**, with no failures;
+**79 focused checks passed** for extraction, window enforcement, jobs and source-scoped
+re-extraction. The live MCP checks recognised both additional instrument forms from held
+judgments. `git diff --check` passed. The full acquisition remains durably queued outside
+the window; local re-extraction had examined 1,000 of 10,844 documents at the final check.

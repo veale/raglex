@@ -11,7 +11,7 @@ def audit_inventory(facade, *, on_progress=None, cancel_check=None):
     page = 1
     occurrences = 0
     page_signatures = set()
-    with RateLimitedClient("dk-domsdatabasen-audit", min_interval=0.5, timeout=90) as client:
+    with RateLimitedClient("dk-domsdatabasen-audit", min_interval=1.0, timeout=90) as client:
         while True:
             if cancel_check and cancel_check():
                 return {"cancelled": True, "public_cases_examined": len(public_cases)}

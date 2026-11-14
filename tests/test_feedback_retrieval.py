@@ -146,3 +146,16 @@ def test_flagged_document_rescan_resolves_only_reviewed_documents(monkeypatch):
     monkeypatch.setattr(Resolver, 'run', global_resolve)
     result = f.apply_rules(document_ids=['ewhc/kb/2026/2776'])
     assert result['documents'] == 1
+
+
+def test_danish_source_grammar_rescan_does_not_resolve_whole_corpus(monkeypatch):
+    from tests.test_mcp_lookup import _facade, _doc
+    from raglex.resolve import Resolver
+    f=_facade()
+    _doc(f,'dk/domsdatabasen/1/2','forordning (EU) 2024/1689. Artikel 5, stk. 1.','Danish')
+    with f._open() as (cat,_,__):
+        cat.conn.execute("UPDATE documents SET source='dk-domsdatabasen', has_text=1 WHERE stable_id='dk/domsdatabasen/1/2'")
+        cat.conn.commit()
+    monkeypatch.setattr(Resolver,'run',lambda *a,**k:(_ for _ in ()).throw(AssertionError('unbounded resolution')))
+    result=f.apply_rules(source='dk-domsdatabasen')
+    assert result['documents']==1 and result['citations']>=2

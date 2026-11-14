@@ -1,4 +1,4 @@
-"""Danish data-protection references — Datatilsynet's vejledninger and afgørelser.
+"""Danish provisions, numbered EU instruments and domestic docket/report references.
 
 Danish splits the two instruments by the marker that introduces the provision: the GDPR
 gets ``artikel 6, stk. 1, litra f``, the domestic Acts get ``§ 8, stk. 2``. Both are
@@ -87,7 +87,7 @@ def _act_id(name: str) -> str:
 def danish_citations(text: str) -> list[Citation]:
     if not text:
         return []
-    out: list[Citation] = []
+    out: list[Citation] = general_danish_citations(text)
     gdpr_named = bool(_GDPR_FULL_NAME_RE.search(text))
     for match in GDPR_ARTICLE_RE.finditer(text):
         # "forordningen" alone is any regulation; require the document to have said
@@ -109,3 +109,73 @@ def danish_citations(text: str) -> list[Citation]:
             pinpoint=_section(m), char_start=m.start(), char_end=m.end(),
             method=method, confidence=.97) for m in pattern.finditer(text)]
     return out
+
+
+# Numbered EU acts retain the shared CELEX year/number safeguards; only the
+# Danish drafting vocabulary and provision ladder differ.
+_EU_ACT_RE = re.compile(
+    r"\b(?:(?:artikel\s*(?P<article>\d{1,3}[a-z]?)" + _DK_TAIL
+    + r"\s*,?\s*(?:(?:i|af)\s+)?)?)"
+    r"(?:(?:Europa-Parlamentets\s+og\s+)?Rådets\s+|Kommissionens\s+)?"
+    r"(?P<kind>forordning(?:en|ens)?|direktiv(?:et|ets)?|afgørelse(?:n|ns)?)\s+"
+    r"(?:\((?:EU|EF|EØF|Euratom)\)\s*)?(?:nr\.?\s*)?"
+    r"(?P<a>\d{2,4})/(?P<b>\d{1,4})(?:/(?:EU|EF|EØF|Euratom))?\b", re.I)
+# Some judgments print the number and adoption date instead of number/year.
+_MONTHS = {name: i for i, name in enumerate(
+    ['januar','februar','marts','april','maj','juni','juli','august','september','oktober','november','december'], 1)}
+_EU_DATED_RE = re.compile(_EU_ACT_RE.pattern.split(r'(?P<a>')[0]
+                         + r'(?P<number>\d{1,4})\s+af\s+(?P<day>\d{1,2})\.?\s+'
+                         + r'(?P<month>' + '|'.join(_MONTHS) + r')\s+(?P<year>\d{4})\b', re.I)
+_DOCKET_RE = re.compile(r"\b(?:BS|SS|AS|FS|SKS)-\d{1,8}/(?:19|20)\d{2}-[A-ZÆØÅ]{2,8}\b")
+_REPORT_RE = re.compile(r"\bU\.?\s*(?P<year>(?:19|20)\d{2})[. ](?P<page>\d{1,5})\s*(?P<court>H|V|Ø)\b")
+_TREATIES = {'TEUF': '12012E', 'TEU': '12012M'}
+_TREATY_RE = re.compile(r'\b(?:artikel\s*(?P<article>\d{1,3}[a-z]?)' + _DK_TAIL
+                        + r'\s*,?\s*(?:(?:i|af)\s+)?)?(?P<treaty>TEUF|TEU)\b')
+
+
+def general_danish_citations(text):
+    from .grammars import _eu_celex, _plausible_eu_year
+    from datetime import date
+    out = []
+    for m in _EU_ACT_RE.finditer(text):
+        word = m['kind'].lower()
+        kind = 'regulation' if word.startswith('forordning') else 'directive' if word.startswith('direktiv') else 'decision'
+        candidate = _eu_celex(kind, m['a'], m['b'])
+        if candidate:
+            out.append(Citation(m[0], kind, candidate, _formex(m) if m['article'] else None,
+                                m.start(), m.end(), 'dk_eu_instrument', .97))
+    for m in _EU_DATED_RE.finditer(text):
+        # A dated domestic afgørelse has the same word: require EU provenance.
+        if not re.search(r'\((?:EU|EF|EØF|Euratom)\)|Rådets|Kommissionens', m[0], re.I):
+            continue
+        if not _plausible_eu_year(m['year']) or int(m['number']) == 0:
+            continue
+        try:
+            date(int(m['year']), _MONTHS[m['month'].lower()], int(m['day']))
+        except ValueError:
+            continue
+        word = m['kind'].lower()
+        kind, descriptor = ('regulation', 'R') if word.startswith('forordning') else (
+            ('directive', 'L') if word.startswith('direktiv') else ('decision', 'D'))
+        out.append(Citation(m[0], kind, f"3{m['year']}{descriptor}{int(m['number']):04d}",
+                            _formex(m) if m['article'] else None,
+                            m.start(), m.end(), 'dk_eu_dated_instrument', .97))
+    for m in _TREATY_RE.finditer(text):
+        out.append(Citation(m[0], 'treaty', _TREATIES[m['treaty']], _formex(m) if m['article'] else None,
+                            m.start(), m.end(), 'dk_eu_treaty', .97))
+    for m in _DOCKET_RE.finditer(text):
+        out.append(Citation(m[0], 'case', 'dk/docket/' + m[0], None,
+                            m.start(), m.end(), 'dk_docket', .95))
+    for m in _REPORT_RE.finditer(text):
+        out.append(Citation(m[0], 'case', f"dk/ufr/{m['year']}/{m['page']}/{m['court'].lower()}", None,
+                            m.start(), m.end(), 'dk_report', .9))
+    return out
+
+
+DANISH_ARTICLE = r"artikel\s*\d{1,3}[a-z]?(?:\s*,?\s*stk\.?\s*\d{1,2})?(?:\s*,?\s*litra\s*[a-z]\)?)?(?:\s*,?\s*nr\.?\s*\d{1,2})?"
+_DK_ARTICLE_RE = re.compile(r'\bartikel\s*(?P<article>\d{1,3}[a-z]?)' + _DK_TAIL, re.I)
+
+
+def danish_article_pinpoint(raw):
+    m = _DK_ARTICLE_RE.fullmatch(raw.strip())
+    return _formex(m) if m else None

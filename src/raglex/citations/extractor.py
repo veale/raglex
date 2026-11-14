@@ -20,16 +20,17 @@ from typing import Protocol
 
 from .grammars import DROP, GRAMMARS
 from .models import Citation
+from .danish import DANISH_ARTICLE, danish_article_pinpoint
 
 # A pinpoint into a *cited case*: the paragraph number(s) trailing the citation —
 # "at [57]", "at paras 8, 44", "at paras 30–31", "paragraphs 168 and 177",
 # "§§ 35-36". The continuation swallows list/range tails but never a following
 # citation's year (4-digit 19xx/20xx excluded there). Years excluded as leads too.
-_PIN_CONT = r"(?:\s*(?:,|–|—|-|to|and|&)\s*\[?(?!(?:19|20)\d\d\b)\d{1,4}\]?)*"
+_PIN_CONT = r"(?:\s*(?:,|–|—|-|to|and|og|til|&)\s*\[?(?!(?:19|20)\d\d\b)\d{1,4}\]?)*"
 _CASE_PINPOINT = re.compile(
     r"^[\s,;]*(?:\(CanLII\)\s*)?\(?\s*(?:per\b[^.;)\n]{0,40}?\s)?(?:"
     rf"(?:at|in)\s+(?:paras?\.?\s*|paragraphs?\s+|§§?\s*)?(?P<a>\[?\d{{1,4}}\]?{_PIN_CONT})"
-    rf"|(?:paras?\.?\s*|paragraphs?\s+)(?P<b>\[?\d{{1,4}}\]?{_PIN_CONT})"
+    rf"|(?:paras?\.?\s*|paragraphs?\s+|præmis(?:ser(?:ne)?|sen)?\s+)(?P<b>\[?\d{{1,4}}\]?{_PIN_CONT})"
     rf"|§§?\s*(?P<d>\d{{1,4}}{_PIN_CONT})"  # ECHR: "Golder v UK, § 35", "§§ 35-36"
     r"|(?:r\.?\s*o\.?|rov\.)\s*(?P<e>\d{1,3}(?:\.\d{1,3}){0,3})"  # Dutch rechtsoverweging
     r"|\[(?P<c>\d{1,3})\]"
@@ -42,6 +43,8 @@ def _pin_text(run: str) -> str:
     """Normalise a matched paragraph run to a stored pinpoint: '[8]' → 'para 8',
     '8, 44' → 'para 8, 44', '30–31' stays a range. First number leads (anchor
     matching jumps to it); the full list is preserved for the network."""
+    run = re.sub(r"\bog\b", "and", run, flags=re.I)
+    run = re.sub(r"\btil\b", "to", run, flags=re.I)
     cleaned = re.sub(r"[\[\]]", "", run)
     cleaned = re.sub(r"\s*(,|–|—|-|to|and|&)\s*", lambda m: {",": ", "}.get(m.group(1), f" {m.group(1)} ")
                      if m.group(1) in (",", "to", "and", "&") else m.group(1), cleaned).strip()
@@ -133,9 +136,11 @@ def _disambiguate_online_safety_act(cites: list[Citation]) -> list[Citation]:
 # German quotation marks are listed alongside the English ones throughout: „…“ is the
 # German house style and »…« the alternative, and neither appeared anywhere in this
 # module, so a German definition written the ordinary way matched nothing at all.
+# Danish uses the same explicitly cued definition structure across long EU titles.
+# Share its antecedent/ambiguity guards rather than learning arbitrary parentheticals.
 _DE_CUES = (r"(?:fortan|im\s+Folgenden|im\s+Weiteren|nachfolgend|nachstehend|künftig|"
             r"kurz|zusammen(?:fassend)?|insgesamt|jeweils|sogenannte?[nrs]?|sog\.?|"
-            r"abgekürzt|abk\.?)")
+            r"abgekürzt|abk\.?|herefter|i\s+det\s+følgende|efterfølgende\s+benævnt)")
 #: How far past a citation a CUED German definition may sit — long enough for an EU
 #: instrument's full official title, which is the whole point.
 DE_SHORTHAND_WINDOW = 420
@@ -144,13 +149,13 @@ _DE_SHORTHAND_DEF = re.compile(
     # an optional colon, then the name, quoted or bare.
     rf"[\[({{]\s*(?:{_DE_CUES}\s*:?\s*)"
     r"(?:(?:der|die|das|den|dem)\s+)?"
-    r"[\"“„«»‘'’]?\s*(?P<dq>[A-Za-zÄÖÜäöüß][\wÄÖÜäöüß'’&.\- ]{1,45}?)\s*[\"”“„«»’'‘]?"
+    r"[\"“„«»‘'’]?\s*(?P<dq>[A-Za-zÄÖÜäöüßÆØÅæøå][\wÄÖÜäöüß'’&.\- ]{1,45}?)\s*[\"”“„«»’'‘]?"
     r"\s*[\])}]"
     # the dash-delimited form German legislation uses for its own short title:
     # "Netzwerkdurchsetzungsgesetz — NetzDG" inside the bracket
     rf"|[\[({{][^)\]}}\n]{{0,80}}?[-–—]\s*(?P<dd>[A-ZÄÖÜ][\wÄÖÜäöüß'’&.\-]{{1,30}})\s*[\])}}]"
     # …and outside it, set off by dashes: "– im Folgenden: EKEK –"
-    rf"|[-–—]\s*{_DE_CUES}\s*:?\s*[\"“„«»']?(?P<dn>[A-Za-zÄÖÜäöüß][\wÄÖÜäöüß'’&.\- ]{{1,45}}?)"
+    rf"|[-–—]\s*{_DE_CUES}\s*:?\s*[\"“„«»']?(?P<dn>[A-Za-zÄÖÜäöüßÆØÅæøå][\wÄÖÜäöüß'’&.\- ]{{1,45}}?)"
     r"[\"”“„«»']?\s*[-–—]",
     re.IGNORECASE,
 )
@@ -327,6 +332,7 @@ _STATUTE_KINDS = ("act", "regulation", "directive", "treaty", "eu_instrument")
 # only link a mention that carries a PROVISION ("s. 18 of the Act"), never a bare one,
 # so the edge always says which provision it is about.
 _HOST_NOUNS = {
+    "forordningen", "direktivet", "loven",
     "act", "code", "regulation", "regulations", "order", "rules", "directive",
     "convention", "charter", "treaty", "agreement", "protocol", "scheme", "statute",
 }
@@ -375,6 +381,7 @@ _PROVISION_NAME_RE = re.compile(
 # 2. GENERIC ROLE AND INSTRUMENT NOUNS name a slot, not an authority. Every
 #    judgment has "the appellant"; every statute book has "the Act".
 _GENERIC_SHORTHAND = {
+    "forordningen", "direktivet", "loven",
     "act", "acts", "code", "codes", "regulation", "regulations", "directive",
     "decision", "convention", "charter", "treaty", "agreement", "protocol",
     "guidance", "guidelines", "rules", "order", "orders", "scheme", "statute",
@@ -777,6 +784,11 @@ def _shorthand_use_re(name: str, abbrev: bool, bare: bool = True) -> "re.Pattern
     pat = (rf"\b{esc}(?:,)?\s+at\s+paras?\.?\s*(?P<run>\[?\d{{1,4}}\]?{_PIN_CONT})"
            rf"|judgment\s+in\s+{esc}\s*,?\s*(?:paragraphs?|paras?\.?)\s*"
            rf"(?P<run2>\[?\d{{1,4}}\]?{_PIN_CONT})")
+    pat += (rf"|\b{esc}\s*,?\s+præmis(?:ser(?:ne)?|sen)?\s*"
+            rf"(?P<dkrun>\d{{1,4}}{_PIN_CONT})")
+    if abbrev:
+        pat += (rf"|\b{esc}s?\b\s*,?\s*(?P<dkpost>{DANISH_ARTICLE})"
+                rf"|(?P<dkpre>{DANISH_ARTICLE})\s+(?:i|af)\s+\b{esc}\b")
     if abbrev:
         # The compact drafting form puts the shorthand first and its pinpoint
         # afterwards: ``GPSR, reg 5`` / ``BPRs, regs 3, 13(1) and 13(4)``.
@@ -802,7 +814,8 @@ def _shorthand_use_re(name: str, abbrev: bool, bare: bool = True) -> "re.Pattern
         pat += (rf"|(?<![\[(\"“'])(?:{prov_group}){optional}"
                 rf"\b{esc}\b(?![\"”'\])])")
     year_act = bool(re.fullmatch(r"the\s+(?:18|19|20)\d{2}\s+Act", name, re.I))
-    return re.compile(pat, re.IGNORECASE if (not abbrev or year_act) else 0)
+    danish_host = name.casefold() in {"forordningen", "direktivet", "loven"}
+    return re.compile(pat, re.IGNORECASE if (not abbrev or year_act or danish_host) else 0)
 
 
 def _provision_pinpoint(prov: str | None) -> str | None:
@@ -842,9 +855,10 @@ def _link_shorthand_uses(
             continue
         if any(os < e and s < oe for os, oe in occupied):
             continue
-        run = m.groupdict().get("run") or m.groupdict().get("run2")
+        run = m.groupdict().get("run") or m.groupdict().get("run2") or m.groupdict().get("dkrun")
         prov = m.groupdict().get("prov") or m.groupdict().get("postprov")
-        provision_pin = _provision_pinpoint(prov)
+        dkprov = m.groupdict().get("dkpre") or m.groupdict().get("dkpost")
+        provision_pin = danish_article_pinpoint(dkprov) if dkprov else _provision_pinpoint(prov)
         out.append(Citation(
             raw=m.group(0), entity_kind=entity_kind, candidate_id=candidate_id,
             pinpoint=_pin_text(run) if run else provision_pin,
@@ -1418,6 +1432,9 @@ _BARE_PROVISION = re.compile(
     # parenthesis. Harmless elsewhere: no other drafting style in the corpus writes a
     # lettered subdivision that way.
     r"(?P<num>\d+[A-Z]?(?:\.\d+)*(?:\.[a-z]\)?)?(?:\s*\(\s*[A-Z0-9]+\s*\))*)"
+    r"(?:\s*,?\s*stk\.?\s*(?P<dkstk>\d{1,2}))?"
+    r"(?:\s*,?\s*litra\s*(?P<dklitra>[a-z])\)?)?"
+    r"(?:\s*,?\s*nr\.?\s*(?P<dknr>\d{1,2}))?"
     r"(?!\s*:)(?=\W|$)",
     re.IGNORECASE,
 )
@@ -1785,6 +1802,11 @@ def _attach_carry_forward(text: str, kept: list[Citation], *,
                 host_id, host_kind = home_id, home_kind
         if not host_id:
             continue
+        if cue_raw.lower().startswith("artikel") and _is_eu_candidate(host_id, host_kind):
+            pinpoint = "Article " + re.sub(r"\s+", "", number)
+            for part in (m.groupdict().get("dkstk"), m.groupdict().get("dklitra"), m.groupdict().get("dknr")):
+                if part:
+                    pinpoint += f"({part.lower()})"
         if _is_spanish_cue(cue_raw):
             # Rendered only now: the notation depends on the host it was carried onto.
             pinpoint = spanish_bare_pinpoint(cue_raw, number, host_kind, host_id)
@@ -2035,9 +2057,9 @@ def extract_citations(text: str, *, llm: CitationExtractor | None = None,
     cites += dutch_citations(text)
     from .italian import italian_citations
     cites += italian_citations(text)
-    # Spanish and Danish are narrow, instrument-named grammars (RGPD/LOPDGDD,
-    # databeskyttelsesforordningen/-loven) with no overlap with the broad German
-    # abbreviation parser, so their order relative to it does not matter.
+    # The language-specific grammars preserve native provision ladders alongside
+    # explicit EU instrument numbers. Run them before the broad German
+    # abbreviation parser so a native explicit reference wins an overlapping guess.
     from .spanish import spanish_citations
     cites += spanish_citations(text)
     from .danish import danish_citations

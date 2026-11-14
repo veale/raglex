@@ -62,3 +62,10 @@ reads JSON in a same-origin browser request before rendering, with a whole-call
 deadline and guaranteed session cleanup. Metadata-only English placeholders are
 excluded in favour of actual renditions, and a confirmed HTTP 204 is handled before
 browser navigation can turn it into `ERR_ABORTED`.
+
+Domsdatabasen has an enforced publisher-host window: **01:00–06:00 Europe/Copenhagen**.
+Both job admission/promotion and outgoing HTTP requests (including redirects) check it.
+A boundary-crossing acquisition releases its slot and waits in the durable queue with
+its checkpoint. See [Danish acquisition](domsdatabasen.md#access-window-and-recurring-full-acquisition).
+The `danish-acquisition` scheduled task retries full acquisition nightly until independent
+verification can enable the daily changes watch. Local OCR/re-extraction is unaffected.

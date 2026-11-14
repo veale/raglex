@@ -27,7 +27,7 @@ PAGE_SIZE = 25
 
 class DomsdatabasenAdapter(BaseAdapter):
     source = "dk-domsdatabasen"
-    min_interval = 0.5
+    min_interval = 1.0
 
     def __init__(self, *, start_offset: int | str | None = None,
                  client=None, email: str | None = None, password: str | None = None,

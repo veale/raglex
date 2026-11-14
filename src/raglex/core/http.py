@@ -46,10 +46,16 @@ def build_client(
         timeout=timeout,
         follow_redirects=True,
         proxy=proxy if proxy is not None else get_proxy(),
+        event_hooks={"request": [_request_window_hook]},
     )
 
 # Statuses that mean "the source is pushing back" — pause/back off, don't crash.
 _RATE_LIMIT_STATUSES = frozenset({429, 503})
+
+
+def _request_window_hook(request):
+    from ..acquisition_window import check_request_window
+    check_request_window(request.url)
 
 
 class RateLimitedClient:
@@ -95,6 +101,12 @@ class RateLimitedClient:
             proxy=proxy if proxy is not None else get_proxy(),
             verify=verify,
         )
+        # HTTPX follows redirects inside a single request() call. The hook checks
+        # those sends too, including a redirect from a different publisher host.
+        hooks = getattr(self._client, "event_hooks", None)
+        if isinstance(hooks, dict) and _request_window_hook not in hooks.get("request", []):
+            hooks.setdefault("request", []).append(_request_window_hook)
+
 
     def __enter__(self) -> "RateLimitedClient":
         return self
@@ -137,6 +149,9 @@ class RateLimitedClient:
         attempt = 0
         while True:
             self._pace()
+            # Pacing/backoff may cross 06:00; recheck immediately before every send.
+            from ..acquisition_window import check_request_window
+            check_request_window(url)
             try:
                 resp = self._client.request(method, url, **kwargs)
             except httpx.TransportError as exc:

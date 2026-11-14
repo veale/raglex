@@ -14227,10 +14227,10 @@ class Facade:
             if cancelled:
                 return {"documents": docs, "citations": cites, "cancelled": True, "resolved_edges": 0}
             _progress(on_progress, stage="resolving citations", done=0, total=0)
-            # Targeted reader repairs must not turn into a whole-graph resolve
+            # Source-scoped grammar and targeted reader repairs must not turn into a whole-graph resolve
             # (millions of unrelated pending edges can exceed the SQL timeout).
             resolved = (Resolver(cat).run_for_documents(ids, cancel_check=cancel_check)
-                        if document_ids is not None or target_ids else Resolver(cat).run())
+                        if document_ids is not None or target_ids or source else Resolver(cat).run())
             stats = {"documents": docs, "citations": cites, "resolved_edges": resolved.resolved}
         self._invalidate_caches()  # re-scan changed edges → dashboards + doc views are stale
         return stats

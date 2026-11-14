@@ -7579,7 +7579,7 @@ class Catalogue:
         API and the scheduler both promote) starting the same queued job. Returns True to
         exactly one caller."""
         cur = self.conn.execute(
-            "UPDATE jobs SET status = 'running', started_at = ?, heartbeat_at = ?, "
+            "UPDATE jobs SET status = 'running', finished_at=NULL, result_json=NULL, started_at = ?, heartbeat_at = ?, "
             "lease_heartbeat_at = ? WHERE job_id = ? AND status = 'queued'",
             (_now(), _now(), _now(), job_id))
         self.conn.commit()
@@ -7610,6 +7610,14 @@ class Catalogue:
             ((json.dumps(progress or {}), json.dumps(log_tail[-300:]), _now())
              + ((json.dumps(checkpoint),) if checkpoint is not None else ()) + (job_id,)),
         )
+        self.conn.commit()
+
+    def defer_job(self, job_id: str, params: dict, result: dict, log_tail: list[str]) -> None:
+        """Release a publisher-window wait without spending a retry attempt or slot."""
+        self.conn.execute(
+            "UPDATE jobs SET status='queued', params_json=?, result_json=?, "
+            "finished_at=NULL, log_json=? WHERE job_id=?",
+            (json.dumps(params), json.dumps(result), json.dumps(log_tail[-300:]), job_id))
         self.conn.commit()
 
     def finish_job(self, job_id: str, status: str, result: dict | None,

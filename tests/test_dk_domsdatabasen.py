@@ -197,6 +197,7 @@ def test_verified_backfill_enables_watch_only_after_inventory_reconciles(monkeyp
         def __init__(self):self.created=False
         def harvest(self,**kwargs):
             assert 'verify_inventory' not in kwargs
+            assert kwargs['force_full'] is True
             return {'stored':37,'errors':0}
         def list_watches(self):return []
         def create_watch(self,**kwargs):
