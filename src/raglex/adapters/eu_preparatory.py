@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections import OrderedDict
 from typing import Iterator
+from urllib.parse import quote
 
 from ..core.models import DocType, ExtractedVia, RelationshipType, ResolutionStatus, Stub, TypedRelation
 from .eu_legislation import CDM, EULegislationAdapter
@@ -285,12 +286,16 @@ SELECT DISTINCT ?title ?proposalCelex ?adopted ?adoptedRelated WHERE {{
                 # actual item URL. EUR-Lex's /TXT/PDF front door often returns an empty
                 # asynchronous HTTP 202 response to non-browser clients.
                 pdf = self._client.get(
-                    stub.raw_url or f"https://publications.europa.eu/resource/celex/{stub.stable_id}",
+                    quote(stub.raw_url or f"https://publications.europa.eu/resource/celex/{stub.stable_id}",
+                          safe=":/?=&%"),
                     headers={"Accept": "application/pdf", "Accept-Language": "eng"})
                 if getattr(pdf, "status_code", 200) < 400 and pdf.content.startswith(b"%PDF"):
                     from ..extraction import extract_bytes
                     extracted = extract_bytes(pdf.content, ext="pdf", mime="application/pdf")
                     rec.raw_bytes, rec.raw_ext, rec.text = pdf.content, "pdf", extracted.text
+                    from ..imports.service import structure_segments
+                    # The old segments describe the metadata stub, not this PDF.
+                    rec.segments = structure_segments("pages", DocType.PREPARATORY, extracted)
                     rec.extra.pop("metadata_only", None)
                     if not rec.text:
                         rec.extra["needs_ocr"] = True

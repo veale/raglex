@@ -220,3 +220,84 @@ def test_a_proposal_does_not_adopt_the_act_it_amends_as_its_citation_home():
     # … and the adapter refuses to apply it to a document with enacting terms of its own.
     assert preparatory_subtype("52023PC0348")[0] == "proposals"
     assert preparatory_subtype("52023DC0348")[0] == "communications"
+
+
+def test_held_cover_does_not_hide_its_english_guidance_annex(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from raglex.adapters.eu_digital_strategy import DigitalStrategyAttachmentsAdapter
+    row={'stable_id':'eu/digital-strategy/guidelines','landing_url':'https://example.org/item',
+         'decision_date':'2025-07-18','meta_json':json.dumps({'other_files':[
+             {'title':'Guidelines (English)','url':'https://example.org/annex'},
+             {'title':'Guidelines (French)','url':'https://example.org/french'},
+             {'title':'Template (DOCX)','url':'https://example.org/template'}]})}
+    class Client:
+        def get(self,url):
+            assert url=='https://example.org/annex', 'attachment re-fetched the cover page'
+            return SimpleNamespace(content=b'%PDF-annex')
+    monkeypatch.setattr('raglex.adapters.eu_digital_strategy.PdfExtractor.extract',
+                        lambda *a,**k:SimpleNamespace(text='Substantive guidelines. '*20))
+    ad=DigitalStrategyAttachmentsAdapter([row],client=Client())
+    stubs=list(ad.discover(None));assert len(stubs)==1
+    assert stubs[0].stable_id.startswith(row['stable_id']+'/attachment/')
+    record=ad.fetch(stubs[0]);assert 'Substantive guidelines' in record.text
+    assert record.relations[0].dst_id==row['stable_id']
+    assert record.extra['attachment_of']==row['stable_id']
+
+
+def test_ordinary_harvest_materializes_annex_of_an_already_held_cover(monkeypatch):
+    from types import SimpleNamespace
+    from tests.test_mcp_lookup import _facade
+    from raglex.core.models import Record, DocType
+    from raglex.adapters import registry
+    f=_facade();parent='eu/digital-strategy/already-held-cover'
+    with f._open() as (cat,rs,ts):
+        rec=Record(source='eu-digital-strategy',stable_id=parent,doc_type=DocType.GUIDANCE,
+                   text='Communication approving the guidelines.',raw_bytes=b'cover',
+                   landing_url='https://example.org/item',extra={'other_files':[
+                       {'title':'Guidelines (English)','url':'https://example.org/annex'}]})
+        rec.ensure_payload_hash();cat.upsert_document(rec,text_path=str(ts.put(rec.payload_hash,rec.text)))
+    calls=[]
+    class Client:
+        def get(self,url):
+            calls.append(url)
+            return SimpleNamespace(content=b'%PDF-annex')
+    ad=DigitalStrategyLibraryAdapter(client=Client())
+    monkeypatch.setattr(ad,'discover',lambda *a,**k:iter(()))
+    monkeypatch.setattr(registry,'get_adapter',lambda *a,**k:ad)
+    monkeypatch.setattr('raglex.adapters.eu_digital_strategy.PdfExtractor.extract',
+                        lambda *a,**k:SimpleNamespace(text='Article 5 of Regulation (EU) 2024/1689 applies. '*20))
+    result=f.harvest('eu-digital-strategy',use_llm=False)
+    assert result['stored']==1 and result['errors']==0
+    assert calls==['https://example.org/annex']
+    with f._open() as (cat,_,ts):
+        row=cat.conn.execute("SELECT * FROM documents WHERE stable_id LIKE ?",(parent+'/attachment/%',)).fetchone()
+        assert row and '2024/1689' in ts.get(row['payload_hash'])
+        assert cat.relations_for(row['stable_id'])[0]['dst_id']==parent
+    assert f.harvest('eu-digital-strategy',use_llm=False)['stored']==0
+    assert len(calls)==1
+
+
+def test_missing_annex_preserves_publisher_not_found_status():
+    import pytest
+    from raglex.core.errors import FetchError
+    from raglex.core.models import Stub
+    class Missing:
+        def get(self,url):raise FetchError('publisher 404',status_code=404,transient=False)
+    stub=Stub('eu/digital-strategy/item/attachment/1',raw_url='https://example.org/missing',
+              hints={'attachment':{'url':'https://example.org/missing','title':'Annex'},
+                     'attachment_of':'eu/digital-strategy/item'})
+    with pytest.raises(FetchError) as caught:
+        DigitalStrategyLibraryAdapter(client=Missing()).fetch(stub)
+    assert caught.value.status_code==404 and not caught.value.transient
+
+
+def test_attachment_language_labels_include_publisher_typos_and_punctuation():
+    import json
+    from raglex.adapters.eu_digital_strategy import DigitalStrategyAttachmentsAdapter
+    titles=['Guidelines (English)','Guidelines (Gaelic)','Guidelines (Slovene)',
+            'Guidelines (Sloveme)','Guidelines (Finish)','Guidelines (Polish).','Guidelines (Slovak))']
+    row={'stable_id':'eu/digital-strategy/parent','landing_url':'https://example.org/parent',
+         'decision_date':None,'meta_json':json.dumps({'other_files':[
+             {'title':title,'url':f'https://example.org/{i}'} for i,title in enumerate(titles)]})}
+    assert [s.title for s in DigitalStrategyAttachmentsAdapter([row]).discover(None)]==titles[:1]

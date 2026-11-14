@@ -16887,6 +16887,23 @@ class Facade:
                              ignore_watermark=ignore_watermark, watermark_key=watermark_key,
                              overlap_days=overlap_days, force_full=force_full,
                              on_progress=_phase_progress, cancel_check=cancel_check)
+            if adapter.source == "eu-digital-strategy" and not (cancel_check and cancel_check()):
+                from .adapters.eu_digital_strategy import DigitalStrategyAttachmentsAdapter
+                parents = cat.conn.execute(
+                    "SELECT stable_id, landing_url, decision_date, meta_json FROM documents WHERE source=?",
+                    (adapter.source,)).fetchall()
+                annexes = pipe.run(
+                    DigitalStrategyAttachmentsAdapter(parents, client=getattr(adapter, "_client", None)),
+                    backfill=True, refetch_held=refetch_held, ignore_watermark=True,
+                    watermark_key="eu-digital-strategy:attachments",
+                    on_progress=_phase_progress, cancel_check=cancel_check)
+                for field in ("discovered", "deduped", "fetched", "stored", "errors",
+                              "errors_fatal", "errors_transient", "not_found"):
+                    setattr(stats, field, getattr(stats, field) + getattr(annexes, field))
+                stats.stored_ids.extend(annexes.stored_ids)
+                stats.refreshed_ids.extend(annexes.refreshed_ids)
+                stats.notes.extend(annexes.notes)
+                stats.rate_limited = stats.rate_limited or annexes.rate_limited
             # Log the run for the Maintain keep-current diagnosis view (bounded history).
             # Only feed-style harvests are worth logging; a targeted single-item fetch sets
             # record_health=False upstream and never reaches here with a real crawl.

@@ -436,6 +436,52 @@ class ScraplingMcpFetcher:
         self._tool: str | None = None      # the fetch tool this service actually exposes
         self._fallback: "StealthyFetcher | None" = None
 
+    def fetch_json(self, url: str) -> dict:
+        """Read JSON in the browser before HTML parsing can decode its entities.
+
+        HUDOC embeds HTML in JSON fields. Rendering that JSON as HTML changes
+        &quot; into unescaped quotes and destroys otherwise valid JSON. A same-origin
+        browser request preserves the response bytes and still uses the linked WAF session.
+        """
+        import time
+        import uuid
+        from ..embeddings.remote import MCPToolClient
+
+        deadline = time.monotonic() + self.deadline
+        client = MCPToolClient(self.url, token=self.api_key, timeout=min(self.deadline, 180))
+        session = "raglex-json-" + uuid.uuid4().hex
+        opened = False
+        def call(name, arguments):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Scrapling JSON fetch exceeded its deadline")
+            client.timeout = min(remaining, 180)
+            return client.call_tool(name, arguments)
+        try:
+            call("browser_open", {"session_id": session})
+            opened = True
+            call("browser_fetch", {"session_id": session, "url": url,
+                                   "extraction_type": "text", "google_search": False,
+                                   "timeout": min(60000, max(1, int((deadline-time.monotonic())*1000)))})
+            result = call("browser_evaluate", {
+                "session_id": session, "arg": {"url": url,
+                    "timeout": max(1, int((deadline-time.monotonic())*1000))},
+                "expression": """async ({url, timeout}) => {
+                    const response = await fetch(url, {signal: AbortSignal.timeout(timeout)});
+                    if (!response.ok) throw new Error('JSON source HTTP ' + response.status);
+                    return await response.json();
+                }"""})
+            if not isinstance(result, dict):
+                raise ValueError("Scrapling JSON source did not return an object")
+            return result
+        finally:
+            if opened:
+                try:
+                    client.timeout = 10
+                    client.call_tool("close_session", {"session_id": session})
+                except Exception:
+                    log.warning("could not close Scrapling JSON session %s", session, exc_info=True)
+
     def _mcp_fetch(self, url: str) -> str | None:
         """Fetch one URL through the scrapling MCP service, under a WHOLE-CALL deadline.
 

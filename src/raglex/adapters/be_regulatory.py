@@ -347,7 +347,7 @@ class BIPTPublicationsAdapter(BaseAdapter):
         return self._client.get(BIPT_SEARCH, params=params).content
 
     def _publication_urls(self, url: str, title: str) -> list[tuple[str, str]]:
-        if "/operators/topic/" not in url:
+        if not re.search(r"/(?:operators|sectors)/topic/", url):
             return [(url, title)]
         try:
             return bipt_topic_decisions(self._client.get(url).content)
@@ -357,7 +357,7 @@ class BIPTPublicationsAdapter(BaseAdapter):
             # it abort discovery prevented every later decision in the register from
             # being seen. Keep the omission explicit in the service logs while
             # continuing with independently listed publications.
-            log.info("%s: skipping unavailable BIPT dossier %s: %s",
+            log.warning("%s: skipping unavailable BIPT dossier %s: %s",
                      self.source, url, exc)
             return []
 

@@ -373,3 +373,41 @@ def test_closed_archives_do_not_raise_a_stale_source_alert():
     assert _never_yields_again("uk-caselaw") is False
     assert _never_yields_again("echr") is False        # now that it has a feed
     assert _never_yields_again("edpb-oss") is False
+
+
+def test_hudoc_json_transport_preserves_html_entities_and_skips_placeholders(monkeypatch):
+    from types import SimpleNamespace
+    from raglex.adapters.echr import _rank_judgments
+    columns = {'itemid': '001-216701', 'appno': '48045/15', 'doctype': 'HFJUD',
+               'docname': 'AFFAIRE BENGHEZAL c. FRANCE', 'languageisocode': 'FRE',
+               'ecli': 'ECLI:CE:ECHR:2022:0324JUD004804515', 'isplaceholder': 'False',
+               'issue': '<p>law on &quot;administrative offences&quot;</p>'}
+    placeholder = {**columns, 'itemid': '001-216702', 'isplaceholder': 'True',
+                   'docname': 'CASE OF BENGHEZAL v. FRANCE', 'languageisocode': 'ENG'}
+    rows = [{'columns': placeholder}, {'columns': columns}]
+    assert _rank_judgments(rows) == [columns]
+    class Browser:
+        def fetch_json(self, url):
+            return {'results': [{'columns': placeholder}]} if 'itemid' in url.split('select=')[0] else {'results': rows}
+        def fetch(self, url):
+            assert '001-216701' in url, 'attempted empty English placeholder'
+            return SimpleNamespace(status=200, html=_HTML.decode())
+    monkeypatch.setenv('RAGLEX_SCRAPLING_MCP_URL', 'http://scrapling.example/mcp')
+    ad = ECHRAdapter(ids='001-216702', client=_FakeClient(), waf_fetcher=Browser())
+    stub = next(ad.discover(None))
+    assert stub.hints['itemid'] == '001-216701'
+    assert stub.hints['meta']['issue'] == columns['issue']
+    assert ad.fetch(stub).source_language == 'fr'
+
+
+def test_linked_browser_does_not_navigate_a_known_no_content_rendition(monkeypatch):
+    from types import SimpleNamespace
+    class Client:
+        def request(self, method, url):
+            assert method == 'HEAD'
+            return SimpleNamespace(status_code=204)
+    class Browser:
+        def fetch(self, url):
+            raise AssertionError('204 should not become a browser ERR_ABORTED')
+    monkeypatch.setenv('RAGLEX_SCRAPLING_MCP_URL', 'http://scrapling.example/mcp')
+    assert ECHRAdapter(client=Client(), waf_fetcher=Browser())._body('001-216702') is None

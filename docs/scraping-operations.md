@@ -47,3 +47,18 @@ conditions; neither is repaired merely by a healthy browser service.
 transient failures rather than clearing every publisher-not-found cooldown. The job
 reports each attempt's outcome and retains remaining publisher failures. A bounded
 citation rescan similarly resolves only its reviewed document set.
+
+
+The Asahi upgrade helper now preserves empty `IPAMConfig` as dynamic allocation
+instead of turning an automatically assigned address into a static request. Its
+backup is retained beside `managed/upgrade-browser-server.py`. Explicit static
+addresses for the scraper/authentication networks are preserved.
+
+## HUDOC JSON and placeholders
+
+HUDOC embeds HTML/entities in JSON fields. Passing that JSON through HTML rendering
+can turn `&quot;` into unescaped quotes and destroy valid JSON. The linked fetcher now
+reads JSON in a same-origin browser request before rendering, with a whole-call
+deadline and guaranteed session cleanup. Metadata-only English placeholders are
+excluded in favour of actual renditions, and a confirmed HTTP 204 is handled before
+browser navigation can turn it into `ERR_ABORTED`.

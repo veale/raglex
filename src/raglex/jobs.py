@@ -363,6 +363,49 @@ def _static_bundle(facade, params, on_progress, cancel_check):
     return build_bundle(facade, params, on_progress, cancel_check)
 
 
+def _harvest_source(facade, params, progress, cancel):
+    verify = bool(params.get("verify_inventory"))
+    if verify and (params.get("options") or {}).get("case_ids"):
+        raise ValueError("Inventory verification requires the complete KAPI feed, not selected cases")
+    options = {k: v for k, v in params.items() if k != "verify_inventory"}
+    result = facade.harvest(**options, on_progress=progress, cancel_check=cancel)
+    recovery = (params.get("source") == "dk-domsdatabasen"
+                and bool((params.get("options") or {}).get("case_ids")))
+    if (verify or recovery) and not cancel():
+        if params.get("source") != "dk-domsdatabasen":
+            raise ValueError("Independent inventory verification is supported for Domsdatabasen")
+        from .danish_inventory import audit_inventory
+        inventory = audit_inventory(facade, on_progress=progress, cancel_check=cancel)
+        result["inventory"] = inventory
+        if not inventory.get("complete") or result.get("error") or result.get("errors", 0):
+            result["error"] = "Danish backfill or inventory did not complete; inspect errors and inventory differences before enabling its watch"
+        elif verify:
+            watches = [w for w in facade.list_watches()
+                       if w.get("spec", {}).get("source") == "dk-domsdatabasen"]
+            if watches:
+                result["watch"] = facade.update_watch(watch_id=watches[0]["watch_id"], enabled=True)
+            else:
+                result["watch"] = facade.create_watch(
+                    name="Danish judgments — daily KAPI changes",
+                    spec={"source": "dk-domsdatabasen", "backfill": False,
+                          "max_pages": None, "enrich": False}, cadence_minutes=1440)
+    return result
+
+
+def _result_error(result):
+    """A returned source failure is still a failed job, not a finished backfill."""
+    if not isinstance(result, dict):
+        return None
+    if result.get("error"):
+        return str(result["error"])
+    if isinstance(result.get("retry_later"), (int, float)) and result["retry_later"] > 0:
+        return f"{result['retry_later']} references still need retry; inspect the preserved failure list"
+    for value in (result, result.get("harvest", {})):
+        if isinstance(value, dict) and isinstance(value.get("errors"), (int, float)) and value["errors"] > 0:
+            return f"Harvest recorded {value['errors']} errors; inspect its result and retry the missing work"
+    return None
+
+
 RUNNERS: dict[str, Callable] = {
     "case-admin": lambda f, p, cb, cancel: __import__(
         "raglex.case_admin", fromlist=["run_action"]
@@ -456,8 +499,7 @@ RUNNERS: dict[str, Callable] = {
     # Harvest one source in the background — the "backfill this whole source" action.
     # Long-running by design (a full catalogue walk), so it belongs in the job table
     # rather than a request that has to return.
-    "harvest-source": lambda f, p, cb, cancel: f.harvest(
-        **p, on_progress=cb, cancel_check=cancel),
+    "harvest-source": _harvest_source,
     # Finish an interrupted bulk import's resolve/tag phases without re-running
     # discovery or extraction — batched, checkpointed, cancellable.
     "finish-bulk-postprocess": lambda f, p, cb, cancel: f.finish_bulk_postprocess(
@@ -840,7 +882,12 @@ class JobManager:
             # first callback is visibly alive and names what is starting.
             on_progress(stage=f"starting {kind}", done=0)
             result = RUNNERS[kind](self.facade, params, on_progress, cancel_check)
-            status = "cancelled" if state["cancel"] else "done"
+            error = _result_error(result)
+            status = "cancelled" if state["cancel"] else "error" if error else "done"
+            if error and not state["cancel"]:
+                state["log"].append(f"✗ {error}")
+                from .ops.errorlog import report_job_failure
+                report_job_failure(self.facade, kind=kind, error=error, job_id=job_id)
             state["log"].append(f"— {status} —")
         except Exception as exc:  # noqa: BLE001 — surface to the poller, don't crash
             result, status = {"error": str(exc)}, "error"

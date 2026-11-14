@@ -43,7 +43,7 @@ _META_FIELDS = (
     "itemid", "ecli", "appno", "extractedappno", "docname", "doctype", "doctypebranch",
     "importance", "conclusion", "article", "violation", "nonviolation", "scl",
     "respondent", "separateopinion", "representedby", "issue", "kpthesaurus",
-    "judgementdate", "kpdate", "originatingbody", "languageisocode", "rulesofcourt",
+    "judgementdate", "kpdate", "originatingbody", "languageisocode", "rulesofcourt", "isplaceholder",
 )
 _SELECT = ",".join(_META_FIELDS)
 
@@ -181,7 +181,10 @@ def _rank_judgments(rows: list[dict]) -> list[dict]:
             (c.get("languageisocode") or "") == "ENG",
         )
     cols = [r["columns"] for r in rows if r.get("columns")]
-    cols = [c for c in cols if not (c.get("docname") or "").upper().startswith(("[", "INFORMATION NOTE"))]
+    # An English placeholder has metadata but permanently answers 204 for its body.
+    # Prefer the actual French judgment rather than navigating the empty rendition.
+    cols = [c for c in cols if str(c.get("isplaceholder", "false")).lower() != "true"
+            and not (c.get("docname") or "").upper().startswith(("[", "INFORMATION NOTE"))]
     return sorted(cols, key=score, reverse=True)
 
 
@@ -318,6 +321,12 @@ class ECHRAdapter(BaseAdapter):
                 self._waf_fetcher = get_fetcher(
                     "stealth", source=self.source, min_interval=self.min_interval)
             try:
+                json_fetch = getattr(self._waf_fetcher, "fetch_json", None)
+                if callable(json_fetch):
+                    data = json_fetch(url)
+                    if not isinstance(data, dict):
+                        raise ValueError("HUDOC response is not an object")
+                    return data
                 page = self._waf_fetcher.fetch(url)
             except Exception as exc:  # noqa: BLE001 — preserve the useful primary failure
                 if original_error is not None:
@@ -360,7 +369,13 @@ class ECHRAdapter(BaseAdapter):
         rows = data.get("results")
         if not isinstance(rows, list):
             raise FetchError(f"{self.source}: HUDOC response omitted results", transient=True)
-        return _rank_judgments(rows)
+        ranked = _rank_judgments(rows)
+        if not ranked and field == "itemid":
+            app = next((r.get("columns", {}).get("appno", "").split(";")[0]
+                        for r in rows if r.get("columns", {}).get("appno")), None)
+            if app and _APPNO.match(app):
+                return self._lookup_all(app)
+        return ranked
 
     def _stub(self, ranked: list[dict]) -> Stub | None:
         """One case's HUDOC documents (best first) → the stub the pipeline fetches."""
@@ -492,6 +507,16 @@ class ECHRAdapter(BaseAdapter):
         """
         url = f"{BASE}/app/conversion/docx/html/body?library=ECHR&id={itemid}"
         original_error: FetchError | None = None
+        if self._prefer_waf and hasattr(self._client, "request"):
+            # A browser navigation to HTTP 204 raises ERR_ABORTED, masking a
+            # permanently unconvertible rendition as an infrastructure outage.
+            # HEAD preserves that explicit status without downloading the body.
+            try:
+                response = self._client.request("HEAD", url)
+                if response.status_code == 204:
+                    return None
+            except FetchError:
+                pass  # the WAF may reject HEAD while admitting the browser
         if not self._prefer_waf:
             try:
                 return self._client.get(url).content or None
@@ -531,7 +556,7 @@ class ECHRAdapter(BaseAdapter):
                 raise
             return None
         text, segments = parse_body_html(raw) if raw else (None, [])
-        lang = "en"
+        lang = str((stub.hints.get("meta") or {}).get("languageisocode") or "ENG").lower()[:2]
         if not text:
             # HUDOC's docx conversion serves 204 No Content for renditions it can't
             # render, and it does so PERMANENTLY — the English text of Singh v. Belgium

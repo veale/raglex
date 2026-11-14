@@ -97,8 +97,9 @@ def test_one_unavailable_dossier_does_not_abort_the_whole_bipt_register(caplog):
             raise FetchError(f"HTTP 500 for {url}")
 
     adapter = BIPTDecisionsAdapter(client=BrokenDossier())
-    url = "https://www.bipt.be/operators/topic/broken-dossier"
-    assert adapter._publication_urls(url, "Broken dossier") == []
+    for segment in ("operators", "sectors"):
+        url = f"https://www.bipt.be/{segment}/topic/broken-dossier"
+        assert adapter._publication_urls(url, "Broken dossier") == []
     assert "skipping unavailable BIPT dossier" in caplog.text
 
 

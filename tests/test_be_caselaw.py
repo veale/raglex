@@ -74,7 +74,7 @@ def test_council_archive_is_sequential_and_resumes_one_block_early():
 def test_council_watch_mode_uses_the_rolling_register(monkeypatch):
     adapter = BelgianCouncilOfStateAdapter(client=Client({}), watch_mode="true")
     expected = [Stub(stable_id="be/rvsce/262672", landing_url="x")]
-    monkeypatch.setattr(adapter, "_recent", lambda: expected)
+    monkeypatch.setattr(adapter, "_recent", lambda *args: expected)
     assert list(adapter.discover(None, max_pages=None)) == expected
 
 
@@ -165,3 +165,31 @@ def test_belgian_court_slugs_have_display_names_and_fetch_routes():
     assert lookup("be-rvsce").name == "Council of State (Belgium)"
     assert lookup("be-rvsce").adapter == "be-rvsce"
     assert lookup("be-const-court").jurisdiction == "BE"
+
+
+def test_migrated_council_register_pages_through_inclusive_date_boundary():
+    def card(number, day):
+        return f'<article><a class="o-card__title-link" href="/arrets/{number}">Arrêt</a><p>Date: {day}</p></article>'
+    base = 'https://www.raadvst-consetat.be/fr/recherche/arrets/'
+    pages = '<a href="?page=2">2</a><a href="?page=3">3</a>'
+    client = Client({
+        mod.RVS_RECENT: b'<html>new homepage, not a register</html>',
+        base+'?page=1&sort=date_desc': (card(268272, '03-11-2026') + pages).encode(),
+        base+'?page=2&sort=date_desc': (card(268272, '03-11-2026') + card(268271, '02-11-2026') + pages).encode(),
+        base+'?page=3&sort=date_desc': card(268270, '01-11-2026').encode(),
+    })
+    adapter = BelgianCouncilOfStateAdapter(client=client, watch_mode=True)
+    rows = list(adapter.discover('2026-11-02'))
+    assert [r.stable_id for r in rows] == ['be/rvsce/268272', 'be/rvsce/268271']
+    assert rows[0].raw_url == 'https://www.raadvst-consetat.be/arrets/268272'
+    assert rows[-1].hint_date == date(2026, 11, 2)
+    assert len(list(adapter.discover(None, max_pages=1))) == 1
+
+
+def test_migrated_register_yields_before_requesting_the_next_page():
+    first = ('<article><a class="o-card__title-link" href="/arrets/268272">Arrêt</a>'
+             '<p>Date: 03-11-2026</p></article><a href="?page=2">2</a>').encode()
+    client = Client({mod.RVS_RECENT: b'new homepage',
+                     'https://www.raadvst-consetat.be/fr/recherche/arrets/?page=1&sort=date_desc': first})
+    rows = BelgianCouncilOfStateAdapter(client=client, watch_mode=True).discover('2026-11-01')
+    assert next(rows).stable_id == 'be/rvsce/268272'

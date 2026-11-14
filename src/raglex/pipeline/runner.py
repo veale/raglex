@@ -729,9 +729,15 @@ class Pipeline:
             held_same = self.catalogue.get_document(record.stable_id)
             if (refresh_projection and held_same is not None
                     and held_same["payload_hash"] == record.payload_hash):
+                text_path = held_same["text_path"]
+                if self.textstore is not None and record.text:
+                    # A parser fix can change text/segments without changing raw
+                    # bytes. An explicit refetch must refresh both projections.
+                    text_path = str(self.textstore.put(record.payload_hash, record.text,
+                                                        source=record.source))
+                    self.textstore.put_segments(record.payload_hash, record.segments)
                 self.catalogue.upsert_document(
-                    record, raw_path=held_same["raw_path"],
-                    text_path=held_same["text_path"])
+                    record, raw_path=held_same["raw_path"], text_path=text_path)
                 return True
             stats.deduped += 1
             return False

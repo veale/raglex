@@ -36,7 +36,8 @@ from bs4 import BeautifulSoup
 from ..core.adapter import BaseAdapter
 from ..core.errors import FetchError
 from ..core.http import RateLimitedClient
-from ..core.models import DocType, ExtractedVia, Record, Stub
+from ..core.models import (DocType, ExtractedVia, Record, Stub, RelationshipType,
+                           ResolutionStatus, TypedRelation, sha256_bytes)
 from ..core.segmentation import synthesise_numbered_segments
 from ..extraction.extractors import PdfExtractor
 
@@ -51,9 +52,10 @@ _LANGUAGES = (
     "French", "German", "Greek", "Hungarian", "Irish", "Italian", "Latvian", "Lithuanian",
     "Maltese", "Polish", "Portuguese", "Romanian", "Slovak", "Slovenian", "Spanish",
     "Swedish", "Norwegian", "Icelandic",
+    "Gaelic", "Slovene", "Sloveme", "Finish",  # publisher labels, including typos
 )
 _LANG_SUFFIX_RE = re.compile(
-    r"\s*[\(\[]\s*(" + "|".join(_LANGUAGES) + r")\s*[\)\]]\s*$", re.IGNORECASE)
+    r"\s*[\(\[]\s*(" + "|".join(_LANGUAGES) + r")\s*[\)\]]+[.\s]*$", re.IGNORECASE)
 # "1 - Guidelines on …" — the panel numbers its files; not part of the title
 _LEADING_NUM_RE = re.compile(r"^\s*\d+\s*[-–—.]\s*")
 _DATE_RE = re.compile(r"\b(\d{1,2}\s+[A-Za-z]+\s+(?:19|20)\d{2})\b")
@@ -242,17 +244,22 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
         The pipeline stores one Record per stub, so the panel's remaining files are listed
         in metadata rather than dropped: they are usually annexes to the same instrument,
         and the annex URLs are what a later pass would need to pull them in."""
-        try:
-            page = self._client.get(stub.landing_url).content
-        except FetchError as exc:
-            if exc.transient:
-                raise
-            return None
-        item = parse_item_page(page, LibraryItem(
-            slug=stub.hints.get("slug") or _slug(stub.stable_id),
-            url=stub.landing_url, title=stub.title or "",
-            kind=stub.hints.get("kind"), published=stub.hint_date,
-            summary=stub.hints.get("summary")))
+        attachment = stub.hints.get("attachment")
+        item = LibraryItem(slug=stub.hints.get("slug") or _slug(stub.stable_id),
+                           url=stub.landing_url, title=stub.title or "",
+                           kind=stub.hints.get("kind"), published=stub.hint_date,
+                           summary=stub.hints.get("summary"))
+        page = None
+        if attachment:
+            item.files = [attachment]
+        else:
+            try:
+                page = self._client.get(stub.landing_url).content
+            except FetchError as exc:
+                if exc.transient:
+                    raise
+                return None
+            item = parse_item_page(page, item)
 
         text, raw, raw_ext, doc_title = None, None, "html", stub.title
         if item.files:
@@ -260,7 +267,7 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
             try:
                 blob = self._client.get(first["url"]).content
             except FetchError as exc:
-                if exc.transient:
+                if exc.transient or attachment:
                     raise
                 blob = None
             # the redirection endpoint answers with Content-Type "/" — trust the bytes
@@ -268,6 +275,9 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                 extracted = PdfExtractor().extract(blob, ext="pdf", mime="application/pdf")
                 text, raw, raw_ext = (extracted.text or "").strip(), blob, "pdf"
                 doc_title = first["title"] or stub.title
+        if attachment and (not text or len(text) < 200):
+            raise FetchError(f"{self.source}: advertised attachment has no readable PDF: {attachment['url']}",
+                             transient=True)
         if not text or len(text) < 200:
             # no readable attachment — keep the item page itself, which carries the
             # Commission's own summary of what was published
@@ -292,6 +302,11 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
             text=text,
             segments=synthesise_numbered_segments(text),
             extracted_via=ExtractedVia.SCRAPE,
+            relations=([TypedRelation(RelationshipType.RELATED_TO,
+                        dst_id=stub.hints["attachment_of"],
+                        raw_citation_string=stub.hints["attachment_of"],
+                        resolution_status=ResolutionStatus.RESOLVED,
+                        extracted_via=ExtractedVia.SCRAPE)] if attachment else []),
             topic_tags=["eu", "digital-policy",
                         _KIND_TAG.get((item.kind or "").casefold(), "publication")],
             extra={k: v for k, v in {
@@ -304,8 +319,42 @@ class DigitalStrategyLibraryAdapter(BaseAdapter):
                     doc_title or stub.title
                 ),
                 "download_url": item.files[0]["url"] if item.files else None,
+                "attachment_of": stub.hints.get("attachment_of"),
+                "library_page": stub.hints.get("library_page"),
                 # the annexes published alongside, so a later pass can pull them
                 "other_files": [{"title": f["title"], "url": f["url"]}
                                 for f in item.files[1:]] or None,
             }.items() if v},
         )
+
+
+class DigitalStrategyAttachmentsAdapter(DigitalStrategyLibraryAdapter):
+    """A bounded sweep of attachments already advertised by held library pages.
+
+    Kept separate from the listing cursor: a held cover must not hide its unheld annexes.
+    """
+    def __init__(self, rows, *, client=None):
+        super().__init__(client=client)
+        self.rows = rows
+
+    def discover(self, since, *, max_pages=None):
+        import json
+        for row in self.rows:
+            meta = json.loads(row["meta_json"] or "{}")
+            for file in meta.get("other_files") or []:
+                title = str(file.get("title") or "")
+                language = _LANG_SUFFIX_RE.search(title)
+                if language and language.group(1).lower() != "english":
+                    continue
+                if re.search(r"\b(?:DOCX?|XLSX?|ZIP)\b", title, re.I):
+                    continue  # the advertised non-PDF asset remains in parent metadata
+                url = str(file.get("url") or "")
+                if not url:
+                    continue
+                key = sha256_bytes(url.encode())[:16]
+                day = date.fromisoformat(str(row["decision_date"])[:10]) if row["decision_date"] else None
+                yield Stub(row["stable_id"] + "/attachment/" + key,
+                           landing_url=url, raw_url=url,
+                           title=title, hint_date=day, court="European Commission",
+                           hints={"attachment": file, "attachment_of": row["stable_id"],
+                                  "kind": meta.get("library_type"), "library_page": row["landing_url"]})

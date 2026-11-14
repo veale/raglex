@@ -468,3 +468,19 @@ def test_backfill_dedups_provisional_id_stub_by_landing_url(catalogue, rawstore)
     ad2 = ProvisionalIdAdapter(url_map)
     stats = Pipeline(catalogue, rawstore).run(ad2, backfill=True)
     assert ad2.fetched == [] and stats.deduped == 1  # recognised by URL, not re-pulled
+
+
+def test_explicit_refetch_refreshes_text_and_segments_with_unchanged_raw(catalogue,rawstore,tmp_path):
+    from raglex.storage.textstore import TextStore
+    from raglex.core.models import Segment
+    ts=TextStore(tmp_path/'projection');pipe=Pipeline(catalogue,rawstore,textstore=ts)
+    old=_rec('same-bytes','Old extracted text.',raw=b'<judgment/>')
+    old.segments=[Segment(label='old',char_start=0,char_end=len(old.text),kind='paragraph')]
+    assert pipe.run(FakeAdapter([old]),backfill=True).stored==1
+    fresh=_rec('same-bytes','Corrected complete extracted text.',raw=b'<judgment/>')
+    fresh.segments=[Segment(label='para 1',char_start=0,char_end=len(fresh.text),kind='paragraph')]
+    result=pipe.run(FakeAdapter([fresh]),backfill=True,ignore_watermark=True,refetch_held=True)
+    assert result.errors==0 and result.stored==1
+    assert ts.get(fresh.payload_hash)==fresh.text
+    assert ts.get_segments(fresh.payload_hash)[0].char_end==len(fresh.text)
+    assert catalogue.get_document('same-bytes')['version']==1

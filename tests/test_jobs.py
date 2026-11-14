@@ -579,3 +579,18 @@ def test_a_wedged_worker_is_reaped_even_though_its_process_is_alive():
             "SELECT job_id, status FROM jobs").fetchall()}
     assert rows["wedged"] == "interrupted"   # frees the slot, and can be resumed
     assert rows["busy"] == "running"         # a job doing work is left alone
+
+
+def test_returned_source_errors_are_not_successful_jobs(monkeypatch):
+    from raglex import jobs as module
+    f = _facade();mgr=JobManager(f, origin='api');mgr.yield_s=0
+    for index, result in enumerate([{'error':'unexpected start_offset'}, {'errors':2,'stored':10},
+                                     {'harvest':{'errors':1}}, {'not_found':2,'stored':10},
+                                     {'retry_later':2,'harvested':10}]):
+        jid=f'returned-error-{index}'
+        with f._open() as (cat,_,_):cat.create_job(jid,'_test-returned-error','test',{})
+        monkeypatch.setitem(module.RUNNERS,'_test-returned-error',lambda *a,r=result:r)
+        mgr._worker(jid,'_test-returned-error',{})
+        job=mgr.get(jid)
+        assert job['status']==('done' if index==3 else 'error')
+        assert job['result']==result

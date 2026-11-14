@@ -16,7 +16,7 @@ WORKDIR /app
 # tesseract: OCR fallback for scanned PDFs. Belgian court scans need Dutch + French;
 # some carry only a tiny born-digital cover layer, so those adapters force a full pass.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-nld \
+    tesseract-ocr tesseract-ocr-eng tesseract-ocr-dan tesseract-ocr-fra tesseract-ocr-nld \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

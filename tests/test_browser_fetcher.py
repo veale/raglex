@@ -111,3 +111,20 @@ def test_browser_failure_does_not_fan_out_as_tool_name_discovery(monkeypatch):
     with pytest.raises(RuntimeError,match='process limit'):
         f._mcp_fetch('https://example.test')
     assert len(calls)==1
+
+
+def test_json_browser_session_closes_after_decode_failure(monkeypatch):
+    from raglex.scraping.fetcher import ScraplingMcpFetcher
+    from raglex.embeddings.remote import MCPToolClient
+    calls = []
+    def call(self, name, args):
+        calls.append(name)
+        if name == 'browser_evaluate':
+            raise ValueError('invalid source JSON')
+        return {}
+    monkeypatch.setattr(MCPToolClient, 'call_tool', call)
+    fetcher = ScraplingMcpFetcher(url='http://scrapling.example/mcp', api_key='test')
+    import pytest
+    with pytest.raises(ValueError, match='invalid source JSON'):
+        fetcher.fetch_json('https://hudoc.example/app/query/results')
+    assert calls == ['browser_open', 'browser_fetch', 'browser_evaluate', 'close_session']

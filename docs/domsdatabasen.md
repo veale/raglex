@@ -12,9 +12,11 @@ log, job parameter, or image build context.
 
 ## Initial import and updates
 
-Start `harvest-source` for `dk-domsdatabasen` with `backfill=true` and no page cap.
-Follow the durable job in the Jobs panel. After that initial walk completes,
-create a daily source watch. A bounded pilot does **not** establish completeness;
+Start `harvest-source` for `dk-domsdatabasen` with `backfill=true`, no page cap,
+and `verify_inventory=true`. Follow the durable job in the Jobs panel. It runs the
+independent inventory audit after harvesting and enables/creates the daily watch
+only when verification succeeds. Harvest errors or unreconciled inventory differences
+leave the job in error and the pending watch disabled. A bounded pilot does **not** establish completeness;
 do not enable an incremental watch after only a pilot.
 
 The adapter authenticates with `POST /webapi/kapi/v2/autoriser`, then walks
@@ -44,9 +46,10 @@ Word spans remain inside their paragraphs.
 
 Explicit document/case withdrawals mark an already held document `withdrawn`
 before held-item deduplication. They never re-ingest a withdrawn body. The
-append-only archive remains available with its status. A withdrawn case with no
-document identities raises for operator review rather than silently pretending
-its earlier documents were reconciled.
+append-only archive remains available with its status. A withdrawn case whose document
+identities have been removed emits a case-level tombstone: all held siblings under
+that exact source/case prefix are marked withdrawn, and the job records the observation.
+This does not invent a document or block the rest of the catalogue.
 
 ## Completeness audit
 
@@ -60,6 +63,31 @@ agree. A completed harvesting job alone proves only that its API feed was exhaus
 The independent comparison is available as the `audit-domsdatabasen` job,
 started through `POST /api/jobs/audit-domsdatabasen`. It returns missing and
 held-only document identities as well as case/document counts. The public
-portal initially reported 8,841 cases on 13 November 2026. The initial bounded
+portal initially reported 8,841 results on 13 November 2026. The initial bounded
 pilot imported 37 documents from 25 cases without errors; this pilot is not a
 completeness claim.
+
+
+Scanned PDFs use Danish/English Tesseract OCR in the background harvest job. The
+Docker image includes the Danish language pack. Scans over the configured page ceiling raise an explicit review error rather than
+publishing a truncated judgment. The default is 80; an explicit targeted background
+repair may set `max_ocr_pages` up to 500. Image-only KAPI HTML falls back to the
+publisher's public PDF download for OCR.
+
+For reconciled missing cases, `options.case_ids` accepts comma-separated numeric
+publisher case IDs and uses the public case/document/download routes. This sparse
+worklist retains the same document identities, cannot advance the main feed watermark,
+and automatically reruns the independent audit afterwards. It cannot enable the daily
+watch; `verify_inventory` still requires the full KAPI walk. Recovery does not substitute
+for the authenticated feed or silently declare coverage.
+
+The public audit uses ascending publication order; judgment-date ordering produced
+repeated cases at page boundaries. It respects the advertised page count, records
+unique cases and case occurrences, and reports any difference from the publisher's
+advertised total. The latest completed audit (13 November, reviewed 14 November 2026) enumerated
+8,841 cases and 10,844 public documents against 8,842 advertised results. It found
+10,832 held readable documents, 12 missing and no held-only documents. The remaining
+one-result count difference requires classification; an earlier walk's difference of
+40 was not stable. None of these differences authorises deleting documents or declaring
+complete coverage. The subsequent targeted recovery and its automatic audit remain
+visible in Jobs; the daily watch stays disabled pending successful full verification.

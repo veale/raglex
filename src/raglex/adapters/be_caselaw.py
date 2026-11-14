@@ -2,7 +2,8 @@
 
 The Council of State has two complementary official interfaces.  Its archive is only
 addressable by sequential decision number (``arr.php?nr=...``), while its rolling
-"decisions recentes" pages are the reliable keep-current feed.  A missing archive
+"decisions recentes" pages, or the migrated date-sorted register, supply the
+keep-current feed. A missing archive
 number returns a tiny HTML page with HTTP 200, so PDF signature validation is part of
 the source protocol rather than merely defensive parsing.
 
@@ -176,11 +177,58 @@ class BelgianCouncilOfStateAdapter(BaseAdapter):
             resume_floor(cursor, self.PAGE_SIZE) if cursor else self.first_number,
         )
 
-    def _recent(self) -> list[Stub]:
+    def _modern_recent(self, since: str | None, max_pages: int | None) -> Iterator[Stub]:
+        # The November 2026 site migration replaced rolling month pages with a
+        # date-sorted register. Keep the actual PDF links; the old index now returns
+        # a normal homepage with HTTP 200, which is not an empty legal register.
+        from datetime import timedelta
+        cutoff = (date.fromisoformat(since[:10]) if since
+                  else date.today() - timedelta(days=366))
+        first = urljoin(RVS_BASE, "fr/recherche/arrets/")
+        seen = set()
+        page = 1
+        while max_pages is None or page <= max_pages:
+            url = first + f"?page={page}&sort=date_desc"
+            soup = BeautifulSoup(self._client.get(url).content, "html.parser")
+            links = soup.select('a.o-card__title-link[href]')
+            if not links:
+                raise FetchError(f"{self.source}: migrated register page {page} had no decisions")
+            dates = []
+            for link in links:
+                match = re.fullmatch(r"/(?:arrets|arresten)/(\d+)/?", str(link.get("href") or ""))
+                if not match:
+                    continue
+                card = link.find_parent("article")
+                date_match = re.search(r"Date:\s*(\d{2}-\d{2}-\d{4})",
+                                       card.get_text(" ", strip=True) if card else "")
+                if not date_match:
+                    raise FetchError(f"{self.source}: migrated decision omitted its date")
+                day = datetime.strptime(date_match.group(1), "%d-%m-%Y").date()
+                dates.append(day)
+                number = int(match.group(1))
+                if day < cutoff or number in seen:
+                    continue
+                seen.add(number)
+                pdf = urljoin(RVS_BASE, str(link["href"]))
+                yield Stub(f"be/rvsce/{number}", landing_url=pdf, raw_url=pdf,
+                                title=f"Conseil d'État / Raad van State — arrêt {number}",
+                                court="be-rvsce", hint_date=day,
+                                hints={"decision_number": number, "advertised": True})
+            if not dates:
+                raise FetchError(f"{self.source}: migrated register contained no recognised decisions")
+            # The publisher advertises all pages, and sorts descending by decision
+            # date. Stop only after covering the inclusive watermark's whole page.
+            pages = [int(m.group(1)) for a in soup.select('a[href]')
+                     if (m := re.search(r"[?&]page=(\d+)", str(a.get("href"))))]
+            if min(dates) < cutoff or page >= max(pages, default=page):
+                break
+            page += 1
+
+    def _recent(self, since: str | None = None, max_pages: int | None = None) -> list[Stub] | Iterator[Stub]:
         index = self._client.get(RVS_RECENT).content
         pages = rvs_recent_pages(index)
         if not pages:
-            raise FetchError(f"{self.source}: recent-decisions index contained no month pages")
+            return self._modern_recent(since, max_pages)
         seen: set[str] = set()
         out: list[Stub] = []
         # The rolling year is intentionally walked in full. Decisions with old numbers
@@ -193,7 +241,7 @@ class BelgianCouncilOfStateAdapter(BaseAdapter):
         return out
 
     def _archive_end(self) -> int:
-        rows = self._recent()
+        rows = self._recent(max_pages=1)
         numbers = [option_int(row.hints.get("decision_number"), 0) for row in rows]
         if not numbers:
             raise FetchError(f"{self.source}: recent register contained no decisions")
@@ -201,7 +249,7 @@ class BelgianCouncilOfStateAdapter(BaseAdapter):
 
     def discover(self, since: str | None, *, max_pages: int | None = None) -> Iterator[Stub]:
         if self.watch_mode or since:
-            yield from self._recent()
+            yield from self._recent(since, max_pages)
             return
 
         end = self.end_number or self._archive_end()

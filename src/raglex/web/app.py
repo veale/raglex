@@ -1334,6 +1334,10 @@ def create_app(config: Config | None = None) -> FastAPI:
         if not source:
             return {"error": "source is required"}
         params: dict = {"source": source, "backfill": bool(payload.get("backfill", True))}
+        if payload.get("verify_inventory"):
+            if source != "dk-domsdatabasen" or not params["backfill"] or payload.get("max_pages") is not None:
+                return {"error": "verify_inventory requires a complete Danish backfill"}
+            params["verify_inventory"] = True
         # max_pages absent/None → no page cap (the true "everything" walk).
         if payload.get("max_pages") is not None:
             params["max_pages"] = int(payload["max_pages"])

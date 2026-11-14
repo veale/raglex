@@ -901,7 +901,9 @@ SOURCE_INFO: dict[str, SourceInfo] = {
         "email and password in Settings. Complete initial case walk, then inclusive "
         "change feed covering new documents, revisions and withdrawals. Selected "
         "published decisions; not all Danish court decisions.",
-        (SourceOption("start_offset", "Resume case offset", "0"),),
+        (SourceOption("start_offset", "Resume case offset", "0"),
+         SourceOption("case_ids", "Public-portal recovery case IDs", "comma-separated; blank uses KAPI"),
+         SourceOption("max_ocr_pages", "Complete-scan OCR page ceiling (1–500)", "80")),
         (),
     ),
     "dk-datatilsynet": SourceInfo(

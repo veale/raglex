@@ -47,3 +47,23 @@ def test_notice_title_declares_single_directive_as_orphan_article_home(monkeypat
     assert rec.extra["citation_default_instrument"] == {
         "id": "32005L0029", "kind": "directive"
     }
+
+
+def test_cellar_pdf_fallback_encodes_oj_item_parentheses(monkeypatch):
+    from types import SimpleNamespace
+    from raglex.adapters import eu_legislation
+    from raglex import extraction
+    calls=[]
+    class Client:
+        def get(self,url,**kwargs):
+            calls.append((url,kwargs))
+            return SimpleNamespace(status_code=200,content=b'%PDF-test')
+    monkeypatch.setattr(eu_legislation.EULegislationAdapter,'fetch',lambda self,stub:
+        Record(source=self.source,stable_id=stub.stable_id,doc_type=DocType.PREPARATORY,text=None,extra={}))
+    monkeypatch.setattr(extraction,'extract_bytes',lambda *a,**k:SimpleNamespace(text='The Blue Guide 2022.',page_spans=[(1,0,20)]))
+    ad=EUPreparatoryAdapter(celex='52022XC0629(04)',client=Client())
+    rec=ad.fetch(Stub('52022XC0629(04)',hints={'title':'The Blue Guide 2022'}))
+    assert rec.text=='The Blue Guide 2022.'
+    assert rec.segments[0].label=='p. 1' and rec.segments[0].char_end==20
+    assert calls[0][0].endswith('52022XC0629%2804%29')
+    assert calls[0][1]['headers']['Accept']=='application/pdf'
